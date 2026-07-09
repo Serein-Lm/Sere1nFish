@@ -1,0 +1,276 @@
+version: "2.4"
+
+x-backend-env: &backend-env
+  HOST: 0.0.0.0
+  PORT: 8000
+  MONGODB_URI: mongodb://mongo:27017
+  MONGODB_DATABASE: Sere1nG0Fish
+  MONGODB_DIRECT: "true"
+  REDIS_ADDR: redis:6379
+  REDIS_DB: 2
+  CHROME_DOCKER_ENABLED: "true"
+  CHROME_DOCKER_NETWORK: sere1nfish_internal
+  CHROME_DOCKER_WARM_POOL_SIZE: ${CHROME_DOCKER_WARM_POOL_SIZE:-2}
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  ALL_PROXY: ""
+  http_proxy: ""
+  https_proxy: ""
+  all_proxy: ""
+  NO_PROXY: mongo,redis,backend,frontend,nginx,127.0.0.1,localhost
+  no_proxy: mongo,redis,backend,frontend,nginx,127.0.0.1,localhost
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  EASYTIER_ENABLED: ${EASYTIER_ENABLED:-true}
+  EASYTIER_PUBLIC_HOST: ${EASYTIER_PUBLIC_HOST:-}
+  EASYTIER_NETWORK_NAME: ${EASYTIER_NETWORK_NAME:-sere1nfish-mobile}
+  EASYTIER_NETWORK_SECRET: ${EASYTIER_NETWORK_SECRET:-change-me-before-production}
+  EASYTIER_HOSTNAME: ${EASYTIER_HOSTNAME:-sere1nfish-public-server}
+  EASYTIER_VIRTUAL_CIDR: ${EASYTIER_VIRTUAL_CIDR:-10.144.144.0/24}
+  EASYTIER_BACKEND_HOSTNAME: ${EASYTIER_BACKEND_HOSTNAME:-sere1nfish-backend-peer}
+  EASYTIER_BACKEND_IPV4: ${EASYTIER_BACKEND_IPV4:-10.144.144.1}
+  EASYTIER_BACKEND_DEV: ${EASYTIER_BACKEND_DEV:-et0}
+  EASYTIER_AUTO_SCAN_ENABLED: ${EASYTIER_AUTO_SCAN_ENABLED:-true}
+  EASYTIER_ADB_SCAN_TIMEOUT: ${EASYTIER_ADB_SCAN_TIMEOUT:-0.25}
+  EASYTIER_ADB_SCAN_WORKERS: ${EASYTIER_ADB_SCAN_WORKERS:-128}
+  EASYTIER_ADB_SCAN_MAX_HOSTS: ${EASYTIER_ADB_SCAN_MAX_HOSTS:-512}
+  EASYTIER_PORT: ${EASYTIER_PORT:-11010}
+  EASYTIER_WS_PORT: ${EASYTIER_WS_PORT:-11011}
+  EASYTIER_WSS_PORT: ${EASYTIER_WSS_PORT:-11012}
+  EASYTIER_WG_PORT: ${EASYTIER_WG_PORT:-11013}
+  EASYTIER_ANDROID_DOWNLOAD_URL: ${EASYTIER_ANDROID_DOWNLOAD_URL:-/api/v1/downloads/mobile/easytier/f4d0f795c2dc283fff573e29690cec54/easytier-v2.6.4-arm64.apk}
+  MOBILE_AGENT_ANDROID_URL: ${MOBILE_AGENT_ANDROID_URL:-}
+  MOBILE_AGENT_ADB_PORT: ${MOBILE_AGENT_ADB_PORT:-5555}
+  DOWNLOADS_ROOT: /srv/downloads
+
+x-high-ulimits: &high-ulimits
+  nofile:
+    soft: 1048576
+    hard: 1048576
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    command: ["mongod", "--bind_ip", "0.0.0.0"]
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - internal
+    ulimits: *high-ulimits
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--bind", "0.0.0.0", "--protected-mode", "no"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    ulimits: *high-ulimits
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  chrome-image:
+    image: chrome-browser:latest
+    build:
+      context: ./server/chrome-browser
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    entrypoint: ["python3", "-c", "print('chrome-browser image built')"]
+    restart: "no"
+    networks:
+      - internal
+    ulimits: *high-ulimits
+
+  db-import:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.dev
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    restart: "no"
+    working_dir: /app
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./server:/app
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - internal
+    ulimits: *high-ulimits
+    command:
+      - python
+      - -m
+      - scripts.db_migrate
+      - import
+      - --input
+      - /app/backup/Sere1nG0Fish/db_20260701_160002.json
+      - --target-uri
+      - mongodb://mongo:27017
+      - --target-db
+      - Sere1nG0Fish
+      - --target-direct
+      - --drop-before-import
+
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.dev
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./server:/app
+      - ${DOWNLOADS_DIR:-./downloads}:/srv/downloads:ro
+      - adb_keys:/root/.android
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chrome-image:
+        condition: service_started
+    networks:
+      - internal
+    shm_size: "1g"
+    ulimits: *high-ulimits
+    command: ["python", "run.py"]
+
+  frontend:
+    image: node:22-bookworm-slim
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      VITE_API_BASE_URL: /api
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      NO_PROXY: backend,frontend,nginx,127.0.0.1,localhost
+      no_proxy: backend,frontend,nginx,127.0.0.1,localhost
+    volumes:
+      - ./view:/app
+      - frontend_node_modules:/app/node_modules
+    networks:
+      - internal
+    shm_size: "1g"
+    ulimits: *high-ulimits
+    command: sh -c "npm install --registry=https://registry.npmmirror.com && npm run dev -- --host 0.0.0.0"
+
+  easytier-server:
+    image: ghcr.io/easytier/easytier:v2.6.4
+    restart: unless-stopped
+    command:
+      - --listeners
+      - tcp://0.0.0.0:11010
+      - --listeners
+      - udp://0.0.0.0:11010
+      - --listeners
+      - ws://0.0.0.0:11011
+      - --listeners
+      - wss://0.0.0.0:11012
+      - --listeners
+      - wg://0.0.0.0:11013
+      - --private-mode
+      - "true"
+      - --hostname
+      - ${EASYTIER_HOSTNAME:-sere1nfish-public-server}
+      - --network-name
+      - ${EASYTIER_NETWORK_NAME:-sere1nfish-mobile}
+      - --network-secret
+      - ${EASYTIER_NETWORK_SECRET:-change-me-before-production}
+      - --relay-network-whitelist
+      - ${EASYTIER_NETWORK_NAME:-sere1nfish-mobile}
+      - --relay-all-peer-rpc
+    ports:
+      - "${EASYTIER_PORT:-11010}:11010/tcp"
+      - "${EASYTIER_PORT:-11010}:11010/udp"
+      - "${EASYTIER_WS_PORT:-11011}:11011/tcp"
+      - "${EASYTIER_WSS_PORT:-11012}:11012/tcp"
+      - "${EASYTIER_WG_PORT:-11013}:11013/udp"
+    environment:
+      TZ: Asia/Shanghai
+    networks:
+      - internal
+    ulimits: *high-ulimits
+
+  easytier-backend-peer:
+    image: ghcr.io/easytier/easytier:v2.6.4
+    restart: unless-stopped
+    network_mode: "service:backend"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    depends_on:
+      backend:
+        condition: service_started
+      easytier-server:
+        condition: service_started
+    command:
+      - --network-name
+      - ${EASYTIER_NETWORK_NAME:-sere1nfish-mobile}
+      - --network-secret
+      - ${EASYTIER_NETWORK_SECRET:-change-me-before-production}
+      - --hostname
+      - ${EASYTIER_BACKEND_HOSTNAME:-sere1nfish-backend-peer}
+      - --ipv4
+      - ${EASYTIER_BACKEND_IPV4:-10.144.144.1}
+      - --dev-name
+      - ${EASYTIER_BACKEND_DEV:-et0}
+      - --no-listener
+      - --peers
+      - tcp://easytier-server:11010
+    environment:
+      TZ: Asia/Shanghai
+    ulimits: *high-ulimits
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - internal
+    ulimits: *high-ulimits
+
+volumes:
+  mongo_data:
+  redis_data:
+  frontend_node_modules:
+  adb_keys:
+
+networks:
+  internal:
+    name: sere1nfish_internal
+    driver: bridge

@@ -1,0 +1,10 @@
+{
+  "deprecated": true,
+  "message": "本地 config.json 配置入口已下线。请在前端配置页写入 MongoDB 加密配置，或使用 /api/v1/config/sections/{category}。",
+  "runtime_config_source": "mongodb_encrypted",
+  "docs": [
+    "docs/CONFIG_API.md",
+    "docs/RUNTIME_OPERATIONS_TUTORIAL.md",
+    "docs/GOAL_COMPLETION_AUDIT.md"
+  ]
+}

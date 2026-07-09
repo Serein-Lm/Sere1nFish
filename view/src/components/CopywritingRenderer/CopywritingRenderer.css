@@ -1,0 +1,389 @@
+/* ============================================
+   话术渲染器样式
+   ============================================ */
+
+.copywriting-renderer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 分析区域 */
+.analysis-section {
+  background: var(--card-bg, rgba(255,255,255,0.04));
+  border-radius: 8px;
+  padding: 16px;
+  border: 1px solid var(--border-color, rgba(255,255,255,0.06));
+}
+.analysis-item { margin-bottom: 8px; }
+.analysis-label {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  padding: 2px 8px;
+  background: var(--accent-color, rgba(255,255,255,0.04));
+  border-radius: 4px;
+}
+.analysis-item .ant-typography { margin-bottom: 0; font-size: 13px; }
+.analysis-skills { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+
+/* 场景卡片 */
+.scenario-card { border-radius: 8px; }
+.scenario-header { font-size: 15px; margin-bottom: 8px; }
+.scenario-overview { font-size: 13px; margin-bottom: 12px !important; }
+.faked-identity, .logic-chain { margin-top: 12px; }
+.identity-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+}
+
+.identity-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+.identity-item {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+}
+.identity-label {
+  color: var(--text-tertiary, rgba(255,255,255,0.45));
+  min-width: 40px;
+  flex-shrink: 0;
+}
+.risk-notes {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(250, 173, 20, 0.08);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* ============================================
+   聊天容器通用
+   ============================================ */
+.chat-container {
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, rgba(255,255,255,0.06));
+}
+.chat-header {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.wechat-chat .chat-header {
+  background: linear-gradient(135deg, #07c160 0%, #06ad56 100%);
+  color: #fff;
+}
+.phone-chat .chat-header {
+  background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+  color: #fff;
+}
+.sms-chat .chat-header {
+  background: linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%);
+  color: #fff;
+}
+.chat-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--tertiary-bg, #f1f3f5);
+}
+
+/* 聊天气泡行 */
+.chat-bubble-row {
+  display: flex;
+  gap: 8px;
+  max-width: 85%;
+}
+.chat-bubble-row.attacker { align-self: flex-end; flex-direction: row-reverse; }
+.chat-bubble-row.target { align-self: flex-start; }
+
+.chat-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+  background: var(--accent-color, rgba(255,255,255,0.04));
+}
+.chat-bubble-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-bubble-row.attacker .chat-bubble-wrapper { align-items: flex-end; }
+
+/* 气泡样式 */
+.chat-bubble {
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+  position: relative;
+}
+.chat-bubble.wechat.attacker {
+  background: #95ec69;
+  color: #1a1a1a !important;
+  border-top-right-radius: 4px;
+}
+.chat-bubble.wechat.target {
+  background: var(--secondary-bg, #fff);
+  color: var(--text-primary, #000) !important;
+  border-top-left-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+.chat-bubble.phone.attacker {
+  background: #3B82F6;
+  color: #fff !important;
+  border-top-right-radius: 4px;
+}
+.chat-bubble.phone.target {
+  background: var(--accent-color, #f0f0f0);
+  color: var(--text-primary) !important;
+  border-top-left-radius: 4px;
+}
+.chat-bubble.sms.attacker {
+  background: #8B5CF6;
+  color: #fff !important;
+  border-top-right-radius: 4px;
+}
+.chat-bubble.sms.target {
+  background: var(--accent-color, #f0f0f0);
+  color: var(--text-primary) !important;
+  border-top-left-radius: 4px;
+}
+
+/* 心理策略标签 */
+.tactic-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+/* 关键要点 */
+.key-points {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-color, rgba(255,255,255,0.06));
+  background: var(--accent-color, rgba(255,255,255,0.02));
+}
+.key-points-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.key-points ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.key-points li {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+}
+
+/* ============================================
+   邮件卡片
+   ============================================ */
+.email-container { display: flex; flex-direction: column; gap: 0; }
+.email-header {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #EF4444 0%, #DC2626 100%);
+  color: #fff;
+  border-radius: 12px 12px 0 0;
+}
+.email-card {
+  border: 1px solid var(--border-color, rgba(255,255,255,0.06));
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+  overflow: hidden;
+}
+.email-meta {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color, rgba(255,255,255,0.06));
+  background: var(--accent-color, rgba(255,255,255,0.02));
+}
+.email-meta-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.email-meta-label {
+  color: var(--text-tertiary);
+  min-width: 48px;
+  flex-shrink: 0;
+}
+.email-meta-value { word-break: break-all; }
+.email-subject { font-weight: 600; }
+.email-body {
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  color: var(--text-primary) !important;
+}
+
+/* ============================================
+   内网通知
+   ============================================ */
+.intranet-container {
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, rgba(255,255,255,0.06));
+}
+.intranet-header {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+  color: #fff;
+}
+.intranet-message { padding: 12px 16px; }
+.intranet-message + .intranet-message {
+  border-top: 1px dashed var(--border-color, rgba(255,255,255,0.06));
+}
+.intranet-notice {
+  background: var(--card-bg, rgba(255,255,255,0.04));
+  border-radius: 8px;
+  padding: 12px 16px;
+  border-left: 3px solid #F59E0B;
+}
+.intranet-notice-badge {
+  font-size: 12px;
+  font-weight: 600;
+  color: #F59E0B;
+  margin-bottom: 8px;
+}
+.intranet-notice-body {
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  color: var(--text-primary) !important;
+}
+.intranet-reply {
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ============================================
+   样本文件卡片
+   ============================================ */
+.payload-card { border-radius: 8px; }
+.payload-header {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.payload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+.payload-item {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+}
+.payload-label {
+  color: var(--text-tertiary);
+  min-width: 60px;
+  flex-shrink: 0;
+}
+.payload-item code {
+  background: var(--accent-color, rgba(255,255,255,0.06));
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* ============================================
+   质疑应对
+   ============================================ */
+.objections-panel {
+  border: 1px solid var(--border-color, rgba(255,255,255,0.06));
+  border-radius: 8px;
+  padding: 12px;
+}
+.objections-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.objection-content { padding: 4px 0; }
+.objection-response {
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+.objection-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.objection-context { font-size: 12px; }
+
+/* ============================================
+   话术 Tab 区域
+   ============================================ */
+.scripts-section {
+  margin-top: 4px;
+}
+
+/* ============================================
+   Drawer 内的话术渲染优化
+   ============================================ */
+.ant-drawer-body .copywriting-renderer {
+  padding-bottom: 24px;
+}
+
+/* 内网通知中的链接样式 */
+.intranet-notice-body a,
+.intranet-notice-body [href] {
+  color: #3B82F6;
+  text-decoration: underline;
+}
+
+/* 邮件正文中的列表样式 */
+.email-body ul, .email-body ol {
+  padding-left: 20px;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .identity-grid, .payload-grid {
+    grid-template-columns: 1fr;
+  }
+  .chat-bubble-row { max-width: 95%; }
+}

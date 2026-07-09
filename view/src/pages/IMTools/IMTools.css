@@ -1,0 +1,113 @@
+.im-tools {
+  padding: 24px;
+}
+
+.im-type-card {
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  border: 2px solid transparent;
+}
+
+.im-type-card.active {
+  border-color: var(--border-active);
+  background: var(--accent-hover);
+}
+
+.im-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.im-name {
+  margin: 0;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.visualization-content,
+.key-usage-content {
+  padding: 16px 0;
+}
+
+.file-card {
+  padding: 16px;
+}
+
+.file-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.file-icon {
+  font-size: 24px;
+  color: #07c160;
+}
+
+.file-name {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 12px 0;
+}
+
+.file-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.upload-card {
+  cursor: pointer;
+  height: 100%;
+  min-height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.upload-content {
+  text-align: center;
+}
+
+.upload-icon {
+  font-size: 48px;
+  color: var(--text-tertiary);
+  margin-bottom: 12px;
+}
+
+.upload-content p {
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.config-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.config-header h3 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.config-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.config-info p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 768px) {
+  .im-tools {
+    padding: 16px;
+  }
+}

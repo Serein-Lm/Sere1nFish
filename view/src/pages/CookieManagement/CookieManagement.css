@@ -1,0 +1,47 @@
+.cookie-management {
+  padding: 24px;
+}
+
+.cookie-management .page-header {
+  margin-bottom: 24px;
+}
+
+.cookie-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: var(--accent-color);
+  border-radius: 8px;
+}
+
+.cookie-section-header .ant-typography {
+  flex: 1;
+  margin-right: 16px;
+}
+
+.cookie-modal-tip {
+  padding: 12px;
+  background: var(--accent-color);
+  border-radius: 6px;
+  margin-top: 8px;
+}
+
+.cookie-runtime-bar {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: var(--accent-color);
+  border-radius: 8px;
+}
+
+.cookie-runtime-result {
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--accent-color);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

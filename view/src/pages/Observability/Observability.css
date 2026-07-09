@@ -1,0 +1,31 @@
+.observability-page .page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.observability-page .stat-card {
+  text-align: center;
+}
+
+.observability-page .tab-content {
+  animation: obsFadeIn 0.3s ease;
+}
+
+.observability-sub-table {
+  margin: 4px 0 8px 32px;
+  max-width: calc(100% - 32px);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.observability-sub-table .ant-table {
+  background: var(--accent-color);
+}
+
+@keyframes obsFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}

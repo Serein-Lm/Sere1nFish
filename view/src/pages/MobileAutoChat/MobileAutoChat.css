@@ -1,0 +1,580 @@
+/* ============================================
+   自动聊天中心
+   ============================================ */
+
+.mobile-autochat .pc-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: var(--spacing-lg);
+  flex-wrap: wrap;
+}
+
+/* 共享工具类（本页独立加载） */
+.toolbar-spacer {
+  flex: 1;
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  display: block;
+}
+
+.modal-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
+}
+
+.modal-hint.ac-warn {
+  color: var(--color-warning);
+}
+
+/* ---------- 顶部统计 ---------- */
+.ac-stats {
+  display: flex;
+  gap: 12px;
+}
+
+.ac-stat {
+  min-width: 92px;
+  padding: 12px 18px;
+  border-radius: var(--radius-md);
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  text-align: center;
+}
+
+.ac-stat-num {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+
+.ac-stat-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+/* ---------- 布局 ---------- */
+.ac-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+.ac-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  min-width: 0;
+}
+
+.ac-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 14px;
+}
+
+.ac-badge-danger {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--accent-color);
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-color);
+}
+
+/* ---------- watcher ---------- */
+.ac-watcher-form {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ac-switches {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.ac-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ac-danger-text {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+.ac-watcher-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ac-watcher-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-color);
+  border: 1px solid var(--border-color);
+}
+
+.ac-watcher-id {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ac-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px rgba(82, 196, 26, 0.18);
+  animation: pulse-dot 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
+}
+
+/* ---------- 会话表 ---------- */
+.ac-contact-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ac-contact-id {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, monospace;
+}
+
+.ac-mono {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.ac-status-cell {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ac-last {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* ---------- 实时活动 ---------- */
+.ac-activity {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(100dvh - 220px);
+  position: sticky;
+  top: var(--spacing-lg);
+}
+
+.ac-live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--color-success);
+}
+
+.ac-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ac-event {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--border-hover);
+  animation: slideUp 0.3s ease both;
+}
+
+.ac-event.tone-info {
+  border-left-color: var(--color-info);
+}
+.ac-event.tone-warn {
+  border-left-color: var(--color-warning);
+}
+.ac-event.tone-success {
+  border-left-color: var(--color-success);
+}
+
+.ac-event-icon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  font-size: 15px;
+  background: var(--accent-color);
+  color: var(--text-secondary);
+}
+
+.ac-event-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ac-event-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ac-event-time {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.ac-event-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-top: 3px;
+  word-break: break-word;
+}
+
+/* ---------- 新会话表单 ---------- */
+.ac-session-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ac-form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.ac-form-col {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 1180px) {
+  .ac-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ac-activity {
+    position: static;
+    max-height: 460px;
+  }
+}
+
+@media (max-width: 768px) {
+  .mobile-autochat .pc-header {
+    flex-direction: column;
+  }
+
+  .ac-stats {
+    width: 100%;
+  }
+
+  .ac-stat {
+    flex: 1;
+  }
+
+  .ac-watcher-form,
+  .ac-form-row {
+    flex-direction: column;
+  }
+
+  .ac-watcher-form .ant-select,
+  .ac-watcher-form .ant-input,
+  .ac-watcher-form .ant-input-number {
+    max-width: none !important;
+    width: 100% !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-event,
+  .ac-live-dot {
+    animation: none !important;
+  }
+}
+
+/* ============================================
+   人物画像 tab
+   ============================================ */
+.ac-tabs {
+  margin-top: 4px;
+}
+
+.ac-persona-grid {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+.ac-persona-list {
+  position: sticky;
+  top: 8px;
+}
+
+.ac-persona-contacts {
+  max-height: 68vh;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+.ac-persona-contact {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+  border: 1px solid transparent;
+}
+
+.ac-persona-contact:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.ac-persona-contact.active {
+  background: var(--bg-active, rgba(64, 150, 255, 0.12));
+  border-color: var(--primary-color, #4096ff);
+}
+
+.ac-persona-avatar {
+  background: linear-gradient(135deg, #4096ff, #9254de);
+  flex-shrink: 0;
+}
+
+.ac-persona-contact-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ac-persona-contact-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ac-persona-contact-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.ac-persona-obs {
+  color: var(--text-secondary);
+}
+
+.ac-persona-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.ac-persona-head-name {
+  font-size: 18px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ac-persona-head-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.ac-persona-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--bg-subtle, rgba(255, 255, 255, 0.04));
+  margin-bottom: 16px;
+}
+
+.ac-persona-metric-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.ac-persona-metric-num {
+  text-align: center;
+  min-width: 72px;
+}
+
+.ac-persona-metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--primary-color, #4096ff);
+}
+
+.ac-persona-summary {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(250, 173, 20, 0.1);
+  border-left: 3px solid #faad14;
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+.ac-persona-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  margin: 18px 0 10px;
+  color: var(--text-primary);
+}
+
+.ac-persona-desc {
+  margin-bottom: 8px;
+}
+
+.ac-tag-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ac-persona-obs-timeline {
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.ac-persona-obs-item {
+  display: flex;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
+.ac-persona-obs-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ac-persona-obs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ac-persona-obs-content {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ac-sync-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #52c41a;
+}
+
+@media (max-width: 1024px) {
+  .ac-persona-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ac-persona-list {
+    position: static;
+  }
+
+  .ac-persona-contacts {
+    max-height: 40vh;
+  }
+
+  .ac-persona-metrics {
+    grid-template-columns: 1fr 1fr;
+  }
+}

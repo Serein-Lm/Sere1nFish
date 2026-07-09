@@ -1,0 +1,20 @@
+.website-phishing-page {
+  padding: 24px;
+}
+
+.website-phishing-page .page-header {
+  margin-bottom: 16px;
+}
+
+.website-phishing-page .phishing-tabs .ant-tabs-nav {
+  margin-bottom: 16px !important;
+}
+
+.website-phishing-page .tab-content {
+  animation: tabFadeIn 0.3s ease;
+}
+
+@keyframes tabFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}

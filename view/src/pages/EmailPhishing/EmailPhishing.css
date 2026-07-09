@@ -1,0 +1,20 @@
+.email-phishing-page {
+  padding: 24px;
+}
+
+.email-phishing-page .page-header {
+  margin-bottom: 16px;
+}
+
+.email-phishing-page .phishing-tabs .ant-tabs-nav {
+  margin-bottom: 16px !important;
+}
+
+.email-phishing-page .tab-content {
+  animation: tabFadeIn 0.3s ease;
+}
+
+@keyframes tabFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}

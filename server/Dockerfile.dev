@@ -1,0 +1,45 @@
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    PATH=/opt/android-sdk/platform-tools:$PATH
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ANDROID_PLATFORM_TOOLS_URL=https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    nodejs \
+    npm \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/android-sdk \
+    && curl -fsSL "${ANDROID_PLATFORM_TOOLS_URL}" -o /tmp/platform-tools.zip \
+    && unzip -q /tmp/platform-tools.zip -d /opt/android-sdk \
+    && rm /tmp/platform-tools.zip \
+    && ln -sf /opt/android-sdk/platform-tools/adb /usr/local/bin/adb \
+    && adb version
+
+WORKDIR /app
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+CMD ["python", "run.py"]

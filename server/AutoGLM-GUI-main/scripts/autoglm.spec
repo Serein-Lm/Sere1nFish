@@ -1,0 +1,128 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""
+PyInstaller 配置文件 - AutoGLM-GUI 后端打包
+
+使用方法:
+    cd scripts
+    pyinstaller autoglm.spec
+
+输出目录:
+    scripts/dist/autoglm-gui/
+"""
+
+from pathlib import Path
+from PyInstaller.utils.hooks import copy_metadata, collect_data_files
+
+# 项目根目录（SPECPATH 是 spec 文件所在目录，由 PyInstaller 提供）
+ROOT_DIR = Path(SPECPATH).parent
+
+block_cipher = None
+
+a = Analysis(
+    # 入口点：Python 后端的 __main__.py
+    [str(ROOT_DIR / 'AutoGLM_GUI' / '__main__.py')],
+
+    pathex=[],
+
+    # 二进制文件
+    binaries=[
+        # scrcpy-server 二进制文件（必需）
+        (str(ROOT_DIR / 'AutoGLM_GUI' / 'resources' / 'scrcpy-server-v3.3.3'), 'AutoGLM_GUI/resources'),
+    ],
+
+    # 数据文件
+    datas=[
+        # 前端静态文件（必需）
+        (str(ROOT_DIR / 'AutoGLM_GUI' / 'static'), 'AutoGLM_GUI/static'),
+
+        # ADB Keyboard APK 及许可证文件（自动安装功能）
+        (str(ROOT_DIR / 'AutoGLM_GUI' / 'resources' / 'apks'), 'AutoGLM_GUI/resources/apks'),
+
+        # Package metadata（运行时需要）
+        *copy_metadata('fastmcp'),
+    ],
+
+    # 隐藏导入：PyInstaller 无法自动检测的模块
+    hiddenimports=[
+        # uvicorn 相关
+        'uvicorn.logging',
+        'uvicorn.loops',
+        'uvicorn.loops.auto',
+        'uvicorn.loops.asyncio',
+        'uvicorn.protocols',
+        'uvicorn.protocols.http',
+        'uvicorn.protocols.http.auto',
+        'uvicorn.protocols.http.h11_impl',
+        'uvicorn.protocols.websockets',
+        'uvicorn.protocols.websockets.auto',
+        'uvicorn.protocols.websockets.websockets_impl',
+        'uvicorn.lifespan',
+        'uvicorn.lifespan.on',
+
+        # FastAPI 相关
+        'fastapi.responses',
+        'fastapi.staticfiles',
+
+
+        # 其他可能需要的模块
+        # droidrun 通过 importlib 动态加载，需显式收集
+        'llama_index.llms.openai_like',
+        'llama_index.llms.openai_like.base',
+        'PIL._tkinter_finder',  # Pillow
+    ],
+
+    hookspath=[],
+    hooksconfig={},
+    # Runtime hooks: 在主程序运行前执行
+    runtime_hooks=[
+        str(Path(SPECPATH) / 'pyi_rth_utf8.py'),  # UTF-8 编码（Windows）
+    ],
+    excludes=[
+        # 排除不需要的模块以减小体积
+        'tkinter',
+        'matplotlib',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(
+    a.pure,
+    a.zipped_data,
+    cipher=block_cipher
+)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    # PyInstaller OPTIONS: 启用 UTF-8 模式 (PEP 540)
+    # 注意: PyInstaller 6.9+ 不再受 PYTHONUTF8 环境变量影响
+    # 必须在打包时通过 OPTIONS 机制永久启用
+    # 参考: https://pyinstaller.org/en/v6.9.0/CHANGES.html
+    [('X utf8_mode=1', None, 'OPTION')],
+    exclude_binaries=True,
+    name='autoglm-gui',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,  # 首次不启用 UPX 压缩，确保稳定性
+    console=True,  # 保留控制台窗口便于调试（生产版本可改为 False）
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='autoglm-gui',
+)

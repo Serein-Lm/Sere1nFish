@@ -1,0 +1,17 @@
+{
+  "base_url": "http://localhost:8000/v1",
+  "model_name": "autoglm-phone-9b",
+  "api_key": "EMPTY",
+  "max_tokens": 3000,
+  "temperature": 0.0,
+  "top_p": 0.85,
+  "frequency_penalty": 0.2,
+  "lang": "cn",
+  "agent_type": "glm-async",
+  "agent_config_params": null,
+  "default_max_steps": 100,
+  "layered_max_turns": 50,
+  "decision_base_url": null,
+  "decision_model_name": null,
+  "decision_api_key": null
+}

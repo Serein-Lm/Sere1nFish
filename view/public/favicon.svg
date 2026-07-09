@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Sere1nFish">
+  <rect width="64" height="64" rx="14" fill="#0f172a"/>
+  <path d="M14 34c7-10 20-14 34-4 2 1 2 5 0 6-14 10-27 6-34-4" fill="#22d3ee"/>
+  <path d="M48 30l8-6v18l-8-6c2-2 2-4 0-6z" fill="#38bdf8"/>
+  <circle cx="38" cy="31" r="2.4" fill="#0f172a"/>
+  <path d="M16 44c9 4 22 4 32 0" fill="none" stroke="#e2e8f0" stroke-width="3" stroke-linecap="round" opacity=".9"/>
+</svg>

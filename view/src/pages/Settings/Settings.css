@@ -1,0 +1,52 @@
+.settings {
+  padding: 24px;
+}
+
+/* 小红书账号管理 */
+.xhs-tip-bar {
+  padding: 12px 16px;
+  background: var(--accent-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+
+.xhs-tip-bar .ant-typography {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.xhs-modal-tip {
+  padding: 12px;
+  background: var(--accent-color);
+  border-radius: var(--radius-sm);
+  margin-top: 8px;
+}
+
+.xhs-modal-tip .ant-typography {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 768px) {
+  .settings {
+    padding: 16px;
+  }
+}
+
+
+/* Settings section header */
+.settings-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: var(--accent-color);
+  border-radius: 8px;
+}
+
+.settings-section-header .ant-typography {
+  flex: 1;
+  margin-right: 16px;
+}

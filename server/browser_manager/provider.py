@@ -1,0 +1,969 @@
+"""
+浏览器提供者 - 透明代理层
+
+独立于 MediaCrawler 的浏览器生命周期管理。
+- DockerProvider: 通过 Docker 动态创建/管理 Chrome 容器
+- LocalProvider: 走原有的本地 Chrome 启动逻辑（兼容开发环境）
+
+业务代码只需要调用 get_browser_provider().get_cdp_endpoint() 即可获取 CDP 地址，
+不需要关心浏览器是本地的还是 Docker 容器里的。
+"""
+
+import asyncio
+import logging
+import os
+import time
+import uuid
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Optional
+
+import httpx
+
+from core.logger import get_logger
+
+logger = get_logger("browser_manager")
+
+
+# ── 数据结构 ──────────────────────────────────────────────
+
+@dataclass
+class ContainerInfo:
+    """Docker 容器信息"""
+    container_id: str
+    container_name: str
+    cdp_host: str
+    cdp_port: int
+    api_port: int
+    vnc_port: int
+    novnc_port: int
+    status: str = "starting"  # starting | idle | busy | stopping | unhealthy
+    task_id: Optional[str] = None
+    purpose: str = "general"  # url_scan | xhs | xhs_screenshot | general
+    created_at: datetime = field(default_factory=datetime.now)
+    last_used_at: datetime = field(default_factory=datetime.now)
+    # 健康监控
+    memory_usage_mb: float = 0.0
+    unhealthy_reason: str = ""
+    consecutive_errors: int = 0
+
+    @property
+    def cdp_url(self) -> str:
+        return f"http://{self.cdp_host}:{self.cdp_port}"
+
+    @property
+    def cdp_ws_url(self) -> str:
+        return f"ws://{self.cdp_host}:{self.cdp_port}"
+
+    @property
+    def api_url(self) -> str:
+        return f"http://{self.cdp_host}:{self.api_port}"
+
+    @property
+    def novnc_url(self) -> str:
+        return f"http://{self.cdp_host}:{self.novnc_port}/vnc.html?autoconnect=true"
+
+
+@dataclass
+class ChromeDockerConfig:
+    """Docker Chrome 配置"""
+    enabled: bool = True  # 默认启用 Docker 模式
+    image: str = "chrome-browser:latest"
+    max_containers: int = 5
+    idle_timeout: int = 300  # 秒
+    shm_size: str = "2g"
+    screen_width: int = 1920
+    screen_height: int = 1080
+    timezone: str = "Asia/Shanghai"
+    network: str = "bridge"
+    # 端口范围（动态分配）
+    cdp_port_start: int = 9222
+    api_port_start: int = 8250
+    vnc_port_start: int = 5900
+    novnc_port_start: int = 6080
+    # VNC 鉴权
+    vnc_password: str = "chrome@2026"  # VNC 访问密码
+    api_token: str = ""  # 容器控制 API 的 Token（空则不鉴权）
+    enable_vnc: bool = False  # 是否启用 VNC/noVNC（默认关闭，省性能）
+    # 健康监控
+    memory_unhealthy_mb: int = 1500  # 内存超过此值标记 unhealthy（MB）
+    memory_restart_mb: int = 800  # 内存超过此值才重启 Chrome（动态策略）
+    health_check_interval: int = 30  # 健康检查间隔（秒）
+    # 预热池
+    warm_pool_size: int = 1  # 预热池大小（启动时预创建的空闲容器数）
+    # 容器热切换
+    max_consecutive_errors: int = 3  # 连续错误超过此值触发容器热切换
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ChromeDockerConfig":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+# ── 抽象基类 ──────────────────────────────────────────────
+
+class BrowserProvider(ABC):
+    """浏览器提供者基类"""
+
+    @abstractmethod
+    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+        """
+        获取一个可用的 CDP WebSocket 地址。
+        返回 None 表示走本地模式。
+        """
+        ...
+
+    @abstractmethod
+    async def release_cdp_endpoint(self, task_id: Optional[str] = None):
+        """释放 CDP 连接"""
+        ...
+
+    @abstractmethod
+    async def shutdown(self):
+        """关闭所有管理的资源"""
+        ...
+
+    async def get_pool_status(self) -> list[dict]:
+        """获取连接池状态"""
+        return []
+
+    async def report_error(self, task_id: Optional[str] = None, error_msg: str = "") -> None:
+        """上报容器错误（用于触发热切换判断）"""
+        pass
+
+    async def hot_swap_container(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+        """
+        容器热切换：释放当前容器 → 从预热池或新建获取新容器。
+        返回新的 CDP WS URL，失败返回 None。
+        """
+        return None
+
+    async def get_container_memory_mb(self, task_id: Optional[str] = None) -> float:
+        """获取任务对应容器的内存使用量（MB），不支持则返回 0"""
+        return 0.0
+
+
+# ── 本地模式 ──────────────────────────────────────────────
+
+class LocalProvider(BrowserProvider):
+    """本地模式：返回 None，让 CDPBrowserManager 走原有逻辑"""
+
+    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+        return None
+
+    async def release_cdp_endpoint(self, task_id: Optional[str] = None):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+# ── Docker 模式 ───────────────────────────────────────────
+
+class DockerProvider(BrowserProvider):
+    """
+    Docker 模式：动态创建和管理 Chrome 容器
+
+    - 按需创建容器（不预启动）
+    - 任务完成后标记空闲
+    - 空闲超时自动销毁
+    - 支持并发任务分配不同容器
+    """
+
+    def __init__(self, config: ChromeDockerConfig):
+        self.config = config
+        self.containers: dict[str, ContainerInfo] = {}  # container_id → info
+        self.task_map: dict[str, str] = {}  # task_id → container_id
+        self._lock = asyncio.Lock()
+        self._reaper_task: Optional[asyncio.Task] = None
+        self._health_checker_task: Optional[asyncio.Task] = None
+        self._warm_pool_task: Optional[asyncio.Task] = None
+        self._docker_client = None
+        self._port_counter = 0
+        self._warm_pool_ready = asyncio.Event()  # 预热池就绪信号
+        # 启动时清理上次遗留的孤儿容器
+        self._cleanup_orphan_containers()
+
+    def _get_docker_client(self):
+        """延迟初始化 docker client"""
+        if self._docker_client is None:
+            try:
+                import docker
+                self._docker_client = docker.from_env()
+            except ImportError:
+                raise RuntimeError(
+                    "docker-py 未安装。请运行: pip install docker"
+                )
+            except Exception as e:
+                raise RuntimeError(f"无法连接 Docker daemon: {e}")
+        return self._docker_client
+
+    def _cleanup_orphan_containers(self):
+        """
+        启动时清理上次遗留的孤儿容器。
+        
+        场景：测试 Ctrl+C 中断、进程崩溃等导致容器没被正确销毁，
+        下次启动时端口冲突。通过容器名前缀 "chrome-" 识别并清理。
+        """
+        try:
+            client = self._get_docker_client()
+            # 查找所有 chrome- 前缀的容器（包括已停止的）
+            containers = client.containers.list(
+                all=True,
+                filters={"name": "chrome-"},
+            )
+            if not containers:
+                return
+
+            orphan_count = 0
+            for container in containers:
+                try:
+                    container.remove(force=True)
+                    orphan_count += 1
+                    logger.info(
+                        f"[DockerProvider] 清理孤儿容器: {container.name} (id={container.id[:12]})"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[DockerProvider] 清理孤儿容器失败: {container.name}: {e}"
+                    )
+
+            if orphan_count > 0:
+                logger.info(f"[DockerProvider] 共清理 {orphan_count} 个孤儿容器")
+
+        except Exception as e:
+            logger.debug(f"[DockerProvider] 孤儿容器检查跳过: {e}")
+
+    def _allocate_ports(self) -> dict[str, int]:
+        """分配端口（递增，跳过已占用的端口）"""
+        import socket
+
+        def _is_port_free(port: int) -> bool:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.5)
+                    s.bind(("0.0.0.0", port))
+                    return True
+            except OSError:
+                return False
+
+        max_attempts = 20
+        for _ in range(max_attempts):
+            offset = self._port_counter
+            self._port_counter += 1
+            ports = {
+                "cdp": self.config.cdp_port_start + offset,
+                "api": self.config.api_port_start + offset,
+                "vnc": self.config.vnc_port_start + offset,
+                "novnc": self.config.novnc_port_start + offset,
+            }
+            # 检查所有端口是否可用
+            if all(_is_port_free(p) for p in ports.values()):
+                return ports
+            logger.debug(
+                f"[DockerProvider] 端口组 offset={offset} 被占用，跳过: "
+                f"{list(ports.values())}"
+            )
+
+        raise RuntimeError(f"无法分配可用端口（尝试 {max_attempts} 次）")
+
+    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+        """
+        获取一个 CDP 地址，必要时动态创建容器。
+        
+        Args:
+            task_id: 任务 ID（用于追踪容器归属）
+            purpose: 用途标签，同一 purpose 的任务共享容器
+                - "url_scan": URL 扫描（chrome-devtools-mcp）
+                - "xhs": 小红书爬虫（Playwright）
+                - "xhs_screenshot": 小红书截屏
+                - "general": 通用
+        """
+        task_id = task_id or str(uuid.uuid4())
+        logger.info(f"[DockerProvider] 请求 CDP 端点 | task_id={task_id} purpose={purpose}")
+
+        async with self._lock:
+            # 1. 优先复用同 purpose 的空闲容器（跳过 unhealthy）
+            for cid, info in self.containers.items():
+                if info.status == "idle" and info.unhealthy_reason == "" and getattr(info, 'purpose', 'general') == purpose:
+                    info.status = "busy"
+                    info.task_id = task_id
+                    info.last_used_at = datetime.now()
+                    self.task_map[task_id] = cid
+                    logger.info(
+                        f"[DockerProvider] 复用同类容器 {info.container_name} (purpose={purpose}) → task {task_id}"
+                    )
+                    return await self._get_ws_url(info)
+
+            # 2. 复用任意空闲容器（跳过 unhealthy）
+            for cid, info in self.containers.items():
+                if info.status == "idle" and info.unhealthy_reason == "":
+                    info.status = "busy"
+                    info.task_id = task_id
+                    info.purpose = purpose
+                    info.last_used_at = datetime.now()
+                    self.task_map[task_id] = cid
+                    logger.info(
+                        f"[DockerProvider] 复用空闲容器 {info.container_name} → task {task_id} (purpose={purpose})"
+                    )
+                    return await self._get_ws_url(info)
+
+            # 3. 检查是否达到上限（unhealthy 的不计入活跃数）
+            active_count = sum(
+                1 for c in self.containers.values()
+                if c.status in ("busy", "idle", "starting") and c.unhealthy_reason == ""
+            )
+            logger.info(
+                f"[DockerProvider] 无空闲容器 | 活跃容器数={active_count}/{self.config.max_containers}"
+            )
+            if active_count >= self.config.max_containers:
+                logger.warning(
+                    f"[DockerProvider] 容器数已达上限 ({self.config.max_containers})，等待空闲容器..."
+                )
+                return await self._wait_for_idle(task_id, timeout=60)
+
+            # 4. 创建新容器
+            logger.info(f"[DockerProvider] 为 task {task_id} 创建新容器 (purpose={purpose})...")
+            info = await self._create_container()
+            info.status = "busy"
+            info.task_id = task_id
+            info.purpose = purpose
+            self.task_map[task_id] = info.container_id
+            logger.info(
+                f"[DockerProvider] 新容器 {info.container_name} 已分配给 task {task_id} | "
+                f"CDP={info.cdp_port}, VNC={info.vnc_port}, noVNC={info.novnc_port}"
+            )
+
+            # 启动后台任务（首次）
+            self._ensure_background_tasks()
+
+            return await self._get_ws_url(info)
+
+    async def release_cdp_endpoint(self, task_id: Optional[str] = None):
+        """释放任务占用的容器"""
+        if not task_id or task_id not in self.task_map:
+            logger.debug(f"[DockerProvider] 释放请求忽略 | task_id={task_id} (未找到)")
+            return
+
+        async with self._lock:
+            cid = self.task_map.pop(task_id, None)
+            if cid and cid in self.containers:
+                info = self.containers[cid]
+                info.status = "idle"
+                info.task_id = None
+                info.last_used_at = datetime.now()
+                logger.info(
+                    f"[DockerProvider] 释放容器 {info.container_name} | task={task_id} | "
+                    f"状态→idle | 当前容器池: {len(self.containers)} 个"
+                )
+
+    async def shutdown(self):
+        """销毁所有容器和后台任务"""
+        container_count = len(self.containers)
+        logger.info(f"[DockerProvider] 开始关闭，待销毁容器数: {container_count}")
+
+        for task in (self._reaper_task, self._health_checker_task, self._warm_pool_task):
+            if task:
+                task.cancel()
+
+        for cid in list(self.containers.keys()):
+            await self._destroy_container(cid)
+
+        logger.info(f"[DockerProvider] 所有容器已销毁 (共 {container_count} 个)")
+
+    async def get_pool_status(self) -> list[dict]:
+        """获取连接池状态（含内存信息）"""
+        result = []
+        for info in self.containers.values():
+            result.append({
+                "container_id": info.container_id[:12],
+                "container_name": info.container_name,
+                "status": info.status,
+                "task_id": info.task_id,
+                "cdp_url": info.cdp_url,
+                "novnc_url": info.novnc_url,
+                "memory_mb": round(info.memory_usage_mb, 1),
+                "unhealthy_reason": info.unhealthy_reason,
+                "consecutive_errors": info.consecutive_errors,
+                "created_at": info.created_at.isoformat(),
+                "last_used_at": info.last_used_at.isoformat(),
+            })
+        return result
+
+    # ── 内部方法 ──────────────────────────────────────────
+
+    def _auth_headers(self) -> dict[str, str]:
+        """生成容器 API 鉴权 headers"""
+        if self.config.api_token:
+            return {"Authorization": f"Bearer {self.config.api_token}"}
+        return {}
+
+    async def _create_container(self) -> ContainerInfo:
+        """通过 docker-py 创建新容器"""
+        client = self._get_docker_client()
+        ports = self._allocate_ports()
+        name = f"chrome-{uuid.uuid4().hex[:8]}"
+
+        logger.info(
+            f"[DockerProvider] 开始创建容器 {name} | "
+            f"镜像={self.config.image} | 端口分配: CDP={ports['cdp']}, "
+            f"API={ports['api']}, VNC={ports['vnc']}, noVNC={ports['novnc']}"
+        )
+
+        env = {
+            "SCREEN_WIDTH": str(self.config.screen_width),
+            "SCREEN_HEIGHT": str(self.config.screen_height),
+            "CDP_PORT": "9222",
+            "VNC_PORT": "5900",
+            "NOVNC_PORT": "6080",
+            "API_PORT": "8250",
+            "TZ": self.config.timezone,
+            "ENABLE_VNC": "true" if self.config.enable_vnc else "false",
+        }
+
+        # VNC 鉴权（仅 VNC 启用时有意义）
+        if self.config.enable_vnc and self.config.vnc_password:
+            env["VNC_PASSWORD"] = self.config.vnc_password
+            logger.info(f"[DockerProvider] VNC 鉴权已启用 (密码长度={len(self.config.vnc_password)})")
+
+        if not self.config.enable_vnc:
+            logger.info("[DockerProvider] VNC/noVNC 已禁用（省性能）")
+
+        # 容器 API Token
+        if self.config.api_token:
+            env["API_TOKEN"] = self.config.api_token
+            logger.info("[DockerProvider] 容器控制 API Token 已启用")
+
+        use_internal_network = self.config.network not in ("", "bridge", "host")
+
+        # Compose 内部网络模式不发布 Chrome 端口到宿主机，避免对外暴露额外服务。
+        # 本机直接运行后端时继续使用 127.0.0.1 端口映射，便于调试。
+        port_bindings = None
+        if not use_internal_network:
+            port_bindings = {
+                "9222/tcp": ("127.0.0.1", ports["cdp"]),
+                "8250/tcp": ("127.0.0.1", ports["api"]),
+            }
+            if self.config.enable_vnc:
+                port_bindings["5900/tcp"] = ("127.0.0.1", ports["vnc"])
+                port_bindings["6080/tcp"] = ("127.0.0.1", ports["novnc"])
+
+        run_kwargs = {
+            "image": self.config.image,
+            "name": name,
+            "detach": True,
+            "shm_size": self.config.shm_size,
+            "environment": env,
+        }
+        if port_bindings:
+            run_kwargs["ports"] = port_bindings
+        if use_internal_network:
+            run_kwargs["network"] = self.config.network
+
+        t_start = time.time()
+        container = client.containers.run(**run_kwargs)
+        t_created = time.time()
+        logger.info(
+            f"[DockerProvider] 容器 {name} 已创建 (id={container.id[:12]}) | "
+            f"docker run 耗时 {t_created - t_start:.1f}s"
+        )
+
+        info = ContainerInfo(
+            container_id=container.id,
+            container_name=name,
+            cdp_host=name if use_internal_network else "localhost",
+            cdp_port=9222 if use_internal_network else ports["cdp"],
+            api_port=8250 if use_internal_network else ports["api"],
+            vnc_port=5900 if use_internal_network else ports["vnc"],
+            novnc_port=6080 if use_internal_network else ports["novnc"],
+            status="starting",
+        )
+        self.containers[container.id] = info
+
+        # 等待容器健康
+        await self._wait_healthy(info, timeout=30)
+        t_ready = time.time()
+        info.status = "idle"
+        logger.info(
+            f"[DockerProvider] 容器 {name} 就绪 | "
+            f"健康检查耗时 {t_ready - t_created:.1f}s | "
+            f"总启动耗时 {t_ready - t_start:.1f}s"
+        )
+
+        return info
+
+    async def _wait_healthy(self, info: ContainerInfo, timeout: int = 30):
+        """等待容器 CDP 端口可达"""
+        start = time.time()
+        attempt = 0
+        last_error = ""
+        while time.time() - start < timeout:
+            attempt += 1
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{info.api_url}/health", timeout=3)
+                    if resp.status_code == 200:
+                        elapsed = time.time() - start
+                        logger.info(
+                            f"[DockerProvider] 容器 {info.container_name} 健康检查通过 | "
+                            f"尝试 {attempt} 次 | 耗时 {elapsed:.1f}s"
+                        )
+                        return
+                    else:
+                        last_error = f"HTTP {resp.status_code}: {resp.text[:100]}"
+            except httpx.ConnectError:
+                last_error = "连接被拒绝（容器可能还在启动）"
+            except httpx.TimeoutException:
+                last_error = "请求超时"
+            except Exception as e:
+                last_error = str(e)
+
+            if attempt % 5 == 0:
+                elapsed = time.time() - start
+                logger.debug(
+                    f"[DockerProvider] 容器 {info.container_name} 健康检查中... "
+                    f"第 {attempt} 次 | 已等待 {elapsed:.1f}s | 最后错误: {last_error}"
+                )
+            await asyncio.sleep(1)
+
+        raise TimeoutError(
+            f"容器 {info.container_name} 启动超时 ({timeout}s) | "
+            f"尝试 {attempt} 次 | 最后错误: {last_error}"
+        )
+
+    async def _get_ws_url(self, info: ContainerInfo, max_retries: int = 10) -> str:
+        """
+        从容器获取 CDP WebSocket URL（带重试）。
+
+        通过容器控制 API（/cdp/info）获取 WS URL，然后返回代理地址。
+        在 Apple Silicon + QEMU 模拟下，宿主机直连 CDP 端口不通，
+        所以使用容器 API 端口上的 /cdp-proxy WebSocket 代理。
+        """
+        logger.info(
+            f"[DockerProvider] 获取 CDP WS URL | 容器={info.container_name} | "
+            f"API 地址={info.api_url}"
+        )
+        last_error = ""
+        for attempt in range(1, max_retries + 1):
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"{info.api_url}/cdp/info",
+                        timeout=5,
+                        headers=self._auth_headers(),
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        browser_version = data.get("browser", "unknown")
+                        ws_url = data.get("ws_url", "")
+                        if ws_url:
+                            # 使用 API 端口上的 CDP 代理，绕过 CDP 端口映射问题
+                            proxy_url = f"ws://{info.cdp_host}:{info.api_port}/cdp-proxy"
+                            logger.info(
+                                f"[DockerProvider] CDP WS URL 获取成功 | "
+                                f"Browser={browser_version} | "
+                                f"原始 WS={ws_url} | 代理 WS={proxy_url} | 第 {attempt} 次"
+                            )
+                            return proxy_url
+                    last_error = f"API 返回异常: HTTP {resp.status_code}"
+            except Exception as e:
+                last_error = str(e)
+
+            if attempt < max_retries:
+                logger.debug(
+                    f"[DockerProvider] 获取 WS URL 第 {attempt} 次失败: {last_error}，1s 后重试..."
+                )
+                await asyncio.sleep(1)
+
+        raise RuntimeError(
+            f"获取 CDP WS URL 失败（重试 {max_retries} 次）| "
+            f"容器={info.container_name} | 最后错误: {last_error}"
+        )
+
+    async def _wait_for_idle(self, task_id: str, timeout: int = 60) -> Optional[str]:
+        """等待一个空闲容器"""
+        start = time.time()
+        while time.time() - start < timeout:
+            for cid, info in self.containers.items():
+                if info.status == "idle":
+                    info.status = "busy"
+                    info.task_id = task_id
+                    info.last_used_at = datetime.now()
+                    self.task_map[task_id] = cid
+                    return await self._get_ws_url(info)
+            await asyncio.sleep(1)
+
+        logger.error(f"[DockerProvider] 等待空闲容器超时 ({timeout}s)")
+        return None
+
+    async def _destroy_container(self, container_id: str):
+        """销毁容器"""
+        info = self.containers.pop(container_id, None)
+        if not info:
+            return
+
+        info.status = "stopping"
+        logger.info(f"[DockerProvider] 开始销毁容器 {info.container_name} (id={container_id[:12]})")
+        try:
+            client = self._get_docker_client()
+            container = client.containers.get(container_id)
+            container.stop(timeout=5)
+            container.remove(force=True)
+            logger.info(f"[DockerProvider] 容器 {info.container_name} 已销毁")
+        except Exception as e:
+            logger.warning(f"[DockerProvider] 销毁容器 {info.container_name} 失败: {e}")
+
+    async def _idle_reaper(self):
+        """后台协程：定期检查并销毁超时的空闲容器（保留预热池数量）"""
+        while True:
+            try:
+                await asyncio.sleep(30)
+                now = datetime.now()
+                to_destroy = []
+
+                async with self._lock:
+                    # 统计当前空闲且健康的容器数
+                    idle_healthy = [
+                        cid for cid, info in self.containers.items()
+                        if info.status == "idle" and info.unhealthy_reason == ""
+                    ]
+
+                    for cid, info in self.containers.items():
+                        if info.status == "idle":
+                            idle_seconds = (now - info.last_used_at).total_seconds()
+                            if idle_seconds > self.config.idle_timeout:
+                                # 保留预热池数量的空闲容器不销毁
+                                if len(idle_healthy) > self.config.warm_pool_size:
+                                    to_destroy.append(cid)
+                                    idle_healthy = [c for c in idle_healthy if c != cid]
+                                    logger.info(
+                                        f"[DockerProvider] 容器 {info.container_name} "
+                                        f"空闲 {idle_seconds:.0f}s > {self.config.idle_timeout}s，准备销毁"
+                                    )
+
+                        # unhealthy 且无任务的容器直接销毁
+                        if info.unhealthy_reason and info.status != "busy":
+                            to_destroy.append(cid)
+                            logger.info(
+                                f"[DockerProvider] 销毁 unhealthy 容器 {info.container_name}: "
+                                f"{info.unhealthy_reason}"
+                            )
+
+                for cid in to_destroy:
+                    await self._destroy_container(cid)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[DockerProvider] idle_reaper 异常: {e}")
+
+    # ── 新增：后台任务管理 ────────────────────────────────
+
+    def _ensure_background_tasks(self):
+        """确保所有后台任务都在运行"""
+        if self._reaper_task is None or self._reaper_task.done():
+            self._reaper_task = asyncio.create_task(self._idle_reaper())
+        if self._health_checker_task is None or self._health_checker_task.done():
+            self._health_checker_task = asyncio.create_task(self._health_checker())
+        if self._warm_pool_task is None or self._warm_pool_task.done():
+            self._warm_pool_task = asyncio.create_task(self._warm_pool_filler())
+
+    # ── 新增：容器健康监控 ────────────────────────────────
+
+    async def _health_checker(self):
+        """
+        后台协程：每 N 秒检查每个容器的内存使用量（Docker stats API）。
+        内存超过阈值的容器标记为 unhealthy，不再分配新任务。
+        """
+        logger.info(
+            f"[DockerProvider] 健康监控已启动 | "
+            f"间隔={self.config.health_check_interval}s | "
+            f"unhealthy 阈值={self.config.memory_unhealthy_mb}MB"
+        )
+        while True:
+            try:
+                await asyncio.sleep(self.config.health_check_interval)
+
+                for cid, info in list(self.containers.items()):
+                    if info.status == "stopping":
+                        continue
+                    try:
+                        mem_mb = await self._query_container_memory(cid)
+                        info.memory_usage_mb = mem_mb
+
+                        if mem_mb > self.config.memory_unhealthy_mb:
+                            if not info.unhealthy_reason:
+                                info.unhealthy_reason = f"内存 {mem_mb:.0f}MB > {self.config.memory_unhealthy_mb}MB"
+                                logger.warning(
+                                    f"[HealthCheck] 容器 {info.container_name} 标记 unhealthy: "
+                                    f"{info.unhealthy_reason} | status={info.status}"
+                                )
+                        else:
+                            # 内存恢复正常（比如 Chrome 重启后），清除 unhealthy 标记
+                            if info.unhealthy_reason and "内存" in info.unhealthy_reason:
+                                logger.info(
+                                    f"[HealthCheck] 容器 {info.container_name} 内存恢复正常 "
+                                    f"({mem_mb:.0f}MB)，清除 unhealthy 标记"
+                                )
+                                info.unhealthy_reason = ""
+
+                    except Exception as e:
+                        logger.debug(f"[HealthCheck] 查询容器 {info.container_name} 内存失败: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[DockerProvider] health_checker 异常: {e}")
+
+    async def _query_container_memory(self, container_id: str) -> float:
+        """通过 Docker API 查询容器内存使用量（MB）"""
+        client = self._get_docker_client()
+        container = client.containers.get(container_id)
+        # docker stats 是阻塞调用，放到线程池
+        stats = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: container.stats(stream=False)
+        )
+        mem_stats = stats.get("memory_stats", {})
+        usage = mem_stats.get("usage", 0)
+        # 减去 cache（不算真实内存占用）
+        cache = mem_stats.get("stats", {}).get("cache", 0)
+        real_usage = usage - cache
+        return max(real_usage / (1024 * 1024), 0)
+
+    # ── 新增：预热池 ─────────────────────────────────────
+
+    async def _warm_pool_filler(self):
+        """
+        后台协程：维持预热池中有 N 个空闲容器。
+        容器被取走后异步补充新的，Worker 需要切换时直接从池里拿，省 4-5s。
+        """
+        logger.info(f"[DockerProvider] 预热池已启动 | 目标大小={self.config.warm_pool_size}")
+        # 首次启动等 5s，让主流程先跑
+        await asyncio.sleep(5)
+
+        while True:
+            try:
+                # 统计当前空闲且健康的容器数
+                idle_healthy_count = sum(
+                    1 for info in self.containers.values()
+                    if info.status == "idle" and info.unhealthy_reason == ""
+                )
+                # 统计总活跃容器数（不含 unhealthy）
+                total_active = sum(
+                    1 for info in self.containers.values()
+                    if info.status in ("busy", "idle", "starting") and info.unhealthy_reason == ""
+                )
+
+                need = self.config.warm_pool_size - idle_healthy_count
+                # 不能超过 max_containers 上限
+                can_create = self.config.max_containers - total_active
+
+                if need > 0 and can_create > 0:
+                    to_create = min(need, can_create)
+                    logger.info(
+                        f"[WarmPool] 空闲容器不足 ({idle_healthy_count}/{self.config.warm_pool_size})，"
+                        f"预创建 {to_create} 个"
+                    )
+                    for _ in range(to_create):
+                        try:
+                            async with self._lock:
+                                info = await self._create_container()
+                                info.status = "idle"
+                                logger.info(f"[WarmPool] 预热容器 {info.container_name} 就绪")
+                        except Exception as e:
+                            logger.warning(f"[WarmPool] 预创建容器失败: {e}")
+                            break
+
+                await asyncio.sleep(10)  # 每 10s 检查一次
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[DockerProvider] warm_pool_filler 异常: {e}")
+                await asyncio.sleep(10)
+
+    # ── 新增：错误上报 + 容器热切换 ──────────────────────
+
+    async def report_error(self, task_id: Optional[str] = None, error_msg: str = "") -> None:
+        """
+        上报容器错误。累计连续错误数，超过阈值后标记 unhealthy。
+        Worker 可据此决定是否触发热切换。
+        
+        Returns: None（调用方通过 info.consecutive_errors 判断是否需要热切换）
+        """
+        if not task_id or task_id not in self.task_map:
+            return
+
+        cid = self.task_map.get(task_id)
+        if not cid or cid not in self.containers:
+            return
+
+        info = self.containers[cid]
+        info.consecutive_errors += 1
+        logger.warning(
+            f"[DockerProvider] 容器 {info.container_name} 错误上报 | "
+            f"连续错误={info.consecutive_errors}/{self.config.max_consecutive_errors} | "
+            f"错误: {error_msg[:100]}"
+        )
+
+        if info.consecutive_errors >= self.config.max_consecutive_errors:
+            info.unhealthy_reason = (
+                f"连续 {info.consecutive_errors} 次错误: {error_msg[:80]}"
+            )
+            logger.error(
+                f"[DockerProvider] 容器 {info.container_name} 标记 unhealthy: "
+                f"{info.unhealthy_reason}"
+            )
+
+    async def reset_error_count(self, task_id: Optional[str] = None) -> None:
+        """重置容器的连续错误计数（工具调用成功时调用）"""
+        if not task_id or task_id not in self.task_map:
+            return
+        cid = self.task_map.get(task_id)
+        if cid and cid in self.containers:
+            self.containers[cid].consecutive_errors = 0
+
+    async def should_hot_swap(self, task_id: Optional[str] = None) -> bool:
+        """判断是否应该触发容器热切换"""
+        if not task_id or task_id not in self.task_map:
+            return False
+        cid = self.task_map.get(task_id)
+        if not cid or cid not in self.containers:
+            return False
+        info = self.containers[cid]
+        return info.consecutive_errors >= self.config.max_consecutive_errors
+
+    async def hot_swap_container(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+        """
+        容器热切换：释放当前容器 → 异步销毁 → 从预热池或新建获取新容器。
+        
+        旧容器异步销毁不阻塞 Worker，新容器优先从预热池拿。
+        返回新的 CDP WS URL，失败返回 None。
+        """
+        if not task_id:
+            return None
+
+        old_cid = self.task_map.get(task_id)
+        old_name = ""
+        if old_cid and old_cid in self.containers:
+            old_name = self.containers[old_cid].container_name
+
+        logger.warning(
+            f"[HotSwap] 开始容器热切换 | task={task_id} | "
+            f"旧容器={old_name} | purpose={purpose}"
+        )
+
+        # 1. 解除旧容器与 task 的绑定
+        async with self._lock:
+            old_cid = self.task_map.pop(task_id, None)
+            if old_cid and old_cid in self.containers:
+                old_info = self.containers[old_cid]
+                old_info.status = "idle"
+                old_info.task_id = None
+                old_info.unhealthy_reason = old_info.unhealthy_reason or "热切换淘汰"
+
+        # 2. 异步销毁旧容器（不阻塞）
+        if old_cid:
+            asyncio.create_task(self._destroy_container(old_cid))
+
+        # 3. 获取新容器（走正常流程，会优先从预热池拿空闲容器）
+        try:
+            new_ws_url = await self.get_cdp_endpoint(task_id=task_id, purpose=purpose)
+            if new_ws_url:
+                # 重置新容器的错误计数
+                new_cid = self.task_map.get(task_id)
+                if new_cid and new_cid in self.containers:
+                    self.containers[new_cid].consecutive_errors = 0
+                logger.info(
+                    f"[HotSwap] 热切换成功 | task={task_id} | "
+                    f"旧容器={old_name} → 新容器 | WS={new_ws_url}"
+                )
+                return new_ws_url
+            else:
+                logger.error(f"[HotSwap] 热切换失败：无法获取新容器 | task={task_id}")
+                return None
+        except Exception as e:
+            logger.error(f"[HotSwap] 热切换异常: {e}")
+            return None
+
+    async def get_container_memory_mb(self, task_id: Optional[str] = None) -> float:
+        """获取任务对应容器的内存使用量（MB）"""
+        if not task_id or task_id not in self.task_map:
+            return 0.0
+        cid = self.task_map.get(task_id)
+        if not cid or cid not in self.containers:
+            return 0.0
+        return self.containers[cid].memory_usage_mb
+
+    async def should_restart_chrome(self, task_id: Optional[str] = None) -> bool:
+        """
+        基于内存的动态重启策略：
+        - 内存低于 memory_restart_mb → 不重启（省时间）
+        - 内存超过 memory_restart_mb → 需要重启
+        """
+        mem = await self.get_container_memory_mb(task_id)
+        if mem <= 0:
+            return True  # 无法获取内存信息时，保守策略：重启
+        return mem > self.config.memory_restart_mb
+
+
+# ── 全局单例 ──────────────────────────────────────────────
+
+_provider: Optional[BrowserProvider] = None
+_docker_config_data: dict[str, Any] = {}
+
+
+def configure_browser_provider(config: dict[str, Any] | None) -> None:
+    """注入前端/Mongo 管理的 Chrome Docker 配置。"""
+    global _docker_config_data
+    _docker_config_data = dict(config or {})
+
+
+def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
+    """环境变量只作为部署兜底覆盖，不再读取 config.json。"""
+    result = dict(config)
+    if os.getenv("CHROME_DOCKER_ENABLED"):
+        result["enabled"] = os.environ["CHROME_DOCKER_ENABLED"].lower() in {"1", "true", "yes"}
+    if os.getenv("CHROME_DOCKER_NETWORK"):
+        result["network"] = os.environ["CHROME_DOCKER_NETWORK"]
+    if os.getenv("CHROME_DOCKER_WARM_POOL_SIZE"):
+        result["warm_pool_size"] = int(os.environ["CHROME_DOCKER_WARM_POOL_SIZE"])
+    return result
+
+
+def _load_docker_config() -> ChromeDockerConfig:
+    """从 Mongo 注入配置加载 Docker Chrome 配置。"""
+    try:
+        return ChromeDockerConfig.from_dict(_apply_env_overrides(_docker_config_data))
+    except Exception as e:
+        logger.warning(f"[browser_manager] Chrome Docker 配置无效，使用默认值: {e}")
+        return ChromeDockerConfig.from_dict(_apply_env_overrides({}))
+
+
+def get_browser_provider() -> BrowserProvider:
+    """
+    获取全局 BrowserProvider 单例。
+    根据前端/Mongo 中 chrome_docker.enabled 决定返回 DockerProvider 还是 LocalProvider。
+    """
+    global _provider
+    if _provider is not None:
+        return _provider
+
+    config = _load_docker_config()
+
+    if config.enabled:
+        logger.info("[browser_manager] Docker 模式已启用")
+        _provider = DockerProvider(config)
+    else:
+        logger.info("[browser_manager] 本地模式（Docker 未启用）")
+        _provider = LocalProvider()
+
+    return _provider
+
+
+async def shutdown_provider():
+    """关闭 provider（应用退出时调用）"""
+    global _provider
+    if _provider:
+        await _provider.shutdown()
+        _provider = None

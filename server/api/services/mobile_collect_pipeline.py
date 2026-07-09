@@ -1,0 +1,64 @@
+"""手机采集任务 — 服务层分派器。
+
+作为统一任务系统的一个 task_type=mobile_collect 的 dispatcher:
+从 params 取 task_def_id, 加载任务定义, 交由运行时 Pipeline 执行,
+并维护任务定义的运行状态(idle/running)。
+"""
+from __future__ import annotations
+
+from api.db.mongodb import get_db
+from api.dao import mobile_collect as collect_dao
+from core.logger import get_logger
+from core.mobile.collect import run_collect_task
+
+logger = get_logger("mobile_collect_service")
+
+
+async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) -> None:
+    """统一任务分派入口(签名对齐 TASK_DISPATCHERS)。"""
+    db = get_db()
+    task_def_id = params.get("task_def_id", "")
+    if not task_def_id:
+        raise ValueError("缺少 task_def_id")
+
+    task_def = await collect_dao.get_task_def(db, task_def_id)
+    if not task_def:
+        raise ValueError(f"采集任务定义不存在: {task_def_id}")
+
+    await collect_dao.set_task_status(db, task_def_id, "running", run_task_id=task_id)
+    try:
+        result = await run_collect_task(
+            db,
+            run_task_id=task_id,
+            project_id=project_id or task_def.get("project_id"),
+            task_def=task_def,
+        )
+        logger.notice(
+            f"采集任务完成 | def={task_def_id} run={task_id} "
+            f"total={result['total']} new={result['new']} changed={result['changed']}"
+        )
+    finally:
+        await collect_dao.set_task_status(db, task_def_id, "idle")
+
+
+async def dry_run_collect(
+    run_task_id: str,
+    project_id: str,
+    task_def: dict,
+    *,
+    preview_limit: int = 50,
+) -> dict:
+    """试跑预览:同步执行一次采集但不入库、不发通知,返回结构化预览。
+
+    仍会占用设备、导航、截屏并做视觉结构化,用于评估采集效果;
+    不修改任务定义的运行状态(idle/running),避免与真实运行互相干扰。
+    """
+    db = get_db()
+    return await run_collect_task(
+        db,
+        run_task_id=run_task_id,
+        project_id=project_id or task_def.get("project_id"),
+        task_def=task_def,
+        dry_run=True,
+        preview_limit=preview_limit,
+    )

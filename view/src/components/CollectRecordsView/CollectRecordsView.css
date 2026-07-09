@@ -1,0 +1,135 @@
+/* ============ 采集记录统一展示 ============ */
+
+.collect-records-table .ant-table-cell {
+  vertical-align: middle;
+}
+
+.collect-row-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.collect-row-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.collect-row-tag {
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.collect-row-meta {
+  font-size: 12px;
+  color: var(--text-secondary, rgba(0, 0, 0, 0.45));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.collect-shot-thumb {
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 6px;
+  object-fit: cover;
+  background: #111827;
+  cursor: zoom-in;
+}
+
+.collect-shot-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px dashed var(--border-color, rgba(0, 0, 0, 0.12));
+  background: var(--fill-quaternary, rgba(0, 0, 0, 0.02));
+}
+
+.collect-shot-empty {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px dashed var(--border-color, rgba(0, 0, 0, 0.12));
+  font-size: 12px;
+  color: var(--text-secondary, rgba(0, 0, 0, 0.35));
+}
+
+.collect-shot-empty.sm {
+  width: 40px;
+  height: 40px;
+  font-size: 11px;
+}
+
+.collect-record-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 4px 8px;
+}
+
+.collect-detail-header {
+  padding-bottom: 2px;
+}
+
+.collect-detail-section {
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--fill-quaternary, rgba(0, 0, 0, 0.015));
+}
+
+.collect-detail-section-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  padding-left: 8px;
+  border-left: 3px solid var(--primary-color, #1677ff);
+  line-height: 1.2;
+}
+
+.collect-contact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collect-contact-channel {
+  min-width: 52px;
+  text-align: center;
+  margin: 0;
+}
+
+.collect-detail-descriptions .ant-descriptions-item-label {
+  width: 120px;
+  font-weight: 500;
+}
+
+.collect-shot-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.collect-shot-gallery img {
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 6px;
+  background: #111827;
+  object-fit: contain;
+  transition: transform 0.2s ease;
+}
+
+.collect-shot-gallery img:hover {
+  transform: scale(1.04);
+}

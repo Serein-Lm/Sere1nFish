@@ -1,0 +1,75 @@
+[project]
+name = "autoglm-gui"
+version = "1.5.16"
+description = "Web GUI for AutoGLM Phone Agent - AI-powered Android automation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "suyiiyii" }]
+keywords = ["autoglm", "phone-agent", "android", "automation", "ai", "gui"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "apscheduler>=3.10.0,<4.0.0",  # Scheduled task scheduler
+    "fastapi>=0.124.0",
+    "fastmcp>=2.0.0",
+    "httpx[socks]>=0.28.1",
+    "jinja2>=3.1.0",  # Required by MAI agent for prompt templating
+    "loguru>=0.7.3",
+    "numpy>=1.24.0",  # Required by MAI agent
+    "openai>=2.9.0",
+    "openai-agents>=0.6.4",
+    "pillow>=11.3.0",
+    "prometheus-client>=0.21.0",
+    "python-socketio>=5.11.0",
+    "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.38.0",
+    "zeroconf>=0.148.0",
+]
+
+[project.optional-dependencies]
+droidrun = ["droidrun>=0.4.0"]
+
+[project.urls]
+Homepage = "https://github.com/suyiiyii/AutoGLM-GUI"
+Repository = "https://github.com/suyiiyii/AutoGLM-GUI"
+
+[project.scripts]
+autoglm-gui = "AutoGLM_GUI.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["AutoGLM_GUI"]
+force-include = {"AutoGLM_GUI/resources/scrcpy-server-v3.3.3" = "AutoGLM_GUI/resources/scrcpy-server-v3.3.3"}
+
+[tool.hatch.build.targets.sdist]
+include = ["AutoGLM_GUI/**/*", "AutoGLM_GUI/resources/scrcpy-server-v3.3.3"]
+
+[tool.hatch.build]
+artifacts = ["AutoGLM_GUI/static/**/*"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.17.0",
+    "pyright>=1.1.407",
+    "pytest>=9.0.2",
+    "ruff>=0.14.9",
+]

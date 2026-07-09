@@ -1,0 +1,426 @@
+.config-management {
+  padding: 24px;
+}
+
+.config-management .page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.config-management .page-title {
+  margin: 0 !important;
+}
+
+.config-management .page-description {
+  margin: 4px 0 0 0 !important;
+}
+
+.config-security-actions {
+  justify-content: flex-end;
+}
+
+.config-unlocked-alert {
+  margin-bottom: 16px;
+}
+
+/* 配置分类卡片 */
+.config-section {
+  margin-bottom: 24px;
+}
+
+.config-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.config-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.config-section-title .anticon {
+  font-size: 18px;
+  color: var(--primary-color);
+}
+
+/* 配置项 */
+.config-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  background: var(--accent-color);
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+  transition: all var(--transition-fast) ease;
+}
+
+.config-item:hover {
+  background: var(--accent-hover);
+}
+
+.config-item:last-child {
+  margin-bottom: 0;
+}
+
+.config-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.config-item-label {
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.config-item-value {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  font-size: 13px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.config-item-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: 16px;
+}
+
+/* 工具列表 */
+.tool-list {
+  display: grid;
+  gap: 12px;
+}
+
+.tool-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  background: var(--accent-color);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast) ease;
+}
+
+.tool-item:hover {
+  background: var(--accent-hover);
+}
+
+.tool-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tool-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 18px;
+}
+
+.tool-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tool-key {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+.tool-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 通用配置段 */
+.section-config-list {
+  display: grid;
+  gap: 12px;
+}
+
+.section-config-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+  padding: 16px;
+  background: var(--accent-color);
+  border-radius: var(--radius-sm);
+}
+
+.section-config-main {
+  min-width: 0;
+}
+
+.section-config-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.section-config-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.section-config-description {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.section-config-preview,
+.section-config-empty,
+.section-config-editor {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+}
+
+.section-config-preview {
+  margin: 0;
+  padding: 12px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.section-config-empty {
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+/* 追踪配置卡片 */
+.tracking-card {
+  padding: 20px;
+}
+
+.tracking-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.tracking-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tracking-title .anticon {
+  font-size: 20px;
+}
+
+.tracking-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.tracking-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.tracking-field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background: var(--accent-color);
+  border-radius: var(--radius-sm);
+}
+
+.tracking-field-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.tracking-field-value {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* 空状态 */
+.config-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.config-empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+/* 权限提示 */
+.permission-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(250, 173, 20, 0.1);
+  border: 1px solid rgba(250, 173, 20, 0.3);
+  border-radius: var(--radius-sm);
+  color: #faad14;
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+/* 导入结果 */
+.import-result {
+  margin-top: 16px;
+}
+
+.import-result-section {
+  margin-bottom: 12px;
+}
+
+.import-result-title {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.import-result-list {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .config-management .page-header {
+    align-items: flex-start;
+  }
+
+  .config-security-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .config-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .config-item-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .tool-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .tool-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+
+/* 钉钉机器人样式 */
+.dingtalk-bot-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  background: var(--accent-color);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast) ease;
+}
+
+.dingtalk-bot-item:hover {
+  background: var(--accent-hover);
+}
+
+.bot-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.bot-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.bot-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.bot-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+}
+
+.bot-meta {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+.bot-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: 16px;
+}
+
+@media (max-width: 768px) {
+  .dingtalk-bot-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .bot-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

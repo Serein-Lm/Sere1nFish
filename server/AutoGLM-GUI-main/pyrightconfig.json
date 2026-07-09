@@ -1,0 +1,21 @@
+{
+  "pythonVersion": "3.11",
+  "pythonPlatform": "All",
+  "include": [
+    "AutoGLM_GUI"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.venv",
+    "**/dist",
+    "**/build"
+  ],
+  "typeCheckingMode": "standard",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "reportMissingTypeArgument": true,
+  "reportMissingParameterType": true,
+  "reportUnnecessaryIsInstance": true,
+  "reportUnnecessaryComparison": true
+}

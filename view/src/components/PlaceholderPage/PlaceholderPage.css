@@ -1,0 +1,37 @@
+.placeholder-page {
+  padding: 24px;
+}
+
+.placeholder-card {
+  min-height: 400px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty-description {
+  color: var(--text-secondary);
+}
+
+.empty-description p {
+  margin: 8px 0;
+}
+
+.empty-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.back-btn {
+  background: var(--primary-color) !important;
+  border-color: var(--primary-color) !important;
+  color: var(--primary-bg) !important;
+  font-weight: 500;
+  transition: all var(--transition-base) ease;
+}
+
+.back-btn:hover {
+  opacity: 0.85;
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
+}

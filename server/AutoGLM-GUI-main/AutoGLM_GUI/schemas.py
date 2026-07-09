@@ -1,0 +1,1260 @@
+"""Shared Pydantic models for the AutoGLM-GUI API."""
+
+import re
+from typing import Any
+
+from pydantic import BaseModel, field_validator
+
+from AutoGLM_GUI.device_metadata_manager import DISPLAY_NAME_MAX_LENGTH
+from AutoGLM_GUI.task_store import TaskSessionStatus, TaskStatus
+
+
+class ChatRequest(BaseModel):
+    message: str
+    device_id: str  # 设备 ID（必填）
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, v: str) -> str:
+        """验证 message 非空."""
+        if not v or not v.strip():
+            raise ValueError("message cannot be empty")
+        if len(v) > 10000:
+            raise ValueError("message too long (max 10000 characters)")
+        return v.strip()
+
+
+class ChatResponse(BaseModel):
+    result: str
+    steps: int
+    success: bool
+
+
+class StatusResponse(BaseModel):
+    version: str
+    initialized: bool
+    step_count: int
+
+
+class ResetRequest(BaseModel):
+    device_id: str  # 设备 ID（必填）
+
+
+class AbortRequest(BaseModel):
+    """中断对话请求。"""
+
+    device_id: str  # 设备 ID（必填）
+
+
+class ScreenshotRequest(BaseModel):
+    device_id: str | None = None
+
+
+class ScreenshotResponse(BaseModel):
+    success: bool
+    image: str  # base64 encoded PNG
+    width: int
+    height: int
+    is_sensitive: bool
+    error: str | None = None
+
+
+class TapRequest(BaseModel):
+    x: int
+    y: int
+    device_id: str | None = None
+    delay: float = 0.0
+
+    @field_validator("x", "y")
+    @classmethod
+    def validate_coordinates(cls, v: int) -> int:
+        """验证坐标范围."""
+        if v < 0:
+            raise ValueError("coordinates must be non-negative")
+        if v > 10000:  # 合理的最大屏幕尺寸
+            raise ValueError("coordinates must be <= 10000")
+        return v
+
+    @field_validator("delay")
+    @classmethod
+    def validate_delay(cls, v: float) -> float:
+        """验证 delay 范围."""
+        if v < 0.0:
+            raise ValueError("delay must be non-negative")
+        if v > 60.0:  # 最大等待 60 秒
+            raise ValueError("delay must be <= 60.0 seconds")
+        return v
+
+
+class TapResponse(BaseModel):
+    success: bool
+    error: str | None = None
+
+
+class SwipeRequest(BaseModel):
+    start_x: int
+    start_y: int
+    end_x: int
+    end_y: int
+    duration_ms: int | None = None
+    device_id: str | None = None
+    delay: float = 0.0
+
+    @field_validator("start_x", "start_y", "end_x", "end_y")
+    @classmethod
+    def validate_coordinates(cls, v: int) -> int:
+        """验证坐标范围."""
+        if v < 0:
+            raise ValueError("coordinates must be non-negative")
+        if v > 10000:
+            raise ValueError("coordinates must be <= 10000")
+        return v
+
+    @field_validator("duration_ms")
+    @classmethod
+    def validate_duration(cls, v: int | None) -> int | None:
+        """验证滑动持续时间."""
+        if v is not None:
+            if v < 0:
+                raise ValueError("duration_ms must be non-negative")
+            if v > 10000:  # 最大 10 秒
+                raise ValueError("duration_ms must be <= 10000")
+        return v
+
+    @field_validator("delay")
+    @classmethod
+    def validate_delay(cls, v: float) -> float:
+        """验证 delay 范围."""
+        if v < 0.0:
+            raise ValueError("delay must be non-negative")
+        if v > 60.0:
+            raise ValueError("delay must be <= 60.0 seconds")
+        return v
+
+
+class SwipeResponse(BaseModel):
+    success: bool
+    error: str | None = None
+
+
+class TouchDownRequest(BaseModel):
+    x: int
+    y: int
+    device_id: str | None = None
+    delay: float = 0.0
+
+    @field_validator("x", "y")
+    @classmethod
+    def validate_coordinates(cls, v: int) -> int:
+        """验证坐标范围."""
+        if v < 0:
+            raise ValueError("coordinates must be non-negative")
+        if v > 10000:
+            raise ValueError("coordinates must be <= 10000")
+        return v
+
+    @field_validator("delay")
+    @classmethod
+    def validate_delay(cls, v: float) -> float:
+        """验证 delay 范围."""
+        if v < 0.0:
+            raise ValueError("delay must be non-negative")
+        if v > 60.0:
+            raise ValueError("delay must be <= 60.0 seconds")
+        return v
+
+
+class TouchDownResponse(BaseModel):
+    success: bool
+    error: str | None = None
+
+
+class TouchMoveRequest(BaseModel):
+    x: int
+    y: int
+    device_id: str | None = None
+    delay: float = 0.0
+
+    @field_validator("x", "y")
+    @classmethod
+    def validate_coordinates(cls, v: int) -> int:
+        """验证坐标范围."""
+        if v < 0:
+            raise ValueError("coordinates must be non-negative")
+        if v > 10000:
+            raise ValueError("coordinates must be <= 10000")
+        return v
+
+    @field_validator("delay")
+    @classmethod
+    def validate_delay(cls, v: float) -> float:
+        """验证 delay 范围."""
+        if v < 0.0:
+            raise ValueError("delay must be non-negative")
+        if v > 60.0:
+            raise ValueError("delay must be <= 60.0 seconds")
+        return v
+
+
+class TouchMoveResponse(BaseModel):
+    success: bool
+    error: str | None = None
+
+
+class TouchUpRequest(BaseModel):
+    x: int
+    y: int
+    device_id: str | None = None
+    delay: float = 0.0
+
+    @field_validator("x", "y")
+    @classmethod
+    def validate_coordinates(cls, v: int) -> int:
+        """验证坐标范围."""
+        if v < 0:
+            raise ValueError("coordinates must be non-negative")
+        if v > 10000:
+            raise ValueError("coordinates must be <= 10000")
+        return v
+
+    @field_validator("delay")
+    @classmethod
+    def validate_delay(cls, v: float) -> float:
+        """验证 delay 范围."""
+        if v < 0.0:
+            raise ValueError("delay must be non-negative")
+        if v > 60.0:
+            raise ValueError("delay must be <= 60.0 seconds")
+        return v
+
+
+class TouchUpResponse(BaseModel):
+    success: bool
+    error: str | None = None
+
+
+class AgentStatusResponse(BaseModel):
+    """Agent 运行状态信息."""
+
+    state: str  # "idle" | "busy" | "error" | "initializing"
+    created_at: float  # Unix 时间戳
+    last_used: float  # Unix 时间戳
+    error_message: str | None = None
+    model_name: str  # 来自 ModelConfig
+
+
+class DeviceResponse(BaseModel):
+    """设备信息及可选的 Agent 状态."""
+
+    id: str
+    serial: str
+    model: str
+    status: str
+    connection_type: str
+    state: str
+    online: bool = False
+    last_seen: float | None = None
+    is_available_only: bool
+    display_name: str | None = None
+    group_id: str = "default"  # 所属分组 ID
+    agent: AgentStatusResponse | None = None
+
+
+class DeviceListResponse(BaseModel):
+    devices: list[DeviceResponse]  # 从 list[dict] 改为强类型
+
+
+class ConfigResponse(BaseModel):
+    """配置读取响应."""
+
+    base_url: str
+    model_name: str
+    api_key: str  # 返回实际值（明文）
+    source: str  # "CLI arguments" | "environment variables" | "config file (...)" | "default"
+    max_tokens: int = 3000
+    temperature: float = 0.0
+    top_p: float = 0.85
+    frequency_penalty: float = 0.2
+    lang: str = "cn"
+
+    # Agent 类型配置
+    agent_type: str = "glm-async"  # Agent type (e.g., "glm-async", "mai")
+    agent_config_params: dict[str, Any] | None = None  # Agent-specific configuration
+
+    # Agent 执行配置
+    default_max_steps: int | None = 100  # None 表示不限制
+
+    # 分层代理配置
+    layered_max_turns: int | None = 50  # None 表示不限制
+
+    # 决策模型配置（用于分层代理）
+    decision_base_url: str | None = None
+    decision_model_name: str | None = None
+    decision_api_key: str | None = None
+
+    conflicts: list[dict[str, Any]] | None = None  # 配置冲突信息（可选）
+
+
+class ConfigSaveRequest(BaseModel):
+    """配置保存请求."""
+
+    base_url: str
+    model_name: str = "autoglm-phone-9b"
+    api_key: str | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    frequency_penalty: float | None = None
+    lang: str | None = None
+
+    # Agent 类型配置
+    agent_type: str = "glm-async"  # Agent type to use (e.g., "glm-async", "mai")
+    agent_config_params: dict[str, Any] | None = (
+        None  # Agent-specific configuration parameters
+    )
+
+    # Agent 执行配置
+    default_max_steps: int | None = None  # 单次任务最大执行步数
+
+    # 分层代理配置
+    layered_max_turns: int | None = None  # 分层代理模式的最大轮次
+
+    # 决策模型配置（用于分层代理）
+    decision_base_url: str | None = None
+    decision_model_name: str | None = None
+    decision_api_key: str | None = None
+
+    @field_validator("default_max_steps")
+    @classmethod
+    def validate_default_max_steps(cls, v: int | None) -> int | None:
+        """验证 default_max_steps 范围."""
+        if v is None:
+            return v
+        if v <= 0:
+            raise ValueError("default_max_steps must be positive")
+        return v
+
+    @field_validator("layered_max_turns")
+    @classmethod
+    def validate_layered_max_turns(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if v < 1:
+            raise ValueError("layered_max_turns must be >= 1")
+        return v
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, v: str) -> str:
+        """验证 base_url 格式."""
+        v = v.strip()
+        if not v:
+            raise ValueError("base_url cannot be empty")
+        if not re.match(r"^https?://", v):
+            raise ValueError("base_url must start with http:// or https://")
+        return v
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, v: str) -> str:
+        """验证 model_name 非空."""
+        if not v or not v.strip():
+            raise ValueError("model_name cannot be empty")
+        return v.strip()
+
+    @field_validator("decision_base_url")
+    @classmethod
+    def validate_decision_base_url(cls, v: str | None) -> str | None:
+        """验证 decision_base_url 格式."""
+        if v is not None and v.strip():
+            if not re.match(r"^https?://", v):
+                raise ValueError(
+                    "decision_base_url must start with http:// or https://"
+                )
+            return v.rstrip("/")
+        return None
+
+    @field_validator("decision_model_name")
+    @classmethod
+    def validate_decision_model_name(cls, v: str | None) -> str | None:
+        """验证 decision_model_name 非空."""
+        if v is not None and v.strip():
+            return v.strip()
+        return None
+
+
+class WiFiConnectRequest(BaseModel):
+    device_id: str | None = None
+    port: int = 5555
+
+    @field_validator("port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        """验证端口范围."""
+        if v < 1 or v > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return v
+
+
+class WiFiConnectResponse(BaseModel):
+    success: bool
+    message: str
+    device_id: str | None = None
+    address: str | None = None
+    error: str | None = None
+
+
+class WiFiDisconnectRequest(BaseModel):
+    device_id: str
+
+
+class WiFiDisconnectResponse(BaseModel):
+    success: bool
+    message: str
+    error: str | None = None
+
+
+class WiFiManualConnectRequest(BaseModel):
+    """手动连接 WiFi 请求 (无需 USB)."""
+
+    ip: str  # IP 地址
+    port: int = 5555  # 端口，默认 5555
+
+    @field_validator("ip")
+    @classmethod
+    def validate_ip(cls, v: str) -> str:
+        """验证 IP 地址格式."""
+        v = v.strip()
+        # 简单的 IPv4 格式验证
+        ip_pattern = r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+        if not re.match(ip_pattern, v):
+            raise ValueError("invalid IPv4 address format")
+        return v
+
+    @field_validator("port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        """验证端口范围."""
+        if v < 1 or v > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return v
+
+
+class WiFiManualConnectResponse(BaseModel):
+    """手动连接 WiFi 响应."""
+
+    success: bool
+    message: str
+    device_id: str | None = None  # 连接后的设备 ID (ip:port)
+    error: str | None = None
+
+
+class WiFiPairRequest(BaseModel):
+    """WiFi pairing request (Android 11+ wireless debugging)."""
+
+    ip: str  # Device IP address
+    pairing_port: int  # Pairing port (from "Pair device with code" dialog)
+    pairing_code: str  # 6-digit pairing code
+    connection_port: int = 5555  # Standard ADB connection port (default 5555)
+
+    @field_validator("ip")
+    @classmethod
+    def validate_ip(cls, v: str) -> str:
+        """验证 IP 地址格式."""
+        v = v.strip()
+        ip_pattern = r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+        if not re.match(ip_pattern, v):
+            raise ValueError("invalid IPv4 address format")
+        return v
+
+    @field_validator("pairing_port", "connection_port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        """验证端口范围."""
+        if v < 1 or v > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return v
+
+    @field_validator("pairing_code")
+    @classmethod
+    def validate_pairing_code(cls, v: str) -> str:
+        """验证配对码格式."""
+        v = v.strip()
+        if not re.match(r"^\d{6}$", v):
+            raise ValueError("pairing_code must be a 6-digit number")
+        return v
+
+
+class WiFiPairResponse(BaseModel):
+    """WiFi pairing response."""
+
+    success: bool
+    message: str
+    device_id: str | None = None  # Device ID after connection (ip:connection_port)
+    error: str | None = None  # Error code for frontend handling
+
+
+class VersionCheckResponse(BaseModel):
+    """Version update check response."""
+
+    current_version: str
+    latest_version: str | None = None
+    has_update: bool = False
+    release_url: str | None = None
+    published_at: str | None = None
+    error: str | None = None
+
+
+class MdnsDeviceResponse(BaseModel):
+    """Single mDNS-discovered device."""
+
+    name: str  # Device name (e.g., "adb-243a09b7-cbCO6P")
+    ip: str  # IP address
+    port: int  # Port number
+    has_pairing: bool  # Whether pairing service was also advertised
+    service_type: str  # Service type
+    pairing_port: int | None = None  # Pairing port if has_pairing is True
+
+
+class MdnsDiscoverResponse(BaseModel):
+    """mDNS device discovery response."""
+
+    success: bool
+    devices: list[MdnsDeviceResponse]
+    error: str | None = None
+
+
+# QR Code Pairing Models
+
+
+class QRPairGenerateResponse(BaseModel):
+    """QR code pairing generation response."""
+
+    success: bool
+    qr_payload: str | None = (
+        None  # QR text payload (WIFI:T:ADB;S:{name};P:{password};;)
+    )
+    session_id: str | None = None  # Session tracking ID (UUID)
+    expires_at: float | None = None  # Unix timestamp when session expires
+    message: str
+    error: str | None = None  # Error code for frontend handling
+
+
+class QRPairStatusResponse(BaseModel):
+    """QR code pairing status response."""
+
+    session_id: str
+    status: str  # "listening" | "pairing" | "paired" | "connecting" | "connected" | "timeout" | "error"
+    device_id: str | None = None  # Device ID when connected (ip:port)
+    message: str
+    error: str | None = None  # Error details
+
+
+class QRPairCancelResponse(BaseModel):
+    """QR code pairing cancellation response."""
+
+    success: bool
+    message: str
+
+
+# Workflow Models
+
+
+class WorkflowBase(BaseModel):
+    """Workflow 基础模型."""
+
+    name: str
+    text: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """验证 name 非空."""
+        if not v or not v.strip():
+            raise ValueError("name cannot be empty")
+        return v.strip()
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, v: str) -> str:
+        """验证 text 非空."""
+        if not v or not v.strip():
+            raise ValueError("text cannot be empty")
+        return v.strip()
+
+
+class WorkflowCreate(WorkflowBase):
+    """创建 Workflow 请求."""
+
+    pass
+
+
+class WorkflowUpdate(WorkflowBase):
+    """更新 Workflow 请求."""
+
+    pass
+
+
+class WorkflowResponse(WorkflowBase):
+    """Workflow 响应."""
+
+    uuid: str
+
+
+class WorkflowListResponse(BaseModel):
+    """Workflow 列表响应."""
+
+    workflows: list[WorkflowResponse]
+
+
+class RemoteDeviceInfo(BaseModel):
+    """远程设备信息."""
+
+    device_id: str
+    model: str
+    platform: str
+    status: str
+
+
+class RemoteDeviceDiscoverRequest(BaseModel):
+    """远程设备发现请求."""
+
+    base_url: str
+    timeout: int = 5
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return v
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("timeout must be positive")
+        if v > 30:
+            raise ValueError("timeout must be <= 30 seconds")
+        return v
+
+
+class RemoteDeviceDiscoverResponse(BaseModel):
+    """远程设备发现响应."""
+
+    success: bool
+    devices: list[RemoteDeviceInfo]
+    message: str
+    error: str | None = None
+
+
+class RemoteDeviceAddRequest(BaseModel):
+    """添加远程设备请求."""
+
+    base_url: str
+    device_id: str
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return v
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("device_id cannot be empty")
+        if len(v) > 100:
+            raise ValueError("device_id too long (max 100 characters)")
+        return v
+
+
+class RemoteDeviceAddResponse(BaseModel):
+    """添加远程设备响应."""
+
+    success: bool
+    message: str
+    serial: str | None = None
+    error: str | None = None
+
+
+class RemoteDeviceRemoveRequest(BaseModel):
+    """移除远程设备请求."""
+
+    serial: str
+
+
+class RemoteDeviceRemoveResponse(BaseModel):
+    """移除远程设备响应."""
+
+    success: bool
+    message: str
+    error: str | None = None
+
+
+class ReinitAllAgentsResponse(BaseModel):
+    """批量重新初始化 agent 响应."""
+
+    success: bool
+    total: int
+    succeeded: list[str]
+    failed: dict[str, str]
+    message: str
+
+
+# History Models
+
+
+class MessageRecordResponse(BaseModel):
+    """对话消息响应."""
+
+    role: str  # "user" | "assistant"
+    content: str
+    timestamp: str
+    thinking: str | None = None
+    action: dict[str, Any] | None = None
+    step: int | None = None
+
+
+class StepTimingSummaryResponse(BaseModel):
+    """Step-level timing summary response."""
+
+    step: int
+    trace_id: str
+    total_duration_ms: float
+    screenshot_duration_ms: float
+    current_app_duration_ms: float
+    llm_duration_ms: float
+    parse_action_duration_ms: float
+    execute_action_duration_ms: float
+    update_context_duration_ms: float
+    adb_duration_ms: float
+    sleep_duration_ms: float
+    other_duration_ms: float
+
+
+class TraceSummaryResponse(BaseModel):
+    """Task-level timing summary response."""
+
+    trace_id: str
+    steps: int
+    total_duration_ms: float
+    screenshot_duration_ms: float
+    current_app_duration_ms: float
+    llm_duration_ms: float
+    parse_action_duration_ms: float
+    execute_action_duration_ms: float
+    update_context_duration_ms: float
+    adb_duration_ms: float
+    sleep_duration_ms: float
+    other_duration_ms: float
+
+
+class HistoryRecordResponse(BaseModel):
+    """历史记录条目响应."""
+
+    id: str
+    task_text: str
+    final_message: str
+    success: bool
+    steps: int
+    start_time: str
+    end_time: str | None
+    duration_ms: int
+    source: str
+    source_detail: str
+    error_message: str | None
+    trace_id: str | None = None
+    step_timings: list[StepTimingSummaryResponse] = []
+    trace_summary: TraceSummaryResponse | None = None
+    messages: list[MessageRecordResponse] = []
+
+
+class HistoryListResponse(BaseModel):
+    """历史记录列表响应."""
+
+    records: list[HistoryRecordResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+# Task Models
+
+
+class TaskSessionCreate(BaseModel):
+    """Create chat task session request."""
+
+    device_id: str
+    device_serial: str
+    mode: str = "classic"
+
+    @field_validator("device_id", "device_serial")
+    @classmethod
+    def validate_required_str(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("value cannot be empty")
+        return v
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        mode = v.strip()
+        if mode not in {"classic", "layered"}:
+            raise ValueError("mode must be one of: classic, layered")
+        return mode
+
+
+class TaskSessionResponse(BaseModel):
+    id: str
+    kind: str
+    mode: str
+    device_id: str
+    device_serial: str
+    status: TaskSessionStatus
+    created_at: str
+    updated_at: str
+
+
+class TaskSubmitRequest(BaseModel):
+    message: str
+
+    @field_validator("message")
+    @classmethod
+    def validate_message_non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("message cannot be empty")
+        if len(v) > 10000:
+            raise ValueError("message too long (max 10000 characters)")
+        return v.strip()
+
+
+class TaskRunResponse(BaseModel):
+    id: str
+    source: str
+    executor_key: str
+    session_id: str | None = None
+    scheduled_task_id: str | None = None
+    workflow_uuid: str | None = None
+    schedule_fire_id: str | None = None
+    device_id: str
+    device_serial: str
+    status: TaskStatus
+    input_text: str
+    final_message: str | None = None
+    error_message: str | None = None
+    stop_reason: str | None = None
+    step_count: int
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: int | None = None
+
+
+class TaskRunListResponse(BaseModel):
+    tasks: list[TaskRunResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class TaskEventResponse(BaseModel):
+    task_id: str
+    seq: int
+    event_type: str
+    role: str
+    payload: dict[str, Any]
+    created_at: str
+
+
+class TaskEventListResponse(BaseModel):
+    events: list[TaskEventResponse]
+
+
+class TaskCancelResponse(BaseModel):
+    success: bool
+    message: str
+    task: TaskRunResponse | None = None
+
+
+class TaskSessionResetResponse(BaseModel):
+    success: bool
+    message: str
+    session: TaskSessionResponse | None = None
+
+
+# Scheduled Task Models
+
+
+class ScheduledTaskCreate(BaseModel):
+    """创建定时任务请求."""
+
+    name: str
+    workflow_uuid: str
+    device_serialnos: list[str] | None = None  # 直接指定设备列表
+    device_group_id: str | None = None  # 或指定设备分组
+    cron_expression: str
+    enabled: bool = True
+    execution_mode: str = "classic"
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("name cannot be empty")
+        return v.strip()
+
+    @field_validator("device_serialnos")
+    @classmethod
+    def validate_devices(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in v or []:
+            s = raw.strip()
+            if not s or s in seen:
+                continue
+            normalized.append(s)
+            seen.add(s)
+        return normalized if normalized else None
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("cron_expression cannot be empty")
+        parts = v.strip().split()
+        if len(parts) != 5:
+            raise ValueError(
+                "cron_expression must have 5 fields (minute hour day month weekday)"
+            )
+        return v.strip()
+
+    @field_validator("execution_mode")
+    @classmethod
+    def validate_execution_mode(cls, v: str) -> str:
+        mode = v.strip()
+        if mode not in {"classic", "layered"}:
+            raise ValueError("execution_mode must be one of: classic, layered")
+        return mode
+
+    def model_post_init(self, __context: Any) -> None:
+        """验证必须指定 device_serialnos 或 device_group_id 之一."""
+        if not self.device_serialnos and not self.device_group_id:
+            raise ValueError(
+                "either device_serialnos or device_group_id must be specified"
+            )
+
+
+class ScheduledTaskUpdate(BaseModel):
+    """更新定时任务请求."""
+
+    name: str | None = None
+    workflow_uuid: str | None = None
+    device_serialnos: list[str] | None = None
+    device_group_id: str | None = None
+    cron_expression: str | None = None
+    enabled: bool | None = None
+    execution_mode: str | None = None
+
+    @field_validator("device_serialnos")
+    @classmethod
+    def validate_devices(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in v:
+            s = raw.strip()
+            if not s or s in seen:
+                continue
+            normalized.append(s)
+            seen.add(s)
+
+        return normalized if normalized else None
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError("cron_expression cannot be empty")
+        parts = v.strip().split()
+        if len(parts) != 5:
+            raise ValueError(
+                "cron_expression must have 5 fields (minute hour day month weekday)"
+            )
+        return v.strip()
+
+    @field_validator("execution_mode")
+    @classmethod
+    def validate_execution_mode(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        mode = v.strip()
+        if mode not in {"classic", "layered"}:
+            raise ValueError("execution_mode must be one of: classic, layered")
+        return mode
+
+
+class ScheduledTaskResponse(BaseModel):
+    """定时任务响应."""
+
+    id: str
+    name: str
+    workflow_uuid: str
+    device_serialnos: list[str]
+    device_group_id: str | None = None
+    cron_expression: str
+    enabled: bool
+    execution_mode: str = "classic"
+    created_at: str
+    updated_at: str
+    last_run_time: str | None
+    last_run_success: bool | None
+    last_run_status: str | None = None
+    last_run_success_count: int | None = None
+    last_run_total_count: int | None = None
+    last_run_message: str | None
+    next_run_time: str | None = None
+
+
+class ScheduledTaskListResponse(BaseModel):
+    """定时任务列表响应."""
+
+    tasks: list[ScheduledTaskResponse]
+
+
+class DeleteResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class DeviceDeleteResponse(BaseModel):
+    success: bool
+    serial: str
+    message: str
+    disconnected: bool = False
+    error: str | None = None
+
+
+class ResetResponse(BaseModel):
+    success: bool
+    message: str
+    device_id: str
+
+
+class ConfigSaveResponse(BaseModel):
+    success: bool
+    message: str
+    warnings: list[str] | None = None
+    destroyed_agents: int
+
+
+class InitResponse(BaseModel):
+    success: bool
+    message: str
+    device_id: str
+    agent_type: str
+
+
+class StreamResetResponse(BaseModel):
+    success: bool
+    message: str
+    device_id: str | None = None
+
+
+class EnableDisableResponse(BaseModel):
+    success: bool
+    message: str
+    task_id: str
+    enabled: bool
+
+
+# Device Group Models
+
+
+class DeviceGroupResponse(BaseModel):
+    """设备分组响应."""
+
+    id: str
+    name: str
+    order: int
+    created_at: str
+    updated_at: str
+    is_default: bool = False
+    device_count: int = 0  # 分组内设备数量
+
+
+class DeviceGroupListResponse(BaseModel):
+    """设备分组列表响应."""
+
+    groups: list[DeviceGroupResponse]
+
+
+class DeviceGroupCreateRequest(BaseModel):
+    """创建设备分组请求."""
+
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """验证 name 非空."""
+        if not v or not v.strip():
+            raise ValueError("name cannot be empty")
+        v = v.strip()
+        if len(v) > 50:
+            raise ValueError("name too long (max 50 characters)")
+        return v
+
+
+class DeviceGroupUpdateRequest(BaseModel):
+    """更新设备分组请求."""
+
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """验证 name 非空."""
+        if not v or not v.strip():
+            raise ValueError("name cannot be empty")
+        v = v.strip()
+        if len(v) > 50:
+            raise ValueError("name too long (max 50 characters)")
+        return v
+
+
+class DeviceGroupReorderRequest(BaseModel):
+    """调整设备分组顺序请求."""
+
+    group_ids: list[str]
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_group_ids(cls, v: list[str]) -> list[str]:
+        """验证 group_ids 非空且无重复."""
+        if not v:
+            raise ValueError("group_ids cannot be empty")
+        seen: set[str] = set()
+        result: list[str] = []
+        for gid in v:
+            gid = gid.strip()
+            if gid in seen:
+                raise ValueError(f"duplicate group_id: {gid}")
+            seen.add(gid)
+            result.append(gid)
+        return result
+
+
+class DeviceGroupAssignRequest(BaseModel):
+    """分配设备到分组请求."""
+
+    group_id: str
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, v: str) -> str:
+        """验证 group_id 非空."""
+        if not v or not v.strip():
+            raise ValueError("group_id cannot be empty")
+        return v.strip()
+
+
+class DeviceGroupOperationResponse(BaseModel):
+    """设备分组操作响应."""
+
+    success: bool
+    message: str
+    error: str | None = None
+
+
+# Device Name Models
+
+
+class DeviceNameUpdateRequest(BaseModel):
+    """更新设备显示名称请求."""
+
+    display_name: str | None
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, v: str | None) -> str | None:
+        """验证 display_name."""
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if len(v) > DISPLAY_NAME_MAX_LENGTH:
+            raise ValueError(
+                f"display_name too long (max {DISPLAY_NAME_MAX_LENGTH} characters)"
+            )
+        return v
+
+
+class DeviceNameResponse(BaseModel):
+    """设备显示名称响应."""
+
+    success: bool
+    serial: str
+    display_name: str | None = None
+    error: str | None = None
+
+
+class TerminalSessionCreateRequest(BaseModel):
+    """创建 Web Terminal 会话请求."""
+
+    cwd: str | None = None
+    command: list[str] | None = None
+
+    @field_validator("command")
+    @classmethod
+    def validate_command(cls, value: list[str] | None) -> list[str] | None:
+        """验证命令参数."""
+        if value is None:
+            return value
+        command = [part.strip() for part in value if part.strip()]
+        if not command:
+            raise ValueError("command cannot be empty")
+        return command
+
+
+class TerminalSessionResponse(BaseModel):
+    """Web Terminal 会话信息."""
+
+    session_id: str
+    cwd: str
+    command: list[str]
+    status: str
+    created_at: float
+    last_active_at: float
+    exit_code: int | None = None
+    created_by: str | None = None
+    origin: str | None = None
+    owner_token_hash: str | None = None
+    total_output_bytes: int = 0
+
+
+class TerminalSessionCreateResponse(TerminalSessionResponse):
+    """创建 Web Terminal 会话响应."""
+
+    session_token: str
+
+
+class TerminalSessionCloseResponse(BaseModel):
+    """关闭 Web Terminal 会话响应."""
+
+    success: bool
+    message: str
+    session_id: str

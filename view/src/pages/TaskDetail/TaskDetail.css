@@ -1,0 +1,10 @@
+.task-detail .ant-statistic-title {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.task-detail .ant-statistic-content {
+  font-size: 20px;
+}
+.task-detail .ant-statistic-content-value {
+  font-weight: 600;
+}

@@ -1,0 +1,288 @@
+"""CLI entry point for AutoGLM-GUI."""
+
+import argparse
+import sys
+import socket
+import threading
+import time
+import webbrowser
+
+from AutoGLM_GUI import __version__
+from AutoGLM_GUI.adb_terminal_repl import main as adb_terminal_repl_main
+
+# Default configuration
+DEFAULT_MODEL_NAME = "autoglm-phone-9b"
+
+
+def find_available_port(
+    start_port: int = 8000, max_attempts: int = 100, host: str = "127.0.0.1"
+) -> int:
+    """Find an available port starting from start_port.
+
+    Args:
+        start_port: Port to start searching from
+        max_attempts: Maximum number of ports to try
+        host: Host to bind to (default: 127.0.0.1)
+
+    Returns:
+        An available port number
+
+    Raises:
+        RuntimeError: If no available port found within max_attempts
+    """
+    for port in range(start_port, start_port + max_attempts):
+        try:
+            # Try to bind to the port
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, port))
+                return port
+        except OSError:
+            # Port is in use, try next one
+            continue
+
+    raise RuntimeError(
+        f"Could not find available port in range {start_port}-{start_port + max_attempts - 1}"
+    )
+
+
+def open_browser(
+    host: str, port: int, use_ssl: bool = False, delay: float = 1.5
+) -> None:
+    """Open browser after a delay to ensure server is ready.
+
+    Args:
+        host: Server host
+        port: Server port
+        use_ssl: Whether to use HTTPS
+        delay: Delay in seconds before opening browser
+    """
+
+    def _open() -> None:
+        time.sleep(delay)
+        protocol = "https" if use_ssl else "http"
+        url = (
+            f"{protocol}://127.0.0.1:{port}"
+            if host == "0.0.0.0"
+            else f"{protocol}://{host}:{port}"
+        )
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            # Non-critical failure, just log it
+            print(f"Could not open browser automatically: {e}", file=sys.stderr)
+
+    thread = threading.Thread(target=_open, daemon=True)
+    thread.start()
+
+
+def main() -> None:
+    """Start the AutoGLM-GUI server."""
+    # Configure logging BEFORE any other imports to ensure DEBUG level from the start
+    # This is especially important for --reload mode where subprocess reimports modules
+    import os
+    import sys
+
+    # Parse args early to get log level
+    early_parser = argparse.ArgumentParser(add_help=False)
+    early_parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+    )
+    early_parser.add_argument(
+        "--log-file", default="logs/autoglm_{time:YYYY-MM-DD}.log"
+    )
+    early_parser.add_argument("--no-log-file", action="store_true")
+    early_parser.add_argument("--adb-terminal-repl", action="store_true")
+    early_args, _ = early_parser.parse_known_args()
+
+    if early_args.adb_terminal_repl:
+        raise SystemExit(adb_terminal_repl_main())
+
+    # Set environment variable for reload mode (subprocess will read this)
+    os.environ["AUTOGLM_LOG_LEVEL"] = early_args.log_level
+    if early_args.no_log_file:
+        os.environ["AUTOGLM_NO_LOG_FILE"] = "1"
+    else:
+        os.environ["AUTOGLM_LOG_FILE"] = early_args.log_file
+
+    # Import and configure logger FIRST
+    from AutoGLM_GUI.logger import configure_logger
+
+    configure_logger(
+        console_level=early_args.log_level,
+        log_file=None if early_args.no_log_file else early_args.log_file,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="AutoGLM-GUI - Web GUI for AutoGLM Phone Agent"
+    )
+    parser.add_argument(
+        "--base-url",
+        required=False,
+        help="Base URL of the model API (e.g., http://localhost:8080/v1)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=f"Model name to use (default: {DEFAULT_MODEL_NAME}, or from config file)",
+    )
+    parser.add_argument(
+        "--apikey",
+        default=None,
+        help="API key for the model API (default: from AUTOGLM_API_KEY or unset)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host to bind the server to (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port to bind the server to (default: auto-find starting from 8000)",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable auto-reload for development",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open browser automatically",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+        help="Console log level (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default="logs/autoglm_{time:YYYY-MM-DD}.log",
+        help="Log file path (default: logs/autoglm_{time:YYYY-MM-DD}.log)",
+    )
+    parser.add_argument(
+        "--no-log-file",
+        action="store_true",
+        help="Disable file logging",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="SSL key file path (for HTTPS)",
+    )
+    parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="SSL certificate file path (for HTTPS)",
+    )
+    parser.add_argument(
+        "--layered-max-turns",
+        type=int,
+        default=None,
+        help="Maximum turns for layered agent mode (default: 50, minimum: 1)",
+    )
+    parser.add_argument(
+        "--adb-terminal-repl",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+
+    args = parser.parse_args()
+
+    if args.adb_terminal_repl:
+        raise SystemExit(adb_terminal_repl_main())
+
+    # Auto-find available port if not specified
+    if args.port is None:
+        try:
+            args.port = find_available_port(start_port=8000, host=args.host)
+            print(f"\nAuto-detected available port: {args.port}\n")
+        except RuntimeError as e:
+            print(f"\nError: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    import uvicorn
+
+    from AutoGLM_GUI import server
+    from AutoGLM_GUI.config_manager import config_manager, init_runtime_config
+
+    # ==================== 配置系统初始化 ====================
+    config_manager.set_cli_config(
+        base_url=args.base_url,
+        model_name=args.model,
+        api_key=args.apikey,
+        layered_max_turns=args.layered_max_turns,
+    )
+    effective_config = init_runtime_config()
+    config_source = config_manager.get_config_source()
+
+    # Determine if SSL is enabled
+    use_ssl = args.ssl_keyfile is not None and args.ssl_certfile is not None
+
+    # Display startup banner
+    print()
+    print("=" * 50)
+    print("  AutoGLM-GUI - Phone Agent Web Interface")
+    print("=" * 50)
+    print(f"  Version:    {__version__}")
+    print()
+    protocol = "https" if use_ssl else "http"
+    print(f"  Server:     {protocol}://{args.host}:{args.port}")
+    print()
+    print("  Model Configuration:")
+    print(f"    Source:   {config_source.value}")
+    print(f"    Base URL: {effective_config.base_url or '(not set)'}")
+    print(f"    Model:    {effective_config.model_name}")
+    if effective_config.api_key != "EMPTY":
+        print("    API Key:  (configured)")
+    print()
+
+    # Warning if base_url is not configured
+    if not effective_config.base_url:
+        print("  [!]  WARNING: base_url is not configured!")
+        print("     Please configure via frontend or use --base-url")
+        print()
+
+    print("=" * 50)
+    print("  Press Ctrl+C to stop")
+    print("=" * 50)
+    print()
+
+    # 确保 ADB 可用
+    from AutoGLM_GUI.adb_manager import ensure_adb
+
+    try:
+        adb_path = ensure_adb()
+    except RuntimeError as e:
+        print(f"\n[AutoGLM] WARNING: {e}", file=sys.stderr)
+        adb_path = "adb"  # 降级，让后续错误正常暴露
+
+    # 写入环境变量（供 --reload 模式的子进程使用）
+    os.environ["AUTOGLM_ADB_PATH"] = adb_path
+    os.environ["AUTOGLM_SERVER_HOST"] = args.host
+
+    # 预先创建 DeviceManager 单例（用正确的 adb_path）
+    from AutoGLM_GUI.device_manager import DeviceManager
+
+    DeviceManager.get_instance(adb_path=adb_path)
+
+    # Open browser automatically unless disabled
+    if not args.no_browser:
+        open_browser(args.host, args.port, use_ssl=use_ssl)
+
+    uvicorn.run(
+        server.app if not args.reload else "AutoGLM_GUI.server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,824 @@
+.login-container {
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: var(--primary-bg);
+  position: relative;
+  overflow: hidden;
+  transition: background-color 0.3s ease;
+}
+
+/* 动态背景层 */
+.dynamic-background {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+}
+
+.grid-layer {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  background-image: linear-gradient(var(--border-color) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-color) 1px, transparent 1px);
+  background-size: 50px 50px;
+  transform: perspective(500px) rotateX(60deg);
+  animation: gridMove 20s linear infinite;
+  opacity: 0.5;
+}
+
+.gradient-sphere {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 800px;
+  height: 800px;
+  background: radial-gradient(circle at center,
+      rgba(30, 30, 35, 0.3) 0%,
+      rgba(20, 20, 25, 0.2) 30%,
+      rgba(15, 15, 20, 0.1) 60%,
+      transparent 80%);
+  filter: blur(80px);
+  animation: spherePulse 10s ease-in-out infinite;
+}
+
+.light-beams {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.beam {
+  position: absolute;
+  background: linear-gradient(45deg,
+      var(--border-color) 0%,
+      var(--border-hover) 50%,
+      var(--border-color) 100%);
+  transform-origin: 0 0;
+  opacity: 0.3;
+}
+
+.beam-1 {
+  top: 20%;
+  left: -10%;
+  width: 120%;
+  height: 2px;
+  transform: rotate(15deg);
+  animation: beamMove 8s ease-in-out infinite;
+}
+
+.beam-2 {
+  top: 40%;
+  left: -10%;
+  width: 120%;
+  height: 1px;
+  transform: rotate(-10deg);
+  animation: beamMove 12s ease-in-out infinite reverse;
+}
+
+.beam-3 {
+  top: 60%;
+  left: -10%;
+  width: 120%;
+  height: 1.5px;
+  transform: rotate(5deg);
+  animation: beamMove 10s ease-in-out infinite;
+}
+
+.tech-circles {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.circle {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+  animation: circlePulse 4s ease-out infinite;
+}
+
+.circle-1 {
+  top: 20%;
+  left: 20%;
+  width: 100px;
+  height: 100px;
+  animation-delay: 0s;
+}
+
+.circle-2 {
+  bottom: 30%;
+  right: 25%;
+  width: 150px;
+  height: 150px;
+  animation-delay: 1s;
+}
+
+.circle-3 {
+  top: 50%;
+  right: 15%;
+  width: 80px;
+  height: 80px;
+  animation-delay: 2s;
+}
+
+/* 粒子系统 */
+.particles-container {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.particles-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 水晕效果 */
+.ripple-background {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+}
+
+.ripple {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle at center,
+      rgba(255, 255, 255, 0.05) 0%,
+      rgba(255, 255, 255, 0.02) 20%,
+      transparent 70%);
+  animation: rippleEffect 8s infinite;
+  opacity: 0;
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
+}
+
+.ripple-1 {
+  top: 20%;
+  left: 30%;
+  width: 800px;
+  height: 800px;
+}
+
+.ripple-2 {
+  top: 60%;
+  left: 60%;
+  width: 600px;
+  height: 600px;
+  animation-delay: 2s;
+}
+
+.ripple-3 {
+  top: 40%;
+  left: 50%;
+  width: 900px;
+  height: 900px;
+  animation-delay: 4s;
+}
+
+.ripple-4 {
+  top: 70%;
+  left: 25%;
+  width: 700px;
+  height: 700px;
+  animation-delay: 6s;
+}
+
+/* 主要内容 */
+.login-content {
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  max-width: 560px;
+  padding: 0 20px;
+  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.content-active {
+  transform: scale(1.01);
+}
+
+.login-box {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-radius: 24px;
+  padding: 48px 40px;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.2),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  backface-visibility: hidden;
+  perspective: 1000px;
+  transform-style: preserve-3d;
+  transform: translate3d(0, 0, 0);
+  position: relative;
+}
+
+.login-box.form-active {
+  transform: translate3d(0, 0, 0) scale(1.02);
+  box-shadow: 0 0 50px rgba(0, 0, 0, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.login-box:hover {
+  transform: translateY(-2px) scale(1.01);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+/* 光环效果 */
+.box-aura {
+  position: absolute;
+  top: -20px;
+  left: -20px;
+  right: -20px;
+  bottom: -20px;
+  border-radius: 32px;
+  background: radial-gradient(circle at center,
+      rgba(255, 255, 255, 0.1) 0%,
+      transparent 70%);
+  opacity: 0;
+  transition: opacity 0.5s ease;
+  pointer-events: none;
+}
+
+.box-glow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: 24px;
+  box-shadow: 0 0 30px rgba(255, 255, 255, 0.1);
+  opacity: 0;
+  transition: all 0.5s ease;
+  pointer-events: none;
+}
+
+.login-box:hover .box-aura,
+.form-active .box-aura {
+  opacity: 1;
+}
+
+.login-box:hover .box-glow,
+.form-active .box-glow {
+  opacity: 1;
+  box-shadow: 0 0 50px rgba(255, 255, 255, 0.15);
+}
+
+/* Logo设计 */
+.brand {
+  text-align: center;
+  margin-bottom: 48px;
+}
+
+.logo-container {
+  position: relative;
+  width: 90px;
+  height: 90px;
+  margin: 0 auto 32px;
+}
+
+.logo-rings {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 100%;
+  height: 100%;
+}
+
+.ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+  animation: ringPulse 3s ease-out infinite;
+}
+
+.ring-1 {
+  animation-delay: 0s;
+}
+
+.ring-2 {
+  animation-delay: 1s;
+}
+
+.ring-3 {
+  animation-delay: 2s;
+}
+
+.logo-icon-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.logo-icon {
+  width: 36px;
+  height: 36px;
+  color: var(--text-primary);
+  z-index: 1;
+}
+
+.icon-glow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 60px;
+  height: 60px;
+  background: radial-gradient(circle at center,
+      rgba(255, 255, 255, 0.1) 0%,
+      transparent 70%);
+  animation: glowPulse 2s ease-out infinite;
+}
+
+.title-container {
+  position: relative;
+}
+
+.title {
+  font-size: 32px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 16px;
+  letter-spacing: 1px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.title-decoration {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.line {
+  width: 40px;
+  height: 1px;
+  background: var(--border-color);
+}
+
+.dot {
+  width: 4px;
+  height: 4px;
+  background: var(--border-hover);
+  border-radius: 50%;
+}
+
+.subtitle {
+  font-size: 15px;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+/* 表单样式 */
+.login-form {
+  margin-top: 40px;
+}
+
+.form-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.input-group {
+  position: relative;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  backface-visibility: hidden;
+}
+
+.input-group.input-active {
+  transform: translate3d(0, 0, 0) scale(1.02);
+  z-index: 1;
+}
+
+.input-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  transition: all 0.3s ease;
+}
+
+.input-active .input-label {
+  color: var(--text-secondary);
+  transform: translateY(-1px);
+}
+
+.input-wrapper {
+  position: relative;
+}
+
+.input-wrapper input {
+  width: 100%;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  color: var(--text-primary);
+  font-size: 15px;
+  outline: none;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-sizing: border-box;
+}
+
+.input-wrapper input::placeholder {
+  color: var(--text-disabled);
+}
+
+.input-wrapper input:hover {
+  background: var(--accent-color);
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+}
+
+.input-wrapper input:focus {
+  background: var(--accent-hover);
+  border-color: var(--border-active);
+  box-shadow: 0 0 0 1px var(--border-color);
+  transform: translateY(-2px);
+}
+
+.input-line {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: linear-gradient(90deg,
+      transparent,
+      var(--border-active),
+      transparent);
+  transform: translateX(-50%);
+  transition: width 0.3s ease;
+}
+
+.input-active .input-line,
+.input-group:hover .input-line {
+  width: 100%;
+}
+
+.error-msg {
+  display: block;
+  color: #ff6b6b;
+  font-size: 12px;
+  margin-top: 4px;
+  padding-left: 4px;
+}
+
+/* 登录按钮 */
+.login-button {
+  width: 100%;
+  height: 48px;
+  margin-top: 8px;
+  background: transparent;
+  border: none;
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+}
+
+.button-content {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+
+.button-text {
+  position: relative;
+  z-index: 2;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  transition: all 0.3s ease;
+}
+
+.button-background {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(45deg,
+      rgba(255, 255, 255, 0.1) 0%,
+      rgba(255, 255, 255, 0.2) 100%);
+  transition: all 0.5s ease;
+}
+
+.button-border {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+  overflow: hidden;
+}
+
+.button-glow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.8);
+  width: 120%;
+  height: 120%;
+  background: radial-gradient(circle at center,
+      rgba(255, 255, 255, 0.1) 0%,
+      transparent 70%);
+  opacity: 0;
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.button-particles {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.particle {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  transition: all 0.6s ease;
+}
+
+.particle-1 { width: 4px; height: 4px; top: 50%; left: 50%; }
+.particle-2 { width: 6px; height: 6px; top: 50%; left: 50%; }
+.particle-3 { width: 3px; height: 3px; top: 50%; left: 50%; }
+.particle-4 { width: 5px; height: 5px; top: 50%; left: 50%; }
+
+.button-shine {
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.2) 50%,
+      transparent 100%);
+  transform: skewX(-20deg);
+  transition: all 0.5s ease;
+}
+
+.login-button:hover {
+  transform: translate3d(0, -2px, 0);
+}
+
+.login-button:hover .button-background {
+  opacity: 0.8;
+  transform: scale(1.05);
+}
+
+.login-button:hover .button-border {
+  border-color: rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+}
+
+.login-button:hover .button-glow {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.login-button:hover .button-text {
+  transform: scale(1.02);
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+}
+
+.login-button:hover .button-shine {
+  left: 150%;
+  transition: all 1s ease;
+}
+
+.login-button:hover .particle {
+  opacity: 1;
+  transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.login-button:hover .particle-1 {
+  transform: translate(-20px, -20px);
+  transition-delay: 0.1s;
+}
+
+.login-button:hover .particle-2 {
+  transform: translate(20px, -15px);
+  transition-delay: 0.15s;
+}
+
+.login-button:hover .particle-3 {
+  transform: translate(-15px, 20px);
+  transition-delay: 0.2s;
+}
+
+.login-button:hover .particle-4 {
+  transform: translate(15px, 15px);
+  transition-delay: 0.25s;
+}
+
+.login-button:active {
+  transform: translate3d(0, 1px, 0);
+}
+
+.login-button:active .button-background {
+  opacity: 1;
+  transform: scale(0.98);
+}
+
+.login-button:active .button-glow {
+  opacity: 0.8;
+  transform: translate(-50%, -50%) scale(0.95);
+}
+
+.login-button:active .button-text {
+  transform: scale(0.98);
+}
+
+.login-button.is-loading {
+  pointer-events: none;
+}
+
+.login-button.is-loading .button-background {
+  animation: buttonPulse 2s infinite;
+}
+
+.login-button.is-loading .button-glow {
+  animation: glowPulse 2s infinite;
+}
+
+/* 动画定义 */
+@keyframes gridMove {
+  0% { transform: perspective(500px) rotateX(60deg) translateY(0); }
+  100% { transform: perspective(500px) rotateX(60deg) translateY(50px); }
+}
+
+@keyframes spherePulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.2; }
+  50% { transform: translate(-50%, -50%) scale(1.1); opacity: 0.3; }
+}
+
+@keyframes beamMove {
+  0%, 100% { transform: translateX(0); opacity: 0.3; }
+  50% { transform: translateX(20px); opacity: 0.5; }
+}
+
+@keyframes circlePulse {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+@keyframes ringPulse {
+  0% { transform: scale(0.8); opacity: 0.8; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+@keyframes glowPulse {
+  0%, 100% { opacity: 0.3; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 0.6; transform: translate(-50%, -50%) scale(1.2); }
+}
+
+@keyframes buttonPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 0.8; }
+}
+
+@keyframes rippleEffect {
+  0% { transform: scale(0.8); opacity: 0; }
+  50% { transform: scale(1.2); opacity: 0.05; }
+  100% { transform: scale(0.8); opacity: 0; }
+}
+
+/* 响应式设计 */
+@media (max-width: 480px) {
+  .login-container {
+    padding: 20px 0;
+  }
+
+  .login-content {
+    padding: 0 16px;
+  }
+
+  .login-box {
+    padding: 36px 20px;
+    border-radius: 20px;
+  }
+
+  .brand {
+    margin-bottom: 32px;
+  }
+
+  .title {
+    font-size: 28px;
+  }
+
+  .subtitle {
+    font-size: 14px;
+  }
+
+  .input-wrapper input {
+    height: 44px;
+    font-size: 16px;
+  }
+
+  .login-button {
+    height: 44px;
+  }
+
+  .box-aura {
+    top: -10px;
+    left: -10px;
+    right: -10px;
+    bottom: -10px;
+  }
+}
+
+@media (max-width: 360px) {
+  .login-box {
+    padding: 28px 16px;
+  }
+
+  .title {
+    font-size: 24px;
+  }
+
+  .logo-container {
+    width: 70px;
+    height: 70px;
+  }
+
+  .logo-icon {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grid-layer,
+  .gradient-sphere,
+  .beam,
+  .circle,
+  .ripple,
+  .ring,
+  .icon-glow,
+  .button-background,
+  .button-glow,
+  .button-shine,
+  .particle {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .login-box,
+  .login-content,
+  .input-group,
+  .input-wrapper input,
+  .login-button {
+    transform: none !important;
+  }
+}

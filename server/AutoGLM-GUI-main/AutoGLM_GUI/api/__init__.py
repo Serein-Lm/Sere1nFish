@@ -1,0 +1,295 @@
+"""FastAPI application factory and route registration."""
+
+import asyncio
+import mimetypes
+import os
+import sys
+from contextlib import asynccontextmanager
+from importlib.resources import files
+from os import PathLike
+from pathlib import Path
+from collections.abc import AsyncGenerator
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
+from starlette.responses import Response
+from starlette.staticfiles import NotModifiedResponse
+from starlette.types import Scope
+
+from AutoGLM_GUI.adb_plus.qr_pair import qr_pairing_manager
+from AutoGLM_GUI.logger import logger
+from AutoGLM_GUI.version import APP_VERSION
+
+from . import (
+    agents,
+    bootstrap,
+    control,
+    devices,
+    health,
+    history,
+    layered_agent,
+    mcp,
+    media,
+    metrics,
+    scheduled_tasks,
+    terminal,
+    tasks,
+    version,
+    workflows,
+)
+
+
+def _get_cors_origins() -> list[str]:
+    cors_origins_str = os.getenv("AUTOGLM_CORS_ORIGINS", "http://localhost:3000")
+    if cors_origins_str == "*":
+        return ["*"]
+    return [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+
+
+# Explicit MIME overrides for frontend assets.
+# Some runtime environments (e.g. packaged/minimal systems) may not ship a full mime db.
+_STATIC_MEDIA_TYPES: dict[str, str] = {
+    ".js": "application/javascript",
+    ".mjs": "application/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".wasm": "application/wasm",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".webp": "image/webp",
+}
+
+
+def _guess_media_type(file_path: Path) -> str | None:
+    suffix = file_path.suffix.lower()
+    if suffix in _STATIC_MEDIA_TYPES:
+        return _STATIC_MEDIA_TYPES[suffix]
+    media_type, _ = mimetypes.guess_type(str(file_path), strict=False)
+    return media_type
+
+
+class _FrontendStaticFiles(StaticFiles):
+    """StaticFiles with deterministic MIME types for frontend assets."""
+
+    def file_response(
+        self,
+        full_path: str | PathLike[str],
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        request_headers = Headers(scope=scope)
+        response = FileResponse(
+            full_path,
+            status_code=status_code,
+            stat_result=stat_result,
+            media_type=_guess_media_type(Path(str(full_path))),
+        )
+        if self.is_not_modified(response.headers, request_headers):
+            return NotModifiedResponse(response.headers)
+        return response
+
+
+def _get_static_dir() -> Path | None:
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled_static = Path(meipass) / "AutoGLM_GUI" / "static"
+        if bundled_static.exists():
+            return bundled_static
+
+    # Priority 2: Check filesystem directly (for Docker deployments)
+    # This handles the case where static files are copied to the package directory
+    # but not included in the Python package itself (e.g., Docker builds)
+    try:
+        from AutoGLM_GUI import __file__ as package_file
+
+        package_dir = Path(package_file).parent
+        filesystem_static = package_dir / "static"
+        if filesystem_static.exists() and filesystem_static.is_dir():
+            return filesystem_static
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"Failed to find static dir via filesystem: {e}")
+
+    # Priority 3: importlib.resources (for installed package)
+    try:
+        static_dir = files("AutoGLM_GUI").joinpath("static")
+        if hasattr(static_dir, "_path"):
+            path = Path(str(static_dir))
+            if path.exists():
+                return path
+        path = Path(str(static_dir))
+        if path.exists():
+            return path
+    except (TypeError, FileNotFoundError) as e:
+        logger.warning(f"Failed to find static dir via importlib: {e}")
+
+    return None
+
+
+def create_app() -> FastAPI:
+    """Build the FastAPI app with routers and static assets."""
+
+    # Configure logging from environment variables (for reload mode)
+    # In reload mode, the subprocess imports this module directly, bypassing __main__.py
+    # So we need to read log config from environment variables set by the parent process
+    import os
+
+    log_level = os.getenv("AUTOGLM_LOG_LEVEL", "INFO")
+    log_file = (
+        None
+        if os.getenv("AUTOGLM_NO_LOG_FILE")
+        else os.getenv("AUTOGLM_LOG_FILE", "logs/autoglm_{time:YYYY-MM-DD}.log")
+    )
+
+    from AutoGLM_GUI.logger import configure_logger
+
+    configure_logger(console_level=log_level, log_file=log_file)
+
+    # Create MCP ASGI app
+    mcp_app = mcp.get_mcp_asgi_app()
+
+    # Define combined lifespan
+    @asynccontextmanager
+    async def combined_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        """Combine app startup logic with MCP lifespan."""
+        # App startup
+        from AutoGLM_GUI.config_manager import init_runtime_config
+
+        init_runtime_config()
+        asyncio.create_task(qr_pairing_manager.cleanup_expired_sessions())
+
+        from AutoGLM_GUI.device_manager import DeviceManager
+        from AutoGLM_GUI.scheduler_manager import scheduler_manager
+        from AutoGLM_GUI.task_manager import task_manager
+
+        adb_path = os.environ.get("AUTOGLM_ADB_PATH", "adb")
+        device_manager = DeviceManager.get_instance(adb_path=adb_path)
+        device_manager.start_polling()
+
+        await task_manager.start()
+        # Start scheduled task scheduler
+        await scheduler_manager.start()
+
+        # Run MCP lifespan
+        async with mcp_app.lifespan(app):
+            yield
+
+        # App shutdown
+        await scheduler_manager.shutdown()
+        await task_manager.shutdown()
+
+    # Create FastAPI app with combined lifespan
+    app = FastAPI(
+        title="AutoGLM-GUI API", version=APP_VERSION, lifespan=combined_lifespan
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_get_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(agents.router)
+    app.include_router(bootstrap.router)
+    app.include_router(health.router)
+    app.include_router(history.router)
+    app.include_router(layered_agent.router)
+    app.include_router(devices.router)
+    app.include_router(control.router)
+    app.include_router(media.router)
+    app.include_router(metrics.router)
+    app.include_router(scheduled_tasks.router)
+    app.include_router(terminal.router)
+    app.include_router(tasks.router)
+    app.include_router(version.router)
+    app.include_router(workflows.router)
+
+    # Mount static files BEFORE MCP to ensure they have priority
+    # This is critical: FastAPI processes mounts in order, so static files
+    # must be mounted before the catch-all MCP mount
+    static_dir = _get_static_dir()
+    if static_dir is not None and static_dir.exists():
+        assets_dir = static_dir / "assets"
+        if assets_dir.exists():
+            # Vite builds assets with content hashes, so we can cache them long-term
+            app.mount(
+                "/assets", _FrontendStaticFiles(directory=assets_dir), name="assets"
+            )
+
+        # Define SPA serving function
+        async def serve_spa(full_path: str) -> FileResponse:
+            static_root = static_dir.resolve()
+            file_path = (static_dir / full_path).resolve()
+            try:
+                file_path.relative_to(static_root)
+            except ValueError:
+                file_path = static_dir / "index.html"
+
+            if file_path.is_file():
+                return FileResponse(
+                    file_path,
+                    media_type=_guess_media_type(file_path),
+                    headers={
+                        "Cache-Control": "no-cache, no-store, must-revalidate",
+                        "Pragma": "no-cache",
+                        "Expires": "0",
+                    },
+                )
+            return FileResponse(
+                static_dir / "index.html",
+                media_type="text/html",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
+
+        # Mount SPA handler at root with lower priority than MCP
+        # Use a custom ASGI app that only handles non-MCP requests
+        from typing import Any
+
+        from starlette.types import Receive, Scope, Send
+
+        class SPAApp:
+            """ASGI app that serves SPA, delegates to MCP for /mcp paths."""
+
+            def __init__(self, spa_dir: Path, mcp_app: Any):
+                self.spa_dir = spa_dir
+                self.mcp_app = mcp_app
+
+            async def __call__(self, scope: Scope, receive: Receive, send: Send):
+                # Only handle HTTP requests, pass everything else to MCP
+                if scope["type"] != "http":
+                    await self.mcp_app(scope, receive, send)
+                    return
+
+                path = scope["path"]
+                # Delegate /mcp and /mcp/* to MCP app
+                # MCP app's http_app(path="/mcp") expects the full path including /mcp prefix
+                if path == "/mcp" or path.startswith("/mcp/"):
+                    await self.mcp_app(scope, receive, send)
+                    return
+
+                # Handle SPA requests
+                full_path = path.lstrip("/")
+                response = await serve_spa(full_path)
+                await response(scope, receive, send)
+
+        app.mount("/", SPAApp(static_dir, mcp_app))
+    else:
+        # No static files, just mount MCP
+        app.mount("/", mcp_app)
+
+    return app
+
+
+app = create_app()

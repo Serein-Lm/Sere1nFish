@@ -1,0 +1,71 @@
+# ===== Dependencies =====
+node_modules/
+view/node_modules/
+
+# ===== Frontend build output =====
+dist/
+view/dist/
+.vite/
+.turbo/
+
+# ===== Python / tooling caches =====
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+coverage/
+.eggs/
+*.egg-info/
+
+# ===== Runtime data, logs, uploads, backups =====
+logs/
+server/logs/
+server/data/
+server/uploads/
+server/backup/
+downloads/*
+!downloads/.gitkeep
+*.log
+
+# Vendored crawler runtime scraped data
+server/MediaCrawler/data/
+server/MediaCrawler/browser_data/
+server/test_server/tests/*_data/
+
+# ===== Local configuration and secrets =====
+.env
+.env.local
+.env.*.local
+server/config.json
+
+# ===== Generated HTTPS certificates =====
+nginx/certs/
+deploy/nginx/certs/
+server/deploy/nginx/certs/
+
+# ===== Browser / device runtime state =====
+browser-profiles/
+chrome-profiles/
+chrome-browser/
+server/chrome-browser/
+server/browser-profiles/
+
+# ===== Databases =====
+*.sqlite
+*.sqlite3
+*.db
+
+# ===== Runtime screenshots & debug artifacts =====
+le2110_*.png
+server/le_*.png
+devtools-*.json
+_scratch_*/
+_watch*.py
+*.tmp
+
+# ===== OS / editor =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

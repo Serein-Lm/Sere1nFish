@@ -1,0 +1,72 @@
+.infrastructure {
+  padding: 24px;
+}
+
+.email-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.email-item-new {
+  padding: 12px;
+  background: var(--accent-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast) ease;
+}
+
+.email-item-new:hover {
+  background: var(--glass-bg);
+  border-color: var(--primary-color);
+  transform: translateX(4px);
+}
+
+.email-info-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.email-address-text {
+  font-family: 'Monaco', monospace;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.email-meta-info {
+  font-size: 11px;
+}
+
+.feature-tips {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tip-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.tip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  opacity: 0.5;
+}
+
+@media (max-width: 768px) {
+  .infrastructure {
+    padding: 16px;
+  }
+}
