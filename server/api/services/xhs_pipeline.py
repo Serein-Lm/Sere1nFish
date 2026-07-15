@@ -136,7 +136,11 @@ class _XhsProfileStage(Stage):
                 va = await analyze_screenshots_with_vision_async(ss)
                 ctx.logger.info(f"[XHS-画像-w{wid}] [{idx+1}/{self.total_users}] VL 完成 ({_time.time()-t:.1f}s)")
                 if uid:
-                    sp = save_screenshots_to_files(ss, uid)
+                    sp = await save_screenshots_to_files(
+                        ss,
+                        uid,
+                        project_id=self.project_id,
+                    )
             except Exception as e:
                 ctx.logger.warning(f"[XHS-画像-w{wid}] VL 失败: {e}")
 

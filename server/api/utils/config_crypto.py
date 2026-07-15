@@ -31,6 +31,8 @@ _EXACT_SENSITIVE_KEYS = {
     "token",
     "login_key",
     "network_secret",
+    "access_key_id",
+    "access_key_secret",
     "cookie",
     "cookies",
 }
@@ -45,6 +47,8 @@ _SENSITIVE_SUFFIXES = (
     "_public_key",
     "_password",
     "_secret",
+    "_access_key_id",
+    "_access_key_secret",
 )
 
 

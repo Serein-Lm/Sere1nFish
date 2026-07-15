@@ -63,6 +63,7 @@ APP_CONFIG_SECTIONS = {
     "langfuse",
     "easytier",
     "notifications",
+    "object_storage",
 }
 
 LLM_RUNTIME_MODEL_KEYS = {

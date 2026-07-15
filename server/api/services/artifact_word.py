@@ -1,8 +1,8 @@
 """
 通用 Word 文档生成服务。
 
-将 Markdown 风格文本或结构化段落渲染为 .docx，落地到产物目录。
-纯文件生成，不涉及数据库；元信息登记由调用方（工具/路由）通过 api.dao.artifacts 完成。
+将 Markdown 风格文本或结构化段落渲染为内存中的 .docx 字节。
+纯文档生成不涉及存储；上传和元信息登记由统一 StorageService 与 DAO 完成。
 
 设计为「通用工具」：不限定内容主体，AI 中枢 agent 可直接调用生成任意 Word 交给前端下载。
 python-docx 采用惰性导入，未安装时抛出清晰错误由上层捕获。
@@ -11,10 +11,8 @@ from __future__ import annotations
 
 import re
 import uuid
-from pathlib import Path
+from io import BytesIO
 from typing import Any
-
-from api.dao import artifacts as artifacts_dao
 
 
 def _safe_filename(title: str) -> str:
@@ -72,7 +70,7 @@ def generate_docx(
     owner: str = "",
 ) -> dict[str, Any]:
     """
-    生成 Word 文档并落地磁盘。
+    生成 Word 文档字节。
 
     参数:
         title: 文档标题（作为一级标题与文件名基）。
@@ -81,7 +79,7 @@ def generate_docx(
         owner: 归属用户名（写入元信息用）。
 
     返回:
-        dict: artifact_id / file_path / filename / size / title / kind
+        dict: artifact_id / data / filename / size / title / kind
     """
     try:
         from docx import Document  # type: ignore
@@ -107,15 +105,15 @@ def generate_docx(
 
     artifact_id = "art_" + uuid.uuid4().hex[:20]
     filename = f"{_safe_filename(title)}.docx"
-    file_path = artifacts_dao.artifacts_dir() / f"{artifact_id}.docx"
-    doc.save(str(file_path))
-    size = file_path.stat().st_size if file_path.exists() else 0
+    buffer = BytesIO()
+    doc.save(buffer)
+    data = buffer.getvalue()
 
     return {
         "artifact_id": artifact_id,
-        "file_path": str(file_path),
+        "data": data,
         "filename": filename,
-        "size": size,
+        "size": len(data),
         "title": title or "未命名文档",
         "kind": "word",
     }

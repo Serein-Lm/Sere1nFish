@@ -80,7 +80,9 @@ export async function downloadWithAuth(pathOrUrl: string, fallbackFilename = 'do
     throw new Error('Unauthorized')
   }
 
-  const response = await fetch(resolveAuthenticatedDownloadUrl(pathOrUrl), {
+  const authenticatedPath = new URL(resolveAuthenticatedDownloadUrl(pathOrUrl), window.location.origin)
+  authenticatedPath.searchParams.set('direct', 'true')
+  const response = await fetch(`${authenticatedPath.pathname}${authenticatedPath.search}`, {
     headers: {
       Authorization: `Bearer ${token}`,
     },
@@ -94,6 +96,25 @@ export async function downloadWithAuth(pathOrUrl: string, fallbackFilename = 'do
   if (!response.ok) {
     const text = await response.text().catch(() => '')
     throw new Error(text || `HTTP error! status: ${response.status}`)
+  }
+
+  if (response.headers.get('content-type')?.includes('application/json')) {
+    const payload = await response.json() as { url?: string; filename?: string }
+    if (!payload.url) {
+      throw new Error('对象存储未返回下载地址')
+    }
+    const directUrl = new URL(payload.url)
+    if (directUrl.protocol !== 'https:') {
+      throw new Error('对象存储下载地址必须使用 HTTPS')
+    }
+    const link = document.createElement('a')
+    link.href = directUrl.toString()
+    link.download = payload.filename || fallbackFilename
+    link.rel = 'noopener noreferrer'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    return
   }
 
   const blob = await response.blob()

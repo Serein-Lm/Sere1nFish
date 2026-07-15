@@ -1,7 +1,7 @@
 """Mobile operation logs and screenshot metadata.
 
-Screenshots are stored as PNG files on disk; MongoDB stores searchable
-screenshot metadata and the authenticated read URL.
+Screenshots are stored through the unified StorageService; legacy disk paths
+remain readable during migration.
 
 Operation logs are stored as local JSONL files under ``logs/mobile_operations``.
 They are intentionally not written to MongoDB.
@@ -9,6 +9,7 @@ They are intentionally not written to MongoDB.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -178,12 +179,27 @@ async def save_screenshot(
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     screenshot_id = "ms_" + uuid.uuid4().hex
-    day = datetime.now(timezone.utc).strftime("%Y%m%d")
-    root = _storage_root()
-    directory = root / day
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{screenshot_id}.png"
-    path.write_bytes(_decode_png(image_base64))
+    image_bytes = _decode_png(image_base64)
+    from api.storage import get_object_storage
+
+    storage = await get_object_storage()
+    stored = await storage.store_bytes(
+        image_bytes,
+        kind="mobile_screenshot",
+        filename=f"{screenshot_id}.png",
+        object_id=screenshot_id,
+        content_type="image/png",
+        project_id=project_id or "",
+        subject_id=device_id or contact_id or "",
+        source="mobile_screenshot",
+        source_id=screenshot_id,
+        meta={
+            "task_id": task_id or "",
+            "device_id": device_id or "",
+            "contact_id": contact_id or "",
+            "operation_id": operation_id or "",
+        },
+    )
 
     doc = {
         "screenshot_id": screenshot_id,
@@ -192,7 +208,8 @@ async def save_screenshot(
         "device_id": device_id,
         "contact_id": contact_id,
         "source": source,
-        "file_path": str(path),
+        "file_path": "",
+        "storage_object_id": stored["object_id"],
         "url": f"/api/v1/mobile/screenshots/{screenshot_id}/image",
         "width": width,
         "height": height,
@@ -204,7 +221,10 @@ async def save_screenshot(
     try:
         await db[MOBILE_SCREENSHOTS_COLLECTION].insert_one(doc)
     except Exception:
-        path.unlink(missing_ok=True)
+        try:
+            await storage.delete(stored["object_id"])
+        except Exception:
+            pass
         raise
     doc.pop("_id", None)
     return doc
@@ -341,16 +361,50 @@ async def delete_project_artifacts(
     """Delete a project's mobile screenshots, local operation logs, and files."""
     screenshots_coll = db[MOBILE_SCREENSHOTS_COLLECTION]
 
-    cursor = screenshots_coll.find({"project_id": project_id}, {"file_path": 1})
+    cursor = screenshots_coll.find(
+        {"project_id": project_id},
+        {"file_path": 1, "storage_object_id": 1},
+    )
     paths: list[Path] = []
+    storage_object_ids: list[str] = []
     file_errors: list[str] = []
     async for doc in cursor:
+        if doc.get("storage_object_id"):
+            storage_object_ids.append(str(doc["storage_object_id"]))
         path = _resolve_stored_file(doc.get("file_path"))
         if path is None:
             if doc.get("file_path"):
                 file_errors.append(f"{doc['file_path']}: path outside screenshot storage")
             continue
         paths.append(path)
+
+    storage_errors: list[str] = []
+    storage_deleted = 0
+    if storage_object_ids:
+        try:
+            from api.storage import get_object_storage
+
+            storage = await get_object_storage()
+            semaphore = asyncio.Semaphore(16)
+
+            async def delete_storage_object(object_id: str) -> tuple[str, str]:
+                async with semaphore:
+                    try:
+                        await storage.delete(object_id)
+                        return object_id, ""
+                    except Exception as exc:
+                        return object_id, str(exc)
+
+            results = await asyncio.gather(*(
+                delete_storage_object(object_id) for object_id in storage_object_ids
+            ))
+            for object_id, error in results:
+                if error:
+                    storage_errors.append(f"{object_id}: {error}")
+                else:
+                    storage_deleted += 1
+        except Exception as exc:
+            storage_errors.append(f"storage provider: {exc}")
 
     screenshot_result = await screenshots_coll.delete_many({"project_id": project_id})
     operations_deleted = _get_operation_store().delete_by_project(project_id)
@@ -370,4 +424,6 @@ async def delete_project_artifacts(
         "operations_deleted": operations_deleted,
         "files_deleted": files_deleted,
         "file_errors": file_errors,
+        "storage_objects_deleted": storage_deleted,
+        "storage_errors": storage_errors,
     }

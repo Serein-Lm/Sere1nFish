@@ -7,8 +7,8 @@ import os
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, RedirectResponse
 
 from api.auth import get_current_active_user
 
@@ -67,8 +67,31 @@ def _resolve_download_path(relative_path: str) -> Path:
 
 
 @router.get("/{relative_path:path}")
-async def download_file(relative_path: str) -> FileResponse:
+async def download_file(relative_path: str, direct: bool = Query(default=False)):
     """Download a runtime file only for authenticated users."""
+    normalized = _normalize_download_path(relative_path)
+    from api.dao import storage_objects as storage_dao
+    from api.db.mongodb import get_db
+    from api.storage import get_object_storage
+
+    stored = await storage_dao.get_by_relative_path(get_db(), normalized)
+    if stored:
+        access = await (await get_object_storage()).read_access(
+            stored["object_id"],
+            filename=Path(normalized).name,
+            content_type=stored.get("content_type") or "application/octet-stream",
+        )
+        if access.mode == "redirect":
+            if direct:
+                return {"url": access.url, "filename": Path(normalized).name}
+            return RedirectResponse(
+                access.url,
+                status_code=307,
+                headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+            )
+        if access.path and access.path.is_file():
+            return FileResponse(access.path, filename=Path(normalized).name)
+
     path = _resolve_download_path(relative_path)
     media_type = mimetypes.guess_type(path.name)[0]
     if path.suffix == ".apk":

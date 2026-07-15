@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-import aiofiles
 from pathlib import Path
 from typing import Any
 
 import dashscope
 from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizer
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -167,14 +166,30 @@ async def upload_audio(
     if len(content) > MAX_AUDIO_SIZE:
         raise HTTPException(400, f"文件超过 {MAX_AUDIO_SIZE // 1024 // 1024}MB 限制")
 
-    filename = f"{uuid.uuid4().hex}{ext}"
-    filepath = UPLOAD_DIR / filename
+    object_id = "voice_" + uuid.uuid4().hex
+    filename = f"{object_id}{ext}"
+    from api.storage import get_object_storage
 
-    async with aiofiles.open(filepath, "wb") as f:
-        await f.write(content)
-
-    relative_url = f"/api/v1/voice/files/{filename}"
-    public_url = _public_url(request, relative_url)
+    storage = await get_object_storage()
+    stored = await storage.store_bytes(
+        content,
+        kind="voice_upload",
+        filename=filename,
+        object_id=object_id,
+        content_type=file.content_type or "application/octet-stream",
+        source="voice_upload",
+        source_id=filename,
+        meta={"original_name": file.filename},
+    )
+    access = await storage.read_access(
+        stored["object_id"],
+        filename=filename,
+        content_type=file.content_type or "application/octet-stream",
+        expires_seconds=1800,
+    )
+    relative_url = f"/api/v1/storage/objects/{stored['object_id']}/content"
+    voice_callback_url = f"/api/v1/voice/files/{filename}"
+    public_url = access.url if access.mode == "redirect" else _public_url(request, voice_callback_url)
     logger.info(f"音频上传: {file.filename} -> {filename} ({len(content)} bytes)")
 
     return {
@@ -183,12 +198,33 @@ async def upload_audio(
         "size": len(content),
         "url": public_url,
         "relative_url": relative_url,
+        "storage_object_id": stored["object_id"],
     }
 
 
 @router.get("/files/{filename}", summary="获取已上传的音频文件")
 async def get_uploaded_file(filename: str):
     """返回已上传的音频文件（供 CosyVoice API 访问）。"""
+    from api.dao import storage_objects as storage_dao
+    from api.storage import get_object_storage
+
+    stored = await storage_dao.get_by_source(
+        get_db(),
+        source="voice_upload",
+        source_id=filename,
+    )
+    if stored:
+        access = await (await get_object_storage()).read_access(
+            stored["object_id"],
+            filename=filename,
+            content_type=stored.get("content_type") or "application/octet-stream",
+            expires_seconds=300,
+        )
+        if access.mode == "redirect":
+            return RedirectResponse(access.url, status_code=307)
+        if access.path and access.path.is_file():
+            return Response(content=access.path.read_bytes(), media_type=stored.get("content_type"))
+
     filepath = UPLOAD_DIR / filename
     if not filepath.exists() or not filepath.is_file():
         raise HTTPException(404, "文件不存在")

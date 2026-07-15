@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from api.auth import User, get_current_active_user
 from api.dao import artifacts as artifacts_dao
@@ -79,13 +79,47 @@ async def get_artifact_meta(
 @router.get("/{artifact_id}/download")
 async def download_artifact(
     artifact_id: str,
+    direct: bool = Query(default=False),
     current_user: User = Depends(get_current_active_user),
-) -> FileResponse:
+):
     """下载产物文件（仅限登录用户）。"""
     doc = await artifacts_dao.get_artifact(get_db(), artifact_id)
     if not doc:
         raise HTTPException(status_code=404, detail="产物不存在")
     _check_owner(doc, current_user)
+
+    filename = doc.get("filename") or f"{artifact_id}.docx"
+    ascii_fallback = f"{artifact_id}.docx"
+    disposition = (
+        f"attachment; filename=\"{ascii_fallback}\"; "
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    storage_object_id = str(doc.get("storage_object_id") or "")
+    if storage_object_id:
+        from api.storage import get_object_storage
+
+        try:
+            access = await (await get_object_storage()).read_access(
+                storage_object_id,
+                filename=filename,
+                content_type=_DOCX_MEDIA,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="文件不存在") from exc
+        if access.mode == "redirect":
+            if direct:
+                return {"url": access.url, "filename": filename}
+            return RedirectResponse(
+                access.url,
+                status_code=307,
+                headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+            )
+        if access.path and access.path.is_file():
+            return FileResponse(
+                access.path,
+                media_type=_DOCX_MEDIA,
+                headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
+            )
 
     file_path = Path(doc.get("file_path", "")).resolve()
     root = artifacts_dao.artifacts_dir()
@@ -95,19 +129,8 @@ async def download_artifact(
         raise HTTPException(status_code=404, detail="文件不存在") from exc
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-
-    filename = doc.get("filename") or f"{artifact_id}.docx"
-    ascii_fallback = f"{artifact_id}.docx"
-    disposition = (
-        f"attachment; filename=\"{ascii_fallback}\"; "
-        f"filename*=UTF-8''{quote(filename)}"
-    )
-    return FileResponse(
-        file_path,
-        media_type=_DOCX_MEDIA,
-        headers={
-            "Content-Disposition": disposition,
-            "Cache-Control": "private, max-age=300",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+    return FileResponse(file_path, media_type=_DOCX_MEDIA, headers={
+        "Content-Disposition": disposition,
+        "Cache-Control": "private, max-age=300",
+        "X-Content-Type-Options": "nosniff",
+    })

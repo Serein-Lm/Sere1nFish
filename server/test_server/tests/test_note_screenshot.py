@@ -82,7 +82,7 @@ async def main():
         status = f"截图={len(screenshots)} 耗时={elapsed:.1f}s" + (f" 错误={error}" if error else "")
         print(f"    [{prefix}笔记{idx+1}] {note['note_id'][:12]}... {status}")
         if screenshots:
-            save_screenshots_to_files(screenshots, f"{prefix}_{idx}_{note['note_id']}", output_dir=out_dir)
+            await save_screenshots_to_files(screenshots, f"{prefix}_{idx}_{note['note_id']}", output_dir=out_dir)
         return {"ok": len(screenshots) > 0, "elapsed": elapsed, "count": len(screenshots)}
 
     # ── 测试 A: 串行（复用同一个容器连接）──

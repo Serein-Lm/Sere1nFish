@@ -294,7 +294,7 @@ async def main():
                     logger.info(f"  [{i+1}] {nid[:12]}... 截图={cnt} 截屏={t_ss:.1f}s")
                     analysis = ""; t_llm = 0
                     if r.get("screenshots"):
-                        save_screenshots_to_files(r["screenshots"], f"fb_{nid}", output_dir=out_dir)
+                        await save_screenshots_to_files(r["screenshots"], f"fb_{nid}", output_dir=out_dir)
                         t1 = time.time()
                         analysis = analyze_note_screenshots_with_vision(r["screenshots"])
                         t_llm = time.time() - t1
@@ -334,7 +334,7 @@ async def main():
                 logger.info(f"  [{i+1}] {nid[:12]}... 截图={cnt} 截屏={t_ss:.1f}s")
                 analysis = ""; t_llm = 0
                 if r.get("screenshots"):
-                    save_screenshots_to_files(r["screenshots"], f"all_{nid}", output_dir=out_dir)
+                    await save_screenshots_to_files(r["screenshots"], f"all_{nid}", output_dir=out_dir)
                     t1 = time.time()
                     analysis = analyze_note_screenshots_with_vision(r["screenshots"])
                     t_llm = time.time() - t1

@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
-from datetime import datetime
+import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
 
@@ -303,18 +302,20 @@ async def screenshot_user_profile_stream(
         yield {"type": "result", "data": {"screenshots": [], "avatar_url": None, "error": f"截屏失败: {error_msg}"}}
 
 
-def save_screenshots_to_files(
+async def save_screenshots_to_files(
     screenshots: list[dict[str, str]],
     user_id: str,
     output_dir: str | None = None,
+    *,
+    project_id: str = "",
 ) -> list[str]:
-    """将截图保存到文件"""
-    if output_dir is None:
-        output_dir = str(Path(__file__).resolve().parents[2] / "data" / "xhs_screenshots")
-    
-    os.makedirs(output_dir, exist_ok=True)
-    saved_paths = []
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    """将截图写入统一存储，返回稳定的鉴权读取 URL。"""
+    _ = output_dir  # 旧参数保留兼容，不再写本地目录。
+    from api.storage import get_object_storage
+
+    storage = await get_object_storage()
+    saved_urls: list[str] = []
+    kind = "xhs_note_screenshot" if user_id.startswith("note_") else "xhs_profile_screenshot"
     
     for idx, screenshot in enumerate(screenshots):
         base64_data = screenshot.get("base64", "")
@@ -323,15 +324,22 @@ def save_screenshots_to_files(
         if not base64_data:
             continue
         
-        filename = f"{user_id}_{timestamp}_{idx + 1}.{img_format}"
-        filepath = os.path.join(output_dir, filename)
-        
-        with open(filepath, "wb") as f:
-            f.write(base64.b64decode(base64_data))
-        
-        saved_paths.append(filepath)
-    
-    return saved_paths
+        object_id = "xss_" + uuid.uuid4().hex
+        stored = await storage.store_bytes(
+            base64.b64decode(base64_data),
+            kind=kind,
+            filename=f"{object_id}.{img_format}",
+            object_id=object_id,
+            content_type=f"image/{'jpeg' if img_format in {'jpg', 'jpeg'} else img_format}",
+            project_id=project_id,
+            subject_id=user_id,
+            source="xhs_screenshot",
+            source_id=object_id,
+            meta={"user_id": user_id, "index": idx + 1},
+        )
+        saved_urls.append(f"/api/v1/storage/objects/{stored['object_id']}/content")
+
+    return saved_urls
 
 
 def _load_prompt(prompt_name: str) -> str:
@@ -385,6 +393,7 @@ async def get_user_profile_vision_analysis(
     user_url: str,
     db: AsyncIOMotorDatabase,
     save_files: bool = False,
+    project_id: str = "",
 ) -> dict[str, Any]:
     """
     获取用户主页的视觉分析结果（供 xhs_pipeline 调用）
@@ -445,7 +454,11 @@ async def get_user_profile_vision_analysis(
         
         # 保存文件（可选）
         if save_files and result["user_id"]:
-            result["screenshot_paths"] = save_screenshots_to_files(screenshots, result["user_id"])
+            result["screenshot_paths"] = await save_screenshots_to_files(
+                screenshots,
+                result["user_id"],
+                project_id=project_id,
+            )
         
         # 视觉分析
         logger.info(f"[视觉分析] 开始 VL 分析 | user={result['user_id']} | 截图={len(screenshots)}张")
@@ -762,6 +775,7 @@ async def get_note_detail_vision_analysis(
     xsec_token: str = "",
     db: AsyncIOMotorDatabase | None = None,
     save_files: bool = False,
+    project_id: str = "",
 ) -> dict[str, Any]:
     """
     获取笔记详情的视觉分析结果（API 406 兜底方案）
@@ -796,7 +810,11 @@ async def get_note_detail_vision_analysis(
             return result
 
         if save_files:
-            result["screenshot_paths"] = save_screenshots_to_files(screenshots, f"note_{note_id}")
+            result["screenshot_paths"] = await save_screenshots_to_files(
+                screenshots,
+                f"note_{note_id}",
+                project_id=project_id,
+            )
 
         vision_analysis = await analyze_note_screenshots_with_vision_async(screenshots)
         result["vision_analysis"] = vision_analysis

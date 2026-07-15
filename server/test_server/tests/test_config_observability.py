@@ -440,9 +440,10 @@ def test_legacy_stats_routes_use_memory_tracker(monkeypatch) -> None:
     asyncio.run(run())
 
 
-def test_observability_logger_is_memory_only() -> None:
+def test_observability_logger_is_memory_only(tmp_path, monkeypatch) -> None:
     from core.observability.logs import ObservabilityLogger
 
+    monkeypatch.setenv("OBS_LOG_DIR", str(tmp_path / "observability"))
     logger = ObservabilityLogger(db=_ExplodingDB())
     logger.set_db(_ExplodingDB())
     assert logger._db is None

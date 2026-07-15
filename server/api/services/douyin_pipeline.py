@@ -479,6 +479,7 @@ class DouyinPipeline:
                     db=self.db,
                     keyword=keyword,
                     save_files=True,
+                    project_id=project_id,
                 )
 
                 if vision_result.get("success"):

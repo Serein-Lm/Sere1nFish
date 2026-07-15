@@ -86,6 +86,8 @@
 - AI 技能、提示词、模型客户端和 AIGC 能力应通过技能/提示词库、runtime service 或模型适配层接入；业务模块不要直接绑定单一模型供应商。
 - 手机相关能力通过 `core/mobile/*`、设备池、预约 DAO、mobile router/service 统一接入；不要在业务流程里直接写 ADB、EasyTier 或设备协议细节。
 - 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。
+- 截图、Word 产物、语音上传和受保护下载文件统一通过 `api.storage.ObjectStorageService` 写入；业务集合只保存 `storage_object_id`，不得直接调用 OSS SDK 或拼接 Object Key。读取按对象元数据选择 Provider，允许迁移期本地与 OSS 对象并存。
+- 对象存储 Bucket 必须为私有读写，服务端使用内网 Endpoint，浏览器下载使用短时签名 URL，图片通过鉴权 API 读取。AK/SK 只存 MongoDB 加密配置，不写入环境文件、日志、迁移报告或 Git。
 - 观测能力通过 `core/observability`、`Sere1nGraph` token tracker 或统一日志入口接入；新增长流程应记录开始、结束、失败和关键资源标识。
 - LLM token 归因必须通过 `core.observability.observation_context` 包裹 AI 调用(浏览器 agent、结构化解析、修复重试),携带 `project_id/task_id/phase/agent/task_type`;不要直接操作 `TokenTracker`。凡是新接入的 AI 链路(人设采集、公司规范化、采集分析、手机规划等)都要确认 token 与日志观测已连通,可在 Observability/Dashboard 看到归因。
 - 已知缺口:`AutoGLM-GUI-main` 手机执行器使用原生 OpenAI 客户端,绕过 LangChain 回调,其 token 暂未纳入统一 tracker;修改该 vendored 代码风险高,接入前先评估影响并在交接说明。
@@ -159,6 +161,7 @@
 - 后端 Git 仓库内的部署模板仍位于 `Sere1nFishServer/deploy`；修改运行时部署后，应按需同步模板或文档。
 - HTTPS 证书位于 `/root/Sere1nFish/nginx/certs/`，不要提交证书文件。
 - 数据库备份属于运维产物。将它们保留在 Git 之外，并通过 Compose `db-import` 服务或迁移脚本导入。
+- 现有业务文件迁移使用 `python -m scripts.migrate_object_storage` 先盘点，再用 `--apply --concurrency 16` 幂等上传。迁移会校验远端大小和下载 SHA-256，成功前保留本地源文件；不得手工批量移动或提前删除源文件。
 - 公网安全组只开放：`443/tcp`、`11010/tcp+udp`、`11011/tcp`、`11012/tcp`、`11013/udp`。
 - 不要开放：`5555`、`8000`、`5173`、`27017`、`6379`、`9222`、`5900`、`6080`。
 

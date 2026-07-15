@@ -1,7 +1,7 @@
 """
 产物（Word 文档等）元信息 DAO。
 
-产物文件落地磁盘（默认 data/artifacts），MongoDB 仅存可检索元信息与鉴权下载路径。
+产物文件由统一 StorageService 保存，MongoDB 存可检索元信息与稳定鉴权下载路径。
 供 AI 中枢通用工具（generate_word_document）调用：先生成文件，再登记元信息，
 返回稳定 artifact_id 与受登录鉴权的下载链接。
 """
@@ -53,7 +53,8 @@ async def create_artifact(
     kind: str,
     title: str,
     filename: str,
-    file_path: str,
+    file_path: str = "",
+    storage_object_id: str = "",
     size: int = 0,
     owner: str = "",
     meta: dict[str, Any] | None = None,
@@ -66,6 +67,7 @@ async def create_artifact(
         "title": title,
         "filename": filename,
         "file_path": file_path,
+        "storage_object_id": storage_object_id,
         "size": size,
         "owner": owner,
         "meta": meta or {},

@@ -1553,7 +1553,7 @@ async def list_project_auto_chat_sessions(project_id: str, limit: int = 100) -> 
 
 
 @router.get("/screenshots/{screenshot_id}/image")
-async def get_mobile_screenshot_image(screenshot_id: str) -> FileResponse:
+async def get_mobile_screenshot_image(screenshot_id: str):
     """读取已保存手机截图图片。路由受登录鉴权保护。"""
     from api.db.mongodb import get_db
     from api.dao import mobile_artifacts as ma_dao
@@ -1561,6 +1561,27 @@ async def get_mobile_screenshot_image(screenshot_id: str) -> FileResponse:
     doc = await ma_dao.get_screenshot(get_db(), screenshot_id)
     if not doc:
         raise HTTPException(status_code=404, detail="截图不存在")
+    storage_object_id = str(doc.get("storage_object_id") or "")
+    if storage_object_id:
+        from api.storage import get_object_storage
+
+        try:
+            storage = await get_object_storage()
+            access = await storage.read_access(
+                storage_object_id,
+                filename=f"{screenshot_id}.png",
+                content_type="image/png",
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="截图文件不存在") from exc
+        if access.mode == "redirect":
+            try:
+                content = await storage.get_bytes(storage_object_id)
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail="截图文件暂时不可读取") from exc
+            return Response(content=content, media_type="image/png", headers={"Cache-Control": "private, max-age=60"})
+        if access.path and access.path.is_file():
+            return FileResponse(str(access.path), media_type="image/png")
     path = ma_dao.resolve_screenshot_file(doc)
     if path is None:
         raise HTTPException(status_code=404, detail="截图文件不存在")

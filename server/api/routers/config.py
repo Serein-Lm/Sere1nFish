@@ -304,6 +304,7 @@ async def get_all_configs(_: User = Depends(get_current_active_user)):
         "chrome_docker": masked_configs.get("chrome_docker"),
         "xhs_crawler": masked_configs.get("xhs_crawler"),
         "douyin_crawler": masked_configs.get("douyin_crawler"),
+        "object_storage": masked_configs.get("object_storage"),
     }
 
 
@@ -381,6 +382,7 @@ async def reveal_configs(body: ConfigRevealRequest, admin: User = Depends(requir
         "chrome_docker": configs.get("chrome_docker"),
         "xhs_crawler": configs.get("xhs_crawler"),
         "douyin_crawler": configs.get("douyin_crawler"),
+        "object_storage": configs.get("object_storage"),
     }
 
 

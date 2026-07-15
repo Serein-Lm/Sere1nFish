@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import sys
+import base64
+import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -121,6 +123,7 @@ async def get_user_profile_vision_analysis(
     max_screenshots: int = 3,
     fix_layout: bool = True,
     save_files: bool = False,
+    project_id: str = "",
 ) -> dict[str, Any]:
     """
     获取用户主页视觉分析（非流式）
@@ -172,27 +175,33 @@ async def get_user_profile_vision_analysis(
     
     # 保存截图文件
     if save_files:
-        import base64
-        from datetime import datetime
-        
-        screenshot_dir = _project_root / "data" / "douyin_screenshots"
-        screenshot_dir.mkdir(parents=True, exist_ok=True)
-        
         # 提取 sec_uid
         sec_uid = ""
         if "/user/" in user_url:
             sec_uid = user_url.split("/user/")[-1].split("?")[0][:20]
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+        from api.storage import get_object_storage
+
+        storage = await get_object_storage()
         for idx, screenshot in enumerate(screenshots):
             base64_data = screenshot.get("base64", "")
             if base64_data:
-                filename = f"{sec_uid}_{timestamp}_{idx + 1}.png"
-                filepath = screenshot_dir / filename
-                with open(filepath, "wb") as f:
-                    f.write(base64.b64decode(base64_data))
-                result["screenshot_paths"].append(str(filepath))
+                object_id = "dss_" + uuid.uuid4().hex
+                stored = await storage.store_bytes(
+                    base64.b64decode(base64_data),
+                    kind="douyin_profile_screenshot",
+                    filename=f"{object_id}.png",
+                    object_id=object_id,
+                    content_type="image/png",
+                    project_id=project_id,
+                    subject_id=sec_uid,
+                    source="douyin_screenshot",
+                    source_id=object_id,
+                    meta={"sec_uid": sec_uid, "index": idx + 1},
+                )
+                result["screenshot_paths"].append(
+                    f"/api/v1/storage/objects/{stored['object_id']}/content"
+                )
     
     # 构建带关键词的 prompt
     prompt = None

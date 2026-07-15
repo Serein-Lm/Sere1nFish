@@ -58,6 +58,7 @@ export interface AllConfig {
   chrome_docker?: ConfigSection
   xhs_crawler?: ConfigSection
   douyin_crawler?: ConfigSection
+  object_storage?: ConfigSection
 }
 
 export interface ConfigRevealStatus {
@@ -109,6 +110,37 @@ export async function setConfigSection(category: string, config: ConfigSection):
     method: 'POST',
     body: JSON.stringify({ config }),
   })
+}
+
+export interface ObjectStorageStatus {
+  provider: string
+  active_provider: string
+  bucket: string
+  enabled: boolean
+  region: string
+  migration_state: string
+  stats: {
+    count: number
+    bytes: number
+    ready_count: number
+    ready_bytes: number
+    providers: Record<string, Record<string, { count: number; bytes: number }>>
+  }
+  latest_migration?: {
+    run_id: string
+    status: string
+    started_at?: string
+    finished_at?: string
+    counters?: Record<string, number>
+  } | null
+}
+
+export async function getObjectStorageStatus(): Promise<ObjectStorageStatus> {
+  return apiFetch<ObjectStorageStatus>('/v1/storage/status', { method: 'GET' })
+}
+
+export async function testObjectStorage(): Promise<Record<string, unknown>> {
+  return apiFetch<Record<string, unknown>>('/v1/storage/test', { method: 'POST' })
 }
 
 // ============ LLM 配置 ============

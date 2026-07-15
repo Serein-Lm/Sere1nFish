@@ -12,6 +12,7 @@ import {
 import {
   getAllConfig, setLLMConfig, deleteLLMConfig,
   setConfigSection, getConfigRevealStatus, revealConfig, setConfigRevealPassword,
+  getObjectStorageStatus, testObjectStorage,
   listToolConfigs, setToolConfig, deleteToolConfig, testToolConfig,
   setLangSmithConfig, toggleLangSmith, deleteLangSmithConfig,
   setLangfuseConfig, toggleLangfuse, deleteLangfuseConfig,
@@ -19,6 +20,7 @@ import {
   type AllConfig, type ToolConfig, type LLMConfig, type ConfigSection,
   type LangSmithConfig, type LangfuseConfig,
   type DingTalkBot, type DingTalkBotConfig, type ConfigRevealStatus,
+  type ObjectStorageStatus,
 } from '../../services/configService'
 import { type CurrentUser } from '../../services/authService'
 import './ConfigManagement.css'
@@ -45,6 +47,7 @@ const CONFIG_SECTIONS = [
   { key: 'logging', label: '日志配置', description: '运行日志等级和输出' },
   { key: 'xhs_crawler', label: '小红书采集', description: '采集、账号池、签名脚本、代理池运行参数' },
   { key: 'douyin_crawler', label: '抖音采集', description: '采集运行参数' },
+  { key: 'object_storage', label: '对象存储', description: '截图、Word、音频和下载文件的统一 OSS 存储' },
 ]
 
 export default function ConfigManagement() {
@@ -103,6 +106,8 @@ export default function ConfigManagement() {
   const [sectionSubmitting, setSectionSubmitting] = useState(false)
   const [editingSection, setEditingSection] = useState<typeof CONFIG_SECTIONS[number] | null>(null)
   const [sectionJson, setSectionJson] = useState('{}')
+  const [testingStorage, setTestingStorage] = useState(false)
+  const [storageStatus, setStorageStatus] = useState<ObjectStorageStatus | null>(null)
 
   // 检查权限
   useEffect(() => {
@@ -133,6 +138,9 @@ export default function ConfigManagement() {
       setRevealedTools(null)
       setRevealedDingtalkBots(null)
       setVisibleKeys({})
+      if (isAdmin) {
+        getObjectStorageStatus().then(setStorageStatus).catch(() => setStorageStatus(null))
+      }
     } catch (e) {
       console.error('Failed to load config:', e)
       message.error('加载配置失败')
@@ -148,11 +156,15 @@ export default function ConfigManagement() {
   useEffect(() => {
     if (!isAdmin) {
       setRevealStatus(null)
+      setStorageStatus(null)
       return
     }
     getConfigRevealStatus()
       .then(setRevealStatus)
       .catch(() => setRevealStatus(null))
+    getObjectStorageStatus()
+      .then(setStorageStatus)
+      .catch(() => setStorageStatus(null))
   }, [isAdmin])
 
   const toolsRecordToList = (record?: Record<string, { api_key: string }>): ToolConfig[] => {
@@ -645,6 +657,17 @@ export default function ConfigManagement() {
     return `${text.slice(0, 520)}\n...`
   }
 
+  const formatStorageBytes = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+
+  const storageMigrationLabel = (status?: string) => ({
+    dry_run_completed: '盘点完成',
+    dry_run_partial: '盘点有缺失',
+    completed: '迁移完成',
+    partial: '部分迁移',
+    failed: '迁移失败',
+    running: '迁移中',
+  }[status || ''] || status || '未开始')
+
   const handleEditSection = (section: typeof CONFIG_SECTIONS[number]) => {
     setEditingSection(section)
     setSectionJson(JSON.stringify(getSectionConfig(section.key), null, 2))
@@ -676,6 +699,19 @@ export default function ConfigManagement() {
       message.error(msg)
     } finally {
       setSectionSubmitting(false)
+    }
+  }
+
+  const handleTestStorage = async () => {
+    setTestingStorage(true)
+    try {
+      const result = await testObjectStorage()
+      message.success(`对象存储连接正常：${String(result.bucket || '')}`)
+      setStorageStatus(await getObjectStorageStatus())
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '对象存储测试失败')
+    } finally {
+      setTestingStorage(false)
     }
   }
 
@@ -958,15 +994,52 @@ export default function ConfigManagement() {
                       </Tag>
                     </div>
                     <div className="section-config-description">{section.description}</div>
+                    {section.key === 'object_storage' && storageStatus && (
+                      <Space size={6} wrap>
+                        <Tag color={storageStatus.enabled ? 'success' : 'warning'}>
+                          {storageStatus.enabled ? '已启用' : '迁移前兼容模式'}
+                        </Tag>
+                        <Tag>
+                          {storageStatus.active_provider === storageStatus.provider
+                            ? storageStatus.provider
+                            : `${storageStatus.active_provider} → ${storageStatus.provider}`}
+                        </Tag>
+                        <Tag>
+                          已纳管 {storageStatus.stats.ready_count} 个 /
+                          {' '}{formatStorageBytes(storageStatus.stats.ready_bytes)}
+                        </Tag>
+                        {storageStatus.latest_migration?.status.startsWith('dry_run') && (
+                          <Tag color="processing">
+                            待迁移 {storageStatus.latest_migration.counters?.discovered || 0} 个 /
+                            {' '}{formatStorageBytes(storageStatus.latest_migration.counters?.bytes || 0)}
+                          </Tag>
+                        )}
+                        <Tag color={storageStatus.latest_migration?.status === 'completed' ? 'success' : 'default'}>
+                          迁移：{storageMigrationLabel(storageStatus.latest_migration?.status || storageStatus.migration_state)}
+                        </Tag>
+                      </Space>
+                    )}
                     {configured ? (
                       <pre className="section-config-preview">{formatSectionPreview(sectionConfig)}</pre>
                     ) : (
                       <div className="section-config-empty">{"{}"}</div>
                     )}
                   </div>
-                  <Button icon={<EditOutlined />} onClick={() => handleEditSection(section)} disabled={!isAdmin}>
-                    编辑
-                  </Button>
+                  <Space>
+                    {section.key === 'object_storage' && (
+                      <Button
+                        icon={<SyncOutlined />}
+                        onClick={handleTestStorage}
+                        loading={testingStorage}
+                        disabled={!isAdmin || !configured}
+                      >
+                        测试
+                      </Button>
+                    )}
+                    <Button icon={<EditOutlined />} onClick={() => handleEditSection(section)} disabled={!isAdmin}>
+                      编辑
+                    </Button>
+                  </Space>
                 </div>
               )
             })}

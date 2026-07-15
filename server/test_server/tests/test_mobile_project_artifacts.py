@@ -18,6 +18,7 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
             CONTACT_PROFILES_COLLECTION,
             MOBILE_OPERATION_LOGS_COLLECTION,
             MOBILE_SCREENSHOTS_COLLECTION,
+            STORAGE_OBJECTS_COLLECTION,
         )
         from api.db.mongodb import close_mongo, get_db, init_mongo
         from api.dao import contact_profiles, mobile_artifacts
@@ -25,12 +26,15 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
         project_id = "__pytest_mobile_project_artifacts__"
         unrelated_project_id = "__pytest_mobile_project_artifacts_other__"
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
+        monkeypatch.setenv("OBJECT_STORAGE_LOCAL_ROOT", str(tmp_path / "objects"))
 
         init_mongo()
         db = get_db()
         try:
             await mobile_artifacts.ensure_indexes(db)
             await contact_profiles.ensure_indexes(db)
+            await mobile_artifacts.delete_project_artifacts(db, project_id)
+            await mobile_artifacts.delete_project_artifacts(db, unrelated_project_id)
             stale = await mobile_artifacts.list_screenshots(
                 db, project_id=project_id, limit=100
             )
@@ -38,6 +42,9 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
                 {"project_id": {"$in": [project_id, unrelated_project_id]}}
             )
             await db[MOBILE_OPERATION_LOGS_COLLECTION].delete_many(
+                {"project_id": {"$in": [project_id, unrelated_project_id]}}
+            )
+            await db[STORAGE_OBJECTS_COLLECTION].delete_many(
                 {"project_id": {"$in": [project_id, unrelated_project_id]}}
             )
             await db[CONTACT_PROFILES_COLLECTION].delete_many(
@@ -49,7 +56,8 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
                 }
             )
             for doc in stale:
-                Path(doc.get("file_path") or "").unlink(missing_ok=True)
+                if doc.get("file_path"):
+                    Path(doc["file_path"]).unlink(missing_ok=True)
 
             screenshot = await mobile_artifacts.save_screenshot(
                 db,
@@ -63,7 +71,12 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
                 height=1,
             )
             assert screenshot["url"].endswith(f"{screenshot['screenshot_id']}/image")
-            assert Path(screenshot["file_path"]).exists()
+            assert screenshot["file_path"] == ""
+            assert screenshot["storage_object_id"] == screenshot["screenshot_id"]
+            from api.storage import get_object_storage
+
+            access = await (await get_object_storage()).read_access(screenshot["storage_object_id"])
+            assert access.path and access.path.exists()
 
             await mobile_artifacts.save_screenshot(
                 db,
@@ -141,6 +154,9 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
             await db[MOBILE_OPERATION_LOGS_COLLECTION].delete_many(
                 {"project_id": {"$in": [project_id, unrelated_project_id]}}
             )
+            await db[STORAGE_OBJECTS_COLLECTION].delete_many(
+                {"project_id": {"$in": [project_id, unrelated_project_id]}}
+            )
             await db[CONTACT_PROFILES_COLLECTION].delete_many(
                 {
                     "$or": [
@@ -149,8 +165,6 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
                     ]
                 }
             )
-            for doc in stale:
-                Path(doc.get("file_path") or "").unlink(missing_ok=True)
             close_mongo()
 
     asyncio.run(run())
@@ -182,6 +196,7 @@ def test_mobile_project_routes_return_linked_artifacts(
             CONTACT_PROFILES_COLLECTION,
             MOBILE_OPERATION_LOGS_COLLECTION,
             MOBILE_SCREENSHOTS_COLLECTION,
+            STORAGE_OBJECTS_COLLECTION,
         )
         from api.db.mongodb import close_mongo, get_db, init_mongo
         from api.routers import mobile as mobile_router
@@ -193,6 +208,7 @@ def test_mobile_project_routes_return_linked_artifacts(
         screenshot_path: Path | None = None
 
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
+        monkeypatch.setenv("OBJECT_STORAGE_LOCAL_ROOT", str(tmp_path / "objects"))
 
         init_mongo()
         db = get_db()
@@ -201,6 +217,8 @@ def test_mobile_project_routes_return_linked_artifacts(
         await auto_chat_sessions.ensure_indexes(db)
 
         try:
+            await mobile_artifacts.delete_project_artifacts(db, project_id)
+            await mobile_artifacts.delete_project_artifacts(db, unrelated_project_id)
             stale = await mobile_artifacts.list_screenshots(
                 db, project_id=project_id, limit=100
             )
@@ -211,6 +229,9 @@ def test_mobile_project_routes_return_linked_artifacts(
                 {"project_id": {"$in": [project_id, unrelated_project_id]}}
             )
             await db[MOBILE_OPERATION_LOGS_COLLECTION].delete_many(
+                {"project_id": {"$in": [project_id, unrelated_project_id]}}
+            )
+            await db[STORAGE_OBJECTS_COLLECTION].delete_many(
                 {"project_id": {"$in": [project_id, unrelated_project_id]}}
             )
             await db[AUTO_CHAT_SESSIONS_COLLECTION].delete_many(
@@ -226,7 +247,8 @@ def test_mobile_project_routes_return_linked_artifacts(
                 }
             )
             for doc in stale:
-                Path(doc.get("file_path") or "").unlink(missing_ok=True)
+                if doc.get("file_path"):
+                    Path(doc["file_path"]).unlink(missing_ok=True)
 
             screenshot = await mobile_artifacts.save_screenshot(
                 db,
@@ -240,7 +262,11 @@ def test_mobile_project_routes_return_linked_artifacts(
                 height=1,
                 note="route linked screenshot",
             )
-            screenshot_path = Path(screenshot["file_path"])
+            from api.storage import get_object_storage
+
+            access = await (await get_object_storage()).read_access(screenshot["storage_object_id"])
+            screenshot_path = access.path
+            assert screenshot_path is not None
             await mobile_artifacts.save_screenshot(
                 db,
                 image_base64=PNG_1X1,
@@ -370,6 +396,9 @@ def test_mobile_project_routes_return_linked_artifacts(
             await db[MOBILE_OPERATION_LOGS_COLLECTION].delete_many(
                 {"project_id": {"$in": [project_id, unrelated_project_id]}}
             )
+            await db[STORAGE_OBJECTS_COLLECTION].delete_many(
+                {"project_id": {"$in": [project_id, unrelated_project_id]}}
+            )
             await db[AUTO_CHAT_SESSIONS_COLLECTION].delete_many(
                 {"project_id": {"$in": [project_id, unrelated_project_id]}}
             )
@@ -382,8 +411,6 @@ def test_mobile_project_routes_return_linked_artifacts(
                     ]
                 }
             )
-            for doc in stale:
-                Path(doc.get("file_path") or "").unlink(missing_ok=True)
             close_mongo()
 
     asyncio.run(run())
@@ -405,11 +432,13 @@ def test_project_delete_cleans_mobile_artifacts_and_project_profile_refs(
             MOBILE_OPERATION_LOGS_COLLECTION,
             MOBILE_SCREENSHOTS_COLLECTION,
             PROJECTS_COLLECTION,
+            STORAGE_OBJECTS_COLLECTION,
         )
         from api.db.mongodb import close_mongo, get_db, init_mongo
         from api.routers import projects as projects_router
 
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
+        monkeypatch.setenv("OBJECT_STORAGE_LOCAL_ROOT", str(tmp_path / "objects"))
         other_project_id = "__pytest_mobile_delete_other_project__"
         project_id = ""
         project_oid = None
@@ -439,7 +468,11 @@ def test_project_delete_cleans_mobile_artifacts_and_project_profile_refs(
                 contact_id="wechat:delete",
                 source="pytest_delete",
             )
-            screenshot_path = Path(screenshot["file_path"])
+            from api.storage import get_object_storage
+
+            access = await (await get_object_storage()).read_access(screenshot["storage_object_id"])
+            screenshot_path = access.path
+            assert screenshot_path is not None
             assert screenshot_path.exists()
 
             await mobile_artifacts.log_operation(
@@ -529,6 +562,7 @@ def test_project_delete_cleans_mobile_artifacts_and_project_profile_refs(
                         ]
                     }
                 )
+                await db[STORAGE_OBJECTS_COLLECTION].delete_many({"project_id": project_id})
             if screenshot_path:
                 screenshot_path.unlink(missing_ok=True)
             close_mongo()

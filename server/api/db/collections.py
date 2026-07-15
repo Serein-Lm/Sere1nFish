@@ -88,3 +88,7 @@ AI_HUB_MESSAGES_COLLECTION = "ai_hub_messages"
 
 # 产物（Word 文档 / 招股书 / 人物背景报告 / 话术包）
 ARTIFACTS_COLLECTION = "artifacts"
+
+# 统一对象存储元数据。领域集合仅保存 storage_object_id，不感知 OSS/本地实现。
+STORAGE_OBJECTS_COLLECTION = "storage_objects"
+STORAGE_MIGRATIONS_COLLECTION = "storage_migrations"

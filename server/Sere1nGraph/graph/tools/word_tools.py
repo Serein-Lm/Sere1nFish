@@ -38,6 +38,22 @@ def _persist_artifact(
     async def _run() -> dict[str, Any]:
         from api.dao import artifacts as artifacts_dao
         from api.db.mongodb import get_db
+        from api.storage import get_object_storage
+
+        storage = await get_object_storage()
+        stored = await storage.store_bytes(
+            result["data"],
+            kind=kind or result["kind"],
+            filename=result["filename"],
+            object_id=result["artifact_id"],
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            owner=context.owner if context else "",
+            project_id=str(artifact_meta.get("project_id") or ""),
+            conversation_id=str(artifact_meta.get("conversation_id") or ""),
+            source="artifact",
+            source_id=result["artifact_id"],
+            meta={"title": result["title"]},
+        )
 
         return await artifacts_dao.create_artifact(
             get_db(),
@@ -45,7 +61,7 @@ def _persist_artifact(
             kind=kind or result["kind"],
             title=result["title"],
             filename=result["filename"],
-            file_path=result["file_path"],
+            storage_object_id=stored["object_id"],
             size=result.get("size", 0),
             owner=context.owner if context else "",
             meta=artifact_meta,
