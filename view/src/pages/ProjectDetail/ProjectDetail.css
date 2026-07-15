@@ -1454,6 +1454,29 @@
   font-size: 20px;
 }
 
+.mobile-profile-eye.is-expanded {
+  color: var(--primary-color);
+  background: var(--primary-bg);
+}
+
+.mobile-profile-expanded {
+  padding: 4px 0;
+  overflow-x: auto;
+}
+
+.mobile-profile-expanded .ant-descriptions-item-content {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mobile-profile-expanded .ant-tag {
+  max-width: 100%;
+  height: auto;
+  margin-inline-end: 0;
+  white-space: normal;
+}
+
 .mobile-screenshot-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));

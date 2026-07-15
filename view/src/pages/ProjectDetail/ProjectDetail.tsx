@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber, Image } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
 import {
   getProject,
   listProjectWebTaggingRecords,
@@ -705,6 +705,7 @@ export default function ProjectDetail() {
   const [mobileSessions, setMobileSessions] = useState<AutoChatSession[]>([])
   const [mobileSessionsTotal, setMobileSessionsTotal] = useState(0)
   const [mobilePreview, setMobilePreview] = useState<MobileScreenshot | null>(null)
+  const [expandedMobileProfileIds, setExpandedMobileProfileIds] = useState<string[]>([])
   const mobileArtifactsReqRef = useRef(0)
 
   // 公众号采集记录(复用手机采集记录, 按项目过滤)
@@ -2521,6 +2522,45 @@ export default function ProjectDetail() {
   }
 
   const renderMobileContent = () => {
+    const renderProfileTags = (values: string[] | undefined, color?: string) => (
+      <Space size={[4, 6]} wrap>
+        {values?.length
+          ? values.map((value, index) => <Tag color={color} key={`${value}-${index}`}>{value}</Tag>)
+          : <Text type="secondary">-</Text>}
+      </Space>
+    )
+
+    const renderMobileProfileExpanded = (record: ContactProfile) => {
+      const persona = record.persona ?? { interests: [], tags: [] }
+      const confidence = typeof persona.confidence === 'number'
+        ? `${Math.round((persona.confidence <= 1 ? persona.confidence * 100 : persona.confidence))}%`
+        : '-'
+
+      return (
+        <div className="mobile-profile-expanded">
+          <Descriptions size="small" bordered column={1}>
+            <Descriptions.Item label="画像摘要">{persona.summary || '-'}</Descriptions.Item>
+            <Descriptions.Item label="背景">{persona.background || '-'}</Descriptions.Item>
+            <Descriptions.Item label="性格">{persona.personality || '-'}</Descriptions.Item>
+            <Descriptions.Item label="沟通风格">{persona.communication_style || '-'}</Descriptions.Item>
+            <Descriptions.Item label="语气">{persona.tone || '-'}</Descriptions.Item>
+            <Descriptions.Item label="回复习惯">{persona.reply_pattern || '-'}</Descriptions.Item>
+            <Descriptions.Item label="置信度">{confidence}</Descriptions.Item>
+            <Descriptions.Item label="兴趣">{renderProfileTags(persona.interests, 'blue')}</Descriptions.Item>
+            <Descriptions.Item label="标签">{renderProfileTags(persona.tags)}</Descriptions.Item>
+            <Descriptions.Item label="常用表达">{renderProfileTags(persona.common_phrases, 'cyan')}</Descriptions.Item>
+            <Descriptions.Item label="风险点">{renderProfileTags(persona.risk_signals, 'red')}</Descriptions.Item>
+            <Descriptions.Item label="关联 Finding">
+              {record.latest_finding_id
+                ? <Text copyable={{ text: record.latest_finding_id }}>{record.latest_finding_id}</Text>
+                : '-'}
+            </Descriptions.Item>
+            <Descriptions.Item label="观察记录">{record.observations?.length ?? 0} 条</Descriptions.Item>
+          </Descriptions>
+        </div>
+      )
+    }
+
     const profileColumns: ColumnsType<ContactProfile> = [
       {
         title: '联系人',
@@ -2562,6 +2602,35 @@ export default function ProjectDetail() {
         key: 'updated_at',
         width: 170,
         render: (val: string) => <Text type="secondary">{formatDate(val)}</Text>,
+      },
+      {
+        title: '查看',
+        key: 'view',
+        width: 64,
+        fixed: 'right',
+        align: 'center',
+        render: (_: unknown, rec) => {
+          const expanded = expandedMobileProfileIds.includes(rec.contact_id)
+          return (
+            <Tooltip title={expanded ? '收起画像' : '展开画像'}>
+              <Button
+                type="text"
+                size="small"
+                className={expanded ? 'mobile-profile-eye is-expanded' : 'mobile-profile-eye'}
+                icon={expanded ? <EyeInvisibleOutlined /> : <EyeOutlined />}
+                aria-label={expanded ? '收起画像' : '展开画像'}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setExpandedMobileProfileIds((current) => (
+                    current.includes(rec.contact_id)
+                      ? current.filter((id) => id !== rec.contact_id)
+                      : [...current, rec.contact_id]
+                  ))
+                }}
+              />
+            </Tooltip>
+          )
+        },
       },
     ]
 
@@ -2722,6 +2791,19 @@ export default function ProjectDetail() {
             loading={mobileLoading}
             columns={profileColumns}
             size="small"
+            scroll={{ x: 900 }}
+            expandable={{
+              expandedRowKeys: expandedMobileProfileIds,
+              expandedRowRender: renderMobileProfileExpanded,
+              showExpandColumn: false,
+              onExpand: (expanded, record) => {
+                setExpandedMobileProfileIds((current) => (
+                  expanded
+                    ? Array.from(new Set([...current, record.contact_id]))
+                    : current.filter((id) => id !== record.contact_id)
+                ))
+              },
+            }}
             locale={{ emptyText: <Empty description="暂无手机人物画像" /> }}
             pagination={{ pageSize: 10, showTotal: (total) => `共 ${total} 个画像` }}
           />
