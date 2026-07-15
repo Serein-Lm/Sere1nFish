@@ -176,15 +176,114 @@ _HEAL_MIN_INTERVAL_SECONDS = 60.0
 def _find_backend_peer_container(client: Any) -> Any:
     """按配置容器名或名称包含 easytier-backend-peer 定位 peer 容器。"""
     wanted = str(_effective_config().get("backend_peer_container") or "").strip()
-    containers = client.containers.list()
+    # 必须包含已退出容器。共享网络命名空间失效时 peer 会以 Exit 128
+    # 退出，只查询运行中容器会让自愈逻辑误判为“容器不存在”。
+    containers = client.containers.list(all=True)
     if wanted:
         for item in containers:
             if item.name == wanted:
                 return item
-    for item in containers:
-        if "easytier-backend-peer" in item.name:
-            return item
+    candidates = [
+        item
+        for item in containers
+        if "easytier-backend-peer" in item.name and "-stale-" not in item.name
+    ]
+    if candidates:
+        return candidates[0]
     return None
+
+
+def _current_backend_container(client: Any) -> Any:
+    """Resolve the backend container that owns this process' network namespace."""
+    container_ref = str(os.getenv("HOSTNAME") or "").strip()
+    if not container_ref:
+        raise RuntimeError("无法确定当前 backend 容器 ID")
+    return client.containers.get(container_ref)
+
+
+def _container_network_target(container: Any) -> str:
+    mode = str(container.attrs.get("HostConfig", {}).get("NetworkMode") or "")
+    return mode.split(":", 1)[1] if mode.startswith("container:") else ""
+
+
+def _recreate_backend_peer_container(
+    client: Any,
+    container: Any,
+    backend: Any,
+    docker_module: Any,
+) -> Any:
+    """Recreate a stale peer while preserving its Compose-managed runtime config."""
+    attrs = container.attrs
+    config = attrs.get("Config", {})
+    host_config = attrs.get("HostConfig", {})
+    name = container.name
+    backup_name = f"{name}-stale-{int(time.time())}"
+
+    devices = [
+        ":".join(
+            [
+                str(item.get("PathOnHost") or ""),
+                str(item.get("PathInContainer") or ""),
+                str(item.get("CgroupPermissions") or "rwm"),
+            ]
+        )
+        for item in host_config.get("Devices", []) or []
+        if item.get("PathOnHost") and item.get("PathInContainer")
+    ]
+    ulimits = [
+        docker_module.types.Ulimit(
+            name=str(item.get("Name") or ""),
+            soft=item.get("Soft"),
+            hard=item.get("Hard"),
+        )
+        for item in host_config.get("Ulimits", []) or []
+        if item.get("Name")
+    ]
+    run_kwargs: dict[str, Any] = {
+        "image": config.get("Image"),
+        "command": config.get("Cmd"),
+        "name": name,
+        "detach": True,
+        "network_mode": f"container:{backend.id}",
+        "environment": config.get("Env") or [],
+        "labels": config.get("Labels") or {},
+        "entrypoint": config.get("Entrypoint"),
+        "restart_policy": host_config.get("RestartPolicy") or {"Name": "unless-stopped"},
+    }
+    optional = {
+        "user": config.get("User"),
+        "working_dir": config.get("WorkingDir"),
+        "cap_add": host_config.get("CapAdd"),
+        "devices": devices,
+        "ulimits": ulimits,
+    }
+    run_kwargs.update({key: value for key, value in optional.items() if value})
+
+    try:
+        if getattr(container, "status", "") in {"running", "restarting", "paused"}:
+            container.stop(timeout=5)
+        container.rename(backup_name)
+        replacement = client.containers.run(**run_kwargs)
+    except Exception:
+        try:
+            container.rename(name)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    try:
+        container.remove(force=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return replacement
+
+
+def _wait_for_easytier_network(timeout: float = 8.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if easytier_network_healthy():
+            return True
+        time.sleep(0.2)
+    return easytier_network_healthy()
 
 
 def easytier_network_healthy() -> bool:
@@ -198,11 +297,11 @@ def easytier_network_healthy() -> bool:
 
 
 def ensure_easytier_healthy() -> dict[str, Any]:
-    """自愈:组网断开(et0 缺失)时重启 backend-peer 容器。
+    """自愈:组网断开时重启或重建 backend-peer 容器。
 
     根因:backend-peer 用 network_mode: service:backend 共享 backend 网络命名空间,
-    backend 重启后 peer 绑在失效旧命名空间且不会自行退出,Docker restart 策略救不了,
-    需主动重启 backend-peer,使其重新绑定新命名空间、重建 et0、重连 easytier-server。
+    backend 被重建后 peer 仍引用旧容器 ID。此时 Docker restart 策略和普通 restart
+    都无法重新绑定命名空间,必须按原运行参数重建 peer。
     带最小重启间隔防抖,避免误判时频繁重启。
     """
     global _LAST_HEAL_TS
@@ -224,8 +323,29 @@ def ensure_easytier_healthy() -> dict[str, Any]:
         container = _find_backend_peer_container(client)
         if container is None:
             return {"enabled": True, "healthy": False, "healed": False, "error": "backend-peer 容器未找到", "dev": dev}
-        container.restart(timeout=10)
-        return {"enabled": True, "healthy": False, "healed": True, "container": container.name, "dev": dev}
+        backend = _current_backend_container(client)
+        network_target = _container_network_target(container)
+        action = "restart"
+        active_container = container
+        if network_target != backend.id:
+            active_container = _recreate_backend_peer_container(client, container, backend, docker)
+            action = "recreate"
+        else:
+            try:
+                container.restart(timeout=10)
+            except Exception:
+                active_container = _recreate_backend_peer_container(client, container, backend, docker)
+                action = "recreate"
+        healthy = _wait_for_easytier_network()
+        return {
+            "enabled": True,
+            "healthy": healthy,
+            "healed": healthy,
+            "action": action,
+            "container": active_container.name,
+            "dev": dev,
+            **({} if healthy else {"error": f"{dev} 未在等待时间内恢复"}),
+        }
     except Exception as exc:  # noqa: BLE001
         return {"enabled": True, "healthy": False, "healed": False, "error": str(exc), "dev": dev}
 

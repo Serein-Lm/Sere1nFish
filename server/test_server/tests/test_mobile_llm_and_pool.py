@@ -126,6 +126,30 @@ def test_connected_adb_device_includes_easytier_link_metrics(monkeypatch) -> Non
     assert items[0]["easytier_peer"] == peer
 
 
+def test_unconnected_easytier_peer_requests_auto_connect(monkeypatch) -> None:
+    from core.mobile.pool import DevicePool
+
+    pool = object.__new__(DevicePool)
+    monkeypatch.setattr(pool, "_connected_adb_ips", lambda: {"10.144.144.2"})
+    monkeypatch.setattr(
+        pool,
+        "_easytier_peers",
+        lambda: [
+            {"ipv4": "10.144.144.2"},
+            {"ipv4": "10.144.144.3"},
+        ],
+    )
+
+    assert pool.has_unconnected_easytier_peers() is True
+
+    monkeypatch.setattr(
+        pool,
+        "_connected_adb_ips",
+        lambda: {"10.144.144.2", "10.144.144.3"},
+    )
+    assert pool.has_unconnected_easytier_peers() is False
+
+
 def test_easytier_byte_counter_normalization() -> None:
     from core.mobile.easytier import _parse_byte_count
 

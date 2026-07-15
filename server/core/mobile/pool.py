@@ -416,6 +416,15 @@ class DevicePool:
             return ips
         return ips
 
+    def has_unconnected_easytier_peers(self) -> bool:
+        """Return whether an EasyTier phone is joined but not attached to ADB."""
+        connected_ips = self._connected_adb_ips()
+        return any(
+            str(peer.get("ipv4") or "") not in connected_ips
+            for peer in self._easytier_peers()
+            if peer.get("ipv4")
+        )
+
     def _scan_easytier_adb(self) -> dict[str, Any]:
         """Scan the EasyTier virtual CIDR for open wireless-ADB endpoints."""
         if not _bool_config("enabled", "EASYTIER_ENABLED", True):
@@ -518,10 +527,26 @@ class DevicePool:
         实现“自动发现 adb 接入资源池”的闭环。手机入 EasyTier 后不需要
         手工填写虚拟 IP；自动接入会扫描虚拟网段上的无线 ADB 端口。
         """
+        from core.mobile.easytier import ensure_easytier_healthy
+
+        network_health = ensure_easytier_healthy()
         self._mgr.refresh()
         dm = self._dm()
         connected: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
+        if network_health.get("enabled") and network_health.get("healthy") is False:
+            errors.append(
+                {
+                    "source": "easytier-health",
+                    "address": None,
+                    "ok": False,
+                    "message": str(
+                        network_health.get("error")
+                        or network_health.get("reason")
+                        or "EasyTier 组网尚未恢复"
+                    ),
+                }
+            )
         sources = {"mdns": 0, "easytier_scan": 0}
         for dev in dm.get_devices():
             state_name = getattr(getattr(dev, "state", None), "name", "")

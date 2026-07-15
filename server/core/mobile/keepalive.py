@@ -60,25 +60,35 @@ class MobileKeepAlive:
         from core.observability import obs_log
 
         # 组网自检自愈:backend 重启后 backend-peer 绑失效命名空间会断网,
-        # et0 缺失则重启 backend-peer 恢复 EasyTier(adb 扫描/配对依赖它)
+        # et0 缺失则恢复 backend-peer 和 ADB 连接(adb 扫描/配对依赖它)
         heal = await asyncio.to_thread(ensure_easytier_healthy)
+        pool = DevicePool.get_instance()
+        auto_connect: dict[str, Any] | None = None
+        needs_auto_connect = bool(heal.get("healed")) or await asyncio.to_thread(
+            pool.has_unconnected_easytier_peers
+        )
+        if needs_auto_connect:
+            # 新 backend 容器里的 adb server 没有旧连接记录。组网恢复后必须
+            # 重新扫描；组网刚恢复时允许路由短暂收敛，避免首次空结果后失联。
+            attempts = 3 if heal.get("healed") else 1
+            for attempt in range(1, attempts + 1):
+                auto_connect = await asyncio.to_thread(pool.auto_connect_discovered)
+                auto_connect["attempts"] = attempt
+                if auto_connect.get("count") or attempt >= attempts:
+                    break
+                await asyncio.sleep(2)
         if heal.get("healed"):
-            self._last_result = {"easytier_heal": heal, "skipped": "healing"}
-            self._rounds += 1
             try:
                 obs_log(
-                    "EasyTier 组网自愈:重启 backend-peer",
+                    "EasyTier 组网自愈并恢复 ADB 连接",
                     source="mobile_keepalive",
                     event="easytier_heal",
                     level="warning",
-                    data=heal,
+                    data={"heal": heal, "auto_connect": auto_connect},
                 )
             except Exception:  # noqa: BLE001
                 pass
-            # 组网刚恢复,本轮跳过扫描,下一轮再保活
-            return
 
-        pool = DevicePool.get_instance()
         result = await asyncio.to_thread(
             pool.keepalive_once,
             screen_always_on=self._screen_always_on,
@@ -86,6 +96,8 @@ class MobileKeepAlive:
             probe_timeout=self._probe_timeout,
         )
         result["easytier"] = heal
+        if auto_connect is not None:
+            result["auto_connect"] = auto_connect
         self._last_result = result
         self._last_error = None
         self._rounds += 1
