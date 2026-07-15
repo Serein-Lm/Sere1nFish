@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
   Card, Button, Typography, Space, Modal, Form, Input, message, Tooltip,
-  Popconfirm, Switch, Tabs, Tag, Empty, Alert, Spin,
+  Popconfirm, Switch, Tabs, Tag, Empty, Alert, Spin, InputNumber, Divider,
 } from 'antd'
 import {
   SettingOutlined, PlusOutlined, DeleteOutlined, EditOutlined,
   RobotOutlined, ToolOutlined, LineChartOutlined, SendOutlined,
   EyeOutlined, EyeInvisibleOutlined, CopyOutlined,
-  LockOutlined, DingdingOutlined, CodeOutlined,
+  LockOutlined, DingdingOutlined, CodeOutlined, SyncOutlined,
 } from '@ant-design/icons'
 import {
   getAllConfig, setLLMConfig, deleteLLMConfig,
@@ -173,6 +173,18 @@ export default function ConfigManagement() {
       keyword: value?.keyword || '',
       enabled: value?.enabled ?? true,
       has_token: Boolean(value?.access_token),
+      has_outgoing_secret: Boolean(value?.has_outgoing_secret),
+      stream_enabled: value?.stream_enabled ?? false,
+      client_id: value?.client_id || '',
+      client_secret: value?.client_secret || '',
+      has_client_secret: Boolean(value?.client_secret || value?.has_client_secret),
+      ai_card_streaming: value?.ai_card_streaming ?? true,
+      public_base_url: value?.public_base_url || '',
+      reconnect_seconds: value?.reconnect_seconds || 5,
+      stream_state: value?.stream_state || 'stopped',
+      stream_connected: value?.stream_connected ?? false,
+      stream_last_error: value?.stream_last_error || '',
+      stream_last_connected_at: value?.stream_last_connected_at,
     }))
   }
 
@@ -513,6 +525,11 @@ export default function ConfigManagement() {
   const handleAddDingTalk = () => {
     setEditingBot(null)
     dingtalkForm.resetFields()
+    dingtalkForm.setFieldsValue({
+      stream_enabled: true,
+      ai_card_streaming: true,
+      reconnect_seconds: 5,
+    })
     setDingtalkModalOpen(true)
   }
 
@@ -523,6 +540,13 @@ export default function ConfigManagement() {
       access_token: '',
       secret: '',
       keyword: bot.keyword,
+      outgoing_app_secret: '',
+      stream_enabled: bot.stream_enabled,
+      client_id: bot.client_id,
+      client_secret: '',
+      ai_card_streaming: bot.ai_card_streaming,
+      public_base_url: bot.public_base_url,
+      reconnect_seconds: bot.reconnect_seconds || 5,
     })
     setDingtalkModalOpen(true)
   }
@@ -536,6 +560,13 @@ export default function ConfigManagement() {
       if (values.access_token) payload.access_token = values.access_token
       if (values.secret) payload.secret = values.secret
       if (values.keyword !== undefined) payload.keyword = values.keyword
+      if (values.outgoing_app_secret) payload.outgoing_app_secret = values.outgoing_app_secret
+      payload.stream_enabled = Boolean(values.stream_enabled)
+      if (values.client_id !== undefined) payload.client_id = values.client_id
+      if (values.client_secret) payload.client_secret = values.client_secret
+      payload.ai_card_streaming = Boolean(values.ai_card_streaming)
+      if (values.public_base_url !== undefined) payload.public_base_url = values.public_base_url
+      if (values.reconnect_seconds !== undefined) payload.reconnect_seconds = values.reconnect_seconds
       await setDingTalkBot(botName, payload)
       setDingtalkModalOpen(false)
       message.success(`钉钉机器人 ${botName} 配置已保存`)
@@ -971,11 +1002,38 @@ export default function ConfigManagement() {
                         <Tag color={bot.enabled ? 'success' : 'default'} style={{ marginLeft: 8 }}>
                           {bot.enabled ? '已启用' : '已禁用'}
                         </Tag>
+                        {bot.stream_enabled && (
+                          <Tag color={bot.stream_connected ? 'processing' : bot.stream_state === 'reconnecting' ? 'warning' : 'default'}>
+                            Stream {bot.stream_connected ? '已连接' : bot.stream_state === 'reconnecting' ? '重连中' : '未连接'}
+                          </Tag>
+                        )}
                       </div>
                       <div className="bot-meta">
-                        <span>Token: {maskValue(bot.access_token, visibleKeys[`dingtalk_${bot.bot_name}_token`])}</span>
+                        {bot.has_token && <span>Token: {maskValue(bot.access_token, visibleKeys[`dingtalk_${bot.bot_name}_token`])}</span>}
+                        {bot.client_id && <span style={{ marginLeft: bot.has_token ? 16 : 0 }}>Client ID: {bot.client_id}</span>}
                         {bot.keyword && <span style={{ marginLeft: 16 }}>关键词: {bot.keyword}</span>}
                       </div>
+                      {bot.has_client_secret && (
+                        <div className="bot-meta">
+                          <Space size={4}>
+                            <span>
+                              Client Secret: {maskValue(
+                                bot.client_secret || '********',
+                                visibleKeys[`dingtalk_${bot.bot_name}_client_secret`],
+                              )}
+                            </span>
+                            {renderSecretActions(
+                              `dingtalk_${bot.bot_name}_client_secret`,
+                              bot.client_secret || '',
+                            )}
+                          </Space>
+                        </div>
+                      )}
+                      {bot.stream_last_error && (
+                        <div className="bot-stream-error" title={bot.stream_last_error}>
+                          {bot.stream_last_error}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="bot-actions">
@@ -985,12 +1043,15 @@ export default function ConfigManagement() {
                       onChange={(checked) => handleToggleDingTalk(bot.bot_name, checked)}
                       disabled={!isAdmin}
                     />
-                    {renderSecretActions(`dingtalk_${bot.bot_name}_token`, bot.access_token)}
-                    <Tooltip title="测试发送">
+                    {bot.has_token && renderSecretActions(`dingtalk_${bot.bot_name}_token`, bot.access_token)}
+                    <Tooltip title="刷新连接状态">
+                      <Button size="small" icon={<SyncOutlined />} onClick={fetchConfig} />
+                    </Tooltip>
+                    <Tooltip title={bot.has_token ? '测试 Webhook 通知' : '未配置 Webhook Access Token'}>
                       <Button size="small" icon={<SendOutlined />}
                         loading={testingBot === bot.bot_name}
                         onClick={() => handleTestDingTalk(bot.bot_name)}
-                        disabled={!isAdmin || !bot.enabled} />
+                        disabled={!isAdmin || !bot.enabled || !bot.has_token} />
                     </Tooltip>
                     <Tooltip title="编辑">
                       <Button size="small" icon={<EditOutlined />}
@@ -1249,16 +1310,72 @@ export default function ConfigManagement() {
       {/* 钉钉机器人配置 Modal */}
       <Modal title={editingBot ? `编辑钉钉机器人 - ${editingBot}` : '添加钉钉机器人'}
         open={dingtalkModalOpen} onOk={handleDingTalkSubmit} onCancel={() => setDingtalkModalOpen(false)}
-        confirmLoading={dingtalkSubmitting} destroyOnHidden width={500}>
+        confirmLoading={dingtalkSubmitting} destroyOnHidden width={640}>
         <Form form={dingtalkForm} layout="vertical">
           {!editingBot && (
             <Form.Item name="bot_name" label="机器人名称" rules={[{ required: true, message: '请输入机器人名称' }]}>
               <Input placeholder="如 default, alert, notify" />
             </Form.Item>
           )}
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            title="Stream Mode 用于 AI 对话，Webhook 用于主动通知，两套配置可独立使用。"
+            description={
+              <span>
+                在钉钉开发者后台创建企业内部应用并添加机器人，消息接收模式选择 Stream Mode，
+                然后填写应用的 Client ID 与 Client Secret。无需配置公网回调 URL。
+              </span>
+            }
+          />
+          <Form.Item name="stream_enabled" label="启用 Stream Mode" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, current) => prev.stream_enabled !== current.stream_enabled}
+          >
+            {({ getFieldValue }) => getFieldValue('stream_enabled') ? (
+              <>
+                <Form.Item
+                  name="client_id"
+                  label="Client ID（AppKey）"
+                  rules={[{ required: true, message: '请输入 Client ID' }]}
+                >
+                  <Input placeholder="应用凭证中的 Client ID / AppKey" />
+                </Form.Item>
+                <Form.Item
+                  name="client_secret"
+                  label="Client Secret（AppSecret）"
+                  extra={editingBot ? '留空则保留已加密保存的 Client Secret' : undefined}
+                  rules={[{
+                    validator: async (_, value) => {
+                      const existing = dingtalkBots.find(bot => bot.bot_name === editingBot)
+                      if (!value && !(editingBot && existing?.has_client_secret)) {
+                        throw new Error('请输入 Client Secret')
+                      }
+                    },
+                  }]}
+                >
+                  <Input.Password placeholder="应用凭证中的 Client Secret / AppSecret" />
+                </Form.Item>
+                <Form.Item name="ai_card_streaming" label="AI Card 流式回答" valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+                <Form.Item name="public_base_url" label="公网访问地址（可选）"
+                  extra="用于在钉钉 AI Card 中生成“在 AI 中枢打开”按钮；用户登录后才能下载 Artifact，例如 https://your-domain.com">
+                  <Input placeholder="https://your-domain.com" />
+                </Form.Item>
+                <Form.Item name="reconnect_seconds" label="断线重连间隔">
+                  <InputNumber min={2} max={60} suffix="秒" style={{ width: '100%' }} />
+                </Form.Item>
+              </>
+            ) : null}
+          </Form.Item>
+          <Divider titlePlacement="start" plain>主动通知 Webhook（可选）</Divider>
           <Form.Item name="access_token" label="Access Token"
-            rules={editingBot ? [] : [{ required: true, message: '请输入 Access Token' }]}
-            extra={editingBot ? '留空则不修改' : 'Webhook URL 中的 access_token 参数'}>
+            extra={editingBot ? '留空则不修改' : '自定义机器人 Webhook URL 中的 access_token 参数'}>
             <Input.Password placeholder="输入 Access Token" />
           </Form.Item>
           <Form.Item name="secret" label="签名密钥 (Secret)"
@@ -1268,6 +1385,10 @@ export default function ConfigManagement() {
           <Form.Item name="keyword" label="关键词"
             extra="安全设置中的自定义关键词，消息中必须包含此关键词">
             <Input placeholder="如：安全资讯、告警（可选）" />
+          </Form.Item>
+          <Form.Item name="outgoing_app_secret" label="旧回调 App Secret（可选）"
+            extra="仅兼容 /api/v1/dingtalk/callback 回调模式；使用 Stream Mode 时无需填写">
+            <Input.Password placeholder="旧 Outgoing 回调验签密钥" />
           </Form.Item>
         </Form>
       </Modal>

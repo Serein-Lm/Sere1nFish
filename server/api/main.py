@@ -256,7 +256,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"定时调度器启动失败(不影响运行): {e}")
 
+    # 启动时：按数据库配置建立钉钉 Stream Mode 长连接
+    try:
+        from api.services.dingtalk_stream import DingTalkStreamManager
+
+        await DingTalkStreamManager.get_instance().reload_all()
+        logger.info("钉钉 Stream Mode 配置已加载")
+    except Exception as e:
+        logger.warning(f"钉钉 Stream Mode 启动失败(不影响运行): {e}")
+
     yield
+
+    # 关闭时：先断开钉钉长连接，停止接收新对话
+    try:
+        from api.services.dingtalk_stream import DingTalkStreamManager
+
+        await DingTalkStreamManager.get_instance().stop()
+        logger.info("钉钉 Stream Mode 已停止")
+    except Exception as e:
+        logger.warning(f"钉钉 Stream Mode 停止失败: {e}")
 
     # 关闭时:停止手机保活后台循环
     try:
@@ -368,7 +386,6 @@ app.include_router(mobile.router, prefix="/api/v1/mobile", tags=["手机"])
 app.include_router(mobile_collect.router, prefix="/api/v1/mobile-collect", tags=["手机采集任务"])
 app.include_router(persons.router, prefix="/api/v1/persons", tags=["人设库"])
 app.include_router(artifacts.router, prefix="/api/v1/artifacts", tags=["产物"])
-app.include_router(context.router, prefix="/api/v1/context", tags=["上下文聚合"])
 app.include_router(context.router, prefix="/api/v1/context", tags=["上下文聚合"])
 app.include_router(bootstrap.router, prefix="/api/v1/bootstrap", tags=["Bootstrap"])
 app.include_router(observability.router, prefix="/api/v1/observability", tags=["观测层"])

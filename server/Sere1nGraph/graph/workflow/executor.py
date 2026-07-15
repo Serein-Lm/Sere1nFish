@@ -131,7 +131,8 @@ async def _run_agent(
     # 创建 SSE 模式的 Agent
     agent = await factory(app_config, output_mode="sse")
     tool_index = 0
-    final_text_parts: list[str] = []
+    streamed_text_parts: list[str] = []
+    final_text = ""
     
     # 执行并转换事件
     async for e in agent({"messages": [HumanMessage(content=query)]}):
@@ -155,8 +156,11 @@ async def _run_agent(
                     for part in text
                 )
             if text:
-                final_text_parts.append(text)
+                streamed_text_parts.append(text)
                 yield events.content(text)
+
+        elif t == "result":
+            final_text = str(e.get("data") or "").strip()
         
         elif t == "error":
             yield events.error(e.get("message", "未知错误"))
@@ -168,7 +172,7 @@ async def _run_agent(
     events.set_agent(None)
 
     # 汇总 agent 输出为最终结果，供前端展示与会话留存
-    final_text = "".join(final_text_parts).strip()
+    final_text = final_text or "".join(streamed_text_parts).strip()
     yield events.final(
         section="result",
         content=final_text or "（本次未生成文本内容）",

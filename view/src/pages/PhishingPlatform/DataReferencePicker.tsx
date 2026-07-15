@@ -251,7 +251,7 @@ export default function DataReferencePicker({ open, onClose, onPick, selectedIds
       footer={null}
       title="引用平台数据给 AI 中枢"
       width={640}
-      destroyOnClose
+      destroyOnHidden
     >
       <Tabs
         activeKey={activeTab}

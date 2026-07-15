@@ -32,6 +32,20 @@
   background: var(--secondary-bg);
 }
 
+.chat-toolbar {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 8px 24px 0;
+  flex-shrink: 0;
+}
+
+.mobile-history-button,
+.conversation-sidebar-backdrop {
+  display: none;
+}
+
 /* ========== 会话侧栏布局 ========== */
 .phishing-layout {
   flex: 1;
@@ -183,12 +197,6 @@
 
 .conversation-item-delete:hover {
   color: #ff4d4f !important;
-}
-
-@media (max-width: 768px) {
-  .conversation-sidebar {
-    width: 200px;
-  }
 }
 
 /* 聊天列表区域 - 居中阅读列 */
@@ -418,6 +426,96 @@
 
 .chat-list .ant-bubble-end .ant-bubble-content * {
   color: var(--primary-bg) !important;
+}
+
+.message-artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.message-artifact-item {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--secondary-bg);
+}
+
+.message-artifact-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.artifact-drawer-loading {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.artifact-scope-switch {
+  margin-bottom: 16px;
+}
+
+.artifact-drawer-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.artifact-drawer-item:last-child {
+  border-bottom: 0;
+}
+
+.artifact-drawer-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.artifact-drawer-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.artifact-drawer-description {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.artifact-file-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--primary-color);
+  background: var(--secondary-bg);
+}
+
+.capability-mcp-row {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .user-message-text {
@@ -849,8 +947,57 @@
 }
 
 @media (max-width: 768px) {
+  .phishing-layout {
+    position: relative;
+  }
+
+  .conversation-sidebar-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 19;
+    padding: 0;
+    border: 0;
+    background: rgba(0, 0, 0, 0.28);
+  }
+
+  .conversation-sidebar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: min(82vw, 300px);
+    background: var(--secondary-bg);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .conversation-sidebar.collapsed {
+    width: 0;
+    border: 0;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .conversation-sidebar.collapsed .conversation-sidebar-rail {
+    display: none;
+  }
+
+  .chat-container {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .chat-toolbar {
+    justify-content: space-between;
+    padding-inline: 12px;
+  }
+
+  .mobile-history-button {
+    display: inline-flex;
+  }
+
   .chat-list {
-    padding: 24px 16px 40px 16px;
+    padding: 16px 10px 24px;
   }
 
   .chat-list .ant-bubble {
@@ -871,15 +1018,55 @@
   }
 
   .welcome-container {
-    padding-top: 48px;
+    padding-top: 16px;
+    justify-content: flex-start;
   }
 
   .welcome-container .ant-welcome-title {
-    font-size: 24px;
+    font-size: 22px;
+  }
+
+  .welcome-container .ant-welcome-description {
+    font-size: 13px;
+  }
+
+  .welcome-container .ant-prompts-item {
+    width: 100% !important;
+  }
+
+  .quick-actions {
+    margin-bottom: 8px;
+  }
+
+  .quick-actions .ant-btn {
+    height: 32px;
+    padding-inline: 10px !important;
   }
 
   .sender-wrapper {
-    padding: 12px 16px 20px 16px;
+    padding: 8px 10px 12px;
+  }
+
+  .sender-footer {
+    flex-wrap: wrap;
+    align-items: flex-start !important;
+    padding: 6px 8px;
+  }
+
+  .sender-footer > .ant-flex:first-child {
+    width: 100%;
+    column-gap: 4px !important;
+  }
+
+  .chat-sender .ant-sender-switch,
+  .ant-sender-switch {
+    padding: 3px 6px;
+    font-size: 12px;
+  }
+
+  .ai-hub-drawer .ant-drawer-content-wrapper {
+    width: min(100vw, 520px) !important;
+    max-width: 100vw;
   }
 }
 

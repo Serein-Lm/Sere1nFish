@@ -567,6 +567,12 @@ async def set_dingtalk_config(
     keyword: str | None = None,
     enabled: bool | None = None,
     outgoing_app_secret: str | None = None,
+    stream_enabled: bool | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    ai_card_streaming: bool | None = None,
+    public_base_url: str | None = None,
+    reconnect_seconds: int | None = None,
 ) -> dict[str, Any]:
     """
     设置钉钉机器人配置
@@ -596,6 +602,18 @@ async def set_dingtalk_config(
         config["enabled"] = enabled
     if outgoing_app_secret is not None:
         config["outgoing_app_secret"] = outgoing_app_secret
+    if stream_enabled is not None:
+        config["stream_enabled"] = stream_enabled
+    if client_id is not None:
+        config["client_id"] = client_id
+    if client_secret is not None:
+        config["client_secret"] = client_secret
+    if ai_card_streaming is not None:
+        config["ai_card_streaming"] = ai_card_streaming
+    if public_base_url is not None:
+        config["public_base_url"] = public_base_url
+    if reconnect_seconds is not None:
+        config["reconnect_seconds"] = max(2, min(int(reconnect_seconds), 60))
     
     return await set_config(db, "dingtalk", config, key=bot_name)
 

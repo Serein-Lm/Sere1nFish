@@ -54,6 +54,7 @@ openpyxl>=3.1.2
 python-docx>=1.1.0
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
+dingtalk-stream>=0.24.3,<0.25.0
 
 # 声音复刻 (CosyVoice / DashScope TTS)
 dashscope>=1.22.0

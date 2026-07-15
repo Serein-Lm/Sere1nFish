@@ -97,6 +97,12 @@ class DingTalkConfigUpdate(BaseModel):
     keyword: str | None = None
     enabled: bool | None = None
     outgoing_app_secret: str | None = None
+    stream_enabled: bool | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    ai_card_streaming: bool | None = None
+    public_base_url: str | None = None
+    reconnect_seconds: int | None = None
 
 
 class DingTalkConfigOut(BaseModel):
@@ -108,6 +114,17 @@ class DingTalkConfigOut(BaseModel):
     enabled: bool
     has_token: bool
     has_outgoing_secret: bool = False
+    stream_enabled: bool = False
+    client_id: str | None = None
+    client_secret: str | None = None
+    has_client_secret: bool = False
+    ai_card_streaming: bool = True
+    public_base_url: str | None = None
+    reconnect_seconds: int = 5
+    stream_state: str = "stopped"
+    stream_connected: bool = False
+    stream_last_error: str = ""
+    stream_last_connected_at: str | None = None
 
 
 class ConfigImportRequest(BaseModel):
@@ -197,10 +214,17 @@ def _langfuse_config_out(config: dict[str, Any], mask: bool = True) -> LangfuseC
     )
 
 
-def _dingtalk_config_out(bot_name: str, config: dict[str, Any], mask: bool = True) -> DingTalkConfigOut:
+def _dingtalk_config_out(
+    bot_name: str,
+    config: dict[str, Any],
+    mask: bool = True,
+    status: dict[str, Any] | None = None,
+) -> DingTalkConfigOut:
     """转换钉钉机器人配置输出"""
     access_token = config.get("access_token", "")
     secret = config.get("secret", "")
+    client_secret = config.get("client_secret", "")
+    status = status or {}
     return DingTalkConfigOut(
         bot_name=bot_name,
         access_token=_mask_api_key(access_token) if mask else access_token,
@@ -209,6 +233,17 @@ def _dingtalk_config_out(bot_name: str, config: dict[str, Any], mask: bool = Tru
         enabled=config.get("enabled", True),
         has_token=bool(access_token),
         has_outgoing_secret=bool(config.get("outgoing_app_secret")),
+        stream_enabled=bool(config.get("stream_enabled", False)),
+        client_id=config.get("client_id") or None,
+        client_secret=_mask_api_key(client_secret) if mask else client_secret,
+        has_client_secret=bool(client_secret),
+        ai_card_streaming=bool(config.get("ai_card_streaming", True)),
+        public_base_url=config.get("public_base_url") or None,
+        reconnect_seconds=int(config.get("reconnect_seconds") or 5),
+        stream_state=str(status.get("state") or "stopped"),
+        stream_connected=bool(status.get("connected", False)),
+        stream_last_error=str(status.get("last_error") or ""),
+        stream_last_connected_at=status.get("last_connected_at"),
     )
 
 
@@ -615,9 +650,12 @@ async def list_dingtalk_configs(_: User = Depends(get_current_active_user)):
     db = get_db()
     configs = await config_dao.list_dingtalk_configs(db)
     
+    from api.services.dingtalk_stream import DingTalkStreamManager
+
+    manager = DingTalkStreamManager.get_instance()
     return {
         "bots": [
-            _dingtalk_config_out(name, config)
+            _dingtalk_config_out(name, config, status=manager.get_status(name))
             for name, config in configs.items()
         ]
     }
@@ -632,7 +670,13 @@ async def get_dingtalk_config(bot_name: str, _: User = Depends(get_current_activ
     if not config:
         raise HTTPException(status_code=404, detail=f"钉钉机器人 {bot_name} 配置不存在")
     
-    return _dingtalk_config_out(bot_name, config)
+    from api.services.dingtalk_stream import DingTalkStreamManager
+
+    return _dingtalk_config_out(
+        bot_name,
+        config,
+        status=DingTalkStreamManager.get_instance().get_status(bot_name),
+    )
 
 
 @router.post("/dingtalk/{bot_name}", response_model=DingTalkConfigOut)
@@ -657,9 +701,19 @@ async def set_dingtalk_config(bot_name: str, body: DingTalkConfigUpdate, _: User
         keyword=body.keyword,
         enabled=body.enabled,
         outgoing_app_secret=body.outgoing_app_secret,
+        stream_enabled=body.stream_enabled,
+        client_id=body.client_id,
+        client_secret=body.client_secret,
+        ai_card_streaming=body.ai_card_streaming,
+        public_base_url=body.public_base_url,
+        reconnect_seconds=body.reconnect_seconds,
     )
+    from api.services.dingtalk_stream import DingTalkStreamManager
+
+    manager = DingTalkStreamManager.get_instance()
+    await manager.reload_bot(bot_name)
     config = await config_dao.get_dingtalk_config(db, bot_name)
-    return _dingtalk_config_out(bot_name, config)
+    return _dingtalk_config_out(bot_name, config, status=manager.get_status(bot_name))
 
 
 @router.post("/dingtalk/{bot_name}/toggle")
@@ -667,6 +721,9 @@ async def toggle_dingtalk(bot_name: str, enabled: bool, _: User = Depends(requir
     """快速开关钉钉机器人"""
     db = get_db()
     await config_dao.set_dingtalk_config(db, bot_name=bot_name, enabled=enabled)
+    from api.services.dingtalk_stream import DingTalkStreamManager
+
+    await DingTalkStreamManager.get_instance().reload_bot(bot_name)
     return {"bot_name": bot_name, "enabled": enabled}
 
 
@@ -679,7 +736,24 @@ async def delete_dingtalk_config(bot_name: str, _: User = Depends(require_admin)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"钉钉机器人 {bot_name} 配置不存在")
     
+    from api.services.dingtalk_stream import DingTalkStreamManager
+
+    await DingTalkStreamManager.get_instance().reload_bot(bot_name)
     return {"ok": True}
+
+
+@router.get("/dingtalk/{bot_name}/status")
+async def get_dingtalk_stream_status(
+    bot_name: str,
+    _: User = Depends(get_current_active_user),
+):
+    """查询 Stream Mode 长连接运行状态。"""
+    from api.services.dingtalk_stream import DingTalkStreamManager
+
+    config = await config_dao.get_dingtalk_config(get_db(), bot_name)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"钉钉机器人 {bot_name} 配置不存在")
+    return DingTalkStreamManager.get_instance().get_status(bot_name)
 
 
 @router.post("/dingtalk/{bot_name}/test")

@@ -424,3 +424,12 @@
     justify-content: flex-end;
   }
 }
+.bot-stream-error {
+  max-width: 520px;
+  margin-top: 4px;
+  overflow: hidden;
+  color: #d46b08;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

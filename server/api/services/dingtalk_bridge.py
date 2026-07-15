@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from core.background import spawn_background
@@ -91,10 +93,7 @@ async def handle_inbound(payload: dict[str, Any], timestamp: str, sign: str) -> 
 
 async def _run_and_reply(parsed: dict[str, Any]) -> None:
     """后台：调用 AI 中枢生成回答，并回推到来源会话。"""
-    from core.observability import observation_context
     from crawler_tools.dingtalk_bot import reply_to_session_webhook
-    from Sere1nGraph.graph.workflow.executor import execute_stream
-    from api.services.runtime_config import get_runtime_app_config
 
     query = parsed["query"]
     session_webhook = parsed["session_webhook"]
@@ -102,22 +101,12 @@ async def _run_and_reply(parsed: dict[str, Any]) -> None:
     at_users = [sender_staff_id] if sender_staff_id else []
 
     try:
-        app_config = await get_runtime_app_config()
-        sections: dict[str, str] = {}
-        with observation_context(
-            phase="dingtalk_hub",
-            agent="dingtalk",
-            task_type=_HUB_WORKFLOW,
-        ):
-            async for event in execute_stream(
-                workflow=_HUB_WORKFLOW,
-                query=query,
-                app_config=app_config,
-                options={},
-            ):
-                _extract_final_text(event, sections)
-
-        final_text = "\n\n".join(v for v in sections.values() if v).strip()
+        final_text, _ = await run_hub_query(
+            query,
+            owner=f"dingtalk:{sender_staff_id or parsed.get('sender_nick') or 'unknown'}",
+            conversation_id=f"dingtalk:{parsed.get('conversation_id') or 'callback'}",
+            channel="dingtalk_callback",
+        )
         if not final_text:
             final_text = "（本次未生成文本内容）"
         if len(final_text) > _REPLY_MAX_CHARS:
@@ -142,3 +131,52 @@ async def _run_and_reply(parsed: dict[str, Any]) -> None:
             )
         except Exception:  # noqa: BLE001
             pass
+
+
+async def run_hub_query(
+    query: str,
+    *,
+    owner: str,
+    conversation_id: str,
+    channel: str,
+    on_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Run the unified AI Hub stream for an IM channel.
+
+    Returns the final answer and artifacts generated in this turn. Channel
+    adapters may consume events for cards without depending on graph internals.
+    """
+    from api.services.artifact_context import artifact_context
+    from api.services.runtime_config import get_runtime_app_config
+    from core.observability import observation_context
+    from Sere1nGraph.graph.workflow.executor import execute_stream
+
+    app_config = await get_runtime_app_config()
+    sections: dict[str, str] = {}
+    artifact_run = None
+    with observation_context(
+        task_id=conversation_id,
+        turn_id=conversation_id,
+        phase="dingtalk_hub",
+        agent="dingtalk",
+        task_type=_HUB_WORKFLOW,
+    ), artifact_context(
+        owner=owner,
+        conversation_id=conversation_id,
+        channel=channel,
+    ) as artifact_run:
+        async for event in execute_stream(
+            workflow=_HUB_WORKFLOW,
+            query=query,
+            app_config=app_config,
+            options={},
+        ):
+            _extract_final_text(event, sections)
+            if on_event:
+                result = on_event(event)
+                if inspect.isawaitable(result):
+                    await result
+
+    preferred = [value for key, value in sections.items() if key != "summary" and value]
+    final_text = "\n\n".join(preferred or [value for value in sections.values() if value]).strip()
+    return final_text, list(artifact_run.created) if artifact_run else []

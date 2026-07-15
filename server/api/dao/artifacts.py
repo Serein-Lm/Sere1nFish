@@ -41,6 +41,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await coll.create_index("owner")
     await coll.create_index("kind")
     await coll.create_index("created_at")
+    await coll.create_index([("owner", 1), ("created_at", -1)])
+    await coll.create_index([("owner", 1), ("meta.conversation_id", 1), ("created_at", -1)])
+    await coll.create_index([("owner", 1), ("meta.project_id", 1), ("created_at", -1)])
 
 
 async def create_artifact(
@@ -91,6 +94,8 @@ async def list_artifacts(
     *,
     owner: str = "",
     kind: str = "",
+    conversation_id: str = "",
+    project_id: str = "",
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     query: dict[str, Any] = {}
@@ -98,6 +103,10 @@ async def list_artifacts(
         query["owner"] = owner
     if kind:
         query["kind"] = kind
+    if conversation_id:
+        query["meta.conversation_id"] = conversation_id
+    if project_id:
+        query["meta.project_id"] = project_id
     cursor = (
         db[ARTIFACTS_COLLECTION]
         .find(query, {"_id": 0})

@@ -272,7 +272,12 @@ async def create_hub_specialist_agent(
     *,
     system_prompt: str,
     tools: list[Callable[..., Any]],
+    mcp_server_name: str | None = None,
     output_mode: OutputMode = "sse",
+    summary_trigger_tokens: int = 3000,
+    summary_keep_messages: int = 6,
+    timeout: int = 500,
+    mcp_tool_limit: int = 0,
 ) -> Callable:
     """
     创建 AI 中枢的「专家子 Agent」（供 hub 路由图并行分发）。
@@ -288,12 +293,14 @@ async def create_hub_specialist_agent(
         middleware=[
             SummarizationMiddleware(
                 model=create_llm(app_config),
-                trigger=("tokens", 3000),
-                keep=("messages", 6),
+                trigger=("tokens", summary_trigger_tokens),
+                keep=("messages", summary_keep_messages),
             ),
         ],
-        mcp_server_name=None,
+        mcp_server_name=mcp_server_name,
         output_mode=output_mode,
+        timeout=timeout,
+        mcp_tool_limit=mcp_tool_limit,
     )
 
 
@@ -314,13 +321,14 @@ async def create_assistant_agent(
     from ..tools.context_tools import CONTEXT_TOOLS
     from ..tools.analysis_tools import ANALYSIS_TOOLS
     from ..tools.read_tools import READ_TOOLS
+    from ..tools.artifact_tools import ARTIFACT_QUERY_TOOLS
 
     return create_agent_node(
         app_config=app_config,
         system_prompt=load_prompt("assistant/assistant"),
         builtin_tools=(
             SKILL_TOOLS + PERSONA_TOOLS + WORD_TOOLS
-            + CONTEXT_TOOLS + ANALYSIS_TOOLS + READ_TOOLS
+            + CONTEXT_TOOLS + ANALYSIS_TOOLS + READ_TOOLS + ARTIFACT_QUERY_TOOLS
         ),
         middleware=None,
         mcp_server_name=None,

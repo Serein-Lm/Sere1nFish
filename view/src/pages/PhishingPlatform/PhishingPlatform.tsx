@@ -4,7 +4,7 @@ import { Bubble, Sender, Welcome, ThoughtChain, Prompts } from '@ant-design/x'
 import type { BubbleListProps, SenderProps, PromptsProps } from '@ant-design/x'
 import type { GetRef } from 'antd'
 import XMarkdown from '@ant-design/x-markdown'
-import { Flex, Space, Button, Divider, Dropdown, message, List, Popconfirm, Spin, Empty, Tooltip, Tag } from 'antd'
+import { Flex, Space, Button, Divider, Dropdown, message, Popconfirm, Spin, Empty, Tooltip, Tag, Drawer, Badge, Collapse, Alert, Segmented, Input } from 'antd'
 import type { MenuProps } from 'antd'
 import { 
   RobotOutlined, 
@@ -31,6 +31,9 @@ import {
   ProjectOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  InboxOutlined,
+  LinkOutlined,
+  HistoryOutlined,
 } from '@ant-design/icons'
 import { 
   agentService, 
@@ -38,7 +41,14 @@ import {
   buildThoughtChainItems,
   parseEntityRefs,
   stripEntityRefs,
+  parseArtifactRefs,
+  stripArtifactRefs,
+  listArtifacts,
+  getArtifact,
+  getHubToolCatalog,
   type EntityRef,
+  type Artifact,
+  type HubToolCatalog,
   type ExecutionState,
   type StreamRequest,
 } from '../../services/agentService'
@@ -47,7 +57,6 @@ import {
   createConversation,
   getConversation,
   deleteConversation,
-  appendMessage,
   type Conversation,
 } from '../../services/agentService'
 import { downloadWithAuth } from '../../services/http'
@@ -56,6 +65,11 @@ import DataReferencePicker, { type DataReference } from './DataReferencePicker'
 import './PhishingPlatform.css'
 
 const Switch = Sender.Switch
+const isNarrowViewport = () => typeof window !== 'undefined'
+  && window.matchMedia('(max-width: 768px)').matches
+const AIHubInput = (props: React.ComponentProps<typeof Input.TextArea>) => (
+  <Input.TextArea {...props} id="ai-hub-query" name="ai_hub_query" aria-label="AI 中枢问题" />
+)
 
 interface Message {
   key: string
@@ -64,6 +78,7 @@ interface Message {
   executionState?: ExecutionState
   status?: 'loading' | 'updating' | 'success'
   expandedKeys?: string[]  // 每条消息独立的展开状态
+  artifacts?: Artifact[]
 }
 
 // Agent 配置信息
@@ -383,8 +398,16 @@ export default function PhishingPlatform() {
   const [convLoading, setConvLoading] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [dataRefs, setDataRefs] = useState<DataReference[]>([])
+  const [artifactRefs, setArtifactRefs] = useState<Artifact[]>([])
+  const [artifacts, setArtifacts] = useState<Artifact[]>([])
+  const [artifactsLoading, setArtifactsLoading] = useState(false)
+  const [artifactsOpen, setArtifactsOpen] = useState(false)
+  const [artifactScope, setArtifactScope] = useState<'conversation' | 'all'>('conversation')
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
+  const [toolCatalog, setToolCatalog] = useState<HubToolCatalog | null>(null)
+  const [toolCatalogLoading, setToolCatalogLoading] = useState(false)
   const [inputValue, setInputValue] = useState('')
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isNarrowViewport())
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatListRef = useRef<HTMLDivElement>(null)
   const scrollToTopRef = useRef(false)
@@ -437,6 +460,34 @@ export default function PhishingPlatform() {
     setSearchParams(next, { replace: true })
   }, [searchParams, setSearchParams])
 
+  // 钉钉 AI Card 等外部入口：登录后把指定产物加入引用并打开产物抽屉。
+  useEffect(() => {
+    const artifactId = searchParams.get('ref_artifact')
+    if (!artifactId) return
+    let cancelled = false
+    getArtifact(artifactId)
+      .then(artifact => {
+        if (cancelled) return
+        setArtifactRefs(prev => prev.some(item => item.artifact_id === artifact.artifact_id)
+          ? prev
+          : [...prev, artifact])
+        setArtifactScope('all')
+        setArtifactsOpen(true)
+        loadArtifactList(undefined, 'all')
+      })
+      .catch(error => {
+        if (!cancelled) message.error(`打开产物失败：${error instanceof Error ? error.message : '无权访问'}`)
+      })
+      .finally(() => {
+        if (cancelled) return
+        const next = new URLSearchParams(searchParams)
+        next.delete('ref_artifact')
+        setSearchParams(next, { replace: true })
+      })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, setSearchParams])
+
   // 加载会话列表
   const loadConversations = async () => {
     setConvLoading(true)
@@ -450,8 +501,51 @@ export default function PhishingPlatform() {
     }
   }
 
+  const loadArtifactList = async (
+    conversationId?: string | null,
+    scope: 'conversation' | 'all' = artifactScope,
+  ) => {
+    setArtifactsLoading(true)
+    try {
+      const res = await listArtifacts({
+        conversationId: scope === 'conversation' ? conversationId || undefined : undefined,
+        scope: scope === 'all' ? 'all' : 'mine',
+        limit: 100,
+      })
+      setArtifacts(res.items)
+    } catch (error) {
+      console.error('加载 AI 产物失败:', error)
+    } finally {
+      setArtifactsLoading(false)
+    }
+  }
+
+  const openCapabilities = async () => {
+    setCapabilitiesOpen(true)
+    if (toolCatalog) return
+    setToolCatalogLoading(true)
+    try {
+      setToolCatalog(await getHubToolCatalog())
+    } catch (error) {
+      console.error('加载 AI 工具目录失败:', error)
+      message.error('加载 AI 工具目录失败')
+    } finally {
+      setToolCatalogLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadConversations()
+    loadArtifactList()
+  }, [])
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 768px)')
+    const handleViewportChange = (event: MediaQueryListEvent) => {
+      if (event.matches) setSidebarCollapsed(true)
+    }
+    media.addEventListener('change', handleViewportChange)
+    return () => media.removeEventListener('change', handleViewportChange)
   }, [])
 
   // 支持通过 ?conv=<id> 直达并打开指定会话（可分享会话链接）
@@ -480,12 +574,16 @@ export default function PhishingPlatform() {
   // 新建会话（清空当前，延迟到首次发送再落库）
   const handleNewConversation = () => {
     if (isRequesting) return
+    if (isNarrowViewport()) setSidebarCollapsed(true)
     setActiveConversationId(null)
     setMessages([])
+    setArtifacts([])
+    setArtifactRefs([])
   }
 
   // 切换会话，加载历史消息
   const selectConversation = async (cid: string) => {
+    if (isNarrowViewport()) setSidebarCollapsed(true)
     if (cid === activeConversationId || isRequesting) return
     setActiveConversationId(cid)
     try {
@@ -500,8 +598,10 @@ export default function PhishingPlatform() {
           role: m.role,
           content: m.content,
           status: 'success' as const,
+          artifacts: Array.isArray(m.meta?.artifacts) ? m.meta.artifacts as Artifact[] : [],
         })),
       )
+      await loadArtifactList(cid)
     } catch (error) {
       console.error('加载会话失败:', error)
       message.error('加载会话失败')
@@ -516,6 +616,8 @@ export default function PhishingPlatform() {
       if (cid === activeConversationId) {
         setActiveConversationId(null)
         setMessages([])
+        setArtifacts([])
+        setArtifactRefs([])
       }
     } catch (error) {
       console.error('删除会话失败:', error)
@@ -524,13 +626,22 @@ export default function PhishingPlatform() {
   }
 
   // 下载产物（Word 等），走鉴权下载
-  const handleDownloadArtifact = async (url: string) => {
+  const handleDownloadArtifact = async (url: string, filename = 'document.docx') => {
     try {
-      await downloadWithAuth(url, 'document.docx')
+      await downloadWithAuth(url, filename)
     } catch (error) {
       console.error('下载产物失败:', error)
       message.error(`下载失败：${error instanceof Error ? error.message : '未知错误'}`)
     }
+  }
+
+  const handleReferenceArtifact = (artifact: Artifact) => {
+    setArtifactRefs(prev => prev.some(item => item.artifact_id === artifact.artifact_id)
+      ? prev
+      : [...prev, artifact])
+    setArtifactsOpen(false)
+    message.success(`已引用产物：${artifact.title}`)
+    setTimeout(() => senderRef.current?.focus?.(), 0)
   }
 
   // 可跳转引用点击：跳到对应实体的读取页，供中台快速读取信息
@@ -598,6 +709,15 @@ export default function PhishingPlatform() {
     return lines.join('\n')
   }
 
+  const buildArtifactPreamble = (refs: Artifact[]): string => {
+    if (!refs.length) return ''
+    return [
+      '【引用产物】用户引用了以下历史 AI 产物，请先调用 get_artifact_content 读取正文与来源：',
+      ...refs.map(item => `- ${item.title}（artifact_id=${item.artifact_id}，kind=${item.kind}）`),
+      '基于这些产物完成新需求；需要更新交付物时生成新的 Artifact，不要覆盖历史文件。',
+    ].join('\n')
+  }
+
   // 快捷提示 - 已移除
 
   // Agent 菜单项
@@ -644,7 +764,14 @@ export default function PhishingPlatform() {
 
 
   // SSE 流式响应 - 使用协议 v2
-  const streamResponse = async (userPrompt: string, messageKey: string, skill?: SenderProps['skill'], conversationId?: string) => {
+  const streamResponse = async (
+    userPrompt: string,
+    messageKey: string,
+    skill?: SenderProps['skill'],
+    conversationId?: string,
+    references: Array<Record<string, unknown>> = [],
+    displayQuery?: string,
+  ) => {
     const updateMessage = (updates: Partial<Message>) => {
       setMessages(prev => prev.map(msg =>
         msg.key === messageKey ? { ...msg, ...updates } : msg
@@ -664,7 +791,8 @@ export default function PhishingPlatform() {
     const request: StreamRequest = {
       workflow,
       query: userPrompt,
-      // 会话留存由前端 appendMessage 负责，避免与后端重复写入，这里不传 conversation_id
+      conversation_id: conversationId,
+      options: { references, display_query: displayQuery },
     }
 
     try {
@@ -687,7 +815,7 @@ export default function PhishingPlatform() {
           })
         },
 
-        onComplete: (state) => {
+        onComplete: async (state) => {
           const clonedState: ExecutionState = {
             nodes: new Map(state.nodes),
             rootPath: state.rootPath,
@@ -702,17 +830,14 @@ export default function PhishingPlatform() {
             status: 'success',
           })
           setIsRequesting(false)
-
-          // 留存最终回复
           if (conversationId) {
-            const sectionsText = (state.finalSections || [])
-              .map(s => (s.title ? `${s.title}\n` : '') + s.content)
-              .join('\n\n')
-            const finalText = sectionsText || state.finalContent || ''
-            if (finalText.trim()) {
-              appendMessage(conversationId, 'assistant', finalText, skill?.value as string)
-                .then(loadConversations)
-                .catch(err => console.error('留存回复失败:', err))
+            try {
+              const artifactResult = await listArtifacts({ conversationId, limit: 100 })
+              setArtifacts(artifactResult.items)
+              updateMessage({ artifacts: artifactResult.items })
+              await loadConversations()
+            } catch (error) {
+              console.error('刷新会话产物失败:', error)
             }
           }
         },
@@ -750,8 +875,13 @@ export default function PhishingPlatform() {
     if (!value.trim() || isRequesting) return
 
     const refsSnapshot = dataRefs
-    const refLine = refsSnapshot.length
-      ? `\n\n> 已引用：${refsSnapshot.map(r => r.label).join('、')}`
+    const artifactRefsSnapshot = artifactRefs
+    const visibleRefLabels = [
+      ...refsSnapshot.map(r => r.label),
+      ...artifactRefsSnapshot.map(r => r.title),
+    ]
+    const refLine = visibleRefLabels.length
+      ? `\n\n> 已引用：${visibleRefLabels.join('、')}`
       : ''
     const userMessage: Message = {
       key: `user-${Date.now()}`,
@@ -777,20 +907,33 @@ export default function PhishingPlatform() {
 
     // 组装给 agent 的查询：引用数据前缀（只声明读什么，不固定编排）+ 用户需求
     const preamble = buildReferencePreamble(refsSnapshot)
-    const agentQuery = preamble ? `${preamble}\n\n【需求】${value}` : value
+    const artifactPreamble = buildArtifactPreamble(artifactRefsSnapshot)
+    const contextPreamble = [preamble, artifactPreamble].filter(Boolean).join('\n\n')
+    const agentQuery = contextPreamble ? `${contextPreamble}\n\n【需求】${value}` : value
     // 发送后清空已引用数据，避免带入下一轮
     setDataRefs([])
+    setArtifactRefs([])
 
-    // 确保会话存在并留存用户消息
+    // 后端流式入口原子留存用户消息、AI 回复和本轮 Artifact 关联
     const conversationId = await ensureConversation()
-    if (conversationId) {
-      appendMessage(conversationId, 'user', userMessage.content, skill?.value as string)
-        .then(loadConversations)
-        .catch(err => console.error('留存用户消息失败:', err))
-    }
+    const persistedReferences: Array<Record<string, unknown>> = [
+      ...refsSnapshot.map(ref => ({ type: ref.type, id: ref.id, label: ref.label })),
+      ...artifactRefsSnapshot.map(item => ({
+        type: 'artifact',
+        id: item.artifact_id,
+        label: item.title,
+      })),
+    ]
 
     // 调用真实的 SSE 流式 API
-    await streamResponse(agentQuery, aiMessageKey, skill, conversationId)
+    await streamResponse(
+      agentQuery,
+      aiMessageKey,
+      skill,
+      conversationId,
+      persistedReferences,
+      userMessage.content,
+    )
   }
 
   const handleCancel = () => {
@@ -833,7 +976,33 @@ export default function PhishingPlatform() {
           msg.content || '',
           ...(msg.executionState?.finalSections?.map(s => s.content) || []),
         ].join('\n')
-        const artifactLinks = extractArtifactLinks(artifactText)
+        const fallbackLinks = extractArtifactLinks(artifactText)
+        const markerRefs = parseArtifactRefs(artifactText)
+        const structuredArtifacts = msg.artifacts || []
+        const messageArtifacts: Artifact[] = [
+          ...structuredArtifacts,
+          ...markerRefs
+            .filter(ref => !structuredArtifacts.some(item => item.artifact_id === ref.artifact_id))
+            .map(ref => artifacts.find(item => item.artifact_id === ref.artifact_id) || ({
+              artifact_id: ref.artifact_id,
+              kind: 'word',
+              title: ref.title,
+              filename: `${ref.artifact_id}.docx`,
+              size: 0,
+              download_url: `/api/v1/artifacts/${ref.artifact_id}/download`,
+            } as Artifact)),
+          ...fallbackLinks
+            .filter(link => !structuredArtifacts.some(item => item.artifact_id === link.id)
+              && !markerRefs.some(ref => ref.artifact_id === link.id))
+            .map(link => ({
+              artifact_id: link.id,
+              kind: 'word',
+              title: 'Word 文档',
+              filename: `${link.id}.docx`,
+              size: 0,
+              download_url: link.url,
+            })),
+        ]
 
         // 提取可跳转引用（person/finding/company），供中台快速跳转
         const entityRefs = parseEntityRefs(artifactText)
@@ -874,29 +1043,41 @@ export default function PhishingPlatform() {
                           {section.title}
                         </div>
                       )}
-                      <XMarkdown content={stripEntityRefs(section.content)} />
+                      <XMarkdown content={stripArtifactRefs(stripEntityRefs(section.content))} />
                     </div>
                   ))}
                 </Flex>
               ) : msg.content ? (
-                <XMarkdown content={stripEntityRefs(msg.content)} />
+                <XMarkdown content={stripArtifactRefs(stripEntityRefs(msg.content))} />
               ) : (
                 <div style={{ color: '#999' }}>等待回复...</div>
               )}
 
               {/* 产物下载入口（Word 等） */}
-              {artifactLinks.length > 0 && (
-                <Flex gap={8} wrap="wrap" style={{ marginTop: 12 }}>
-                  {artifactLinks.map(link => (
-                    <Button
-                      key={link.id}
-                      icon={<FileWordOutlined />}
-                      onClick={() => handleDownloadArtifact(link.url)}
-                    >
-                      下载 Word 文档
-                    </Button>
+              {messageArtifacts.length > 0 && (
+                <div className="message-artifact-list">
+                  {messageArtifacts.map(artifact => (
+                    <div key={artifact.artifact_id} className="message-artifact-item">
+                      <FileWordOutlined />
+                      <span className="message-artifact-title">{artifact.title}</span>
+                      <Tooltip title="在新问题中引用">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<LinkOutlined />}
+                          onClick={() => handleReferenceArtifact(artifact)}
+                        />
+                      </Tooltip>
+                      <Button
+                        size="small"
+                        icon={<FileWordOutlined />}
+                        onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
+                      >
+                        下载
+                      </Button>
+                    </div>
                   ))}
-                </Flex>
+                </div>
               )}
 
               {/* 可跳转引用（人物 / 发现 / 公司），点击跳到读取页 */}
@@ -932,6 +1113,14 @@ export default function PhishingPlatform() {
   return (
     <div className="phishing-platform fade-in">
       <div className="phishing-layout">
+        {!sidebarCollapsed && (
+          <button
+            type="button"
+            className="conversation-sidebar-backdrop"
+            aria-label="关闭对话历史"
+            onClick={() => setSidebarCollapsed(true)}
+          />
+        )}
         <aside className={`conversation-sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
           {sidebarCollapsed ? (
             <div
@@ -991,11 +1180,10 @@ export default function PhishingPlatform() {
                     style={{ marginTop: 40 }}
                   />
                 ) : (
-                  <List
-                    dataSource={conversations}
-                    split={false}
-                    renderItem={(conv) => (
+                  <div>
+                    {conversations.map(conv => (
                       <div
+                        key={conv.conversation_id}
                         className={`conversation-item${conv.conversation_id === activeConversationId ? ' active' : ''}`}
                         onClick={() => selectConversation(conv.conversation_id)}
                       >
@@ -1020,14 +1208,47 @@ export default function PhishingPlatform() {
                           />
                         </Popconfirm>
                       </div>
-                    )}
-                  />
+                    ))}
+                  </div>
                 )}
               </div>
             </>
           )}
         </aside>
         <div className="chat-container">
+        <div className="chat-toolbar">
+          <Tooltip title="对话历史">
+            <Button
+              className="mobile-history-button"
+              size="small"
+              icon={<HistoryOutlined />}
+              onClick={() => setSidebarCollapsed(false)}
+            />
+          </Tooltip>
+          <Space size={8}>
+            <Tooltip title="查看 Agent、Prompt、工具和查询接口审计">
+              <Button size="small" icon={<ApiOutlined />} onClick={openCapabilities}>
+                能力目录
+              </Button>
+            </Tooltip>
+            <Tooltip title={activeConversationId ? '查看当前会话产物' : '查看全部 AI 产物'}>
+              <Badge count={artifacts.length} size="small" overflowCount={99}>
+                <Button
+                  size="small"
+                  icon={<InboxOutlined />}
+                  onClick={() => {
+                    setArtifactsOpen(true)
+                    const nextScope = activeConversationId ? artifactScope : 'all'
+                    setArtifactScope(nextScope)
+                    loadArtifactList(activeConversationId, nextScope)
+                  }}
+                >
+                  AI 产物
+                </Button>
+              </Badge>
+            </Tooltip>
+          </Space>
+        </div>
         <div className="chat-list" ref={chatListRef}>
           {messages.length === 0 ? (
             <Flex vertical className="welcome-container slide-up" gap={24} align="center" justify="center">
@@ -1135,9 +1356,9 @@ export default function PhishingPlatform() {
         </div>
 
         <div className="sender-wrapper">
-          {dataRefs.length > 0 && (
+          {(dataRefs.length > 0 || artifactRefs.length > 0) && (
             <Flex gap={8} wrap="wrap" align="center" style={{ marginBottom: 8 }}>
-              <span style={{ color: '#999', fontSize: 12 }}>已引用数据：</span>
+              <span style={{ color: '#999', fontSize: 12 }}>已引用：</span>
               {dataRefs.map(ref => (
                 <Tag
                   key={`${ref.type}:${ref.id}`}
@@ -1150,10 +1371,25 @@ export default function PhishingPlatform() {
                   {ref.label}
                 </Tag>
               ))}
+              {artifactRefs.map(artifact => (
+                <Tag
+                  key={`artifact:${artifact.artifact_id}`}
+                  color="cyan"
+                  icon={<FileWordOutlined />}
+                  closable
+                  onClose={() => setArtifactRefs(prev => prev.filter(
+                    item => item.artifact_id !== artifact.artifact_id,
+                  ))}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  {artifact.title}
+                </Tag>
+              ))}
             </Flex>
           )}
           <Sender
             ref={senderRef}
+            components={{ input: AIHubInput }}
             value={inputValue}
             onChange={setInputValue}
             loading={isRequesting}
@@ -1218,7 +1454,9 @@ export default function PhishingPlatform() {
                   </Switch>
                 </Flex>
                 <Flex align="center">
-                  <Button type="text" style={IconStyle} icon={<ApiOutlined />} />
+                  <Tooltip title="能力目录">
+                    <Button type="text" style={IconStyle} icon={<ApiOutlined />} onClick={openCapabilities} />
+                  </Tooltip>
                   <Divider orientation="vertical" />
                   {actionNode}
                 </Flex>
@@ -1236,6 +1474,126 @@ export default function PhishingPlatform() {
         onPick={handlePickReference}
         selectedIds={dataRefs.map(r => r.id)}
       />
+      <Drawer
+        rootClassName="ai-hub-drawer"
+        title="AI 中枢能力目录"
+        open={capabilitiesOpen}
+        onClose={() => setCapabilitiesOpen(false)}
+        size={520}
+      >
+        {toolCatalogLoading ? (
+          <div className="artifact-drawer-loading"><Spin /></div>
+        ) : toolCatalog ? (
+          <Flex vertical gap={16}>
+            <Alert
+              type={toolCatalog.audit.complete ? 'success' : 'warning'}
+              showIcon
+              message={toolCatalog.audit.complete
+                ? `${toolCatalog.audit.registered_query_interfaces} 个查询接口已全部录入`
+                : `缺少 ${toolCatalog.audit.missing_query_interfaces.length} 个查询接口`}
+              description={toolCatalog.audit.missing_query_interfaces.join('、') || '数据、人设、Artifact 查询接口均已分配给对应 Agent。'}
+            />
+            {toolCatalog.mcp.map(server => (
+              <div className="capability-mcp-row" key={server.name}>
+                <GlobalOutlined />
+                <span>{server.name}</span>
+                <Tag color={server.configured ? 'success' : 'error'}>
+                  {server.configured ? '已配置' : '未配置'}
+                </Tag>
+                <span>{server.purpose}</span>
+              </div>
+            ))}
+            <Collapse
+              items={toolCatalog.agents.map(agent => ({
+                key: agent.name,
+                label: (
+                  <Flex justify="space-between" align="center">
+                    <span>{agent.name}</span>
+                    <Tag>{agent.tools.length} 个工具</Tag>
+                  </Flex>
+                ),
+                children: (
+                  <Flex vertical gap={10}>
+                    <div><Tag color="blue">Prompt</Tag>{agent.prompt}</div>
+                    {agent.mcp_servers?.map(server => (
+                      <Tag key={server} color="green">MCP: {server}</Tag>
+                    ))}
+                    <Flex gap={6} wrap="wrap">
+                      {agent.tools.map(tool => <Tag key={tool}>{tool}</Tag>)}
+                    </Flex>
+                  </Flex>
+                ),
+              }))}
+            />
+          </Flex>
+        ) : (
+          <Empty description="能力目录加载失败" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        )}
+      </Drawer>
+      <Drawer
+        rootClassName="ai-hub-drawer"
+        title="AI 产物"
+        open={artifactsOpen}
+        onClose={() => setArtifactsOpen(false)}
+        size={420}
+      >
+        <Segmented
+          block
+          className="artifact-scope-switch"
+          value={artifactScope}
+          options={[
+            { label: '当前会话', value: 'conversation', disabled: !activeConversationId },
+            { label: '全部渠道', value: 'all' },
+          ]}
+          onChange={value => {
+            const nextScope = value as 'conversation' | 'all'
+            setArtifactScope(nextScope)
+            loadArtifactList(activeConversationId, nextScope)
+          }}
+        />
+        {artifactsLoading ? (
+          <div className="artifact-drawer-loading"><Spin /></div>
+        ) : artifacts.length === 0 ? (
+          <Empty description="暂无 AI 产物" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : (
+          <div className="artifact-drawer-list">
+            {artifacts.map(artifact => (
+              <div className="artifact-drawer-item" key={artifact.artifact_id}>
+                <div className="artifact-file-icon"><FileWordOutlined /></div>
+                <div className="artifact-drawer-body">
+                  <div className="artifact-drawer-title">{artifact.title}</div>
+                  <Space className="artifact-drawer-description" size={6} wrap>
+                    <Tag color={artifact.kind === 'payload_word' ? 'blue' : 'default'}>
+                      {artifact.kind === 'payload_word' ? '载荷 Word' : 'Word'}
+                    </Tag>
+                    <span>{artifact.filename}</span>
+                    {artifact.meta?.sources?.length
+                      ? <span>{artifact.meta.sources.length} 个公网来源</span>
+                      : null}
+                    {artifact.meta?.channel === 'dingtalk_stream' ? <Tag color="cyan">钉钉</Tag> : null}
+                  </Space>
+                </div>
+                <Space size={4}>
+                  <Tooltip title="在新问题中引用" key="reference">
+                    <Button
+                      type="text"
+                      icon={<LinkOutlined />}
+                      onClick={() => handleReferenceArtifact(artifact)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="下载 Word" key="download">
+                    <Button
+                      type="text"
+                      icon={<FileWordOutlined />}
+                      onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
+                    />
+                  </Tooltip>
+                </Space>
+              </div>
+            ))}
+          </div>
+        )}
+      </Drawer>
     </div>
   )
 }

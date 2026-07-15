@@ -37,9 +37,15 @@ OutputMode = Literal["silent", "console", "sse"]
 
 # 默认超时（秒）
 DEFAULT_AGENT_TIMEOUT = 500
+DEFAULT_TOOL_TIMEOUT = 60
 
 
-def _wrap_tools_with_error_handling(tools: list) -> list:
+def _wrap_tools_with_error_handling(
+    tools: list,
+    *,
+    tool_timeout: int = DEFAULT_TOOL_TIMEOUT,
+    max_calls: int = 0,
+) -> list:
     """
     给每个工具包一层 try/except，异常时返回错误字符串而不是抛异常。
     连续错误超过阈值时抛异常中断 Agent（防止死循环）。
@@ -56,6 +62,7 @@ def _wrap_tools_with_error_handling(tools: list) -> list:
         "max_consecutive": 4,          # 通用错误 4 次中断（原 5 次）
         "container_error_consecutive": 0,
         "max_container_errors": 3,     # 容器级错误 3 次中断
+        "calls": 0,
     }
 
     # 容器级错误关键词（这类错误重试同一容器没意义）
@@ -74,15 +81,32 @@ def _wrap_tools_with_error_handling(tools: list) -> list:
         if original_coroutine:
             @functools.wraps(original_coroutine)
             async def safe_coroutine(*args, _orig=original_coroutine, _name=tool.name, _art=is_artifact, _es=error_state, **kwargs):
+                _es["calls"] += 1
+                if max_calls > 0 and _es["calls"] > max_calls:
+                    message = (
+                        f"MCP 工具调用预算已用完（最多 {max_calls} 次）。"
+                        "请停止调用 MCP，使用已获得的信息并调用内置交付工具完成任务。"
+                    )
+                    return (message, "") if _art else message
                 try:
-                    result = await _orig(*args, **kwargs)
+                    call = _orig(*args, **kwargs)
+                    result = (
+                        await asyncio.wait_for(call, timeout=tool_timeout)
+                        if tool_timeout > 0
+                        else await call
+                    )
                     _es["consecutive"] = 0  # 成功则重置
                     _es["container_error_consecutive"] = 0
                     return result
                 except Exception as e:
                     _es["consecutive"] += 1
                     err_str = str(e)
-                    err_msg = f"Tool '{_name}' error: {type(e).__name__}: {e}"
+                    detail = (
+                        f"调用超过 {tool_timeout}s"
+                        if isinstance(e, asyncio.TimeoutError)
+                        else str(e)
+                    )
+                    err_msg = f"Tool '{_name}' error: {type(e).__name__}: {detail}"
                     logger.debug(f"[tool-wrapper] {err_msg} (连续错误: {_es['consecutive']})")
 
                     # 容器级错误：更快中断
@@ -108,6 +132,13 @@ def _wrap_tools_with_error_handling(tools: list) -> list:
         elif original_func:
             @functools.wraps(original_func)
             def safe_func(*args, _orig=original_func, _name=tool.name, _art=is_artifact, _es=error_state, **kwargs):
+                _es["calls"] += 1
+                if max_calls > 0 and _es["calls"] > max_calls:
+                    message = (
+                        f"MCP 工具调用预算已用完（最多 {max_calls} 次）。"
+                        "请停止调用 MCP，使用已获得的信息并调用内置交付工具完成任务。"
+                    )
+                    return (message, "") if _art else message
                 try:
                     result = _orig(*args, **kwargs)
                     _es["consecutive"] = 0
@@ -193,6 +224,7 @@ def create_agent_node(
     output_mode: OutputMode = "silent",
     streaming: bool = True,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
+    mcp_tool_limit: int = 0,
 ) -> Callable[[MessagesState], dict[str, Any] | AsyncGenerator[dict[str, Any], None]]:
     """
     创建 Agent 节点函数。
@@ -228,8 +260,7 @@ def create_agent_node(
         mcp_connections = build_mcp_connections(app_config, server_names=mcp_server_name)
 
     if output_mode == "sse":
-        # SSE 模式：返回异步生成器
-        async def run_agent_sse(state: MessagesState) -> AsyncGenerator[dict[str, Any], None]:
+        async def _stream_once(state: MessagesState) -> AsyncGenerator[dict[str, Any], None]:
             all_tools = list(base_tools)
 
             if mcp_connections and mcp_server_name:
@@ -239,7 +270,9 @@ def create_agent_node(
                 if transport == "stdio":
                     async with client.session(mcp_server_name) as session:
                         mcp_tools = await load_mcp_tools(session)
-                        mcp_tools = _wrap_tools_with_error_handling(mcp_tools)
+                        mcp_tools = _wrap_tools_with_error_handling(
+                            mcp_tools, max_calls=mcp_tool_limit
+                        )
                         all_tools.extend(mcp_tools)
                         agent = create_agent(
                             model=llm,
@@ -253,7 +286,9 @@ def create_agent_node(
                         return
                 else:
                     mcp_tools = await client.get_tools()
-                    mcp_tools = _wrap_tools_with_error_handling(mcp_tools)
+                    mcp_tools = _wrap_tools_with_error_handling(
+                        mcp_tools, max_calls=mcp_tool_limit
+                    )
                     all_tools.extend(mcp_tools)
 
             agent = create_agent(
@@ -265,6 +300,19 @@ def create_agent_node(
             
             async for event in process_agent_stream_sse(agent, state["messages"]):
                 yield event
+
+        # SSE 模式同样执行统一超时，断开 MCP session 并释放浏览器资源。
+        async def run_agent_sse(state: MessagesState) -> AsyncGenerator[dict[str, Any], None]:
+            try:
+                if timeout > 0:
+                    async with asyncio.timeout(timeout):
+                        async for event in _stream_once(state):
+                            yield event
+                else:
+                    async for event in _stream_once(state):
+                        yield event
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(f"Agent 执行超时（{timeout}s）") from exc
 
         return run_agent_sse
     
@@ -298,12 +346,16 @@ def create_agent_node(
                     if transport == "stdio":
                         async with client.session(mcp_server_name) as session:
                             mcp_tools = await load_mcp_tools(session)
-                            mcp_tools = _wrap_tools_with_error_handling(mcp_tools)
+                            mcp_tools = _wrap_tools_with_error_handling(
+                                mcp_tools, max_calls=mcp_tool_limit
+                            )
                             all_tools.extend(mcp_tools)
                             return await _execute(all_tools)
                     else:
                         mcp_tools = await client.get_tools()
-                        mcp_tools = _wrap_tools_with_error_handling(mcp_tools)
+                        mcp_tools = _wrap_tools_with_error_handling(
+                            mcp_tools, max_calls=mcp_tool_limit
+                        )
                         all_tools.extend(mcp_tools)
 
                 return await _execute(all_tools)

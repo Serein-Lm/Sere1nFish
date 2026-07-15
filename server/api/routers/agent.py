@@ -81,12 +81,24 @@ async def get_workflows() -> dict[str, list[WorkflowInfo]]:
     return {"workflows": workflows}
 
 
+@router.get("/tools")
+async def get_tools() -> dict[str, Any]:
+    """返回 AI 中枢工具分配与查询接口完整性审计。"""
+    from Sere1nGraph.graph.tools.catalog import get_hub_tool_catalog
+
+    app_config = await get_runtime_app_config()
+    chrome_configured = "chrome-devtools" in (app_config.mcp_servers or {})
+    return get_hub_tool_catalog(chrome_configured=chrome_configured)
+
+
 def _extract_final_text(event: dict[str, Any], sections: dict[str, str]) -> None:
     """从 SSE 事件中累积最终回复文本（按 section 归并）。"""
     if event.get("event") != "final":
         return
     data = event.get("data") or {}
     section = str(data.get("section") or "_default")
+    if section == "summary":
+        return
     content = data.get("content")
     if content:
         sections[section] = str(content)
@@ -117,6 +129,8 @@ async def stream(
 
     conversation_id = (request.conversation_id or "").strip()
     owner = getattr(current_user, "username", "") or ""
+    request_options = request.options or {}
+    display_query = str(request_options.get("display_query") or request.query)
 
     # 会话留存：先落库 user query（会话存在且属于当前用户才留存）
     if conversation_id:
@@ -126,21 +140,24 @@ async def stream(
             db,
             conversation_id=conversation_id,
             role="user",
-            content=request.query,
+            content=display_query,
             workflow=request.workflow,
         )
         # 首条消息用 query 作为会话标题
         if not conv.get("message_count") and (not conv.get("title") or conv.get("title") == "新会话"):
-            await ai_hub_dao.rename_conversation(db, conversation_id, request.query[:40])
+            await ai_hub_dao.rename_conversation(db, conversation_id, display_query[:40])
 
     async def event_generator():
         """生成 SSE 事件流，并在结束后落库最终回复。"""
         from core.observability import observation_context
+        from api.services.artifact_context import artifact_context
 
         sections: dict[str, str] = {}
-        opts = request.options or {}
+        opts = request_options
         project_id = str(opts.get("project_id") or "").strip()
+        references = opts.get("references") if isinstance(opts.get("references"), list) else []
         attribution_id = conversation_id or ""
+        artifact_run = None
         try:
             with observation_context(
                 project_id=project_id,
@@ -149,12 +166,19 @@ async def stream(
                 phase=request.workflow,
                 agent=request.workflow,
                 task_type=request.workflow,
-            ):
+            ), artifact_context(
+                owner=owner,
+                is_admin=bool(getattr(current_user, "is_admin", False)),
+                conversation_id=conversation_id,
+                project_id=project_id,
+                channel="web",
+                references=references,
+            ) as artifact_run:
                 async for event in execute_stream(
                     workflow=request.workflow,
                     query=request.query,
                     app_config=app_config,
-                    options=request.options
+                    options=request.options,
                 ):
                     _extract_final_text(event, sections)
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -178,6 +202,10 @@ async def stream(
                             role="assistant",
                             content=final_text,
                             workflow=request.workflow,
+                            meta={
+                                "artifacts": list(artifact_run.created) if artifact_run else [],
+                                "references": references,
+                            },
                         )
                     except Exception:
                         pass
@@ -280,4 +308,3 @@ async def append_message(
     ):
         await ai_hub_dao.rename_conversation(db, conversation_id, req.content[:40])
     return doc
-

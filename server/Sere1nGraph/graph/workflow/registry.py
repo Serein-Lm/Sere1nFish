@@ -51,7 +51,7 @@ GRAPH_REGISTRY: dict[str, dict[str, Any]] = {
         "builder": "build_hub_graph",
         "displayName": "🧠 AI 中枢",
         "icon": "robot",
-        "description": "综合个人助手（路由模式）：分类分发到数据/人设/话术专家子 Agent 并汇总，上下文有界、无固定编排",
+        "description": "综合个人助手：分发到数据、人设、内容和载荷专家；载荷专家支持公网检索与 Word 交付",
         "initial_state": {
             "query": "",
             "classifications": [],

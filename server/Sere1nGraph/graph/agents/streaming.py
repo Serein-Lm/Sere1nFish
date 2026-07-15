@@ -239,6 +239,21 @@ async def process_agent_stream_api(
 from typing import AsyncGenerator
 
 
+def _message_text(content: Any) -> str:
+    """将 LangChain 文本内容块归一化为字符串。"""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and item.get("text"):
+            parts.append(str(item["text"]))
+    return "".join(parts)
+
+
 async def process_agent_stream_sse(
     agent: Any,
     messages: list[Any],
@@ -257,6 +272,7 @@ async def process_agent_stream_sse(
     - tool_start: {"type": "tool_start", "tool_name": "..."}
     - tool_end: {"type": "tool_end", "tool_name": "..."}
     - content: {"type": "content", "data": "..."}
+    - result: {"type": "result", "data": "..."}（最后一条无工具调用的模型回复）
     - done: {"type": "done"}
     - error: {"type": "error", "message": "..."}
     """
@@ -292,6 +308,17 @@ async def process_agent_stream_sse(
                         continue
                     if isinstance(state, dict) and "messages" in state:
                         for msg in state["messages"]:
+                            # token 流用于折叠执行过程；只有 model 节点最后一条
+                            # 无工具调用的回复才是面向用户和会话留存的结果。
+                            if (
+                                node_name == "model"
+                                and isinstance(msg, AIMessage)
+                                and not getattr(msg, "tool_calls", None)
+                            ):
+                                final_text = _message_text(msg.content).strip()
+                                if final_text:
+                                    yield {"type": "result", "data": final_text}
+
                             if isinstance(msg, ToolMessage):
                                 tid = getattr(msg, 'tool_call_id', None)
                                 name = pending_tool_calls.pop(tid, None)

@@ -18,8 +18,22 @@ from . import _refs
 from .builtin import _run_coro_sync
 
 
-def _persist_artifact(result: dict[str, Any]) -> str:
-    """登记产物元信息并返回鉴权下载链接。"""
+def _persist_artifact(
+    result: dict[str, Any],
+    *,
+    kind: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """登记产物元信息，并写入当前请求的用户/会话上下文。"""
+
+    from api.services.artifact_context import (
+        current_artifact_meta,
+        get_artifact_context,
+        record_created_artifact,
+    )
+
+    context = get_artifact_context()
+    artifact_meta = {**current_artifact_meta(), **(meta or {})}
 
     async def _run() -> dict[str, Any]:
         from api.dao import artifacts as artifacts_dao
@@ -28,22 +42,47 @@ def _persist_artifact(result: dict[str, Any]) -> str:
         return await artifacts_dao.create_artifact(
             get_db(),
             artifact_id=result["artifact_id"],
-            kind=result["kind"],
+            kind=kind or result["kind"],
             title=result["title"],
             filename=result["filename"],
             file_path=result["file_path"],
             size=result.get("size", 0),
+            owner=context.owner if context else "",
+            meta=artifact_meta,
         )
 
     doc = _run_coro_sync(_run())
-    return doc.get("download_url", f"/api/v1/artifacts/{result['artifact_id']}/download")
+    record_created_artifact(
+        {
+            "artifact_id": doc["artifact_id"],
+            "kind": doc.get("kind", "word"),
+            "title": doc.get("title", ""),
+            "filename": doc.get("filename", ""),
+            "size": doc.get("size", 0),
+            "download_url": doc.get("download_url", ""),
+        }
+    )
+    return doc
+
+
+def _artifact_response(doc: dict[str, Any]) -> str:
+    artifact_id = str(doc.get("artifact_id") or "")
+    title = str(doc.get("title") or "Word 文档")
+    filename = str(doc.get("filename") or f"{artifact_id}.docx")
+    url = str(doc.get("download_url") or f"/api/v1/artifacts/{artifact_id}/download")
+    return (
+        f"已生成 Word 文档《{title}》。\n"
+        f"文件名：{filename}\n"
+        f"产物引用：[[artifact:{artifact_id}|{title}]]\n"
+        f"下载链接：{url}"
+    )
 
 
 @tool(
     "generate_word_document",
     description=(
         "将整理好的文本内容生成为可下载的 Word（.docx）文档，返回下载链接。"
-        "适用于把报告、话术包、人物背景、攻击方案等任意内容导出为 Word 交给用户下载。"
+        "适用于把报告、话术包、人物背景、授权演练方案等任意内容导出为 Word 交给用户下载。"
         "参数：title（文档标题，必填）；content（Markdown 风格正文，支持 # 标题、- 列表）；"
         "sections（可选，结构化段落的 JSON 字符串，形如 "
         '[{"heading":"章节名","body":"正文"}]）。content 与 sections 至少提供其一。'
@@ -85,15 +124,73 @@ def generate_word_document(title: str, content: str = "", sections: str = "") ->
         return f"生成 Word 文档失败：{exc}"
 
     try:
-        url = _persist_artifact(result)
+        doc = _persist_artifact(
+            result,
+            meta={
+                "content": (content or "")[:200_000],
+                "sections": parsed_sections or [],
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         return f"Word 文档已生成但登记失败：{exc}"
 
-    return (
-        f"已生成 Word 文档《{result['title']}》。\n"
-        f"文件名：{result['filename']}\n"
-        f"下载链接：{url}"
-    )
+    return _artifact_response(doc)
+
+
+@tool(
+    "generate_payload_word",
+    description=(
+        "将已完成公网检索、平台数据查询和来源核验的内部载荷方案整理为独立 Word 产物。"
+        "参数：title（标题）、content（完整 Markdown 正文）、sources（来源 JSON 数组字符串，"
+        "每项可含 title/url/summary）、references（平台实体引用 JSON 数组字符串）。"
+        "仅用于授权的研究、演练和内容交付，不生成可执行恶意代码。"
+    ),
+)
+def generate_payload_word(
+    title: str,
+    content: str,
+    sources: str = "[]",
+    references: str = "[]",
+) -> str:
+    """生成带来源和引用元数据的载荷 Word 产物。"""
+    if not (title or "").strip():
+        return "生成失败：title（文档标题）不能为空。"
+    if not (content or "").strip():
+        return "生成失败：content（文档正文）不能为空。"
+
+    def _parse_list(raw: str, field_name: str) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(raw or "[]")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} 需为合法 JSON 数组字符串") from exc
+        if not isinstance(value, list):
+            raise ValueError(f"{field_name} 需为 JSON 数组")
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    try:
+        source_items = _parse_list(sources, "sources")
+        reference_items = _parse_list(references, "references")
+    except ValueError as exc:
+        return f"生成失败：{exc}。"
+
+    try:
+        from api.services import artifact_word
+
+        result = artifact_word.generate_docx(title=title, content=content)
+        doc = _persist_artifact(
+            result,
+            kind="payload_word",
+            meta={
+                "content": content[:200_000],
+                "sources": source_items[:100],
+                "references": reference_items[:100],
+                "agent": "payload",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"生成载荷 Word 失败：{exc}"
+
+    return _artifact_response(doc)
 
 
 def _persona_sections(bundle: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
@@ -202,19 +299,25 @@ def generate_persona_word(person_id: str) -> str:
         return f"生成人物背景 Word 失败：{exc}"
 
     try:
-        url = _persist_artifact(result)
+        doc = _persist_artifact(
+            result,
+            meta={
+                "content": "\n\n".join(
+                    f"# {section.get('heading', '')}\n{section.get('body', '')}"
+                    for section in sections
+                )[:200_000],
+                "person_id": person_id,
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         return f"人物背景 Word 已生成但登记失败：{exc}"
 
     name = (bundle.get("person") or {}).get("name") or person_id
     ref = _refs.person_ref(person_id, name)
     tail = f"\n关联人物：{ref}" if ref else ""
-    return (
-        f"已生成人物背景报告《{result['title']}》。\n"
-        f"文件名：{result['filename']}\n"
-        f"下载链接：{url}{tail}"
-    )
+    return f"{_artifact_response(doc)}{tail}"
 
 
 # 供 Agent 复用的产物工具集
 WORD_TOOLS = [generate_word_document, generate_persona_word]
+PAYLOAD_WORD_TOOLS = [generate_payload_word]

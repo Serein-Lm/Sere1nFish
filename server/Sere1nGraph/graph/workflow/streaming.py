@@ -29,6 +29,7 @@ AGENT_DISPLAY_NAMES = {
     "data": "📊 数据分析",
     "persona": "🎭 人设与联系人",
     "content": "✍️ 话术与产物",
+    "payload": "📦 载荷研究与交付",
 }
 
 TOOL_DISPLAY_NAMES = {
@@ -40,11 +41,31 @@ TOOL_DISPLAY_NAMES = {
     "xhs_search": "小红书搜索",
     "tianyancha_get_bids": "查询招投标信息",
     "tianyancha_get_domain": "查询企业域名",
+    "generate_payload_word": "生成载荷 Word",
+    "get_artifact_content": "读取历史产物",
+    "list_my_artifacts": "查询历史产物",
 }
 
 
 def _ts() -> str:
     return datetime.now().isoformat()
+
+
+def _exception_message(exc: BaseException) -> str:
+    """提取 ExceptionGroup 的叶子异常，避免只返回 TaskGroup 包装信息。"""
+    leaves: list[str] = []
+
+    def _collect(current: BaseException) -> None:
+        children = getattr(current, "exceptions", None)
+        if children:
+            for child in children:
+                _collect(child)
+            return
+        message = str(current).strip() or type(current).__name__
+        leaves.append(f"{type(current).__name__}: {message}")
+
+    _collect(exc)
+    return "; ".join(dict.fromkeys(leaves))[:800]
 
 
 # ============ 基于 ContextVar 的事件队列（用户隔离）============
@@ -96,7 +117,8 @@ async def run_agent_with_sse(source: str, agent: Any, query: str) -> str:
         "timestamp": _ts()
     })
     
-    content = ""
+    streamed_content = ""
+    final_content = ""
     error_message = None
     
     try:
@@ -119,13 +141,15 @@ async def run_agent_with_sse(source: str, agent: Any, query: str) -> str:
                     "timestamp": _ts()
                 })
             elif event_type == "content":
-                content += event.get("data", "")
+                streamed_content += event.get("data", "")
                 await emit_event({
                     "type": "agent_content",
                     "agent_name": source,
                     "data": event.get("data", ""),
                     "timestamp": _ts()
                 })
+            elif event_type == "result":
+                final_content = str(event.get("data") or "").strip()
             elif event_type == "error":
                 error_message = event.get("message", "未知错误")
                 await emit_event({
@@ -141,7 +165,7 @@ async def run_agent_with_sse(source: str, agent: Any, query: str) -> str:
     except Exception as e:
         import traceback
         traceback.print_exc()
-        error_message = str(e)
+        error_message = _exception_message(e)
         await emit_event({
             "type": "agent_error",
             "agent_name": source,
@@ -159,4 +183,6 @@ async def run_agent_with_sse(source: str, agent: Any, query: str) -> str:
             "timestamp": _ts()
         })
     
-    return content or (f"执行出错: {error_message}" if error_message else "未获取到内容")
+    return final_content or streamed_content or (
+        f"执行出错: {error_message}" if error_message else "未获取到内容"
+    )

@@ -215,6 +215,18 @@ export interface DingTalkBot {
   keyword: string
   enabled: boolean
   has_token: boolean
+  has_outgoing_secret?: boolean
+  stream_enabled: boolean
+  client_id?: string
+  client_secret?: string
+  has_client_secret: boolean
+  ai_card_streaming: boolean
+  public_base_url?: string
+  reconnect_seconds: number
+  stream_state: string
+  stream_connected: boolean
+  stream_last_error?: string
+  stream_last_connected_at?: string
 }
 
 export interface DingTalkBotConfig {
@@ -222,6 +234,22 @@ export interface DingTalkBotConfig {
   secret?: string
   keyword?: string
   enabled?: boolean
+  outgoing_app_secret?: string
+  stream_enabled?: boolean
+  client_id?: string
+  client_secret?: string
+  ai_card_streaming?: boolean
+  public_base_url?: string
+  reconnect_seconds?: number
+}
+
+export interface DingTalkStreamStatus {
+  bot_name: string
+  state: string
+  connected: boolean
+  last_error?: string
+  last_connected_at?: string
+  last_message_at?: string
 }
 
 export async function listDingTalkBots(): Promise<{ bots: DingTalkBot[] }> {
@@ -252,6 +280,13 @@ export async function testDingTalkBot(botName: string): Promise<{ ok: boolean; m
   return apiFetch<{ ok: boolean; message: string }>(
     `/v1/config/dingtalk/${encodeURIComponent(botName)}/test`,
     { method: 'POST' }
+  )
+}
+
+export async function getDingTalkStreamStatus(botName: string): Promise<DingTalkStreamStatus> {
+  return apiFetch<DingTalkStreamStatus>(
+    `/v1/config/dingtalk/${encodeURIComponent(botName)}/status`,
+    { method: 'GET' },
   )
 }
 

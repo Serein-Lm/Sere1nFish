@@ -268,6 +268,9 @@ export interface StreamRequest {
     selectedAgents?: string[]
     timeout?: number
     maxConcurrency?: number
+    project_id?: string
+    references?: Array<Record<string, unknown>>
+    display_query?: string
   }
   context?: {
     conversationId?: string
@@ -421,6 +424,42 @@ export interface ConversationMessage {
   created_at?: string
 }
 
+export interface Artifact {
+  artifact_id: string
+  kind: string
+  title: string
+  filename: string
+  size: number
+  download_url: string
+  owner?: string
+  meta?: {
+    conversation_id?: string
+    project_id?: string
+    channel?: string
+    sources?: Array<{ title?: string; url?: string; summary?: string }>
+    references?: Array<Record<string, unknown>>
+  }
+  created_at?: string
+  updated_at?: string
+}
+
+export interface HubToolCatalog {
+  agents: Array<{
+    name: string
+    prompt: string
+    tools: string[]
+    mcp_servers?: string[]
+  }>
+  tools: Array<{ name: string; description: string; kind: string; agents: string[] }>
+  mcp: Array<{ name: string; purpose: string; configured: boolean; agents: string[] }>
+  audit: {
+    query_interfaces: number
+    registered_query_interfaces: number
+    missing_query_interfaces: string[]
+    complete: boolean
+  }
+}
+
 export const listConversations = (limit = 50) =>
   apiFetch<{ items: Conversation[]; total: number }>(`/v1/agent/conversations?limit=${limit}`)
 
@@ -451,14 +490,36 @@ export const appendMessage = (
   role: 'user' | 'assistant',
   content: string,
   workflow = '',
+  meta: Record<string, unknown> = {},
 ) =>
   apiFetch<ConversationMessage>(
     `/v1/agent/conversations/${encodeURIComponent(conversationId)}/messages`,
     {
       method: 'POST',
-      body: JSON.stringify({ role, content, workflow }),
+      body: JSON.stringify({ role, content, workflow, meta }),
     },
   )
+
+export const listArtifacts = (filters: {
+  conversationId?: string
+  projectId?: string
+  kind?: string
+  scope?: 'mine' | 'all'
+  limit?: number
+} = {}) => {
+  const params = new URLSearchParams()
+  if (filters.conversationId) params.set('conversation_id', filters.conversationId)
+  if (filters.projectId) params.set('project_id', filters.projectId)
+  if (filters.kind) params.set('kind', filters.kind)
+  if (filters.scope) params.set('scope', filters.scope)
+  params.set('limit', String(filters.limit || 50))
+  return apiFetch<{ items: Artifact[]; total: number }>(`/v1/artifacts?${params.toString()}`)
+}
+
+export const getArtifact = (artifactId: string) =>
+  apiFetch<Artifact>(`/v1/artifacts/${encodeURIComponent(artifactId)}`)
+
+export const getHubToolCatalog = () => apiFetch<HubToolCatalog>('/v1/agent/tools')
 
 // ============================================
 // 可跳转引用解析（AI 输出内嵌 [[ref:type:id|label]]）
@@ -498,6 +559,27 @@ export function stripEntityRefs(text: string): string {
   return text.replace(REF_PATTERN, (_all, _type, _id, label) => (label || '').trim())
 }
 
+const ARTIFACT_REF_PATTERN = /\[\[artifact:(art_[A-Za-z0-9]+)\|([^\]]*)\]\]/g
+
+export function parseArtifactRefs(text: string): Array<{ artifact_id: string; title: string }> {
+  if (!text) return []
+  const seen = new Set<string>()
+  const refs: Array<{ artifact_id: string; title: string }> = []
+  for (const match of text.matchAll(ARTIFACT_REF_PATTERN)) {
+    const artifactId = (match[1] || '').trim()
+    if (artifactId && !seen.has(artifactId)) {
+      seen.add(artifactId)
+      refs.push({ artifact_id: artifactId, title: (match[2] || '').trim() || artifactId })
+    }
+  }
+  return refs
+}
+
+export function stripArtifactRefs(text: string): string {
+  if (!text) return ''
+  return text.replace(ARTIFACT_REF_PATTERN, '')
+}
+
 // ============================================
 // 图标配置
 // ============================================
@@ -529,6 +611,7 @@ const NODE_NAME_ICONS: Record<string, React.ReactNode> = {
   data: React.createElement(DatabaseOutlined, { style: { color: '#1890ff' } }),
   persona: React.createElement(RobotOutlined, { style: { color: '#eb2f96' } }),
   content: React.createElement(FileTextOutlined, { style: { color: '#13c2c2' } }),
+  payload: React.createElement(GlobalOutlined, { style: { color: '#1677ff' } }),
 
   // Phases
   classify: React.createElement(SearchOutlined, { style: { color: '#1890ff' } }),
