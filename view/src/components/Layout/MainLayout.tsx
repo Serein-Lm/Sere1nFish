@@ -80,6 +80,11 @@ export default function MainLayout() {
         label: '仪表盘',
       },
       {
+        key: '/projects',
+        icon: <FileTextOutlined />,
+        label: '项目管理',
+      },
+      {
         key: '/phishing',
         icon: <ThunderboltOutlined />,
         label: '钓鱼中台',
@@ -108,11 +113,6 @@ export default function MainLayout() {
         key: '/persona-library',
         icon: <TeamOutlined />,
         label: '人设库',
-      },
-      {
-        key: '/projects',
-        icon: <FileTextOutlined />,
-        label: '项目管理',
       },
       {
         key: '/ai-tools',

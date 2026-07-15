@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import findings as findings_dao
@@ -41,6 +42,10 @@ async def resolve_project_dashboard(
         {"$group": {"_id": "$status", "count": {"$sum": 1}}},
     ]
     pid = {"project_id": project_id}
+    try:
+        web_pid = {"project_id": {"$in": [project_id, ObjectId(project_id)]}}
+    except Exception:
+        web_pid = pid
 
     (
         findings_summary,
@@ -61,7 +66,7 @@ async def resolve_project_dashboard(
         db[TASKS_COLLECTION].aggregate(tasks_agg).to_list(100),
         db[XHS_NOTES_COLLECTION].count_documents(pid),
         db[XHS_PROFILES_COLLECTION].count_documents(pid),
-        db[WEB_TAGS_COLLECTION].count_documents(pid),
+        db[WEB_TAGS_COLLECTION].count_documents(web_pid),
         db[DOUYIN_SEARCH_RESULTS_COLLECTION].count_documents(pid),
         db[DOUYIN_TAGGED_RESULTS_COLLECTION].count_documents(pid),
         db[DOUYIN_PROFILES_COLLECTION].count_documents(pid),
