@@ -32,7 +32,7 @@
 | `api_key` | 百炼 API Key，必填，加密保存 |
 | `workspace_id` | 百炼业务空间 ID；新版协议推荐使用 Workspace 专属域名 |
 | `region` | `beijing`、`singapore`、`frankfurt`，也支持 `cn-beijing`、`ap-southeast-1` 等别名 |
-| `base_url` | 可选，覆盖 Workspace API 根域名；会自动补 `/api/v1` |
+| `base_url` | 可选，覆盖 Workspace API 根域名；支持完整 URL 或裸域名，并自动补 `https://` 和 `/api/v1` |
 | `legacy_base_url` | 可选，覆盖旧 DashScope API 根域名；北京默认 `https://dashscope.aliyuncs.com/api/v1` |
 | `qwen_image_edit_model` | Qwen 图片指令编辑模型 |
 | `wanx_image_edit_model` | 万相异步图片编辑模型 |

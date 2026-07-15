@@ -71,11 +71,33 @@ def _normalize_region(region: str | None) -> str:
     return _REGION_ALIASES.get(value, value or "beijing")
 
 
-def _api_v1_base(url: str) -> str:
+def normalize_bailian_http_base(url: str) -> str:
+    """Normalize a full URL or a pasted Workspace hostname to `/api/v1`."""
     base = str(url).strip().rstrip("/")
+    if "://" not in base:
+        base = f"https://{base}"
+    elif not base.lower().startswith(("http://", "https://")):
+        raise BailianAPIError("Bailian HTTP endpoint must use http or https", status_code=400)
     if base.endswith("/api/v1"):
         return base
     return f"{base}/api/v1"
+
+
+def normalize_bailian_ws_base(url: str) -> str:
+    """Normalize a full URL or hostname to the DashScope WebSocket endpoint."""
+    base = str(url).strip().rstrip("/")
+    lower = base.lower()
+    if "://" not in base:
+        base = f"wss://{base}"
+    elif lower.startswith("https://"):
+        base = f"wss://{base[8:]}"
+    elif lower.startswith("http://"):
+        base = f"ws://{base[7:]}"
+    elif not lower.startswith(("ws://", "wss://")):
+        raise BailianAPIError("Bailian WebSocket endpoint must use ws or wss", status_code=400)
+    if base.endswith("/api-ws/v1/inference"):
+        return base
+    return f"{base}/api-ws/v1/inference"
 
 
 def _extract_task(output: dict[str, Any]) -> dict[str, Any]:
@@ -141,7 +163,7 @@ class BailianAIGCClient:
 
     def workspace_base_url(self) -> str:
         if self.config.base_url:
-            return _api_v1_base(self.config.base_url)
+            return normalize_bailian_http_base(self.config.base_url)
         domain = _REGION_DOMAINS.get(self.config.region)
         if not domain:
             raise BailianAPIError(f"Unsupported Bailian workspace region: {self.config.region}", status_code=400)
@@ -151,7 +173,7 @@ class BailianAIGCClient:
 
     def legacy_base_url(self) -> str:
         if self.config.legacy_base_url:
-            return _api_v1_base(self.config.legacy_base_url)
+            return normalize_bailian_http_base(self.config.legacy_base_url)
         if self.config.region in _LEGACY_BASE_URLS:
             return _LEGACY_BASE_URLS[self.config.region]
         return self.workspace_base_url()

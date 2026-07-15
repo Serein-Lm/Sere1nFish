@@ -9,7 +9,11 @@ import pytest
 from fastapi import HTTPException
 
 
-def _make_client(region: str = "beijing", workspace_id: str | None = "ws1"):
+def _make_client(
+    region: str = "beijing",
+    workspace_id: str | None = "ws1",
+    base_url: str | None = None,
+):
     from api.services.bailian_aigc import BailianAIGCClient, BailianRuntimeConfig
 
     class FakeBailianClient(BailianAIGCClient):
@@ -26,7 +30,7 @@ def _make_client(region: str = "beijing", workspace_id: str | None = "ws1"):
             api_key="sk-test",
             workspace_id=workspace_id,
             region=region,
-            base_url=None,
+            base_url=base_url,
             legacy_base_url=None,
             timeout_seconds=30,
             qwen_image_edit_model="qwen-image-2.0-pro",
@@ -34,6 +38,18 @@ def _make_client(region: str = "beijing", workspace_id: str | None = "ws1"):
             text_to_video_model="wan2.7-t2v-2026-06-12",
             image_to_video_model="wan2.7-i2v-2026-04-25",
         )
+    )
+
+
+def test_workspace_hostname_is_normalized_to_https_api_endpoint() -> None:
+    client = _make_client(
+        workspace_id="llm-example",
+        base_url="llm-example.cn-beijing.maas.aliyuncs.com",
+    )
+
+    assert (
+        client.workspace_base_url()
+        == "https://llm-example.cn-beijing.maas.aliyuncs.com/api/v1"
     )
 
 

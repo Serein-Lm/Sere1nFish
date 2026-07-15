@@ -58,12 +58,36 @@ def test_voice_upload_public_url_uses_forwarded_headers() -> None:
             "server": ("backend", 8000),
         }
     )
-
     assert (
         _public_url(request, "/api/v1/voice/files/sample.mp3")
         == "https://voice.example.com/api/v1/voice/files/sample.mp3"
     )
 
+
+def test_voice_config_normalizes_pasted_workspace_hostnames(monkeypatch) -> None:
+    from api.routers import voice as voice_router
+
+    async def fake_app_config():
+        return SimpleNamespace(runtime=SimpleNamespace(api_key="runtime-key"))
+
+    async def fake_section(category: str) -> dict:
+        if category == "cosyvoice":
+            return {
+                "workspace_id": "llm-example",
+                "base_http": "llm-example.cn-beijing.maas.aliyuncs.com",
+                "base_ws": "llm-example.cn-beijing.maas.aliyuncs.com",
+            }
+        return {}
+
+    monkeypatch.setattr(voice_router, "get_runtime_app_config", fake_app_config)
+    monkeypatch.setattr(voice_router, "get_runtime_config_section", fake_section)
+
+    cfg = asyncio.run(voice_router._cfg())
+
+    assert cfg["base_http"] == "https://llm-example.cn-beijing.maas.aliyuncs.com/api/v1"
+    assert cfg["base_ws"] == (
+        "wss://llm-example.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
+    )
 
 def test_voice_synthesize_returns_audio_and_records_metadata(monkeypatch) -> None:
     from api.auth import User, UserRole

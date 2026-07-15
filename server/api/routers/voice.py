@@ -16,6 +16,11 @@ from pydantic import BaseModel, Field
 from api.auth import get_current_active_user, require_admin, User
 from api.db.mongodb import get_db
 from api.dao import voice as voice_dao
+from api.services.bailian_aigc import (
+    BailianAPIError,
+    normalize_bailian_http_base,
+    normalize_bailian_ws_base,
+)
 from api.services.runtime_config import get_runtime_app_config, get_runtime_config_section
 from core.logger import get_logger
 
@@ -67,6 +72,12 @@ async def _cfg() -> dict:
         else:
             base_http = base_http or "https://dashscope.aliyuncs.com/api/v1"
             base_ws = base_ws or "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+
+    try:
+        base_http = normalize_bailian_http_base(base_http)
+        base_ws = normalize_bailian_ws_base(base_ws)
+    except BailianAPIError as exc:
+        raise HTTPException(500, str(exc)) from exc
 
     return {
         "api_key": api_key,
