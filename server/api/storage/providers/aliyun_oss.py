@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -157,6 +158,25 @@ class AliyunOSSProvider:
         finally:
             await asyncio.to_thread(result.body.close)
 
+    async def iter_bytes(
+        self,
+        key: str,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> AsyncIterator[bytes]:
+        result = await asyncio.to_thread(
+            self._client.get_object,
+            self._oss.GetObjectRequest(bucket=self.bucket, key=key),
+        )
+        if result.body is None:
+            return
+        iterator = result.body.iter_bytes(chunk_size=max(64 * 1024, chunk_size))
+        try:
+            while chunk := await asyncio.to_thread(next, iterator, None):
+                yield chunk
+        finally:
+            await asyncio.to_thread(result.body.close)
+
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(
             self._client.delete_object,
@@ -175,7 +195,6 @@ class AliyunOSSProvider:
             bucket=self.bucket,
             key=key,
             response_content_disposition=_content_disposition(filename) or None,
-            response_content_type=content_type or None,
         )
         result = await asyncio.to_thread(
             self._public_client.presign,

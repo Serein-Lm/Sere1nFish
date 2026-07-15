@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import mimetypes
 import shutil
+from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import quote
 
@@ -51,6 +52,20 @@ class LocalStorageProvider:
 
     async def get_bytes(self, key: str) -> bytes:
         return await asyncio.to_thread(self._path(key).read_bytes)
+
+    async def iter_bytes(
+        self,
+        key: str,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> AsyncIterator[bytes]:
+        path = self._path(key)
+        stream = await asyncio.to_thread(path.open, "rb")
+        try:
+            while chunk := await asyncio.to_thread(stream.read, max(64 * 1024, chunk_size)):
+                yield chunk
+        finally:
+            await asyncio.to_thread(stream.close)
 
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self._path(key).unlink, missing_ok=True)

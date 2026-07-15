@@ -12,6 +12,19 @@ PNG_1X1 = (
 )
 
 
+def _use_local_object_storage(monkeypatch, root: Path) -> None:
+    import api.storage.service as storage_service
+
+    async def local_config(_category: str) -> dict[str, object]:
+        return {
+            "provider": "local",
+            "enabled": True,
+            "local_root": str(root),
+        }
+
+    monkeypatch.setattr(storage_service, "get_runtime_config_section", local_config)
+
+
 def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None:
     async def run() -> None:
         from api.db.collections import (
@@ -27,6 +40,7 @@ def test_mobile_project_artifacts_roundtrip(tmp_path: Path, monkeypatch) -> None
         unrelated_project_id = "__pytest_mobile_project_artifacts_other__"
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
         monkeypatch.setenv("OBJECT_STORAGE_LOCAL_ROOT", str(tmp_path / "objects"))
+        _use_local_object_storage(monkeypatch, tmp_path / "objects")
 
         init_mongo()
         db = get_db()
@@ -209,6 +223,7 @@ def test_mobile_project_routes_return_linked_artifacts(
 
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
         monkeypatch.setenv("OBJECT_STORAGE_LOCAL_ROOT", str(tmp_path / "objects"))
+        _use_local_object_storage(monkeypatch, tmp_path / "objects")
 
         init_mongo()
         db = get_db()
@@ -439,6 +454,7 @@ def test_project_delete_cleans_mobile_artifacts_and_project_profile_refs(
 
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
         monkeypatch.setenv("OBJECT_STORAGE_LOCAL_ROOT", str(tmp_path / "objects"))
+        _use_local_object_storage(monkeypatch, tmp_path / "objects")
         other_project_id = "__pytest_mobile_delete_other_project__"
         project_id = ""
         project_oid = None

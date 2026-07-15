@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import mimetypes
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -238,6 +239,19 @@ class ObjectStorageService:
     async def get_bytes(self, object_id: str) -> bytes:
         doc, provider = await self._ready_provider(object_id)
         return await provider.get_bytes(str(doc["object_key"]))
+
+    async def iter_bytes(
+        self,
+        object_id: str,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> AsyncIterator[bytes]:
+        doc, provider = await self._ready_provider(object_id)
+        async for chunk in provider.iter_bytes(
+            str(doc["object_key"]),
+            chunk_size=chunk_size,
+        ):
+            yield chunk
 
     async def read_access(
         self,

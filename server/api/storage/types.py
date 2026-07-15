@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, AsyncIterator, Protocol
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,8 @@ class StorageProvider(Protocol):
     async def head(self, key: str) -> ObjectHead: ...
 
     async def get_bytes(self, key: str) -> bytes: ...
+
+    def iter_bytes(self, key: str, *, chunk_size: int = 1024 * 1024) -> AsyncIterator[bytes]: ...
 
     async def delete(self, key: str) -> None: ...
 

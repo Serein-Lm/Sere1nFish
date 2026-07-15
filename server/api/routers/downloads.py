@@ -6,9 +6,10 @@ import mimetypes
 import os
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 from api.auth import get_current_active_user
 
@@ -76,14 +77,32 @@ async def download_file(relative_path: str, direct: bool = Query(default=False))
 
     stored = await storage_dao.get_by_relative_path(get_db(), normalized)
     if stored:
-        access = await (await get_object_storage()).read_access(
+        storage = await get_object_storage()
+        filename = Path(normalized).name
+        if filename.lower().endswith(".apk"):
+            fallback = "download.apk"
+            disposition = (
+                f"attachment; filename=\"{fallback}\"; "
+                f"filename*=UTF-8''{quote(filename)}"
+            )
+            return StreamingResponse(
+                storage.iter_bytes(stored["object_id"]),
+                media_type="application/vnd.android.package-archive",
+                headers={
+                    "Content-Disposition": disposition,
+                    "Content-Length": str(int(stored.get("size") or 0)),
+                    "Cache-Control": "private, no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+        access = await storage.read_access(
             stored["object_id"],
-            filename=Path(normalized).name,
+            filename=filename,
             content_type=stored.get("content_type") or "application/octet-stream",
         )
         if access.mode == "redirect":
             if direct:
-                return {"url": access.url, "filename": Path(normalized).name}
+                return {"url": access.url, "filename": filename}
             return RedirectResponse(
                 access.url,
                 status_code=307,

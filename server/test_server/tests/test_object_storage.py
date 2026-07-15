@@ -57,11 +57,134 @@ async def test_local_provider_roundtrip(tmp_path) -> None:
     assert head.size == len(data)
     assert result.etag == hashlib.md5(data, usedforsecurity=False).hexdigest()
     assert await provider.get_bytes("sere1nfish/prod/test/item.bin") == data
+    streamed = b"".join([
+        chunk async for chunk in provider.iter_bytes(
+            "sere1nfish/prod/test/item.bin",
+            chunk_size=8,
+        )
+    ])
+    assert streamed == data
     access = await provider.read_access("sere1nfish/prod/test/item.bin")
     assert access.mode == "local"
     assert access.path and access.path.is_file()
     await provider.delete("sere1nfish/prod/test/item.bin")
     assert not access.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_oss_presign_does_not_override_content_type() -> None:
+    from api.storage.providers.aliyun_oss import AliyunOSSProvider
+
+    captured: dict[str, object] = {}
+
+    class FakeOSS:
+        class GetObjectRequest:
+            def __init__(self, **kwargs) -> None:
+                captured["request"] = kwargs
+
+    class FakePublicClient:
+        def presign(self, request, *, expires):
+            captured["expires"] = expires
+            return type("PresignResult", (), {"url": "https://bucket.example/object?signature=test"})()
+
+    provider = AliyunOSSProvider.__new__(AliyunOSSProvider)
+    provider._oss = FakeOSS
+    provider._public_client = FakePublicClient()
+    provider.bucket = "bucket"
+
+    access = await provider.read_access(
+        "object.png",
+        expires_seconds=120,
+        filename="object.png",
+        content_type="image/png",
+    )
+
+    assert access.mode == "redirect"
+    assert access.url.startswith("https://")
+    assert captured["request"] == {
+        "bucket": "bucket",
+        "key": "object.png",
+        "response_content_disposition": (
+            "attachment; filename=\"download.png\"; filename*=UTF-8''object.png"
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_oss_provider_streams_with_sdk_body_iterator() -> None:
+    from api.storage.providers.aliyun_oss import AliyunOSSProvider
+
+    captured: dict[str, object] = {}
+
+    class FakeBody:
+        def iter_bytes(self, **kwargs):
+            captured["iter_kwargs"] = kwargs
+            return iter((b"first", b"second"))
+
+        def close(self):
+            captured["closed"] = True
+
+    class FakeOSS:
+        class GetObjectRequest:
+            def __init__(self, **kwargs) -> None:
+                captured["request"] = kwargs
+
+    class FakeClient:
+        def get_object(self, request):
+            return type("GetObjectResult", (), {"body": FakeBody()})()
+
+    provider = AliyunOSSProvider.__new__(AliyunOSSProvider)
+    provider._oss = FakeOSS
+    provider._client = FakeClient()
+    provider.bucket = "bucket"
+
+    body = b"".join([
+        chunk async for chunk in provider.iter_bytes("object.apk", chunk_size=256 * 1024)
+    ])
+
+    assert body == b"firstsecond"
+    assert captured["request"] == {"bucket": "bucket", "key": "object.apk"}
+    assert captured["iter_kwargs"] == {"chunk_size": 256 * 1024}
+    assert captured["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_apk_download_streams_through_authenticated_backend(monkeypatch) -> None:
+    from fastapi.responses import StreamingResponse
+
+    from api.dao import storage_objects as storage_dao
+    from api.db import mongodb
+    from api.routers import downloads
+    import api.storage as storage_package
+
+    relative_path = "mobile/easytier/release/easytier-v2.6.4-arm64.apk"
+    stored = {
+        "object_id": "release_apk",
+        "size": 6,
+        "content_type": "application/octet-stream",
+    }
+
+    class Storage:
+        async def iter_bytes(self, object_id, *, chunk_size=1024 * 1024):
+            assert object_id == "release_apk"
+            yield b"PK"
+            yield b"test"
+
+        async def read_access(self, *args, **kwargs):
+            raise AssertionError("APK must not use an OSS public signed URL")
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(storage_dao, "get_by_relative_path", _async_return(stored))
+    monkeypatch.setattr(storage_package, "get_object_storage", _async_return(Storage()))
+
+    response = await downloads.download_file(relative_path, direct=True)
+    body = b"".join([chunk async for chunk in response.body_iterator])
+
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "application/vnd.android.package-archive"
+    assert response.headers["content-length"] == "6"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert body == b"PKtest"
 
 
 @pytest.mark.asyncio

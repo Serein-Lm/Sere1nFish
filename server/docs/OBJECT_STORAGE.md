@@ -12,16 +12,17 @@
 - 新写入由 `object_storage.enabled/provider` 选择 Provider。
 - 历史读取按 `storage_objects.provider` 选择 Provider，迁移期间本地和 OSS 对象可以并存。
 - 领域集合只保存 `storage_object_id`；`storage_objects` 保存 Object Key、SHA-256、大小、归属和状态。
-- Bucket 使用私有读写。下载先经过本站鉴权，再返回最长 1 小时、默认 5 分钟的签名 URL。
-- 手机、采集截图经本站鉴权接口从 OSS 内网读取，避免依赖 Bucket CORS。
+- Bucket 使用私有读写。普通文件下载先经过本站鉴权，再返回最长 1 小时、默认 5 分钟的签名 URL。
+- 手机、采集截图经本站鉴权接口代理读取，避免暴露签名 URL 或依赖 Bucket CORS。
+- 阿里云禁止通过默认 OSS 公网域名分发 APK；APK 由本站登录鉴权接口从 OSS 分块读取并流式返回，不落本地文件。
 - AK/SK 由 `system_config/object_storage` 加密存储，普通配置 API 只返回脱敏值。
 
 ## Bucket 准备
 
 在 OSS 控制台创建 Bucket：
 
-- Bucket：`limofish`
-- 地域：新加坡 `ap-southeast-1`
+- Bucket：`limo-ai-fish`
+- 地域：杭州 `cn-hangzhou`
 - 读写权限：私有
 - 公共访问：阻止公共访问
 - 服务端加密：AES256
@@ -34,10 +35,10 @@
 {
   "enabled": false,
   "provider": "aliyun_oss",
-  "bucket": "limofish",
-  "region": "ap-southeast-1",
-  "endpoint": "https://oss-ap-southeast-1-internal.aliyuncs.com",
-  "public_endpoint": "https://oss-ap-southeast-1.aliyuncs.com",
+  "bucket": "limo-ai-fish",
+  "region": "cn-hangzhou",
+  "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+  "public_endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
   "prefix": "sere1nfish/prod",
   "access_key_id": "<RAM AccessKey ID>",
   "access_key_secret": "<RAM AccessKey Secret>",
@@ -81,6 +82,8 @@ curl -k https://127.0.0.1/health
 docker-compose logs --tail=200 backend
 ```
 
-在“系统配置 -> 运行配置 -> 对象存储”查看当前 Provider、纳管对象数量、容量和最近迁移状态。迁移完成并经过观察期前，不删除 `server/data/mobile_screenshots`、`server/data/xhs_screenshots`、`server/data/artifacts` 和 `downloads` 中的源文件。
+在“系统配置 -> 运行配置 -> 对象存储”查看当前 Provider、纳管对象数量、容量和最近迁移状态。删除本地源文件前，必须对全部远端对象重新校验大小和 SHA-256 元数据，并确认远端对象数量与 MongoDB 元数据一一对应。
 
-完成迁移后应轮换曾经通过聊天或临时终端传递过的 AK/SK，并只给新 RAM 凭据保留 `limofish/sere1nfish/prod/*` 所需的最小对象权限。
+当前运行环境已完成 360 个对象、479625948 字节的迁移和全量校验，本地源文件已经删除，OSS 是唯一文件源。不要再依赖 `legacy_path` 回退，也不要把截图、Word、APK 或采集产物重新写入本地业务目录。
+
+完成迁移后应轮换曾经通过聊天或临时终端传递过的 AK/SK，并只给新 RAM 凭据保留 `limo-ai-fish/sere1nfish/prod/*` 所需的最小对象权限。
