@@ -13,6 +13,7 @@ from __future__ import annotations
 import concurrent.futures
 import ipaddress
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -163,25 +164,40 @@ class DevicePool:
             and not d.device_id.startswith("easytier:")
         }
         connected_ips.update(self._connected_adb_ips())
-        pairing_candidates = self._easytier_pairing_candidates(connected_ips)
+        easytier_peers = self._easytier_peers()
+        peer_by_ip = {
+            str(peer["ipv4"]): peer
+            for peer in easytier_peers
+            if peer.get("ipv4")
+        }
+        pairing_candidates = [
+            peer for peer in easytier_peers if peer.get("ipv4") not in connected_ips
+        ]
+        linked = []
+        for d, key in keyed:
+            endpoint = self._mgr.resolve_adb_device_id(d.device_id)
+            network_ip = self._endpoint_ipv4(endpoint)
+            linked.append((d, key, network_ip, peer_by_ip.get(network_ip or "")))
         out: list[dict[str, Any]] = []
         with self._lock:
-            for d, key in keyed:
+            for d, key, network_ip, peer in linked:
                 r = self._reservations.get(key)
-                out.append(
-                    {
-                        "device_id": d.device_id,
-                        "device_key": key,
-                        "status": d.status,
-                        "model": d.model,
-                        "connection_type": d.connection_type,
-                        "online": d.status == "device",
-                        "reserved": r is not None,
-                        "owner": r.owner if r else None,
-                        "since": r.since if r else None,
-                        "note": r.note if r else None,
-                    }
-                )
+                item = {
+                    "device_id": d.device_id,
+                    "device_key": key,
+                    "status": d.status,
+                    "model": d.model,
+                    "connection_type": d.connection_type,
+                    "online": d.status == "device",
+                    "reserved": r is not None,
+                    "owner": r.owner if r else None,
+                    "since": r.since if r else None,
+                    "note": r.note if r else None,
+                }
+                if peer:
+                    item["network_ip"] = network_ip
+                    item["easytier_peer"] = peer
+                out.append(item)
             for peer in pairing_candidates:
                 key = f"easytier:{peer['ipv4']}"
                 r = self._reservations.get(key)
@@ -355,18 +371,33 @@ class DevicePool:
             return False
 
     @staticmethod
-    def _easytier_pairing_candidates(exclude_ips: set[str] | None = None) -> list[dict[str, Any]]:
-        exclude = exclude_ips or set()
+    def _easytier_peers() -> list[dict[str, Any]]:
         try:
             from core.mobile.easytier import list_easytier_peer_candidates
 
-            return [
-                peer
-                for peer in list_easytier_peer_candidates()
-                if peer.get("ipv4") and peer.get("ipv4") not in exclude
-            ]
+            return list_easytier_peer_candidates()
         except Exception:
             return []
+
+    @classmethod
+    def _easytier_pairing_candidates(
+        cls, exclude_ips: set[str] | None = None
+    ) -> list[dict[str, Any]]:
+        exclude = exclude_ips or set()
+        return [
+            peer
+            for peer in cls._easytier_peers()
+            if peer.get("ipv4") and peer.get("ipv4") not in exclude
+        ]
+
+    @staticmethod
+    def _endpoint_ipv4(device_id: str) -> str | None:
+        host = str(device_id or "").rsplit(":", 1)[0]
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return None
+        return str(address) if address.version == 4 else None
 
     def _connected_adb_ips(self) -> set[str]:
         ips: set[str] = set()
@@ -627,6 +658,14 @@ class DevicePool:
         adb_device_id = self._mgr.resolve_adb_device_id(device_id)
         steps: list[dict[str, Any]] = []
 
+        time.sleep(0.2)
+        locked = self._keyguard_showing(adb_device_id)
+        out["lock_state"] = {"checked": locked is not None, "locked": locked}
+        if locked is False:
+            out["unlock"] = steps
+            out["unlocked"] = True
+            return out
+
         commands = [
             ("menu", ["input", "keyevent", "82"]),
             ("swipe_unlock", ["input", "swipe", "500", "1800", "500", "300", "250"]),
@@ -652,10 +691,38 @@ class DevicePool:
             except Exception as exc:  # noqa: BLE001
                 steps.append({"step": name, "ok": False, "error": str(exc)})
         out["unlock"] = steps
+        time.sleep(0.2)
+        final_locked = self._keyguard_showing(adb_device_id)
+        out["unlocked"] = final_locked is False if final_locked is not None else None
         out["ok"] = bool(out.get("wake", {}).get("ok")) and all(
             step.get("ok") for step in steps
         )
         return out
+
+    def _keyguard_showing(self, device_id: str) -> bool | None:
+        """Return the Android keyguard state without assuming an OEM UI layout."""
+        try:
+            result = self._adb_shell(device_id, ["dumpsys", "window", "policy"])
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        output = result.stdout or ""
+        delegate = re.search(
+            r"KeyguardServiceDelegate.*?^\s*showing=(true|false)\s*$",
+            output,
+            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+        if delegate:
+            return delegate.group(1).lower() == "true"
+        legacy = re.search(
+            r"(?:mShowingLockscreen|mDreamingLockscreen|isStatusBarKeyguard)=(true|false)",
+            output,
+            flags=re.IGNORECASE,
+        )
+        if legacy:
+            return legacy.group(1).lower() == "true"
+        return None
 
     def set_stay_awake(self, device_id: str, on: bool) -> dict[str, Any]:
         """设置充电时是否常亮(svc power stayon)。"""

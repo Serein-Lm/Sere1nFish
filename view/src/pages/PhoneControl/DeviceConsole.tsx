@@ -18,7 +18,7 @@ import {
   getCurrentApp,
   inputText,
   launchApp,
-  wakeDevice,
+  wakeUnlockDevice,
   stayAwake,
   videoReset,
   type PoolDevice,
@@ -137,11 +137,12 @@ export default function DeviceConsole({
 
   const handleWake = async () => {
     try {
-      await wakeDevice(device.device_id, true)
+      const result = await wakeUnlockDevice(device.device_id, undefined, true)
       setStayOn(true)
-      message.success('已唤醒并设置充电常亮')
+      if (result.ok && result.unlocked !== false) message.success('已唤醒并解锁设备')
+      else message.warning('设备已唤醒，但仍可能需要手动解锁')
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '唤醒失败')
+      message.error(e instanceof Error ? e.message : '唤醒解锁失败')
     }
   }
 
@@ -249,9 +250,9 @@ export default function DeviceConsole({
             启动应用
           </Button>
         </Tooltip>
-        <Tooltip title="亮屏 + 充电常亮">
+        <Tooltip title="亮屏、解锁并保持充电常亮">
           <Button icon={<BulbOutlined />} onClick={handleWake}>
-            唤醒
+            唤醒并解锁
           </Button>
         </Tooltip>
         <Tooltip title="充电常亮开关">

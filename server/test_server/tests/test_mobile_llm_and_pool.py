@@ -56,6 +56,9 @@ def test_pairing_candidate_survives_stale_offline_adb_record(monkeypatch) -> Non
                 )
             ]
 
+        def resolve_adb_device_id(self, device_id: str) -> str:
+            return device_id
+
     pool = object.__new__(DevicePool)
     pool._mgr = FakeManager()
     pool._reservations = {}
@@ -64,11 +67,9 @@ def test_pairing_candidate_survives_stale_offline_adb_record(monkeypatch) -> Non
     monkeypatch.setattr(DevicePool, "_connected_adb_ips", lambda _self: set())
     monkeypatch.setattr(
         DevicePool,
-        "_easytier_pairing_candidates",
+        "_easytier_peers",
         staticmethod(
-            lambda exclude_ips=None: [
-                {"ipv4": "10.144.144.23", "hostname": "vivo-phone"}
-            ]
+            lambda: [{"ipv4": "10.144.144.23", "hostname": "vivo-phone"}]
         ),
     )
 
@@ -78,3 +79,82 @@ def test_pairing_candidate_survives_stale_offline_adb_record(monkeypatch) -> Non
     pairing = items[1]
     assert pairing["device_id"] == "easytier:10.144.144.23"
     assert pairing["pairing_available"] is True
+
+
+def test_connected_adb_device_includes_easytier_link_metrics(monkeypatch) -> None:
+    from core.mobile.pool import DevicePool
+
+    class FakeManager:
+        def refresh(self) -> None:
+            return None
+
+        def list_devices(self):
+            return [
+                SimpleNamespace(
+                    device_id="10AEBJ43JU002MZ",
+                    status="device",
+                    model="V2353A",
+                    connection_type="wifi",
+                )
+            ]
+
+        def resolve_adb_device_id(self, _device_id: str) -> str:
+            return "10.144.144.2:5555"
+
+    peer = {
+        "ipv4": "10.144.144.2",
+        "hostname": "test1",
+        "lat_ms": "43.2",
+        "rx_bytes": "1.20 MB",
+        "tx_bytes": "800.00 kB",
+        "rx_bytes_total": 1_200_000,
+        "tx_bytes_total": 800_000,
+        "sampled_at": 100.0,
+    }
+    pool = object.__new__(DevicePool)
+    pool._mgr = FakeManager()
+    pool._reservations = {}
+    pool._lock = threading.Lock()
+
+    monkeypatch.setattr(DevicePool, "_connected_adb_ips", lambda _self: {"10.144.144.2"})
+    monkeypatch.setattr(DevicePool, "_easytier_peers", staticmethod(lambda: [peer]))
+
+    items = pool.list_pool()
+
+    assert len(items) == 1
+    assert items[0]["network_ip"] == "10.144.144.2"
+    assert items[0]["easytier_peer"] == peer
+
+
+def test_easytier_byte_counter_normalization() -> None:
+    from core.mobile.easytier import _parse_byte_count
+
+    assert _parse_byte_count("518.15 kB") == 518_150
+    assert _parse_byte_count("1.01 MB") == 1_010_000
+    assert _parse_byte_count("42 B") == 42
+    assert _parse_byte_count("-") is None
+
+
+def test_wake_unlock_does_not_swipe_an_unlocked_device(monkeypatch) -> None:
+    from core.mobile.pool import DevicePool
+
+    commands: list[list[str]] = []
+
+    def fake_adb_shell(_device_id: str, args: list[str], timeout: int = 10):
+        commands.append(args)
+        stdout = ""
+        if args == ["dumpsys", "window", "policy"]:
+            stdout = "KeyguardServiceDelegate\n  showing=false\n"
+        return SimpleNamespace(returncode=0, stderr="", stdout=stdout)
+
+    pool = object.__new__(DevicePool)
+    pool._mgr = SimpleNamespace(resolve_adb_device_id=lambda device_id: device_id)
+    monkeypatch.setattr(pool, "_adb_shell", fake_adb_shell)
+    monkeypatch.setattr("core.mobile.pool.time.sleep", lambda _seconds: None)
+
+    result = pool.wake_and_unlock("10.144.144.2:5555", stay_on=True)
+
+    assert result["ok"] is True
+    assert result["unlocked"] is True
+    assert result["unlock"] == []
+    assert ["input", "swipe", "500", "1800", "500", "300", "250"] not in commands

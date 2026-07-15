@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Button,
   Input,
@@ -44,6 +44,9 @@ import {
   LinkOutlined,
   WarningOutlined,
   QrcodeOutlined,
+  ArrowDownOutlined,
+  ArrowUpOutlined,
+  DashboardOutlined,
 } from '@ant-design/icons'
 import {
   relativeTime,
@@ -78,6 +81,25 @@ const { Text } = Typography
 type Filter = 'all' | 'free' | 'reserved' | 'offline'
 
 const GROUP_COLORS = ['#10b981', '#1677ff', '#722ed1', '#fa8c16', '#eb2f96', '#13c2c2', '#f5222d', '#52c41a']
+
+interface TrafficSample {
+  rx: number
+  tx: number
+  sampledAt: number
+}
+
+interface TrafficRate {
+  rx: number | null
+  tx: number | null
+}
+
+function formatRate(bytesPerSecond?: number | null): string {
+  if (bytesPerSecond == null) return '采样中'
+  if (bytesPerSecond < 1_000) return `${Math.round(bytesPerSecond)} B/s`
+  if (bytesPerSecond < 1_000_000) return `${(bytesPerSecond / 1_000).toFixed(1)} KB/s`
+  if (bytesPerSecond < 1_000_000_000) return `${(bytesPerSecond / 1_000_000).toFixed(1)} MB/s`
+  return `${(bytesPerSecond / 1_000_000_000).toFixed(1)} GB/s`
+}
 
 /** 设备显示名优先级：meta.display_name → model → device_id */
 function deviceLabel(d: PoolDevice): string {
@@ -163,6 +185,8 @@ export default function DevicePool({
   const [unlockDevice, setUnlockDevice] = useState<PoolDevice | null>(null)
   const [unlockPin, setUnlockPin] = useState('')
   const [unlocking, setUnlocking] = useState(false)
+  const trafficSamples = useRef(new Map<string, TrafficSample>())
+  const [trafficRates, setTrafficRates] = useState<Record<string, TrafficRate>>({})
 
   // v3 §13b：设备分组 + 元数据
   const [groups, setGroups] = useState<DeviceGroup[]>([])
@@ -324,6 +348,37 @@ export default function DevicePool({
     getDevices().then((r) => setLocalCount(r.devices.length)).catch(() => {})
     loadGroups()
   }, [])
+
+  useEffect(() => {
+    const previous = trafficSamples.current
+    const nextSamples = new Map<string, TrafficSample>()
+    const nextRates: Record<string, TrafficRate> = {}
+
+    for (const device of devices) {
+      const peer = device.easytier_peer
+      if (
+        typeof peer?.rx_bytes_total !== 'number' ||
+        typeof peer.tx_bytes_total !== 'number'
+      ) {
+        continue
+      }
+      const sample = {
+        rx: peer.rx_bytes_total,
+        tx: peer.tx_bytes_total,
+        sampledAt: peer.sampled_at ?? Date.now() / 1000,
+      }
+      const prior = previous.get(device.device_id)
+      const elapsed = prior ? sample.sampledAt - prior.sampledAt : 0
+      nextSamples.set(device.device_id, sample)
+      nextRates[device.device_id] = {
+        rx: prior && elapsed > 0 && sample.rx >= prior.rx ? (sample.rx - prior.rx) / elapsed : null,
+        tx: prior && elapsed > 0 && sample.tx >= prior.tx ? (sample.tx - prior.tx) / elapsed : null,
+      }
+    }
+
+    trafficSamples.current = nextSamples
+    setTrafficRates(nextRates)
+  }, [devices])
 
   const counts = useMemo(() => {
     const c = { all: devices.length, free: 0, reserved: 0, offline: 0 }
@@ -660,6 +715,8 @@ export default function DevicePool({
             const othersHold = d.reserved && d.owner !== me
             const statusClass = isPairingCandidate ? 'is-pairing' : !d.online ? 'is-offline' : othersHold ? 'is-busy' : 'is-idle'
             const isBusy = busyId === d.device_id
+            const peer = d.easytier_peer
+            const rate = trafficRates[d.device_id]
             return (
               <div
                 key={d.device_id}
@@ -724,6 +781,38 @@ export default function DevicePool({
                     <span>{isPairingCandidate ? d.easytier_peer?.lat_ms ? `${d.easytier_peer.lat_ms} ms` : '已入网' : d.since ? relativeTime(d.since) : '—'}</span>
                   </div>
                 </div>
+
+                {peer && (
+                  <div className="device-network-stats" aria-label="EasyTier 链路网速">
+                    <Tooltip title={`累计接收 ${peer.rx_bytes || '—'}`}>
+                      <span className="network-stat rx">
+                        <ArrowDownOutlined />
+                        <span>
+                          <small>接收</small>
+                          <strong>{formatRate(rate?.rx)}</strong>
+                        </span>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title={`累计发送 ${peer.tx_bytes || '—'}`}>
+                      <span className="network-stat tx">
+                        <ArrowUpOutlined />
+                        <span>
+                          <small>发送</small>
+                          <strong>{formatRate(rate?.tx)}</strong>
+                        </span>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title={`丢包 ${peer.loss_rate || '—'} · ${peer.tunnel_proto || '未知协议'}`}>
+                      <span className="network-stat link">
+                        <DashboardOutlined />
+                        <span>
+                          <small>延迟</small>
+                          <strong>{peer.lat_ms && peer.lat_ms !== '-' ? `${peer.lat_ms} ms` : '—'}</strong>
+                        </span>
+                      </span>
+                    </Tooltip>
+                  </div>
+                )}
 
                 {(d.meta?.group_id || (d.meta?.tags?.length ?? 0) > 0) && (
                   <div className="device-tags">

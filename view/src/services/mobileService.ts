@@ -192,6 +192,9 @@ export interface WakeResult {
   ok: boolean
   wake?: { ok: boolean; stderr: string }
   stay_on?: { ok: boolean; stderr: string }
+  lock_state?: { checked: boolean; locked: boolean | null }
+  unlock?: { step: string; ok: boolean; stderr?: string; error?: string }[]
+  unlocked?: boolean | null
 }
 
 export interface EasyTierAccessProfile {
@@ -229,6 +232,9 @@ export interface EasyTierPeerCandidate {
   loss_rate?: string
   rx_bytes?: string
   tx_bytes?: string
+  rx_bytes_total?: number | null
+  tx_bytes_total?: number | null
+  sampled_at?: number
   tunnel_proto?: string
   nat_type?: string
   version?: string
@@ -310,7 +316,7 @@ export const wakeDevice = (deviceId: string, stayOn = false) =>
   })
 
 export const wakeUnlockDevice = (deviceId: string, pin?: string, stayOn = true) =>
-  request<WakeResult & { unlock?: { step: string; ok: boolean; stderr?: string; error?: string }[] }>(
+  request<WakeResult>(
     `${MOBILE}/pool/wake-unlock`,
     {
       method: 'POST',

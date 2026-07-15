@@ -297,6 +297,7 @@ def list_easytier_peer_candidates() -> list[dict[str, Any]]:
         network = None
 
     candidates: list[dict[str, Any]] = []
+    sampled_at = time.time()
     for item in _run_easytier_cli_json("peer"):
         cidr = str(item.get("cidr") or item.get("ipv4") or "").strip()
         ip = _strip_prefix(cidr)
@@ -323,6 +324,9 @@ def list_easytier_peer_candidates() -> list[dict[str, Any]]:
                 "loss_rate": item.get("loss_rate"),
                 "rx_bytes": item.get("rx_bytes"),
                 "tx_bytes": item.get("tx_bytes"),
+                "rx_bytes_total": _parse_byte_count(item.get("rx_bytes")),
+                "tx_bytes_total": _parse_byte_count(item.get("tx_bytes")),
+                "sampled_at": sampled_at,
                 "tunnel_proto": item.get("tunnel_proto"),
                 "nat_type": item.get("nat_type"),
                 "version": item.get("version"),
@@ -330,6 +334,30 @@ def list_easytier_peer_candidates() -> list[dict[str, Any]]:
             }
         )
     return candidates
+
+
+_BYTE_UNITS = {
+    "b": 1,
+    "kb": 1_000,
+    "mb": 1_000_000,
+    "gb": 1_000_000_000,
+    "tb": 1_000_000_000_000,
+}
+
+
+def _parse_byte_count(value: Any) -> int | None:
+    """Normalize EasyTier's human-readable traffic counters for API consumers."""
+    match = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?b)\s*",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    multiplier = _BYTE_UNITS.get(match.group(2).lower())
+    if multiplier is None:
+        return None
+    return round(float(match.group(1)) * multiplier)
 
 
 def _build_phone_config_toml(

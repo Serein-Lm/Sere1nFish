@@ -208,6 +208,70 @@
   gap: 10px 16px;
 }
 
+.device-network-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-height: 46px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.network-stat {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--text-secondary);
+}
+
+.network-stat + .network-stat {
+  border-left: 1px solid var(--border-color);
+}
+
+.network-stat > .anticon {
+  flex: 0 0 auto;
+  font-size: 14px;
+}
+
+.network-stat.rx > .anticon {
+  color: var(--color-success);
+}
+
+.network-stat.tx > .anticon {
+  color: var(--primary-color);
+}
+
+.network-stat.link > .anticon {
+  color: var(--color-warning);
+}
+
+.network-stat > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.network-stat small,
+.network-stat strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.network-stat small {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.network-stat strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .meta-item {
   display: flex;
   align-items: center;

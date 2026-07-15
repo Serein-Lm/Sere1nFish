@@ -18,7 +18,7 @@ import {
   autoConnect,
   acquireDevice,
   releaseDevice,
-  wakeDevice,
+  wakeUnlockDevice,
   connectWifi,
   MobileError,
   type PoolDevice,
@@ -94,6 +94,17 @@ export default function PhoneControl() {
     }
   }, [])
 
+  const prepareForControl = useCallback(async (d: PoolDevice) => {
+    try {
+      const result = await wakeUnlockDevice(d.device_id, undefined, true)
+      if (!result.ok || result.unlocked === false) {
+        message.warning('设备已唤醒，但仍可能需要手动解锁')
+      }
+    } catch (e) {
+      message.warning(e instanceof Error ? `自动唤醒解锁未完成：${e.message}` : '自动唤醒解锁未完成')
+    }
+  }, [])
+
   // 设备池视图下自动轮询占用状态
   useEffect(() => {
     if (activeTab !== 'control') return
@@ -119,6 +130,7 @@ export default function PhoneControl() {
       message.success(`已占用 ${d.device_id}`)
       setSelected({ ...d, reserved: true, owner: me })
       setView('console')
+      void prepareForControl(d)
     } catch (e) {
       if (e instanceof MobileError && e.status === 409) {
         message.warning('该设备已被他人占用')
@@ -134,6 +146,7 @@ export default function PhoneControl() {
   const handleEnter = (d: PoolDevice) => {
     setSelected(d)
     setView('console')
+    void prepareForControl(d)
   }
 
   const handleRelease = async (d: PoolDevice) => {
@@ -155,11 +168,12 @@ export default function PhoneControl() {
 
   const handleWake = async (d: PoolDevice) => {
     try {
-      await wakeDevice(d.device_id, true)
-      message.success('已发送唤醒指令')
+      const result = await wakeUnlockDevice(d.device_id, undefined, true)
+      if (result.ok && result.unlocked !== false) message.success('已唤醒并解锁设备')
+      else message.warning('设备已唤醒，但仍可能需要手动解锁')
       window.setTimeout(refresh, 1500)
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '唤醒失败')
+      message.error(e instanceof Error ? e.message : '唤醒解锁失败')
     }
   }
 
