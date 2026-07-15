@@ -44,7 +44,7 @@ def test_pairing_candidate_survives_stale_offline_adb_record(monkeypatch) -> Non
 
     class FakeManager:
         def refresh(self) -> None:
-            return None
+            raise AssertionError("list_pool must not synchronously refresh ADB")
 
         def list_devices(self):
             return [

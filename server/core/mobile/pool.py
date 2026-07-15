@@ -140,11 +140,12 @@ class DevicePool:
     # ── 资源池全景 ──
 
     def list_pool(self) -> list[dict[str, Any]]:
-        """列出资源池:设备 + 稳定 key + 在线/占用状态(含 mDNS 发现的可接入设备)。
+        """读取资源池缓存:设备 + 稳定 key + 在线/占用状态。
 
         占用按稳定 key 匹配,因此 WiFi 设备 ip:port 变化重连后占用仍能对应。
+        设备管理器已在后台轮询；列表请求不能同步强刷 ADB，否则单台失联设备会
+        用探测超时阻塞整个设备池。主动发现和重连由 auto-connect/keepalive 负责。
         """
-        self._mgr.refresh()
         devices = self._mgr.list_devices()
         # 先在锁外解析 key(含 adb getprop,已缓存),避免阻塞占用申请/释放
         keyed = [

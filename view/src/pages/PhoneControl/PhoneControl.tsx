@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Typography, Button, message, Tabs } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -47,6 +47,7 @@ export default function PhoneControl() {
   const [autoConnecting, setAutoConnecting] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [vibeMode, setVibeMode] = useState(() => localStorage.getItem(VIBE_KEY) === '1')
+  const poolRequestRef = useRef<Promise<void> | null>(null)
 
   const [me, setMe] = useState<string>(() => {
     try {
@@ -81,18 +82,26 @@ export default function PhoneControl() {
     }
   }, [me])
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await getPool()
-      setDevices(res.devices)
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '获取设备池失败')
-    } finally {
-      setLoading(false)
-    }
+  const loadPool = useCallback((showLoading: boolean) => {
+    if (poolRequestRef.current) return poolRequestRef.current
+    if (showLoading) setLoading(true)
+    const request = getPool()
+      .then((res) => {
+        setDevices(res.devices)
+        setError(null)
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : '获取设备池失败')
+      })
+      .finally(() => {
+        poolRequestRef.current = null
+        if (showLoading) setLoading(false)
+      })
+    poolRequestRef.current = request
+    return request
   }, [])
+
+  const refresh = useCallback(() => loadPool(true), [loadPool])
 
   const prepareForControl = useCallback(async (d: PoolDevice) => {
     try {
@@ -108,11 +117,11 @@ export default function PhoneControl() {
   // 设备池视图下自动轮询占用状态
   useEffect(() => {
     if (activeTab !== 'control') return
-    refresh()
+    void loadPool(true)
     if (view !== 'pool') return
-    const t = window.setInterval(refresh, 6000)
+    const t = window.setInterval(() => void loadPool(false), 6000)
     return () => clearInterval(t)
-  }, [activeTab, view, refresh])
+  }, [activeTab, view, loadPool])
 
   // 同步已选设备的最新池信息
   useEffect(() => {
