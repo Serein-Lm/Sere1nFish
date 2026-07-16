@@ -38,8 +38,10 @@ class _RecordsColl:
         doc.update(update.get("$set", {}))
         for k, v in update.get("$addToSet", {}).items():
             arr = doc.setdefault(k, [])
-            if v not in arr:
-                arr.append(v)
+            values = v.get("$each", []) if isinstance(v, dict) else [v]
+            for value in values:
+                if value not in arr:
+                    arr.append(value)
         self.docs[rid] = doc
 
 
@@ -85,6 +87,18 @@ def _patch_pipeline(monkeypatch, *, analyze_returns):
     async def _fake_analyze(image_base64, **k):
         return list(analyze_returns)
 
+    async def _fake_triage(image_base64, **k):
+        return [
+            {
+                "fields": dict(record),
+                "score": 80,
+                "subject_match": 80,
+                "score_reason": "test",
+                "source_url": None,
+            }
+            for record in analyze_returns
+        ]
+
     _FakePool.events = []
     _FakePool._inst = None
 
@@ -96,6 +110,7 @@ def _patch_pipeline(monkeypatch, *, analyze_returns):
     monkeypatch.setattr(pl, "MobileDeviceManager", lambda *a, **k: object())
     monkeypatch.setattr(pl.ma_dao, "save_screenshot", _fake_save)
     monkeypatch.setattr(pl, "analyze_screenshot", _fake_analyze)
+    monkeypatch.setattr(pl, "triage_screenshot", _fake_triage)
     monkeypatch.setattr(pl, "obs_log", lambda *a, **k: "")
 
     notifies: list = []
@@ -177,3 +192,73 @@ def test_request_stop_unknown_is_idempotent():
 
     assert pl.request_stop("never-started") is False
     assert pl.is_running("never-started") is False
+
+
+def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+    from core.mobile.collect.source_links import SourceLinkResult
+
+    emitted: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def warning(self, message):
+            raise AssertionError(message)
+
+    class _Context:
+        logger = _Logger()
+        state = {
+            "stop_event": asyncio.Event(),
+            "device_id": "devA",
+            "run_task_id": "run-link",
+            "project_id": "projectA",
+            "detail_max_swipes": 0,
+            "swipe_interval": 0.01,
+            "extract_fields": [],
+            "app_name": "微信",
+            "source_link_strategy": "wechat_copy_link",
+        }
+
+        async def emit(self, stage, payload):
+            emitted.append((stage, payload))
+
+    async def _capture(ctx, keyword, note):
+        return "QUJD", "shot-link", "https://oss.example/shot-link.png"
+
+    async def _analyze_detail(*args, **kwargs):
+        return {
+            "fields": {"title": "A"},
+            "score": 80,
+            "source_url": None,
+        }
+
+    async def _no_sleep(_seconds):
+        return None
+
+    stage = pl._CollectStage()
+    monkeypatch.setattr(stage, "_capture_save", _capture)
+    monkeypatch.setattr(pl, "_do_tap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pl, "_do_back", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pl, "analyze_detail", _analyze_detail)
+    monkeypatch.setattr(pl, "obs_log", lambda *args, **kwargs: "")
+    monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(
+        pl,
+        "extract_source_link",
+        lambda device_id, strategy: SourceLinkResult(
+            strategy=strategy,
+            ok=True,
+            url="https://mp.weixin.qq.com/s/runtime-link",
+        ),
+    )
+
+    asyncio.new_event_loop().run_until_complete(
+        stage._deep_dive(
+            _Context(),
+            "keyword",
+            {"tap_x": 100, "tap_y": 200, "score": 80, "subject_match": 90},
+        )
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0][0] == "persist"
+    assert emitted[0][1]["source_url"] == "https://mp.weixin.qq.com/s/runtime-link"

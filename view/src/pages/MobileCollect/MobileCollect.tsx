@@ -43,6 +43,7 @@ import {
   updateSchedule,
   deleteSchedule,
   listPresets,
+  listSourceLinkStrategies,
   fetchScreenshotObjectUrl,
   type CollectTaskDef,
   type CollectTaskInput,
@@ -51,9 +52,11 @@ import {
   type CollectPreset,
   type DryRunResult,
   type DryRunPreviewItem,
+  type SourceLinkStrategyOption,
 } from '../../services/mobileCollectService'
 import { getDevices, type SimpleDevice } from '../../services/mobileService'
 import CollectRecordsView from '../../components/CollectRecordsView/CollectRecordsView'
+import './MobileCollect.css'
 
 const NOTIFY_OPTIONS = [
   { value: 'new', label: '仅新增' },
@@ -104,6 +107,9 @@ export default function MobileCollect() {
   const [loading, setLoading] = useState(false)
   const [devices, setDevices] = useState<SimpleDevice[]>([])
   const [presets, setPresets] = useState<CollectPreset[]>([])
+  const [sourceLinkStrategies, setSourceLinkStrategies] = useState<SourceLinkStrategyOption[]>([
+    { strategy: 'none', label: '不提取', description: '仅使用视觉模型可见的链接' },
+  ])
 
   // 编辑抽屉
   const [editorOpen, setEditorOpen] = useState(false)
@@ -146,6 +152,7 @@ export default function MobileCollect() {
     loadTasks()
     getDevices().then((r) => setDevices(r.devices)).catch(() => undefined)
     listPresets().then((r) => setPresets(r.items)).catch(() => undefined)
+    listSourceLinkStrategies().then((r) => setSourceLinkStrategies(r.items)).catch(() => undefined)
   }, [loadTasks])
 
   // ── 编辑 ──
@@ -163,6 +170,7 @@ export default function MobileCollect() {
       notify_on: 'new',
       search_hint: '',
       deep_collect: false,
+      source_link_strategy: 'none',
       detail_max_items: 5,
       detail_max_swipes: 12,
       min_score_to_detail: 60,
@@ -187,6 +195,7 @@ export default function MobileCollect() {
       notify_on: task.notify_on,
       search_hint: task.search_hint || '',
       deep_collect: task.deep_collect ?? false,
+      source_link_strategy: task.source_link_strategy ?? 'none',
       detail_max_items: task.detail_max_items ?? 5,
       detail_max_swipes: task.detail_max_swipes ?? 12,
       min_score_to_detail: task.min_score_to_detail ?? 60,
@@ -353,6 +362,7 @@ export default function MobileCollect() {
       title: '关键词',
       dataIndex: 'keywords',
       key: 'keywords',
+      width: 220,
       render: (kws: string[]) =>
         kws?.length ? kws.map((k) => <Tag key={k}>{k}</Tag>) : <span style={{ color: '#999' }}>无(浏览)</span>,
     },
@@ -484,14 +494,14 @@ export default function MobileCollect() {
           dataSource={tasks}
           locale={{ emptyText: <Empty description="暂无采集任务，点击右上角新建" /> }}
           pagination={{ pageSize: 10, hideOnSinglePage: true }}
-          scroll={{ x: 900 }}
+          scroll={{ x: 1110 }}
         />
       </Card>
 
       {/* 编辑抽屉 */}
       <Drawer
         title={editing ? '编辑采集任务' : '新建采集任务'}
-        width={560}
+        size={560}
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         forceRender
@@ -537,20 +547,32 @@ export default function MobileCollect() {
               {(fields, { add, remove }) => (
                 <div>
                   {fields.map((field) => (
-                    <Space key={field.key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
-                      <Form.Item name={[field.name, 'name']} rules={[{ required: true, message: '字段名' }]} noStyle>
-                        <Input placeholder="字段名" style={{ width: 110 }} />
-                      </Form.Item>
-                      <Form.Item name={[field.name, 'description']} noStyle>
-                        <Input placeholder="含义描述" style={{ width: 170 }} />
-                      </Form.Item>
-                      <Form.Item name={[field.name, 'type']} noStyle initialValue="string">
-                        <Select style={{ width: 90 }} options={FIELD_TYPE_OPTIONS} />
-                      </Form.Item>
-                      <Button size="small" danger onClick={() => remove(field.name)}>
-                        删
-                      </Button>
-                    </Space>
+                    <div key={field.key} className="mobile-collect-field-row">
+                      <div className="mobile-collect-field-name">
+                        <Form.Item name={[field.name, 'name']} rules={[{ required: true, message: '字段名' }]} noStyle>
+                          <Input placeholder="字段名" />
+                        </Form.Item>
+                      </div>
+                      <div className="mobile-collect-field-description">
+                        <Form.Item name={[field.name, 'description']} noStyle>
+                          <Input placeholder="含义描述" />
+                        </Form.Item>
+                      </div>
+                      <div className="mobile-collect-field-type">
+                        <Form.Item name={[field.name, 'type']} noStyle initialValue="string">
+                          <Select options={FIELD_TYPE_OPTIONS} />
+                        </Form.Item>
+                      </div>
+                      <Button
+                        className="mobile-collect-field-remove"
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        title="删除字段"
+                        aria-label="删除字段"
+                        onClick={() => remove(field.name)}
+                      />
+                    </div>
                   ))}
                   <Button type="dashed" onClick={() => add({ type: 'string' })} block icon={<PlusOutlined />}>
                     添加字段
@@ -578,6 +600,20 @@ export default function MobileCollect() {
             >
               <Switch />
             </Form.Item>
+            <Form.Item
+              name="source_link_strategy"
+              label="原文链接提取"
+              tooltip="进入详情页后通过运行时适配器获取真实原文 URL；微信公众号预设使用复制链接策略"
+            >
+              <Select
+                style={{ width: 190 }}
+                options={sourceLinkStrategies.map((item) => ({
+                  value: item.strategy,
+                  label: item.label,
+                  title: item.description,
+                }))}
+              />
+            </Form.Item>
             <Form.Item name="detail_max_items" label="每屏深采上限" tooltip="每个列表页最多点进几条深采">
               <InputNumber min={0} max={20} />
             </Form.Item>
@@ -603,7 +639,7 @@ export default function MobileCollect() {
       {/* 记录抽屉 */}
       <Drawer
         title={`采集记录 - ${recordsTask?.name ?? ''}`}
-        width={820}
+        size={820}
         open={recordsOpen}
         onClose={() => setRecordsOpen(false)}
         extra={
@@ -626,7 +662,7 @@ export default function MobileCollect() {
       {/* 调度抽屉 */}
       <Drawer
         title={`定时调度 - ${scheduleTask?.name ?? ''}`}
-        width={560}
+        size={560}
         open={scheduleOpen}
         onClose={() => setScheduleOpen(false)}
       >
@@ -703,7 +739,7 @@ export default function MobileCollect() {
       {/* 试跑预览抽屉 */}
       <Drawer
         title={`试跑预览 - ${dryRunTask?.name ?? ''}`}
-        width={820}
+        size={820}
         open={dryRunOpen}
         onClose={() => setDryRunOpen(false)}
         extra={

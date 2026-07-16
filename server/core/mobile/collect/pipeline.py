@@ -26,6 +26,7 @@ from core.mobile.collect.analysis import (
     triage_screenshot,
     analyze_detail,
 )
+from core.mobile.collect.source_links import extract_source_link
 
 from api.dao import mobile_collect as collect_dao
 from api.dao import mobile_artifacts as ma_dao
@@ -194,6 +195,7 @@ class _CollectStage(Stage):
             shots_b64: list[str] = []
             shot_ids: list[str] = []
             shot_urls: list[str] = []
+            source_url: str | None = None
             b64, sid, url = await self._capture_save(
                 ctx, keyword, note=f"detail kw={keyword} score={candidate.get('score')}"
             )
@@ -201,6 +203,48 @@ class _CollectStage(Stage):
             shot_ids.append(sid)
             shot_urls.append(url)
             prev_sig = _image_signature(b64)
+
+            source_link_strategy = str(st.get("source_link_strategy") or "none")
+            if source_link_strategy != "none" and not stop.is_set():
+                link_result = await asyncio.to_thread(
+                    extract_source_link, device_id, source_link_strategy
+                )
+                if link_result.ok:
+                    source_url = link_result.url
+                    obs_log(
+                        "详情页原文链接提取成功",
+                        project_id=st["project_id"] or "",
+                        task_id=run_task_id,
+                        source=_OBS_SOURCE,
+                        level="info",
+                        event="collect_source_link_extracted",
+                        data={
+                            "keyword": keyword,
+                            "strategy": source_link_strategy,
+                            "url": source_url,
+                            "elapsed_ms": link_result.elapsed_ms,
+                        },
+                    )
+                else:
+                    ctx.logger.warning(
+                        "[collect] 原文链接提取失败 "
+                        f"strategy={source_link_strategy}: {link_result.error}"
+                    )
+                    obs_log(
+                        f"详情页原文链接提取失败: {link_result.error}",
+                        project_id=st["project_id"] or "",
+                        task_id=run_task_id,
+                        source=_OBS_SOURCE,
+                        level="warning",
+                        event="collect_source_link_error",
+                        data={
+                            "keyword": keyword,
+                            "strategy": source_link_strategy,
+                            "error": link_result.error,
+                            "elapsed_ms": link_result.elapsed_ms,
+                        },
+                    )
+
             # 详情页滑动到底: 逐屏截图, 需连续两屏几乎一致才判定到底(避免单帧误判提前退出)
             reached_bottom = False
             swipes = 0
@@ -260,7 +304,7 @@ class _CollectStage(Stage):
                         "subject_match": rec.get("subject_match")
                         or candidate.get("subject_match"),
                         "score_reason": rec.get("score_reason", ""),
-                        "source_url": rec.get("source_url"),
+                        "source_url": source_url or rec.get("source_url"),
                         "keyword": keyword,
                         "screenshot_id": shot_ids[0] if shot_ids else sid,
                         "screenshot_url": shot_urls[0] if shot_urls else url,
@@ -658,6 +702,7 @@ async def run_collect_task(
         "dedup_key_fields": task_def.get("dedup_key_fields") or [],
         "notify_on": task_def.get("notify_on", "new"),
         "deep_collect": bool(task_def.get("deep_collect", False)),
+        "source_link_strategy": str(task_def.get("source_link_strategy") or "none"),
         "detail_max_items": int(task_def.get("detail_max_items", 5) or 0),
         "detail_max_swipes": int(task_def.get("detail_max_swipes", 12) or 12),
         "min_score_to_detail": int(task_def.get("min_score_to_detail", 60) or 0),

@@ -24,6 +24,7 @@ from api.models.mobile_collect import (
 )
 from core.mobile.collect import request_stop
 from core.mobile.collect.presets import PRESETS
+from core.mobile.collect.source_links import list_source_link_strategies
 from core.background import spawn_background
 from core.logger import get_logger
 
@@ -52,6 +53,21 @@ async def list_task_defs(project_id: str | None = None):
     db = get_db()
     items = await collect_dao.list_task_defs(db, project_id=project_id)
     return {"items": items, "total": len(items)}
+
+
+@router.get("/source-link-strategies")
+async def source_link_strategies():
+    items = list_source_link_strategies()
+    return {
+        "items": [
+            {
+                "strategy": item.strategy,
+                "label": item.label,
+                "description": item.description,
+            }
+            for item in items
+        ]
+    }
 
 
 @router.get("/tasks/{task_def_id}")

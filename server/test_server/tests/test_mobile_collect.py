@@ -36,8 +36,10 @@ class _FakeCollection:
         add = update.get("$addToSet", {})
         for key, val in add.items():
             arr = existing.setdefault(key, [])
-            if val not in arr:
-                arr.append(val)
+            values = val.get("$each", []) if isinstance(val, dict) else [val]
+            for value in values:
+                if value not in arr:
+                    arr.append(value)
         self.docs[rid] = existing
 
 
@@ -50,7 +52,7 @@ class _FakeDB:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ── DAO: 稳定 record_id ─────────────────────────────────
@@ -135,6 +137,43 @@ def test_upsert_record_first_seen_preserved_on_update():
 
     before, after = _run(scenario())
     assert before == after  # first_seen 不因更新而改变
+
+
+def test_upsert_record_treats_new_source_url_as_content_change():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+
+    async def scenario():
+        first = await dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id=None,
+            fields={"title": "A"},
+            dedup_key_fields=["title"],
+        )
+        linked = await dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id=None,
+            fields={"title": "A"},
+            dedup_key_fields=["title"],
+            source_url="https://mp.weixin.qq.com/s/demo",
+        )
+        same = await dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id=None,
+            fields={"title": "A"},
+            dedup_key_fields=["title"],
+            source_url="https://mp.weixin.qq.com/s/demo",
+        )
+        return first, linked, same
+
+    first, linked, same = _run(scenario())
+    assert first["is_new"] is True
+    assert linked["is_changed"] is True
+    assert same["is_changed"] is False
 
 
 # ── 调度: interval next_run ─────────────────────────────

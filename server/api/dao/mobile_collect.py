@@ -138,8 +138,11 @@ def stable_record_id(
     return _stable_record_id(task_def_id, fields, dedup_key_fields)
 
 
-def _content_hash(fields: dict[str, Any]) -> str:
-    raw = json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str)
+def _content_hash(fields: dict[str, Any], source_url: str | None = None) -> str:
+    content: dict[str, Any] = fields
+    if source_url:
+        content = {"fields": fields, "source_url": source_url}
+    raw = json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
@@ -160,7 +163,7 @@ async def upsert_record(
 ) -> dict[str, Any]:
     """增量 upsert 一条采集记录。返回 {record_id, is_new, is_changed}。"""
     record_id = _stable_record_id(task_def_id, fields, dedup_key_fields)
-    content_hash = _content_hash(fields)
+    content_hash = _content_hash(fields, source_url)
     now = _now()
     coll = db[MOBILE_COLLECT_RECORDS_COLLECTION]
 

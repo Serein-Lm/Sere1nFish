@@ -1,0 +1,36 @@
+.mobile-collect-field-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(150px, 1.5fr) 90px 32px;
+  gap: 8px;
+  align-items: start;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.mobile-collect-field-row .ant-input,
+.mobile-collect-field-row .ant-select {
+  width: 100%;
+}
+
+.mobile-collect-field-remove {
+  margin-top: 1px;
+}
+
+@media (max-width: 600px) {
+  .mobile-collect-field-row {
+    grid-template-columns: minmax(0, 1fr) 84px 32px;
+  }
+
+  .mobile-collect-field-description {
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+
+  .mobile-collect-field-type {
+    grid-column: 2;
+  }
+
+  .mobile-collect-field-remove {
+    grid-column: 3;
+  }
+}

@@ -26,6 +26,7 @@ export interface CollectTaskDef {
   notify_on: NotifyOn
   search_hint?: string
   deep_collect?: boolean
+  source_link_strategy?: string
   detail_max_items?: number
   detail_max_swipes?: number
   min_score_to_detail?: number
@@ -51,6 +52,7 @@ export interface CollectTaskInput {
   notify_on: NotifyOn
   search_hint?: string
   deep_collect?: boolean
+  source_link_strategy?: string
   detail_max_items?: number
   detail_max_swipes?: number
   min_score_to_detail?: number
@@ -126,6 +128,12 @@ export interface CollectPreset {
   suggested_trigger: TriggerDef
 }
 
+export interface SourceLinkStrategyOption {
+  strategy: string
+  label: string
+  description: string
+}
+
 const BASE = '/v1/mobile-collect'
 
 // ── 任务定义 ────────────────────────────────────────────
@@ -137,6 +145,10 @@ export function listTaskDefs(projectId?: string) {
 
 export function getTaskDef(taskDefId: string) {
   return apiFetch<CollectTaskDef>(`${BASE}/tasks/${encodeURIComponent(taskDefId)}`)
+}
+
+export function listSourceLinkStrategies() {
+  return apiFetch<{ items: SourceLinkStrategyOption[] }>(`${BASE}/source-link-strategies`)
 }
 
 export function createTaskDef(payload: CollectTaskInput) {

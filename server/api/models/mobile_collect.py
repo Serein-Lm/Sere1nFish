@@ -47,6 +47,13 @@ class CollectTaskDef(BaseModel):
     deep_collect: bool = Field(
         default=False, description="是否启用详情页深入采集(点进列表条目采集富信息)"
     )
+    source_link_strategy: str = Field(
+        default="none",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+        description="详情页原文链接提取策略;none 表示仅使用视觉模型结果",
+    )
     detail_max_items: int = Field(
         default=5, ge=0, le=20, description="每个列表页最多点进几条做详情深采"
     )
@@ -79,6 +86,12 @@ class CollectTaskUpdate(BaseModel):
     notify_on: NotifyOn | None = None
     search_hint: str | None = None
     deep_collect: bool | None = None
+    source_link_strategy: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
     detail_max_items: int | None = Field(default=None, ge=0, le=20)
     detail_max_swipes: int | None = Field(default=None, ge=0, le=20)
     min_score_to_detail: int | None = Field(default=None, ge=0, le=100)

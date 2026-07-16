@@ -58,7 +58,7 @@ PRESETS: list[dict[str, Any]] = [
     {
         "preset_id": "wechat_official",
         "title": "微信公众号搜索入库分析",
-        "description": "搜索微信公众号文章, 截屏滑动收集, 结构化分析入库, 每日增量监控通知。",
+        "description": "搜索微信公众号文章, 深采时复制原文链接, 截屏滑动并结构化入库, 每日增量监控通知。",
         "task": {
             "name": "公众号搜索入库分析",
             "app_name": "微信",
@@ -82,6 +82,7 @@ PRESETS: list[dict[str, Any]] = [
             "notify_on": "both",
             "search_hint": "在微信顶部搜索框输入关键词, 选择公众号/文章结果",
             "deep_collect": True,
+            "source_link_strategy": "wechat_copy_link",
             "detail_max_items": 5,
             "detail_max_swipes": 12,
             "min_score_to_detail": 60,
