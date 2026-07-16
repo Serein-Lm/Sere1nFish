@@ -58,6 +58,12 @@ async def _load_hunter_config_from_db() -> dict[str, Any]:
         return {}
 
 
+async def get_configured_api_key() -> str:
+    """读取数据库中已解密的 Hunter Key，供统一 Provider 做快速预检。"""
+    config = await _load_hunter_config_from_db()
+    return str(config.get("api_key") or "").strip()
+
+
 def _hunter_base64_encode(query: str) -> str:
     """Hunter base64 编码"""
     return base64.urlsafe_b64encode(query.encode()).decode()
@@ -92,6 +98,7 @@ async def search_hunter(
     size: int = 100,
     api_key: str | None = None,
     months: int = 1,
+    raise_on_error: bool = False,
 ) -> list[HunterResult]:
     """
     Hunter API 搜索（支持分页查询）
@@ -108,9 +115,7 @@ async def search_hunter(
     """
     # 获取 API Key
     if not api_key:
-        # 优先从数据库读取
-        config = await _load_hunter_config_from_db()
-        api_key = config.get("api_key", "")
+        api_key = await get_configured_api_key()
     
     if not api_key:
         logger.warning("API Key 未配置")
@@ -162,7 +167,10 @@ async def search_hunter(
                     data = await resp.json()
                     
                     if data.get("code") != 200:
-                        logger.warning(f"第 {page} 页查询错误: {data.get('message')}")
+                        error_message = str(data.get("message") or "未知错误")
+                        logger.warning(f"第 {page} 页查询错误: {error_message}")
+                        if raise_on_error:
+                            raise RuntimeError(f"Hunter 查询返回错误: {error_message}")
                         break
                     
                     arr = data.get("data", {}).get("arr", [])
@@ -196,9 +204,13 @@ async def search_hunter(
                     
             except asyncio.TimeoutError:
                 logger.warning(f"第 {page} 页查询超时")
+                if raise_on_error:
+                    raise TimeoutError(f"Hunter 第 {page} 页查询超时")
                 break
             except Exception as e:
                 logger.error(f"第 {page} 页查询失败: {e}")
+                if raise_on_error:
+                    raise
                 break
     
     logger.info(f"查询完成，共获取 {len(all_results)} 条结果")
@@ -213,8 +225,7 @@ async def validate_key(api_key: str | None = None) -> tuple[bool, str]:
         (是否有效, 说明信息)
     """
     if not api_key:
-        config = await _load_hunter_config_from_db()
-        api_key = str(config.get("api_key") or "").strip()
+        api_key = await get_configured_api_key()
 
     if not api_key:
         return False, "Hunter API Key 未配置"

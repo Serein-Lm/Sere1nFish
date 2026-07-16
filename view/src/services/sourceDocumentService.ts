@@ -107,6 +107,8 @@ export interface ProjectTargetSummary {
   document_count: number
   project_document_count: number
   record_count: number
+  asset_count: number
+  alive_asset_count: number
   linked_project_count: number
   last_document_at?: string
 }

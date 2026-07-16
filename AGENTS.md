@@ -97,6 +97,7 @@
 - 配置读取和敏感字段处理应通过 `api.services.runtime_config`、`api.dao.config`、配置加密工具或既有配置入口接入，不在业务模块散落解析逻辑。
 - AI 技能、提示词、模型客户端和 AIGC 能力应通过技能/提示词库、runtime service 或模型适配层接入；业务模块不要直接绑定单一模型供应商。
 - 手机相关能力通过 `core/mobile/*`、设备池、预约 DAO、mobile router/service 统一接入；不要在业务流程里直接写 ADB、EasyTier 或设备协议细节。
+- 手机附件、图片和音频传递统一通过 `api.services.mobile_transfer` 接入：先写私有对象存储留档，再按媒体类型推送到 Android 公共媒体目录并触发媒体扫描；上传临时文件必须在成功、失败和取消分支释放，页面不得直接执行 ADB。
 - 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。
 - 截图、Word 产物、语音上传和受保护下载文件统一通过 `api.storage.ObjectStorageService` 写入；业务集合只保存 `storage_object_id`，不得直接调用 OSS SDK 或拼接 Object Key。读取按对象元数据选择 Provider，允许迁移期本地与 OSS 对象并存。
 - 对象存储 Bucket 必须为私有读写，服务端使用内网 Endpoint，浏览器下载使用短时签名 URL，图片通过鉴权 API 读取。AK/SK 只存 MongoDB 加密配置，不写入环境文件、日志、迁移报告或 Git。
@@ -110,7 +111,7 @@
 - 后端异步流程不要阻塞事件循环；外部 I/O、长任务、流式响应和后台任务要沿用现有 runtime/pipeline 模式。
 - 生命周期初始化放在 `api.main` 或对应 service/DAO 的幂等初始化函数里；不要靠首次请求隐式创建关键索引或全局状态。
 - 公司名规范化、根域名判断等 AI 浏览器能力必须复用 `Sere1nGraph` 的 `create_agent_node` + `chrome-devtools` MCP，禁止另起浏览器；AI 输出必须用结构化 schema（如 `CompanyNormalization`）约束并落库元信息（如 `company_meta`）。
-- 外部资产情报（FOFA/Hunter 等）经统一适配层 `crawler_tools/*_tools.py` 接入，API Key 走 `api.dao.config` 的 tools 分类加密存储；结果按稳定 `asset_id` upsert 增量入库，不在业务流程散落 HTTP 细节。工具 Key 有效性探测统一走 `api.services.tool_key_test` 分派，各工具校验收敛在其 `validate_key`。
+- 外部资产情报（FOFA/Hunter 等）经 `api.services.asset_intelligence` 统一协议、工厂和 Provider 接入，底层查询复用 `crawler_tools/*_tools.py`；API Key 走 `api.dao.config` 的 tools 分类加密存储。候选 URL 必须先跨来源规范化去重和并发存活探测，再按稳定 `asset_id` 增量 upsert 到 `fofa_assets`，只有新增或发生实质变化且存活的资产进入深度扫描。工具 Key 有效性探测统一走 `api.services.tool_key_test` 分派，各工具校验收敛在其 `validate_key`。
 - 新增 MongoDB collection（如 `fofa_assets`、`company_meta`）先在 `api/db/collections.py` 声明常量，再在 `api.main` 生命周期或 DAO `ensure_indexes` 中幂等建索引。
 
 ## 前端关键设计规则

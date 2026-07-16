@@ -1690,3 +1690,26 @@
 .wechat-shot-gallery img:hover {
   transform: scale(1.04);
 }
+
+.project-tab-section {
+  min-width: 0;
+}
+
+.section-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.section-header-row .ant-typography {
+  margin-block: 0 4px;
+}
+
+@media (max-width: 640px) {
+  .section-header-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

@@ -30,6 +30,8 @@ logger = get_logger("company_scan")
 # 集合名
 COMPANY_SCAN_COLLECTION = "company_scan_results"
 PROFILE_COPYWRITINGS_COLLECTION = "profile_copywritings"
+COMPANY_NORMALIZE_TIMEOUT_SECONDS = 300
+COMPANY_ROUTER_TIMEOUT_SECONDS = 120
 
 
 class _ProfileCopywritingStage(Stage):
@@ -48,6 +50,7 @@ class _ProfileCopywritingStage(Stage):
         router_output: Any,
         db: Any,
         pipeline_owner: Any,
+        target_id: str = "",
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
@@ -55,6 +58,7 @@ class _ProfileCopywritingStage(Stage):
         self.router_output = router_output
         self.db = db
         self.pipeline_owner = pipeline_owner
+        self.target_id = target_id
         super().__init__(concurrency=concurrency)
 
     async def on_setup(self, state: dict[str, Any]) -> None:
@@ -116,12 +120,17 @@ class _ProfileCopywritingStage(Stage):
             cw["project_id"] = self.project_id
             cw["source"] = "xhs_profile"
             cw["user_id"] = user_id
+            if self.target_id:
+                cw["target_id"] = self.target_id
             cw["status"] = "completed"
             await self.db[PROFILE_COPYWRITINGS_COLLECTION].insert_one(cw)
 
             try:
+                finding_query = {"project_id": self.project_id, "xhs_user_id": user_id}
+                if self.target_id:
+                    finding_query["target_id"] = self.target_id
                 finding = await self.db["findings"].find_one(
-                    {"project_id": self.project_id, "xhs_user_id": user_id},
+                    finding_query,
                     {"finding_id": 1},
                 )
                 if finding:
@@ -161,12 +170,16 @@ class CompanyScanPipeline:
         url_text: str = "",
         urls: list[str] | None = None,
         enable_url_scan: bool = True,
+        enable_asset_discovery: bool = True,
         enable_xhs: bool = True,
         enable_copywriting: bool = True,
         xhs_max_notes: int = 100,
         xhs_attention_threshold: int = 60,
         min_attention_score: int = 40,
         profile_copywriting_threshold: int = 60,
+        fofa_size: int = 200,
+        hunter_size: int = 200,
+        asset_probe_concurrency: int = 48,
     ) -> dict[str, Any]:
         """
         运行综合扫描流水线
@@ -181,10 +194,21 @@ class CompanyScanPipeline:
         result = {
             "task_id": task_id,
             "company_name": company_name,
+            "status": "running",
+            "identity": {},
             "router_result": None,
+            "assets": {
+                "enabled": enable_asset_discovery,
+                "discovered": 0,
+                "alive": 0,
+                "inserted": 0,
+                "updated": 0,
+                "providers": {},
+            },
             "url_scan": {"enabled": enable_url_scan, "findings_count": 0, "copywritings_count": 0},
             "xhs": {"enabled": enable_xhs, "keywords_used": [], "notes_count": 0, "profiles_count": 0},
             "profile_copywritings": {"count": 0},
+            "sub_errors": [],
             "error": None,
         }
         obs_log(
@@ -194,11 +218,94 @@ class CompanyScanPipeline:
         )
 
         try:
-            # ── 阶段 1: 公司路由 ──
-            logger.info(f"[company_scan] task={task_id} 阶段1: 公司路由分析 '{company_name}'")
-            await self._update_progress(task_id, "routing", "分析公司信息...")
+            # ── 阶段 1: 公司标准化与场景路由并发执行 ──
+            logger.info(f"[company_scan] task={task_id} 阶段1: 识别公司 '{company_name}'")
+            await self._update_progress(task_id, "routing", "识别法定主体、根域名和搜索别名...")
+            from api.dao import company_meta as company_meta_dao
+            from api.services.company_normalize import normalize_company
+            from api.services.targets import attach_normalized_company
+            from Sere1nGraph.graph.company_router.router import CompanyRouterResult
 
-            router_output = await self._run_company_router(company_name)
+            normalized_result, router_result = await asyncio.gather(
+                asyncio.wait_for(
+                    normalize_company(
+                        self.db,
+                        self.app_config,
+                        project_id=project_id,
+                        input_name=company_name,
+                        task_id=task_id,
+                    ),
+                    timeout=COMPANY_NORMALIZE_TIMEOUT_SECONDS,
+                ),
+                asyncio.wait_for(
+                    self._run_company_router(company_name),
+                    timeout=COMPANY_ROUTER_TIMEOUT_SECONDS,
+                ),
+                return_exceptions=True,
+            )
+            normalization_error = ""
+            if isinstance(normalized_result, Exception):
+                normalization_error = str(normalized_result) or "公司规范化执行超时"
+                logger.warning("[company_scan] 公司规范化失败，降级使用路由结果: %s", normalized_result)
+                company_meta: dict[str, Any] = {
+                    "normalized_name": company_name,
+                    "root_domain": "",
+                    "aliases": [company_name],
+                    "source": "fallback",
+                    "confidence": None,
+                }
+            else:
+                company_meta = normalized_result
+            if isinstance(router_result, Exception):
+                router_output = CompanyRouterResult(success=False, error=str(router_result))
+            else:
+                router_output = router_result
+
+            router_profile = router_output.company_profile if router_output.success else None
+            router_legal_name = str(getattr(router_profile, "icp_name", "") or "").strip()
+            normalized_name = str(company_meta.get("normalized_name") or company_name).strip()
+            if normalized_name == company_name and router_legal_name:
+                normalized_name = router_legal_name
+            aliases = self._dedupe_text(
+                [
+                    company_name,
+                    normalized_name,
+                    *[str(item) for item in company_meta.get("aliases") or []],
+                    *list(getattr(router_profile, "colloquial_names", []) or []),
+                    router_legal_name,
+                ]
+            )
+            root_domain = str(company_meta.get("root_domain") or "").strip()
+            target = await attach_normalized_company(
+                self.db,
+                project_id=project_id,
+                input_name=company_name,
+                normalized_name=normalized_name,
+                root_domain=root_domain,
+                aliases=aliases,
+                task_id=task_id,
+            )
+            target_id = str(target.get("target_id") or "")
+            company_meta = await company_meta_dao.upsert_company_meta(
+                self.db,
+                project_id=project_id,
+                input_name=company_name,
+                normalized_name=normalized_name,
+                root_domain=root_domain,
+                aliases=aliases,
+                confidence=company_meta.get("confidence"),
+                source=str(company_meta.get("source") or "company_scan"),
+                task_id=task_id,
+                target_id=target_id,
+            )
+            result["identity"] = {
+                "input_name": company_name,
+                "normalized_name": normalized_name,
+                "root_domain": root_domain,
+                "aliases": aliases,
+                "target_id": target_id,
+                "normalization_error": normalization_error or None,
+            }
             result["router_result"] = {
                 "success": router_output.success,
                 "enabled_nodes": router_output.enabled_nodes,
@@ -208,21 +315,34 @@ class CompanyScanPipeline:
             if not router_output.success:
                 logger.warning(f"[company_scan] 公司路由失败: {router_output.error}，使用默认策略")
 
-            # ── 阶段 2: 并行执行子流水线 ──
-            tasks = []
-
-            if enable_url_scan and (url_text or urls):
-                tasks.append(self._run_url_scan(
-                    task_id, project_id, url_text, urls or [],
-                    min_attention_score, enable_copywriting,
-                ))
+            # ── 阶段 2: 资产发现/URL 深扫与社媒采集并发执行 ──
+            tasks: list[Any] = []
+            if enable_asset_discovery or (enable_url_scan and (url_text or urls)):
+                tasks.append(
+                    self._run_asset_and_url_scan(
+                        task_id=task_id,
+                        project_id=project_id,
+                        identity=result["identity"],
+                        url_text=url_text,
+                        urls=urls or [],
+                        enable_asset_discovery=enable_asset_discovery,
+                        enable_url_scan=enable_url_scan,
+                        enable_copywriting=enable_copywriting,
+                        min_attention_score=min_attention_score,
+                        fofa_size=fofa_size,
+                        hunter_size=hunter_size,
+                        probe_concurrency=asset_probe_concurrency,
+                    )
+                )
 
             if enable_xhs:
-                xhs_keywords = self._get_xhs_keywords(company_name, router_output)
+                xhs_keywords = self._get_xhs_keywords(aliases, router_output)
                 result["xhs"]["keywords_used"] = xhs_keywords
                 tasks.append(self._run_xhs_search(
                     task_id, project_id, xhs_keywords,
                     xhs_max_notes, xhs_attention_threshold,
+                    target_id=target_id,
+                    target_name=normalized_name,
                 ))
 
             if tasks:
@@ -233,11 +353,15 @@ class CompanyScanPipeline:
                 for i, sub in enumerate(sub_results):
                     if isinstance(sub, Exception):
                         logger.error(f"[company_scan] 子流水线 {i} 失败: {sub}")
+                        result["sub_errors"].append(str(sub))
                     elif isinstance(sub, dict):
-                        if "findings_count" in sub:
-                            result["url_scan"].update(sub)
+                        if sub.get("kind") == "asset_url":
+                            result["assets"].update(sub.get("assets") or {})
+                            result["url_scan"].update(sub.get("url_scan") or {})
                         elif "notes_count" in sub:
                             result["xhs"].update(sub)
+                if result["sub_errors"] and len(result["sub_errors"]) == len(tasks):
+                    raise RuntimeError("所有公司扫描子流水线均失败: " + "; ".join(result["sub_errors"]))
 
             # ── 阶段 3: 画像→话术 ──
             if enable_xhs and enable_copywriting:
@@ -245,12 +369,14 @@ class CompanyScanPipeline:
                 await self._update_progress(task_id, "profile_copywriting", "为高分画像生成话术...")
 
                 cw_count = await self._run_profile_copywriting(
-                    task_id, project_id, company_name,
+                    task_id, project_id, normalized_name,
                     router_output, profile_copywriting_threshold,
+                    target_id=target_id,
                 )
                 result["profile_copywritings"]["count"] = cw_count
 
             # ── 保存综合结果 ──
+            result["status"] = "completed"
             await self.db[COMPANY_SCAN_COLLECTION].update_one(
                 {"task_id": task_id},
                 {"$set": {
@@ -262,11 +388,23 @@ class CompanyScanPipeline:
                 }},
                 upsert=True,
             )
+            if target_id:
+                from api.dao import targets as targets_dao
+
+                await targets_dao.touch_project_target_collection(
+                    self.db,
+                    project_id=project_id,
+                    target_id=target_id,
+                    run_task_id=task_id,
+                )
+            await self._update_progress(task_id, "completed", "综合公司扫描完成")
             obs_log(
                 "综合公司扫描流水线完成", task_id=task_id, project_id=project_id,
                 source="company_scan_pipeline", level="notice", event="pipeline_done",
                 data={
                     "url_findings": result["url_scan"].get("findings_count", 0),
+                    "assets": result["assets"].get("discovered", 0),
+                    "alive_assets": result["assets"].get("alive", 0),
                     "xhs_notes": result["xhs"].get("notes_count", 0),
                     "xhs_profiles": result["xhs"].get("profiles_count", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
@@ -274,13 +412,29 @@ class CompanyScanPipeline:
             )
 
         except Exception as e:
+            result["status"] = "error"
             result["error"] = str(e)
             logger.error(f"[company_scan] task={task_id} 流水线异常: {e}")
+            await self.db[COMPANY_SCAN_COLLECTION].update_one(
+                {"task_id": task_id},
+                {
+                    "$set": {
+                        "task_id": task_id,
+                        "project_id": project_id,
+                        "company_name": company_name,
+                        "result": result,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                },
+                upsert=True,
+            )
+            await self._update_progress(task_id, "error", f"综合公司扫描失败: {e}")
             obs_log(
                 f"综合公司扫描流水线失败: {e}", task_id=task_id, project_id=project_id,
                 source="company_scan_pipeline", level="error", event="pipeline_error",
                 data={"error": str(e)},
             )
+            raise
 
         return result
 
@@ -297,6 +451,73 @@ class CompanyScanPipeline:
     # 阶段 2a: URL 扫描
     # ══════════════════════════════════════
 
+    async def _run_asset_and_url_scan(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        identity: dict[str, Any],
+        url_text: str,
+        urls: list[str],
+        enable_asset_discovery: bool,
+        enable_url_scan: bool,
+        enable_copywriting: bool,
+        min_attention_score: int,
+        fofa_size: int,
+        hunter_size: int,
+        probe_concurrency: int,
+    ) -> dict[str, Any]:
+        from api.services.asset_intelligence import AssetIdentity, AssetIntelligenceService
+
+        asset_result: dict[str, Any] = {
+            "enabled": enable_asset_discovery,
+            "discovered": 0,
+            "alive": 0,
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "providers": {},
+        }
+        discovered_urls: list[str] = []
+        if enable_asset_discovery:
+            asset_result = await AssetIntelligenceService(self.db).discover(
+                identity=AssetIdentity(
+                    input_name=str(identity.get("input_name") or ""),
+                    normalized_name=str(identity.get("normalized_name") or ""),
+                    root_domain=str(identity.get("root_domain") or ""),
+                    target_id=str(identity.get("target_id") or ""),
+                    aliases=list(identity.get("aliases") or []),
+                ),
+                project_id=project_id,
+                task_id=task_id,
+                provider_sizes={"fofa": fofa_size, "hunter": hunter_size},
+                probe_concurrency=probe_concurrency,
+            )
+            discovered_urls = [
+                str(value) for value in asset_result.get("scan_urls") or [] if str(value).strip()
+            ]
+
+        url_result: dict[str, Any] = {
+            "enabled": enable_url_scan,
+            "findings_count": 0,
+            "copywritings_count": 0,
+        }
+        if enable_url_scan:
+            merged_urls = self._dedupe_text([*urls, *discovered_urls])
+            if merged_urls or url_text.strip():
+                url_result.update(
+                    await self._run_url_scan(
+                        task_id,
+                        project_id,
+                        url_text,
+                        merged_urls,
+                        min_attention_score,
+                        enable_copywriting,
+                        target_id=str(identity.get("target_id") or ""),
+                    )
+                )
+        return {"kind": "asset_url", "assets": asset_result, "url_scan": url_result}
+
     async def _run_url_scan(
         self,
         task_id: str,
@@ -305,6 +526,7 @@ class CompanyScanPipeline:
         urls: list[str],
         min_attention_score: int,
         enable_copywriting: bool,
+        target_id: str = "",
     ) -> dict[str, Any]:
         from api.services.url_scan_pipeline import UrlScanPipeline
 
@@ -318,11 +540,17 @@ class CompanyScanPipeline:
             project_id=project_id,
             url_content=url_content,
             min_attention_score=min_attention_score,
+            target_id=target_id,
+            enable_copywriting=enable_copywriting,
         )
+        if scan_result.get("status") == "error":
+            raise RuntimeError(str(scan_result.get("error") or "URL 深度扫描失败"))
 
         return {
             "findings_count": scan_result.get("total_findings", 0),
             "copywritings_count": scan_result.get("total_copywritings", 0),
+            "status": scan_result.get("status"),
+            "error": scan_result.get("error"),
         }
 
     # ══════════════════════════════════════
@@ -336,6 +564,8 @@ class CompanyScanPipeline:
         keywords: list[str],
         max_notes: int,
         attention_threshold: int,
+        target_id: str = "",
+        target_name: str = "",
     ) -> dict[str, Any]:
         """
         流式队列架构的 XHS 搜索流水线
@@ -349,7 +579,7 @@ class CompanyScanPipeline:
         from api.services.xhs_pipeline import XhsPipeline
 
         t0 = _time.time()
-        per_keyword = min(40, max_notes)
+        per_keyword = max(1, min(40, (max_notes + max(1, len(keywords)) - 1) // max(1, len(keywords))))
         pipeline = XhsPipeline(self.db, self.app_config)
         toolset = await InfoCollectionToolFactory(
             db=self.db,
@@ -360,30 +590,35 @@ class CompanyScanPipeline:
         logger.info(f"[xhs-stream] ▶ 流式流水线启动 | keywords={len(keywords)} per_keyword={per_keyword}")
 
         search_stage = _XhsSearchStage(
-            concurrency=2, project_id=project_id, task_id=task_id,
+            concurrency=min(3, max(1, len(keywords))), project_id=project_id, task_id=task_id,
             per_keyword=per_keyword, db=self.db, pipeline_owner=pipeline,
+            target_id=target_id, target_name=target_name,
         )
         tagging_stage = _XhsTaggingStage(
-            concurrency=7, attention_threshold=attention_threshold,
+            concurrency=8, attention_threshold=attention_threshold,
             db=self.db, pipeline_owner=pipeline,
         )
         detail_stage = _XhsDetailStage(
-            concurrency=3, project_id=project_id, db=self.db, pipeline_owner=pipeline,
+            concurrency=4, project_id=project_id, db=self.db, pipeline_owner=pipeline,
         )
 
-        pipe = await run_stream_pipeline(
-            stages=[
-                stream_stage(search_stage, downstream=["tagging"]),
-                stream_stage(tagging_stage, downstream=["detail"]),
-                stream_stage(detail_stage),
-            ],
-            seeds=make_stream_items(keywords, indexed=True),
-            entry="search",
-            state={
-                "db": self.db,
-                **toolset.state(),
-            },
-        )
+        try:
+            pipe = await run_stream_pipeline(
+                stages=[
+                    stream_stage(search_stage, downstream=["tagging"]),
+                    stream_stage(tagging_stage, downstream=["detail"]),
+                    stream_stage(detail_stage),
+                ],
+                seeds=make_stream_items(keywords, indexed=True),
+                entry="search",
+                state={
+                    "db": self.db,
+                    **toolset.state(),
+                },
+            )
+        except Exception:
+            await toolset.close()
+            raise
 
         all_notes_count = pipe.state.get("all_notes_count", 0)
         all_suspicious_count = pipe.state.get("all_suspicious_count", 0)
@@ -404,6 +639,7 @@ class CompanyScanPipeline:
                         project_id=project_id,
                         task_id=sub_task_id,
                         keyword=keyword,
+                        options={"target_id": target_id},
                     )
                 )
                 logger.info(f"[xhs-stream] 画像完成 keyword='{keyword}' profiles={profile_result.count}")
@@ -412,16 +648,16 @@ class CompanyScanPipeline:
                 logger.error(f"[xhs-stream] 画像失败 keyword='{keyword}': {e}")
                 return 0
 
-        profile_results = await asyncio.gather(
-            *[_gen_profile(i, kw) for i, kw in enumerate(keywords)],
-            return_exceptions=True,
-        )
+        try:
+            profile_results = await asyncio.gather(
+                *[_gen_profile(i, kw) for i, kw in enumerate(keywords)],
+                return_exceptions=True,
+            )
+        finally:
+            await toolset.close()
         for r in profile_results:
             if isinstance(r, int):
                 all_profiles_count += r
-
-        # 关闭共享 V2 客户端
-        await toolset.close()
 
         elapsed = _time.time() - t0
         logger.info(
@@ -445,6 +681,7 @@ class CompanyScanPipeline:
         company_name: str,
         router_output: Any,
         threshold: int,
+        target_id: str = "",
     ) -> int:
         """为高分画像生成话术"""
         from api.dao import xhs as xhs_dao
@@ -452,7 +689,12 @@ class CompanyScanPipeline:
         from api.services.info_collection.streaming import make_stream_items, run_stream_pipeline, stream_stage
 
         # 获取高分画像
-        profiles, _ = await xhs_dao.list_profiles(self.db, project_id)
+        profiles, _ = await xhs_dao.list_profiles(
+            self.db,
+            project_id,
+            target_id=target_id or None,
+            limit=500,
+        )
         high_profiles = [
             p for p in profiles
             if (p.get("attention_score") or p.get("tagging", {}).get("attention_score", 0)) >= threshold
@@ -477,6 +719,7 @@ class CompanyScanPipeline:
             router_output=router_output,
             db=self.db,
             pipeline_owner=self,
+            target_id=target_id,
         )
         pipe = await run_stream_pipeline(
             stages=[stream_stage(stage)],
@@ -495,18 +738,28 @@ class CompanyScanPipeline:
     # 辅助方法
     # ══════════════════════════════════════
 
-    def _get_xhs_keywords(self, company_name: str, router_output: Any) -> list[str]:
-        """从路由结果提取小红书搜索关键词，如果路由失败则使用默认词"""
-        if router_output.success and router_output.all_keywords.get("xhs"):
-            return router_output.all_keywords["xhs"]
+    @staticmethod
+    def _dedupe_text(values: list[str]) -> list[str]:
+        return list(
+            dict.fromkeys(
+                value.strip() for value in values if isinstance(value, str) and value.strip()
+            )
+        )
 
-        # 默认关键词（高社工价值场景）
-        short_name = company_name[:4] if len(company_name) > 4 else company_name
-        return [
-            f"{short_name} 实习",
-            f"{short_name} 内推",
-            f"{short_name} 招聘",
+    def _get_xhs_keywords(self, search_names: list[str], router_output: Any) -> list[str]:
+        """组合真实品牌别名与场景词，法定名不再是唯一检索入口。"""
+        routed = (
+            list(router_output.all_keywords.get("xhs") or [])
+            if router_output.success
+            else []
+        )
+        scene_terms = ["实习", "内推", "招聘", "工作体验"]
+        generated = [
+            f"{name} {term}"
+            for name in search_names[:4]
+            for term in scene_terms
         ]
+        return self._dedupe_text([*routed, *generated])[:20]
 
     def _build_profile_copywriting_context(
         self,

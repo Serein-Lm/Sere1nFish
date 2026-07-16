@@ -134,7 +134,7 @@ export const TASK_TYPE_LABELS: Record<string, string> = {
   douyin_search: '抖音搜索',
   web_tagging: '官网打标',
   company_scan: '综合公司扫描',
-  fofa_collect: 'FOFA 资产采集',
+  fofa_collect: 'FOFA + Hunter 资产采集',
 }
 
 export function taskTypeLabel(taskType: string): string {

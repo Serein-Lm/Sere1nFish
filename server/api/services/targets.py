@@ -9,6 +9,7 @@ from api.dao import projects as projects_dao
 from api.dao import mobile_collect as mobile_collect_dao
 from api.dao import targets as targets_dao
 from api.db.collections import (
+    FOFA_ASSETS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
     SOURCE_DOCUMENT_LINKS_COLLECTION,
 )
@@ -194,6 +195,60 @@ async def list_project_target_summaries(
         str(item.get("_id") or ""): int(item.get("record_count") or 0)
         for item in record_counts
     }
+    asset_counts = await db[FOFA_ASSETS_COLLECTION].aggregate(
+        [
+            {
+                "$match": {
+                    "project_id": project_id,
+                    "$or": [
+                        {"target_ids": {"$in": target_ids}},
+                        {"target_id": {"$in": target_ids}},
+                    ],
+                }
+            },
+            {
+                "$set": {
+                    "_resolved_target_ids": {
+                        "$setUnion": [
+                            {
+                                "$cond": [
+                                    {"$isArray": "$target_ids"},
+                                    "$target_ids",
+                                    [],
+                                ]
+                            },
+                            {
+                                "$cond": [
+                                    {
+                                        "$ne": [
+                                            {"$ifNull": ["$target_id", ""]},
+                                            "",
+                                        ]
+                                    },
+                                    ["$target_id"],
+                                    [],
+                                ]
+                            },
+                        ]
+                    }
+                }
+            },
+            {"$unwind": "$_resolved_target_ids"},
+            {"$match": {"_resolved_target_ids": {"$in": target_ids}}},
+            {
+                "$group": {
+                    "_id": "$_resolved_target_ids",
+                    "asset_count": {"$sum": 1},
+                    "alive_asset_count": {
+                        "$sum": {"$cond": [{"$eq": ["$is_alive", True]}, 1, 0]}
+                    },
+                }
+            },
+        ]
+    ).to_list(len(target_ids))
+    assets_by_target = {
+        str(item.get("_id") or ""): item for item in asset_counts
+    }
     return [
         {
             **relation,
@@ -215,6 +270,16 @@ async def list_project_target_summaries(
             ),
             "record_count": records_by_target.get(
                 str(relation.get("target_id") or ""), 0
+            ),
+            "asset_count": int(
+                assets_by_target.get(str(relation.get("target_id") or ""), {}).get(
+                    "asset_count", 0
+                )
+            ),
+            "alive_asset_count": int(
+                assets_by_target.get(str(relation.get("target_id") or ""), {}).get(
+                    "alive_asset_count", 0
+                )
             ),
         }
         for relation in relations

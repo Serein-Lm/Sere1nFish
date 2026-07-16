@@ -89,7 +89,12 @@ async def normalize_company(
 
     # 1. 增量复用：已缓存则直接返回
     cached = await company_meta_dao.get_company_meta(db, project_id, input_name)
-    if cached and cached.get("normalized_name"):
+    # 降级结果不能成为永久缓存，否则一次浏览器故障会让后续资产发现永远缺失根域名。
+    if (
+        cached
+        and cached.get("normalized_name")
+        and str(cached.get("source") or "") not in {"fallback", "company_scan"}
+    ):
         if not cached.get("target_id"):
             from api.services.targets import attach_normalized_company
 
@@ -117,7 +122,52 @@ async def normalize_company(
         logger.info(f"[normalize] 命中缓存: {input_name} → {cached.get('normalized_name')}")
         return cached
 
-    # 2. 获取浏览器 CDP 端点
+    # 2. 跨项目复用全局 Target 别名。品牌名（如“B站”）已聚类过时，不再重复启动浏览器。
+    from api.dao import targets as targets_dao
+
+    existing_target = await targets_dao.find_target(db, name=input_name)
+    if (
+        existing_target
+        and existing_target.get("canonical_name")
+        and existing_target.get("root_domain")
+    ):
+        normalized_name = str(existing_target.get("canonical_name") or input_name)
+        root_domain = str(existing_target.get("root_domain") or "")
+        aliases = list(
+            dict.fromkeys(
+                [
+                    input_name,
+                    *[
+                        str(item).strip()
+                        for item in existing_target.get("aliases") or []
+                        if str(item).strip()
+                    ],
+                ]
+            )
+        )
+        await targets_dao.link_project_target(
+            db,
+            project_id=project_id,
+            target=existing_target,
+            search_terms=aliases,
+            task_def_id=task_id,
+        )
+        doc = await company_meta_dao.upsert_company_meta(
+            db,
+            project_id=project_id,
+            input_name=input_name,
+            normalized_name=normalized_name,
+            root_domain=root_domain,
+            aliases=aliases,
+            confidence=None,
+            source="target_cache",
+            task_id=task_id,
+            target_id=str(existing_target.get("target_id") or ""),
+        )
+        logger.info(f"[normalize] 命中全局 Target: {input_name} → {normalized_name}")
+        return doc
+
+    # 3. 获取浏览器 CDP 端点
     from browser_manager.provider import get_browser_provider
 
     provider = get_browser_provider()
@@ -142,11 +192,22 @@ async def normalize_company(
 
     normalized_name = str(parsed.get("normalized_name") or input_name).strip()
     ai_domain = normalize_root_domain(str(parsed.get("root_domain") or ""))
-    aliases = parsed.get("aliases") or []
+    parsed_aliases = parsed.get("aliases") or []
+    if not isinstance(parsed_aliases, list):
+        parsed_aliases = [parsed_aliases]
+    aliases = list(
+        dict.fromkeys(
+            [
+                input_name,
+                normalized_name,
+                *[str(item).strip() for item in parsed_aliases if str(item).strip()],
+            ]
+        )
+    )
     confidence = parsed.get("confidence")
     source = str(parsed.get("source") or "bing_search")
 
-    # 3. ICP 交叉验证：不一致以 ICP 为准
+    # 4. ICP 交叉验证：不一致以 ICP 为准
     icp_domain = await _icp_lookup_domain(normalized_name)
     root_domain = ai_domain
     if icp_domain:
@@ -156,7 +217,7 @@ async def normalize_company(
             root_domain = icp_domain
             source = "tianyancha_icp"
 
-    # 4. 落库
+    # 5. 落库
     from api.services.targets import attach_normalized_company
 
     target = await attach_normalized_company(
@@ -165,7 +226,7 @@ async def normalize_company(
         input_name=input_name,
         normalized_name=normalized_name,
         root_domain=root_domain,
-        aliases=[str(a) for a in aliases if a],
+        aliases=aliases,
         task_id=task_id,
     )
     doc = await company_meta_dao.upsert_company_meta(
@@ -174,7 +235,7 @@ async def normalize_company(
         input_name=input_name,
         normalized_name=normalized_name,
         root_domain=root_domain,
-        aliases=[str(a) for a in aliases if a],
+        aliases=aliases,
         confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
         source=source,
         task_id=task_id,

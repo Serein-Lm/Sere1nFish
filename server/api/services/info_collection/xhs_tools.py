@@ -82,12 +82,16 @@ class XhsSearchTool:
         project_id: str,
         task_id: str,
         keyword: str,
+        target_id: str = "",
+        target_name: str = "",
     ) -> dict[str, Any]:
         note_card = item.get("note_card", {})
         return {
             "project_id": project_id,
             "task_id": task_id,
             "keyword": keyword,
+            "target_id": target_id,
+            "target_name": target_name,
             "note_id": item.get("id", ""),
             "xsec_token": item.get("xsec_token", ""),
             "xsec_source": item.get("xsec_source", ""),
@@ -110,11 +114,15 @@ class XhsSearchTool:
         project_id: str,
         task_id: str,
         keyword: str,
+        target_id: str = "",
+        target_name: str = "",
     ) -> dict[str, Any]:
         return {
             "project_id": project_id,
             "task_id": task_id,
             "keyword": keyword,
+            "target_id": target_id,
+            "target_name": target_name,
             "note_id": item.get("note_id", ""),
             "xsec_token": item.get("xsec_token", ""),
             "xsec_source": item.get("xsec_source", ""),
@@ -222,6 +230,8 @@ class XhsSearchTool:
         keyword = request.query
         max_notes = request.limit
         sort_type = str(request.options.get("sort_type", "time_descending"))
+        target_id = str(request.options.get("target_id") or "")
+        target_name = str(request.options.get("target_name") or "")
 
         runtime_config = await self._load_runtime_config()
         account_pool = runtime_config.get("account_pool", {})
@@ -360,6 +370,8 @@ class XhsSearchTool:
                     project_id=project_id,
                     task_id=task_id,
                     keyword=keyword,
+                    target_id=target_id,
+                    target_name=target_name,
                 )
                 note_id = note_data.get("note_id", "")
                 if not note_id or note_id in seen_note_ids:
@@ -455,6 +467,8 @@ class XhsSearchTool:
                         project_id=project_id,
                         task_id=task_id,
                         keyword=keyword,
+                        target_id=target_id,
+                        target_name=target_name,
                     )
                     note_id = note_data.get("note_id", "")
                     if not note_id or note_id in seen_note_ids:
@@ -811,12 +825,18 @@ class XhsProfileTool:
         self._pipeline_owner = pipeline_owner
 
     async def generate_profile(self, request: ProfileRequest) -> ProfileResult:
+        options: dict[str, Any] = {
+            "screenshot_concurrency": int(request.options.get("screenshot_concurrency", 2)),
+            "profile_concurrency": int(request.options.get("profile_concurrency", 3)),
+        }
+        target_id = str(request.options.get("target_id") or "")
+        if target_id:
+            options["target_id"] = target_id
         profiles = await self._pipeline_owner._stage_profile_generation(
             request.task_id,
             request.project_id,
             request.keyword,
-            screenshot_concurrency=int(request.options.get("screenshot_concurrency", 2)),
-            profile_concurrency=int(request.options.get("profile_concurrency", 3)),
+            **options,
         )
         return ProfileResult(
             source="xhs",

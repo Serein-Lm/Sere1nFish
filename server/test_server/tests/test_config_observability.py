@@ -120,6 +120,14 @@ def test_sensitive_config_is_encrypted_and_masked() -> None:
     assert masked["nested"]["plain"] == "visible"
 
 
+def test_asset_intelligence_tools_are_registered() -> None:
+    from api.dao.config import CONFIG_CATEGORIES
+
+    tool_names = CONFIG_CATEGORIES["tools"]["sub_keys"]
+    assert "fofa" in tool_names
+    assert "hunter" in tool_names
+
+
 def test_load_config_without_path_does_not_read_default_config(monkeypatch, tmp_path) -> None:
     from Sere1nGraph.graph.config.loader import load_config
 

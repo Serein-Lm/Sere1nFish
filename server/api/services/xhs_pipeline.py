@@ -44,11 +44,21 @@ class _XhsScreenshotStage(Stage):
     name = "screenshot"
     retry = RetryPolicy(max_attempts=2, base_delay=5.0, jitter=False)
 
-    def __init__(self, *, concurrency: int, project_id: str, task_id: str, db: Any, total_users: int) -> None:
+    def __init__(
+        self,
+        *,
+        concurrency: int,
+        project_id: str,
+        task_id: str,
+        db: Any,
+        total_users: int,
+        target_id: str = "",
+    ) -> None:
         self.project_id = project_id
         self.task_id = task_id
         self.db = db
         self.total_users = total_users
+        self.target_id = target_id
         super().__init__(concurrency=concurrency)
 
     async def handle(self, item: Item, ctx) -> None:
@@ -67,6 +77,11 @@ class _XhsScreenshotStage(Stage):
             self.db, project_id=self.project_id, task_id=self.task_id,
             user_id=uid, nickname=nick, avatar=None, note_ids=nids,
         )
+        if self.target_id:
+            await self.db[xhs_dao.XHS_PROFILES_COLLECTION].update_one(
+                {"project_id": self.project_id, "user_id": uid},
+                {"$addToSet": {"target_ids": self.target_id}},
+            )
         ss_r = await screenshot_user_profile(
             f"https://www.xiaohongshu.com/user/profile/{uid}", self.db,
         )
@@ -95,6 +110,7 @@ class _XhsProfileStage(Stage):
         keyword: str,
         pipeline_owner: "XhsPipeline",
         total_users: int,
+        target_id: str = "",
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
@@ -102,6 +118,7 @@ class _XhsProfileStage(Stage):
         self.keyword = keyword
         self.pipeline_owner = pipeline_owner
         self.total_users = total_users
+        self.target_id = target_id
         super().__init__(concurrency=concurrency)
 
     async def on_setup(self, state: dict[str, Any]) -> None:
@@ -174,11 +191,15 @@ class _XhsProfileStage(Stage):
             "notes_count": len(nids), "attention_score": sc,
             "attention_reason": tag.get("profile_summary", ""),
             "context": f"小红书用户 {nick}，关联 {len(nids)} 条笔记",
+            **({"target_id": self.target_id} if self.target_id else {}),
         }
         await findings_dao.insert_finding(self.db, fd)
         ud["finding_id"] = fd["finding_id"]
+        profile_update: dict[str, Any] = {"$set": ud}
+        if self.target_id:
+            profile_update["$addToSet"] = {"target_ids": self.target_id}
         await self.db[xhs_dao.XHS_PROFILES_COLLECTION].update_one(
-            {"project_id": self.project_id, "user_id": uid}, {"$set": ud},
+            {"project_id": self.project_id, "user_id": uid}, profile_update,
         )
         await findings_dao.upsert_profile(
             self.db, fd["finding_id"],
@@ -843,6 +864,7 @@ class XhsPipeline:
         keyword: str = "",
         screenshot_concurrency: int = 2,
         profile_concurrency: int = 3,
+        target_id: str = "",
     ) -> list[dict[str, Any]]:
         """
         阶段 5: 流式画像 + 话术（队列 + 并发 worker）
@@ -853,12 +875,16 @@ class XhsPipeline:
         from api.services.info_collection.streaming import make_stream_items, run_stream_pipeline, stream_stage
 
         # 从 findings 按 project_id 聚合用户（score>=60，按分数降序）
+        findings_query: dict[str, Any] = {
+            "project_id": project_id,
+            "source": "xhs",
+            "xhs_user_id": {"$exists": True, "$nin": [None, ""]},
+            "attention_score": {"$gte": 60},
+        }
+        if target_id:
+            findings_query["target_id"] = target_id
         cursor = self.db["findings"].find(
-            {
-                "project_id": project_id, "source": "xhs",
-                "xhs_user_id": {"$exists": True, "$nin": [None, ""]},
-                "attention_score": {"$gte": 60},
-            },
+            findings_query,
             {"_id": 0},
         ).sort("attention_score", -1)
         all_f = await cursor.to_list(500)
@@ -868,6 +894,14 @@ class XhsPipeline:
             if uid and uid not in seen:
                 seen[uid] = f
         user_findings = list(seen.values())
+        if target_id and user_findings:
+            await self.db[xhs_dao.XHS_PROFILES_COLLECTION].update_many(
+                {
+                    "project_id": project_id,
+                    "user_id": {"$in": [item.get("xhs_user_id") for item in user_findings]},
+                },
+                {"$addToSet": {"target_ids": target_id}},
+            )
 
         # 获取项目的目标公司名（作为关键词传给画像 Agent）
         if not keyword:
@@ -906,11 +940,13 @@ class XhsPipeline:
             concurrency=screenshot_concurrency,
             project_id=project_id, task_id=task_id, db=self.db,
             total_users=total_users,
+            target_id=target_id,
         )
         prof_stage = _XhsProfileStage(
             concurrency=profile_concurrency,
             project_id=project_id, task_id=task_id, db=self.db,
             keyword=keyword, pipeline_owner=self, total_users=total_users,
+            target_id=target_id,
         )
         cw_stage = _XhsCopywritingStage(
             concurrency=2,

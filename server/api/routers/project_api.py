@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_active_user
@@ -107,12 +107,16 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         company_name=params.get("company_name", ""),
         url_text=params.get("url_text", ""), urls=params.get("urls", []),
         enable_url_scan=params.get("enable_url_scan", True),
+        enable_asset_discovery=params.get("enable_asset_discovery", True),
         enable_xhs=params.get("enable_xhs", True),
         enable_copywriting=params.get("enable_copywriting", True),
         xhs_max_notes=params.get("xhs_max_notes") or params.get("max_notes", 20),
         xhs_attention_threshold=params.get("xhs_attention_threshold") or params.get("attention_threshold", 60),
         min_attention_score=params.get("min_attention_score", 40),
         profile_copywriting_threshold=params.get("profile_copywriting_threshold", 60),
+        fofa_size=params.get("fofa_size", 200),
+        hunter_size=params.get("hunter_size", 200),
+        asset_probe_concurrency=params.get("asset_probe_concurrency", 48),
     )
 
 async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
@@ -125,8 +129,10 @@ async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
         db=db, app_config=runtime_config, task_id=task_id, project_id=project_id,
         company_name=params.get("company_name", ""),
         fofa_size=params.get("fofa_size", 200),
+        hunter_size=params.get("hunter_size", 200),
         enable_scan=params.get("enable_scan", True),
         min_attention_score=params.get("min_attention_score", 40),
+        probe_concurrency=params.get("probe_concurrency", 48),
     )
 
 async def _dispatch_scholar_contact(task_id: str, project_id: str, params: dict):
@@ -217,6 +223,35 @@ async def _execute_task(task_id: str, project_id: str, task_type: str, params: d
 class TaskCreateRequest(BaseModel):
     task_type: str = Field(description="任务类型")
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/projects/{project_id}/assets")
+async def list_project_assets(
+    project_id: str,
+    target_id: str = "",
+    root_domain: str = "",
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> dict[str, Any]:
+    """查询项目下已去重的 FOFA/Hunter 资产及最新存活状态。"""
+    from api.dao import fofa_assets as assets_dao
+
+    db = get_db()
+    if not await projects_dao.get_project(db, project_id):
+        raise HTTPException(404, "项目不存在")
+    items = await assets_dao.query_assets(
+        db,
+        project_id,
+        root_domain=root_domain,
+        target_id=target_id,
+        limit=limit,
+    )
+    total = await assets_dao.count_assets(
+        db,
+        project_id,
+        root_domain=root_domain,
+        target_id=target_id,
+    )
+    return {"items": items, "total": total}
 
 
 @router.post("/projects/{project_id}/tasks")

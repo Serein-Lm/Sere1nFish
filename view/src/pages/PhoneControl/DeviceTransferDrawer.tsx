@@ -4,10 +4,10 @@ import {
   Button,
   Drawer,
   Empty,
-  List,
   Progress,
   Segmented,
   Space,
+  Spin,
   Tag,
   Typography,
   Upload,
@@ -82,6 +82,7 @@ export default function DeviceTransferDrawer({ deviceId, open, onClose }: Props)
   }, [loadHistory, open])
 
   const uploadProps: UploadProps = {
+    name: 'file',
     multiple: true,
     showUploadList: false,
     customRequest: async ({ file, onError, onProgress, onSuccess }) => {
@@ -133,7 +134,7 @@ export default function DeviceTransferDrawer({ deviceId, open, onClose }: Props)
       title="传文件到手机"
       open={open}
       onClose={onClose}
-      width="min(560px, 100vw)"
+      size={560}
       className="device-transfer-drawer"
       extra={(
         <Button
@@ -145,7 +146,7 @@ export default function DeviceTransferDrawer({ deviceId, open, onClose }: Props)
         />
       )}
     >
-      <Space direction="vertical" size={16} className="device-transfer-content">
+      <Space orientation="vertical" size={16} className="device-transfer-content">
         <Segmented
           block
           value={category}
@@ -166,56 +167,59 @@ export default function DeviceTransferDrawer({ deviceId, open, onClose }: Props)
         <Alert
           type="info"
           showIcon
-          message="图片进入相册，音频进入音乐目录，其他附件进入下载目录，可直接从微信等应用的文件选择器中选用。"
+          title="图片进入相册，音频进入音乐目录，其他附件进入下载目录，可直接从微信等应用的文件选择器中选用。"
         />
 
         <div className="device-transfer-history-title">
           <Typography.Title level={5}>最近传输</Typography.Title>
           <Typography.Text type="secondary">{items.length} 条</Typography.Text>
         </div>
-        <List
-          loading={loading}
-          dataSource={items}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无传输记录" /> }}
-          renderItem={(item) => {
-            const status = STATUS_META[item.status]
-            return (
-              <List.Item
-                className="device-transfer-item"
-                actions={item.status === 'failed' ? [
-                  <Button
-                    key="retry"
-                    type="link"
-                    icon={<ReloadOutlined />}
-                    loading={retrying === item.transfer_id}
-                    onClick={() => void handleRetry(item)}
-                  >
-                    重试
-                  </Button>,
-                ] : undefined}
-              >
-                <List.Item.Meta
-                  avatar={item.category === 'image' ? <PictureOutlined /> : item.category === 'audio' ? <AudioOutlined /> : <PaperClipOutlined />}
-                  title={(
-                    <Space size={8} className="device-transfer-item-title">
-                      <Typography.Text ellipsis title={item.filename}>{item.filename}</Typography.Text>
-                      <Tag color={status.color}>{status.text}</Tag>
-                    </Space>
-                  )}
-                  description={(
-                    <Space direction="vertical" size={2}>
-                      <Typography.Text type="secondary">
-                        {formatBytes(item.size)} · {new Date(item.created_at).toLocaleString('zh-CN')}
-                      </Typography.Text>
-                      {item.remote_path && <Typography.Text copyable ellipsis>{item.remote_path}</Typography.Text>}
-                      {item.last_error && <Typography.Text type="danger">{item.last_error}</Typography.Text>}
-                    </Space>
-                  )}
-                />
-              </List.Item>
-            )
-          }}
-        />
+        <Spin spinning={loading}>
+          {items.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无传输记录" />
+          ) : (
+            <div className="device-transfer-list">
+              {items.map((item) => {
+                const status = STATUS_META[item.status]
+                const icon = item.category === 'image'
+                  ? <PictureOutlined />
+                  : item.category === 'audio'
+                    ? <AudioOutlined />
+                    : <PaperClipOutlined />
+                return (
+                  <div key={item.transfer_id} className="device-transfer-item">
+                    <span className="device-transfer-item-icon" aria-hidden="true">
+                      {icon}
+                    </span>
+                    <div className="device-transfer-item-body">
+                      <Space size={8} className="device-transfer-item-title">
+                        <Typography.Text ellipsis title={item.filename}>{item.filename}</Typography.Text>
+                        <Tag color={status.color}>{status.text}</Tag>
+                      </Space>
+                      <Space orientation="vertical" size={2}>
+                        <Typography.Text type="secondary">
+                          {formatBytes(item.size)} · {new Date(item.created_at).toLocaleString('zh-CN')}
+                        </Typography.Text>
+                        {item.remote_path && <Typography.Text copyable ellipsis>{item.remote_path}</Typography.Text>}
+                        {item.last_error && <Typography.Text type="danger">{item.last_error}</Typography.Text>}
+                      </Space>
+                    </div>
+                    {item.status === 'failed' && (
+                      <Button
+                        type="link"
+                        icon={<ReloadOutlined />}
+                        loading={retrying === item.transfer_id}
+                        onClick={() => void handleRetry(item)}
+                      >
+                        重试
+                      </Button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </Spin>
       </Space>
     </Drawer>
   )

@@ -622,6 +622,10 @@ class UrlScanPipeline:
         url_content: str,
         probe_concurrency: int = 20,
         min_attention_score: int = 40,
+        target_id: str = "",
+        scan_concurrency: int = 6,
+        copywriting_concurrency: int = 4,
+        enable_copywriting: bool = True,
     ) -> dict[str, Any]:
         """
         完整流水线：url.txt → 探活 → 扫描 → 提取 → 话术生成 → 存储
@@ -631,12 +635,14 @@ class UrlScanPipeline:
         task_result = {
             "task_id": task_id,
             "project_id": project_id,
+            "target_id": target_id,
             "status": "running",
             "total_urls": 0,
             "alive_urls": 0,
             "scanned_urls": 0,
             "total_findings": 0,
             "total_copywritings": 0,
+            "copywriting_enabled": enable_copywriting,
             "error": None,
         }
         obs_log(
@@ -707,14 +713,20 @@ class UrlScanPipeline:
                 ]
                 if not url_findings:
                     return
-                all_findings.extend(url_findings)
                 unified = [
-                    {**f, "task_id": task_id, "project_id": project_id, "source": "web_tagging"}
+                    {
+                        **f,
+                        "task_id": task_id,
+                        "project_id": project_id,
+                        "source": "web_tagging",
+                        **({"target_id": target_id} if target_id else {}),
+                    }
                     for f in url_findings
                 ]
+                all_findings.extend(unified)
                 await findings_dao.insert_findings_batch(self.db, unified)
                 emit = _emit_ref["emit"]
-                for finding in url_findings:
+                for finding in unified:
                     site_context = {
                         "url": finding["url"],
                         "domain": finding.get("domain", ""),
@@ -730,17 +742,17 @@ class UrlScanPipeline:
                 )
 
             scan_stage = _UrlScanStage(
-                concurrency=3,
+                concurrency=max(1, min(scan_concurrency, 12)),
                 project_id=project_id,
                 task_id=task_id,
                 on_result=_on_scan_result,
             )
             cw_stage = _CopywritingStage(
-                concurrency=3,
+                concurrency=max(1, min(copywriting_concurrency, 8)),
                 project_id=project_id,
                 task_id=task_id,
                 pipeline_owner=self,
-                score_threshold=60,
+                score_threshold=60 if enable_copywriting else 101,
             )
 
             def _on_pipeline_ready(pipe):
@@ -778,6 +790,7 @@ class UrlScanPipeline:
                 {
                     "task_id": task_id,
                     "project_id": project_id,
+                    "target_id": target_id,
                     "url": r["url"],
                     "success": r.get("success", False),
                     "error": r.get("error"),

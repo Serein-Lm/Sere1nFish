@@ -51,7 +51,10 @@ class XhsToolset:
     async def close(self) -> None:
         detail_close = getattr(self.detail_tool, "close", None)
         if detail_close:
-            await detail_close()
+            try:
+                await detail_close()
+            except Exception as exc:
+                logger.warning(f"[xhs-stream] 详情客户端关闭失败: {exc}")
         client = self.v2_client
         if not client:
             return

@@ -1820,10 +1820,31 @@ button.ctrl-btn {
   margin: 0;
 }
 
-.device-transfer-item .ant-list-item-meta,
-.device-transfer-item .ant-list-item-meta-content,
+.device-transfer-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.device-transfer-item,
+.device-transfer-item-body,
 .device-transfer-item-title {
   min-width: 0;
+}
+
+.device-transfer-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.device-transfer-item:last-child {
+  border-bottom: 0;
+}
+
+.device-transfer-item-body {
+  flex: 1;
 }
 
 .device-transfer-item-title {
@@ -1836,12 +1857,12 @@ button.ctrl-btn {
   max-width: 320px;
 }
 
-.device-transfer-item .ant-list-item-meta-avatar {
+.device-transfer-item-icon {
   display: grid;
   place-items: center;
+  flex: 0 0 32px;
   width: 32px;
   height: 32px;
-  margin-inline-end: 12px;
   color: var(--accent-color);
   background: var(--secondary-bg);
   border: 1px solid var(--border-color);

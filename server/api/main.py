@@ -98,11 +98,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"system_config 加密迁移失败（不影响运行）: {e}")
         try:
-            from browser_manager import configure_browser_provider
+            from browser_manager import configure_browser_provider, get_browser_provider
 
             chrome_doc = await config_dao.get_config(db, "chrome_docker")
             configure_browser_provider(chrome_doc.get("config", {}) if chrome_doc else {})
-            logger.info("Chrome Docker 配置已从 MongoDB 注入")
+            await get_browser_provider().start()
+            logger.info("Chrome Docker 配置已从 MongoDB 注入，资源池维护已启动")
         except Exception as e:
             logger.warning(f"Chrome Docker 配置注入失败（不影响运行）: {e}")
         logger.info("用户和配置已从 MongoDB 加载")
@@ -163,10 +164,13 @@ async def lifespan(app: FastAPI):
         # xhs 集合
         await db["xhs_notes"].create_index("note_id")
         await db["xhs_notes"].create_index([("project_id", 1), ("task_id", 1)])
+        await db["xhs_notes"].create_index([("project_id", 1), ("target_id", 1)])
         await db["xhs_notes"].create_index([("task_id", 1), ("tagging.is_suspicious", 1)])
         await db["xhs_note_details"].create_index("note_id")
         await db["xhs_note_details"].create_index("project_id")
         await db["xhs_profiles"].create_index([("project_id", 1), ("user_id", 1)])
+        await db["xhs_profiles"].create_index([("project_id", 1), ("target_ids", 1)])
+        await db["company_scan_results"].create_index([("project_id", 1), ("updated_at", -1)])
         from api.services.xhs_runtime import ensure_indexes as ensure_xhs_runtime_indexes
         await ensure_xhs_runtime_indexes(db)
         # tasks

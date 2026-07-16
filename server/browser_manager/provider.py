@@ -105,6 +105,10 @@ class ChromeDockerConfig:
 class BrowserProvider(ABC):
     """浏览器提供者基类"""
 
+    async def start(self) -> None:
+        """启动 Provider 后台维护；无状态实现可保持空操作。"""
+        return None
+
     @abstractmethod
     async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
         """
@@ -180,9 +184,9 @@ class DockerProvider(BrowserProvider):
         self._warm_pool_task: Optional[asyncio.Task] = None
         self._docker_client = None
         self._port_counter = 0
+        self._pending_creates = 0
         self._warm_pool_ready = asyncio.Event()  # 预热池就绪信号
-        # 启动时清理上次遗留的孤儿容器
-        self._cleanup_orphan_containers()
+        self._orphan_cleanup_done = False
 
     def _get_docker_client(self):
         """延迟初始化 docker client"""
@@ -197,6 +201,15 @@ class DockerProvider(BrowserProvider):
             except Exception as e:
                 raise RuntimeError(f"无法连接 Docker daemon: {e}")
         return self._docker_client
+
+    async def start(self) -> None:
+        """服务启动时立即启动健康检查、回收器和预热池。"""
+        if not self._orphan_cleanup_done:
+            try:
+                await asyncio.to_thread(self._cleanup_orphan_containers)
+            finally:
+                self._orphan_cleanup_done = True
+        self._ensure_background_tasks()
 
     def _cleanup_orphan_containers(self):
         """
@@ -282,6 +295,9 @@ class DockerProvider(BrowserProvider):
         task_id = task_id or str(uuid.uuid4())
         logger.info(f"[DockerProvider] 请求 CDP 端点 | task_id={task_id} purpose={purpose}")
 
+        claimed: ContainerInfo | None = None
+        wait_for_idle = False
+        create_required = False
         async with self._lock:
             # 1. 优先复用同 purpose 的空闲容器（跳过 unhealthy）
             for cid, info in self.containers.items():
@@ -293,51 +309,80 @@ class DockerProvider(BrowserProvider):
                     logger.info(
                         f"[DockerProvider] 复用同类容器 {info.container_name} (purpose={purpose}) → task {task_id}"
                     )
-                    return await self._get_ws_url(info)
+                    claimed = info
+                    break
 
             # 2. 复用任意空闲容器（跳过 unhealthy）
-            for cid, info in self.containers.items():
-                if info.status == "idle" and info.unhealthy_reason == "":
+            if claimed is None:
+                for cid, info in self.containers.items():
+                    if info.status == "idle" and info.unhealthy_reason == "":
+                        info.status = "busy"
+                        info.task_id = task_id
+                        info.purpose = purpose
+                        info.last_used_at = datetime.now()
+                        self.task_map[task_id] = cid
+                        logger.info(
+                            f"[DockerProvider] 复用空闲容器 {info.container_name} → task {task_id} (purpose={purpose})"
+                        )
+                        claimed = info
+                        break
+
+            # 3. 检查是否达到上限（unhealthy 的不计入活跃数）
+            if claimed is None:
+                active_count = sum(
+                    1 for c in self.containers.values()
+                    if c.status in ("busy", "idle", "starting") and c.unhealthy_reason == ""
+                ) + self._pending_creates
+                logger.info(
+                    f"[DockerProvider] 无空闲容器 | 活跃容器数={active_count}/{self.config.max_containers}"
+                )
+                if active_count >= self.config.max_containers:
+                    logger.warning(
+                        f"[DockerProvider] 容器数已达上限 ({self.config.max_containers})，等待空闲容器..."
+                    )
+                    wait_for_idle = True
+                else:
+                    logger.info(f"[DockerProvider] 为 task {task_id} 创建新容器 (purpose={purpose})...")
+                    self._pending_creates += 1
+                    create_required = True
+
+        if wait_for_idle:
+            return await self._wait_for_idle(task_id, purpose=purpose, timeout=60)
+        if create_required:
+            info: ContainerInfo | None = None
+            registered = False
+            try:
+                info = await self._create_container()
+                async with self._lock:
+                    self.containers[info.container_id] = info
                     info.status = "busy"
                     info.task_id = task_id
                     info.purpose = purpose
-                    info.last_used_at = datetime.now()
-                    self.task_map[task_id] = cid
-                    logger.info(
-                        f"[DockerProvider] 复用空闲容器 {info.container_name} → task {task_id} (purpose={purpose})"
-                    )
-                    return await self._get_ws_url(info)
-
-            # 3. 检查是否达到上限（unhealthy 的不计入活跃数）
-            active_count = sum(
-                1 for c in self.containers.values()
-                if c.status in ("busy", "idle", "starting") and c.unhealthy_reason == ""
-            )
-            logger.info(
-                f"[DockerProvider] 无空闲容器 | 活跃容器数={active_count}/{self.config.max_containers}"
-            )
-            if active_count >= self.config.max_containers:
-                logger.warning(
-                    f"[DockerProvider] 容器数已达上限 ({self.config.max_containers})，等待空闲容器..."
+                    self.task_map[task_id] = info.container_id
+                    registered = True
+                logger.info(
+                    f"[DockerProvider] 新容器 {info.container_name} 已分配给 task {task_id} | "
+                    f"CDP={info.cdp_port}, VNC={info.vnc_port}, noVNC={info.novnc_port}"
                 )
-                return await self._wait_for_idle(task_id, timeout=60)
-
-            # 4. 创建新容器
-            logger.info(f"[DockerProvider] 为 task {task_id} 创建新容器 (purpose={purpose})...")
-            info = await self._create_container()
-            info.status = "busy"
-            info.task_id = task_id
-            info.purpose = purpose
-            self.task_map[task_id] = info.container_id
-            logger.info(
-                f"[DockerProvider] 新容器 {info.container_name} 已分配给 task {task_id} | "
-                f"CDP={info.cdp_port}, VNC={info.vnc_port}, noVNC={info.novnc_port}"
-            )
-
-            # 启动后台任务（首次）
-            self._ensure_background_tasks()
-
-            return await self._get_ws_url(info)
+                self._ensure_background_tasks()
+                claimed = info
+            except BaseException:
+                if info is not None and not registered:
+                    await self._remove_docker_container(
+                        info.container_id,
+                        info.container_name,
+                    )
+                raise
+            finally:
+                async with self._lock:
+                    self._pending_creates = max(0, self._pending_creates - 1)
+        if claimed is None:
+            return None
+        try:
+            return await self._get_ws_url(claimed)
+        except Exception:
+            await self.release_cdp_endpoint(task_id)
+            raise
 
     async def release_cdp_endpoint(self, task_id: Optional[str] = None):
         """释放任务占用的容器"""
@@ -461,7 +506,7 @@ class DockerProvider(BrowserProvider):
             run_kwargs["network"] = self.config.network
 
         t_start = time.time()
-        container = client.containers.run(**run_kwargs)
+        container = await asyncio.to_thread(client.containers.run, **run_kwargs)
         t_created = time.time()
         logger.info(
             f"[DockerProvider] 容器 {name} 已创建 (id={container.id[:12]}) | "
@@ -478,12 +523,12 @@ class DockerProvider(BrowserProvider):
             novnc_port=6080 if use_internal_network else ports["novnc"],
             status="starting",
         )
-        self.containers[container.id] = info
-
-        # 等待容器健康
-        await self._wait_healthy(info, timeout=30)
+        try:
+            await self._wait_healthy(info, timeout=30)
+        except BaseException:
+            await self._remove_docker_container(container.id, name)
+            raise
         t_ready = time.time()
-        info.status = "idle"
         logger.info(
             f"[DockerProvider] 容器 {name} 就绪 | "
             f"健康检查耗时 {t_ready - t_created:.1f}s | "
@@ -491,6 +536,23 @@ class DockerProvider(BrowserProvider):
         )
 
         return info
+
+    async def _remove_docker_container(self, container_id: str, container_name: str) -> None:
+        """在线程中停止并删除容器，避免 Docker SDK 阻塞事件循环。"""
+        try:
+            client = self._get_docker_client()
+
+            def _remove() -> None:
+                container = client.containers.get(container_id)
+                container.stop(timeout=5)
+                container.remove(force=True)
+
+            await asyncio.to_thread(_remove)
+        except Exception as exc:
+            logger.warning(
+                f"[DockerProvider] 删除容器失败: {container_name} "
+                f"(id={container_id[:12]}): {exc}"
+            )
 
     async def _wait_healthy(self, info: ContainerInfo, timeout: int = 30):
         """等待容器 CDP 端口可达"""
@@ -580,17 +642,33 @@ class DockerProvider(BrowserProvider):
             f"容器={info.container_name} | 最后错误: {last_error}"
         )
 
-    async def _wait_for_idle(self, task_id: str, timeout: int = 60) -> Optional[str]:
+    async def _wait_for_idle(
+        self,
+        task_id: str,
+        *,
+        purpose: str = "general",
+        timeout: int = 60,
+    ) -> Optional[str]:
         """等待一个空闲容器"""
         start = time.time()
         while time.time() - start < timeout:
-            for cid, info in self.containers.items():
-                if info.status == "idle":
-                    info.status = "busy"
-                    info.task_id = task_id
-                    info.last_used_at = datetime.now()
-                    self.task_map[task_id] = cid
-                    return await self._get_ws_url(info)
+            claimed: ContainerInfo | None = None
+            async with self._lock:
+                for cid, info in self.containers.items():
+                    if info.status == "idle" and info.unhealthy_reason == "":
+                        info.status = "busy"
+                        info.task_id = task_id
+                        info.purpose = purpose
+                        info.last_used_at = datetime.now()
+                        self.task_map[task_id] = cid
+                        claimed = info
+                        break
+            if claimed is not None:
+                try:
+                    return await self._get_ws_url(claimed)
+                except Exception:
+                    await self.release_cdp_endpoint(task_id)
+                    raise
             await asyncio.sleep(1)
 
         logger.error(f"[DockerProvider] 等待空闲容器超时 ({timeout}s)")
@@ -598,20 +676,20 @@ class DockerProvider(BrowserProvider):
 
     async def _destroy_container(self, container_id: str):
         """销毁容器"""
-        info = self.containers.pop(container_id, None)
+        async with self._lock:
+            info = self.containers.pop(container_id, None)
+            stale_tasks = [
+                task_id for task_id, cid in self.task_map.items() if cid == container_id
+            ]
+            for task_id in stale_tasks:
+                self.task_map.pop(task_id, None)
         if not info:
             return
 
         info.status = "stopping"
         logger.info(f"[DockerProvider] 开始销毁容器 {info.container_name} (id={container_id[:12]})")
-        try:
-            client = self._get_docker_client()
-            container = client.containers.get(container_id)
-            container.stop(timeout=5)
-            container.remove(force=True)
-            logger.info(f"[DockerProvider] 容器 {info.container_name} 已销毁")
-        except Exception as e:
-            logger.warning(f"[DockerProvider] 销毁容器 {info.container_name} 失败: {e}")
+        await self._remove_docker_container(container_id, info.container_name)
+        logger.info(f"[DockerProvider] 容器 {info.container_name} 已销毁")
 
     async def _idle_reaper(self):
         """后台协程：定期检查并销毁超时的空闲容器（保留预热池数量）"""
@@ -634,6 +712,7 @@ class DockerProvider(BrowserProvider):
                             if idle_seconds > self.config.idle_timeout:
                                 # 保留预热池数量的空闲容器不销毁
                                 if len(idle_healthy) > self.config.warm_pool_size:
+                                    info.status = "stopping"
                                     to_destroy.append(cid)
                                     idle_healthy = [c for c in idle_healthy if c != cid]
                                     logger.info(
@@ -642,7 +721,8 @@ class DockerProvider(BrowserProvider):
                                     )
 
                         # unhealthy 且无任务的容器直接销毁
-                        if info.unhealthy_reason and info.status != "busy":
+                        if info.unhealthy_reason and info.status not in {"busy", "stopping"}:
+                            info.status = "stopping"
                             to_destroy.append(cid)
                             logger.info(
                                 f"[DockerProvider] 销毁 unhealthy 容器 {info.container_name}: "
@@ -718,11 +798,12 @@ class DockerProvider(BrowserProvider):
     async def _query_container_memory(self, container_id: str) -> float:
         """通过 Docker API 查询容器内存使用量（MB）"""
         client = self._get_docker_client()
-        container = client.containers.get(container_id)
-        # docker stats 是阻塞调用，放到线程池
-        stats = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: container.stats(stream=False)
-        )
+
+        def _stats() -> dict[str, Any]:
+            container = client.containers.get(container_id)
+            return container.stats(stream=False)
+
+        stats = await asyncio.to_thread(_stats)
         mem_stats = stats.get("memory_stats", {})
         usage = mem_stats.get("usage", 0)
         # 减去 cache（不算真实内存占用）
@@ -731,6 +812,30 @@ class DockerProvider(BrowserProvider):
         return max(real_usage / (1024 * 1024), 0)
 
     # ── 新增：预热池 ─────────────────────────────────────
+
+    async def _create_warm_container(self) -> None:
+        """完成一个已预留容量的预热容器创建。"""
+        info: ContainerInfo | None = None
+        registered = False
+        try:
+            info = await self._create_container()
+            async with self._lock:
+                self.containers[info.container_id] = info
+                info.status = "idle"
+                info.last_used_at = datetime.now()
+                registered = True
+            logger.info(f"[WarmPool] 预热容器 {info.container_name} 就绪")
+        except asyncio.CancelledError:
+            if info is not None and not registered:
+                await self._remove_docker_container(info.container_id, info.container_name)
+            raise
+        except Exception as exc:
+            if info is not None and not registered:
+                await self._remove_docker_container(info.container_id, info.container_name)
+            logger.warning(f"[WarmPool] 预创建容器失败: {exc}")
+        finally:
+            async with self._lock:
+                self._pending_creates = max(0, self._pending_creates - 1)
 
     async def _warm_pool_filler(self):
         """
@@ -743,36 +848,33 @@ class DockerProvider(BrowserProvider):
 
         while True:
             try:
-                # 统计当前空闲且健康的容器数
-                idle_healthy_count = sum(
-                    1 for info in self.containers.values()
-                    if info.status == "idle" and info.unhealthy_reason == ""
-                )
-                # 统计总活跃容器数（不含 unhealthy）
-                total_active = sum(
-                    1 for info in self.containers.values()
-                    if info.status in ("busy", "idle", "starting") and info.unhealthy_reason == ""
-                )
+                async with self._lock:
+                    idle_healthy_count = sum(
+                        1 for info in self.containers.values()
+                        if info.status == "idle" and info.unhealthy_reason == ""
+                    )
+                    total_active = sum(
+                        1 for info in self.containers.values()
+                        if info.status in ("busy", "idle", "starting")
+                        and info.unhealthy_reason == ""
+                    )
+                    need = self.config.warm_pool_size - idle_healthy_count
+                    can_create = (
+                        self.config.max_containers
+                        - total_active
+                        - self._pending_creates
+                    )
+                    to_create = max(0, min(need, can_create))
+                    self._pending_creates += to_create
 
-                need = self.config.warm_pool_size - idle_healthy_count
-                # 不能超过 max_containers 上限
-                can_create = self.config.max_containers - total_active
-
-                if need > 0 and can_create > 0:
-                    to_create = min(need, can_create)
+                if to_create > 0:
                     logger.info(
                         f"[WarmPool] 空闲容器不足 ({idle_healthy_count}/{self.config.warm_pool_size})，"
                         f"预创建 {to_create} 个"
                     )
-                    for _ in range(to_create):
-                        try:
-                            async with self._lock:
-                                info = await self._create_container()
-                                info.status = "idle"
-                                logger.info(f"[WarmPool] 预热容器 {info.container_name} 就绪")
-                        except Exception as e:
-                            logger.warning(f"[WarmPool] 预创建容器失败: {e}")
-                            break
+                    await asyncio.gather(
+                        *(self._create_warm_container() for _ in range(to_create))
+                    )
 
                 await asyncio.sleep(10)  # 每 10s 检查一次
 

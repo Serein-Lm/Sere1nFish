@@ -46,6 +46,8 @@ CORE_PROMPT_SLUGS = {
     "bid_collect/bid_collect",
     "browser_chat/browser_chat",
     "copywriting/copywriting",
+    "company_normalize/company_normalize",
+    "company_router/company_router",
     "douyin_profile/douyin_profile",
     "douyin_profile/douyin_tagging",
     "profile_copywriting/profile_copywriting",

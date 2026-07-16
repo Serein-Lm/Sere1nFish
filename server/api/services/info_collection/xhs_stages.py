@@ -23,6 +23,8 @@ class XhsSearchStage(Stage):
         db: Any,
         pipeline_owner: Any,
         sort_type: str = "time_descending",
+        target_id: str = "",
+        target_name: str = "",
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
@@ -30,6 +32,8 @@ class XhsSearchStage(Stage):
         self.db = db
         self.pipeline_owner = pipeline_owner
         self.sort_type = sort_type
+        self.target_id = target_id
+        self.target_name = target_name
         super().__init__(concurrency=concurrency)
 
     async def handle(self, item: Item, ctx) -> None:
@@ -52,7 +56,11 @@ class XhsSearchStage(Stage):
                 project_id=self.project_id,
                 task_id=sub_task_id,
                 limit=self.per_keyword,
-                options={"sort_type": self.sort_type},
+                options={
+                    "sort_type": self.sort_type,
+                    "target_id": self.target_id,
+                    "target_name": self.target_name,
+                },
             )
         )
         notes = search_result.items
@@ -227,6 +235,14 @@ async def _insert_detail_findings(
             "finding_id": _uuid.uuid4().hex[:12],
             "project_id": project_id,
             "task_id": note.get("_sub_task_id", note.get("task_id", "")),
+            **(
+                {
+                    "target_id": note.get("target_id"),
+                    "target_name": note.get("target_name", ""),
+                }
+                if note.get("target_id")
+                else {}
+            ),
             "source": "xhs",
             "type": detail_finding.get("type", "other"),
             "channel": "xhs_note_detail",

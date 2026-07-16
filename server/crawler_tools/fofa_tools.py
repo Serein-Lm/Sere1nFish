@@ -80,6 +80,12 @@ async def _load_fofa_config_from_db() -> dict[str, Any]:
         return {}
 
 
+async def get_configured_api_key() -> str:
+    """读取数据库中已解密的 FOFA Key，供统一 Provider 做快速预检。"""
+    config = await _load_fofa_config_from_db()
+    return str(config.get("api_key") or "").strip()
+
+
 def _fofa_base64_encode(query: str) -> str:
     """FOFA qbase64 使用标准 base64 编码"""
     return base64.b64encode(query.encode()).decode()
@@ -137,6 +143,7 @@ async def search_fofa(
     size: int = 100,
     api_key: str | None = None,
     full: bool = False,
+    raise_on_error: bool = False,
 ) -> list[FofaAsset]:
     """
     FOFA API 搜索（支持 domain / cert 两种搜索）。
@@ -152,8 +159,7 @@ async def search_fofa(
         FofaAsset 列表
     """
     if not api_key:
-        config = await _load_fofa_config_from_db()
-        api_key = str(config.get("api_key") or "").strip()
+        api_key = await get_configured_api_key()
 
     if not api_key:
         logger.warning("FOFA API Key 未配置")
@@ -185,13 +191,20 @@ async def search_fofa(
                 data = await resp.json()
     except asyncio.TimeoutError:
         logger.warning("FOFA 查询超时")
+        if raise_on_error:
+            raise TimeoutError("FOFA 查询超时")
         return []
     except Exception as exc:  # noqa: BLE001
         logger.error(f"FOFA 查询失败: {exc}")
+        if raise_on_error:
+            raise RuntimeError(f"FOFA 查询失败: {exc}") from exc
         return []
 
     if data.get("error"):
-        logger.warning(f"FOFA 查询返回错误: {data.get('errmsg') or data}")
+        error_message = str(data.get("errmsg") or data)
+        logger.warning(f"FOFA 查询返回错误: {error_message}")
+        if raise_on_error:
+            raise RuntimeError(f"FOFA 查询返回错误: {error_message}")
         return []
 
     results = data.get("results") or []
@@ -208,8 +221,7 @@ async def validate_key(api_key: str | None = None) -> tuple[bool, str]:
         (是否有效, 说明信息)
     """
     if not api_key:
-        config = await _load_fofa_config_from_db()
-        api_key = str(config.get("api_key") or "").strip()
+        api_key = await get_configured_api_key()
 
     if not api_key:
         return False, "FOFA API Key 未配置"

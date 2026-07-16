@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, CloudServerOutlined } from '@ant-design/icons'
 import {
   getProject,
   listProjectWebTaggingRecords,
@@ -67,11 +67,12 @@ import {
   listScholarContacts,
   type ScholarContact,
 } from '../../services/scholarContactService'
+import { listProjectAssets, type ProjectAsset } from '../../services/assetService'
 import './ProjectDetail.css'
 
 const { Title, Paragraph, Text } = Typography
 
-type TabKey = 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'mobile' | 'scholars' | 'tasks' | 'stats'
+type TabKey = 'website' | 'assets' | 'xiaohongshu' | 'douyin' | 'wechat' | 'mobile' | 'scholars' | 'tasks' | 'stats'
 
 /**
  * 抖音标签中文映射
@@ -431,6 +432,9 @@ export default function ProjectDetail() {
   // 看板状态
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [dashboardLoading, setDashboardLoading] = useState(false)
+  const [assets, setAssets] = useState<ProjectAsset[]>([])
+  const [assetsTotal, setAssetsTotal] = useState(0)
+  const [assetsLoading, setAssetsLoading] = useState(false)
 
   // 小红书状态
   const [xhsNotes, setXhsNotes] = useState<XhsNote[]>([])
@@ -545,6 +549,19 @@ export default function ProjectDetail() {
       console.error(e)
     } finally {
       setTaggingLoading(false)
+    }
+  }
+
+  const fetchAssets = async (pid: string) => {
+    setAssetsLoading(true)
+    try {
+      const result = await listProjectAssets(pid)
+      setAssets(result.items)
+      setAssetsTotal(result.total)
+    } catch (e) {
+      console.error('加载资产情报失败:', e)
+    } finally {
+      setAssetsLoading(false)
     }
   }
 
@@ -841,6 +858,7 @@ export default function ProjectDetail() {
         if (!cancelled) {
           setProject(data)
           await fetchRecords(projectId)
+          fetchAssets(projectId)
           // 加载任务列表
           await fetchTasks(projectId)
           // 加载看板数据
@@ -873,6 +891,7 @@ export default function ProjectDetail() {
           setDouyinSearchResults([])
           setDouyinTaggedResults([])
           setDouyinProfiles([])
+          setAssets([])
           setMobileProfiles([])
           setMobileScreenshots([])
           setMobileOperations([])
@@ -2732,7 +2751,7 @@ export default function ProjectDetail() {
                 { value: '', label: `全部 Target (${wechatTargets.length})` },
                 ...wechatTargets.map((target) => ({
                   value: target.target_id,
-                  label: `${target.target_name} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
+                  label: `${target.target_name} (记录 ${target.record_count} · 原文 ${target.project_document_count} · 存活资产 ${target.alive_asset_count})`,
                 })),
               ]}
               onChange={(value) => {
@@ -2958,6 +2977,83 @@ export default function ProjectDetail() {
     )
   }
 
+  const renderAssetsContent = () => {
+    const columns: ColumnsType<ProjectAsset> = [
+      {
+        title: '资产地址',
+        dataIndex: 'canonical_url',
+        key: 'canonical_url',
+        width: 260,
+        ellipsis: true,
+        render: (value: string, record) => {
+          const href = value || record.link
+          return href ? <a href={href} target="_blank" rel="noreferrer">{href}</a> : '-'
+        },
+      },
+      {
+        title: 'IP / 端口',
+        key: 'endpoint',
+        width: 170,
+        render: (_, record) => `${record.ip || '-'}${record.port ? `:${record.port}` : ''}`,
+      },
+      {
+        title: '来源',
+        dataIndex: 'sources',
+        key: 'sources',
+        width: 150,
+        render: (values: string[] = []) => (
+          <Space size={[4, 4]} wrap>{values.map((value) => <Tag key={value}>{value.toUpperCase()}</Tag>)}</Space>
+        ),
+      },
+      {
+        title: '存活',
+        dataIndex: 'is_alive',
+        key: 'is_alive',
+        width: 90,
+        render: (value: boolean | null) => (
+          value === true ? <Tag color="success">存活</Tag> : value === false ? <Tag color="error">不可达</Tag> : <Tag>未探测</Tag>
+        ),
+      },
+      {
+        title: '状态码',
+        key: 'status_code',
+        width: 90,
+        render: (_, record) => record.probe?.status_code ?? '-',
+      },
+      { title: '标题', dataIndex: 'title', key: 'title', width: 220, ellipsis: true, render: (value) => value || '-' },
+      { title: '根域名', dataIndex: 'root_domain', key: 'root_domain', width: 150, ellipsis: true, render: (value) => value || '-' },
+      {
+        title: '最近发现',
+        dataIndex: 'updated_at',
+        key: 'updated_at',
+        width: 170,
+        render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-',
+      },
+    ]
+    return (
+      <div className="project-tab-section">
+        <div className="section-header-row">
+          <div>
+            <Title level={4}>资产情报</Title>
+            <Text type="secondary">FOFA 与 Hunter 跨源去重，展示最新探活状态和增量结果</Text>
+          </div>
+          <Button icon={<SyncOutlined />} loading={assetsLoading} onClick={() => projectId && fetchAssets(projectId)}>
+            刷新
+          </Button>
+        </div>
+        <Table<ProjectAsset>
+          rowKey="asset_id"
+          columns={columns}
+          dataSource={assets}
+          loading={assetsLoading}
+          scroll={{ x: 1320 }}
+          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: () => `共 ${assetsTotal} 条` }}
+          locale={{ emptyText: <Empty description="暂无资产，请下发综合公司扫描或资产采集任务" /> }}
+        />
+      </div>
+    )
+  }
+
   // Tab 配置
   const tabItems = [
     {
@@ -2969,6 +3065,17 @@ export default function ProjectDetail() {
         </Space>
       ),
       children: renderWebsiteContent(),
+    },
+    {
+      key: 'assets' as TabKey,
+      label: (
+        <Space>
+          <CloudServerOutlined />
+          资产情报
+          {assetsTotal > 0 && <Tag>{assetsTotal}</Tag>}
+        </Space>
+      ),
+      children: renderAssetsContent(),
     },
     {
       key: 'xiaohongshu' as TabKey,
@@ -3099,7 +3206,7 @@ export default function ProjectDetail() {
                 val === 'xhs_search' ? '小红书搜索' :
                 val === 'douyin_search' ? '抖音搜索' :
                 val === 'web_tagging' ? '官网打标' :
-                val === 'fofa_collect' ? 'FOFA 采集' : val
+                val === 'fofa_collect' ? 'FOFA + Hunter 资产采集' : val
               }</Tag>,
             },
             {
@@ -3495,10 +3602,14 @@ export default function ProjectDetail() {
                       if (urlList.length > 0) params.urls = urlList
                     }
                     params.enable_url_scan = values.enable_url_scan ?? true
+                    params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? true
                     params.enable_copywriting = values.enable_copywriting ?? true
                     if (values.xhs_max_notes) params.xhs_max_notes = values.xhs_max_notes
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
+                    if (values.fofa_size) params.fofa_size = values.fofa_size
+                    if (values.hunter_size) params.hunter_size = values.hunter_size
+                    if (values.asset_probe_concurrency) params.asset_probe_concurrency = values.asset_probe_concurrency
                   }
                   if (taskType === 'url_scan' && values.urls) {
                     params.urls = values.urls.split('\n').map((u: string) => u.trim()).filter(Boolean)
@@ -3519,6 +3630,8 @@ export default function ProjectDetail() {
                     params.company_name = values.company_name
                     params.enable_scan = values.enable_scan ?? true
                     if (values.fofa_size) params.fofa_size = values.fofa_size
+                    if (values.hunter_size) params.hunter_size = values.hunter_size
+                    if (values.probe_concurrency) params.probe_concurrency = values.probe_concurrency
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
                   }
                   if (taskType === 'scholar_contact') {
@@ -3546,19 +3659,19 @@ export default function ProjectDetail() {
               onCancel={() => setIsTaskModalOpen(false)}
               confirmLoading={taskSubmitting}
               destroyOnHidden
-              width={560}
+              width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', enable_url_scan: true, enable_xhs: true, enable_copywriting: true, xhs_max_notes: 20, min_attention_score: 40 }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_copywriting: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, asset_probe_concurrency: 48, probe_concurrency: 48 }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
-                    { label: '🏢 综合公司扫描', value: 'company_scan' },
+                    { label: '综合公司扫描', value: 'company_scan' },
                     { label: 'URL 扫描 + 话术生成', value: 'url_scan' },
                     { label: '小红书搜索', value: 'xhs_search' },
                     { label: '抖音搜索', value: 'douyin_search' },
                     { label: '官网打标', value: 'web_tagging' },
-                    { label: '🛰️ FOFA 资产采集', value: 'fofa_collect' },
-                    { label: '🎓 学者联系发现', value: 'scholar_contact' },
+                    { label: 'FOFA + Hunter 资产采集', value: 'fofa_collect' },
+                    { label: '学者联系发现', value: 'scholar_contact' },
                   ]} />
                 </Form.Item>
                 <Form.Item noStyle shouldUpdate={(prev, cur) => prev.task_type !== cur.task_type}>
@@ -3570,10 +3683,13 @@ export default function ProjectDetail() {
                           <Input placeholder="如：字节跳动" />
                         </Form.Item>
                         <Form.Item name="urls" label="URL 列表（可选）">
-                          <Input.TextArea rows={3} placeholder="每行一个 URL，留空则自动通过 Hunter 查询" />
+                          <Input.TextArea rows={3} placeholder="每行一个 URL；留空时由公司身份、FOFA 和 Hunter 自动发现" />
                         </Form.Item>
                         <Form.Item label="扫描模块">
                           <Space direction="vertical">
+                            <Form.Item name="enable_asset_discovery" valuePropName="checked" noStyle>
+                              <Checkbox>公司标准化 + FOFA/Hunter 资产发现与存活去重</Checkbox>
+                            </Form.Item>
                             <Form.Item name="enable_url_scan" valuePropName="checked" noStyle>
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
                             </Form.Item>
@@ -3585,6 +3701,23 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Space>
                         </Form.Item>
+                        <Row gutter={16}>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="fofa_size" label="FOFA 单路条数">
+                              <InputNumber min={1} max={2000} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="hunter_size" label="Hunter 单路条数">
+                              <InputNumber min={1} max={2000} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="asset_probe_concurrency" label="探活并发">
+                              <InputNumber min={1} max={128} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
                         <Row gutter={16}>
                           <Col span={12}>
                             <Form.Item name="xhs_max_notes" label="小红书最大笔记数">
@@ -3622,23 +3755,31 @@ export default function ProjectDetail() {
                     if (taskType === 'fofa_collect') return (
                       <>
                         <Form.Item name="company_name" label="公司名称" rules={[{ required: true, message: '请输入公司名称' }]}>
-                          <Input placeholder="公司名→自动规范化→判定根域名→FOFA 资产采集" />
+                          <Input placeholder="支持法定名、品牌名和简称，如：B站" />
                         </Form.Item>
                         <Form.Item name="enable_scan" valuePropName="checked" noStyle>
                           <Checkbox>对新增存活资产做深度扫描</Checkbox>
                         </Form.Item>
                         <Row gutter={16} style={{ marginTop: 12 }}>
-                          <Col span={12}>
+                          <Col xs={24} sm={8}>
                             <Form.Item name="fofa_size" label="FOFA 单路最大条数">
                               <InputNumber min={1} max={2000} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
-                          <Col span={12}>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="hunter_size" label="Hunter 单路最大条数">
+                              <InputNumber min={1} max={2000} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={8}>
                             <Form.Item name="min_attention_score" label="最低关注度阈值">
                               <InputNumber min={0} max={100} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                         </Row>
+                        <Form.Item name="probe_concurrency" label="URL 探活并发">
+                          <InputNumber min={1} max={128} style={{ width: '100%' }} />
+                        </Form.Item>
                       </>
                     )
                     if (taskType === 'scholar_contact') return (

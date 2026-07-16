@@ -106,29 +106,45 @@ async def upsert_target(
     if not display_name:
         raise ValueError("Target 名称不能为空")
     root_domain = str(root_domain or "").strip().lower()
+    alias_values = [
+        value.strip()
+        for value in [display_name, *(aliases or [])]
+        if isinstance(value, str) and value.strip()
+    ]
+    alias_keys = list(
+        dict.fromkeys(normalize_target_name(value) for value in alias_values)
+    )
     existing = await find_target(
         db,
         name=display_name,
         root_domain=root_domain,
         target_type=target_type,
     )
+    if existing is None and alias_keys:
+        existing = await db[TARGETS_COLLECTION].find_one(
+            {
+                "target_type": target_type,
+                "$or": [
+                    {"normalized_name": {"$in": alias_keys}},
+                    {"aliases_normalized": {"$in": alias_keys}},
+                ],
+            },
+            {"_id": 0},
+        )
     target_id = (
         str(existing.get("target_id"))
         if existing
         else target_id_for_name(display_name, target_type)
     )
     now = _now()
-    alias_values = [
-        value.strip()
-        for value in [display_name, *(aliases or [])]
-        if isinstance(value, str) and value.strip()
-    ]
-    alias_keys = [normalize_target_name(value) for value in alias_values]
+    canonical_name = display_name
+    if existing and source != "company_normalize":
+        canonical_name = str(existing.get("canonical_name") or display_name)
     set_fields: dict[str, Any] = {
         "target_id": target_id,
         "target_type": target_type,
-        "canonical_name": display_name,
-        "normalized_name": normalize_target_name(display_name),
+        "canonical_name": canonical_name,
+        "normalized_name": normalize_target_name(canonical_name),
         "status": "active",
         "last_seen_at": now,
         "updated_at": now,

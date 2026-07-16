@@ -601,6 +601,7 @@ async def list_profiles(
     db: AsyncIOMotorDatabase,
     project_id: str,
     task_id: str | None = None,
+    target_id: str | None = None,
     limit: int = 50,
     skip: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -608,6 +609,8 @@ async def list_profiles(
     query: dict[str, Any] = {"project_id": project_id}
     if task_id:
         query["task_id"] = task_id
+    if target_id:
+        query["target_ids"] = target_id
     total = await db[XHS_PROFILES_COLLECTION].count_documents(query)
     cursor = db[XHS_PROFILES_COLLECTION].find(query).sort("updated_at", -1).skip(skip).limit(limit)
     items = [doc async for doc in cursor]

@@ -32,7 +32,7 @@ CONFIG_CATEGORIES = {
     },
     "tools": {
         "description": "工具 API Key 配置",
-        "sub_keys": ["tianyancha", "hunter", "bocha"],
+        "sub_keys": ["tianyancha", "hunter", "fofa", "bocha"],
     },
     "langsmith": {
         "description": "LangSmith 追踪配置",
