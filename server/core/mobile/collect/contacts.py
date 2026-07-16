@@ -50,50 +50,77 @@ def _clean_tel(value: str) -> str:
     return re.sub(r"\s+", "", value)
 
 
-def extract_contacts(text_blob: str) -> list[dict[str, str]]:
+def _context_excerpt(text: str, start: int, end: int, radius: int = 140) -> str:
+    """截取联系方式所在句/段附近的证据上下文。"""
+    left = max(0, start - radius)
+    right = min(len(text), end + radius)
+    for separator in ("\n", "。", "；", ";", "！", "？"):
+        pos = text.rfind(separator, left, start)
+        if pos >= 0:
+            left = max(left, pos + 1)
+    candidates = [
+        pos
+        for separator in ("\n", "。", "；", ";", "！", "？")
+        if (pos := text.find(separator, end, right)) >= 0
+    ]
+    if candidates:
+        right = min(candidates) + 1
+    return re.sub(r"\s+", " ", text[left:right]).strip()
+
+
+def extract_contacts(text_blob: str) -> list[dict[str, Any]]:
     """从一段文本中抽取分类联系方式,去重后返回。
 
     返回 [{"channel","value","label"}],channel ∈ phone/telephone/email/wechat/qq。
     """
     if not text_blob:
         return []
-    found: list[dict[str, str]] = []
+    found: list[dict[str, Any]] = []
+    found_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     seen: set[tuple[str, str]] = set()
 
-    def _add(channel: str, value: str) -> None:
+    def _add(channel: str, value: str, match: re.Match[str]) -> None:
         value = value.strip()
         if not value:
             return
         key = (channel, value.lower())
+        context = _context_excerpt(text_blob, match.start(), match.end())
         if key in seen:
+            item = found_by_key[key]
+            contexts = item.setdefault("contexts", [])
+            if context and context not in contexts and len(contexts) < 5:
+                contexts.append(context)
             return
         seen.add(key)
-        found.append(
-            {
-                "channel": channel,
-                "value": value,
-                "label": f"{_CHANNEL_LABEL.get(channel, channel)}: {value}",
-            }
-        )
+        item: dict[str, Any] = {
+            "channel": channel,
+            "value": value,
+            "label": f"{_CHANNEL_LABEL.get(channel, channel)}: {value}",
+            "context": context,
+            "contexts": [context] if context else [],
+            "source": "text",
+        }
+        found_by_key[key] = item
+        found.append(item)
 
     for m in _RE_EMAIL.finditer(text_blob):
-        _add("email", m.group(1))
+        _add("email", m.group(1), m)
     for m in _RE_MOBILE.finditer(text_blob):
-        _add("phone", m.group(1))
+        _add("phone", m.group(1), m)
     for m in _RE_MOBILE_KW.finditer(text_blob):
-        _add("phone", m.group(1))
+        _add("phone", m.group(1), m)
     for m in _RE_TEL.finditer(text_blob):
-        _add("telephone", _clean_tel(m.group(1)))
+        _add("telephone", _clean_tel(m.group(1)), m)
     for m in _RE_TEL_KW.finditer(text_blob):
         digits = _clean_tel(m.group(1))
         if len(digits) == 11 and digits[0] == "1":
-            _add("phone", digits)
+            _add("phone", digits, m)
         else:
-            _add("telephone", digits)
+            _add("telephone", digits, m)
     for m in _RE_WECHAT.finditer(text_blob):
-        _add("wechat", m.group(1))
+        _add("wechat", m.group(1), m)
     for m in _RE_QQ.finditer(text_blob):
-        _add("qq", m.group(1))
+        _add("qq", m.group(1), m)
     return found
 
 
@@ -131,8 +158,15 @@ def record_text_blob(fields: dict[str, Any], source_url: str | None = None) -> s
     return "\n".join(parts)
 
 
-def _contact_finding_id(project_id: str, channel: str, value: str) -> str:
-    raw = f"mobile_contact:{project_id}:{channel}:{value}".encode("utf-8")
+def _contact_finding_id(
+    project_id: str, channel: str, value: str, target_id: str = ""
+) -> str:
+    identity = (
+        f"mobile_contact:{project_id}:{target_id}:{channel}:{value}"
+        if target_id
+        else f"mobile_contact:{project_id}:{channel}:{value}"
+    )
+    raw = identity.encode("utf-8")
     return "mc_" + hashlib.sha1(raw).hexdigest()[:20]
 
 
@@ -157,7 +191,7 @@ def build_contact_findings(
     project_id: str,
     task_id: str,
     record: dict[str, Any],
-    contacts: list[dict[str, str]],
+    contacts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """把抽到的联系方式组装成统一 findings dict 列表(未落库)。
 
@@ -175,26 +209,56 @@ def build_contact_findings(
     record_id = record.get("record_id", "")
     keyword = record.get("keyword", "")
     screenshot_url = record.get("screenshot_url")
+    target_id = str(record.get("target_id") or "")
+    target_name = str(record.get("target_name") or "")
+    source_document_id = str(record.get("source_document_id") or "")
+    source_document_version_id = str(
+        record.get("source_document_version_id") or ""
+    )
+    source_type = str(record.get("source_type") or "mobile")
+    article_context = str(
+        fields.get("content")
+        or fields.get("article_content")
+        or fields.get("summary")
+        or ""
+    )
 
     out: list[dict[str, Any]] = []
     for c in contacts:
         channel = c["channel"]
         value = c["value"]
-        finding_id = _contact_finding_id(project_id, channel, value)
+        finding_id = _contact_finding_id(
+            project_id, channel, value, target_id=target_id
+        )
+        contact_context = str(c.get("context") or "").strip()
+        evidence_ref = {
+            "record_id": record_id,
+            "source_document_id": source_document_id,
+            "source_document_version_id": source_document_version_id,
+            "source_url": source_url,
+            "keyword": keyword,
+            "context": contact_context,
+            "screenshot_url": screenshot_url,
+        }
         out.append(
             {
                 "finding_id": finding_id,
                 "project_id": project_id,
                 "task_id": task_id,
-                "source": "mobile",
+                "source": source_type,
                 "type": "contact",
                 "channel": channel,
                 "label": c["label"],
                 "value": value,
                 "url": source_url or "",
                 "attention_score": attention,
-                "attention_reason": title or context[:80],
-                "context": context,
+                "attention_reason": contact_context or title or context[:80],
+                "context": contact_context or context,
+                "article_context": article_context[:4000],
+                "target_id": target_id,
+                "target_name": target_name,
+                "source_document_id": source_document_id,
+                "source_document_version_id": source_document_version_id,
                 "has_profile": False,
                 "evidence": {
                     "record_id": record_id,
@@ -203,6 +267,7 @@ def build_contact_findings(
                     "source_url": source_url,
                     "fields": fields,
                 },
+                "evidence_ref": evidence_ref,
             }
         )
     return out

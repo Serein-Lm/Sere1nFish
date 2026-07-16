@@ -38,6 +38,7 @@ from core.mobile.collect.contacts import (
     build_contact_findings,
     grade_with_contacts,
 )
+from api.services.source_documents import ingest_source_url
 
 logger = get_logger("mobile_collect")
 
@@ -245,6 +246,94 @@ class _CollectStage(Stage):
                         },
                     )
 
+            # 已获得真实 URL 时交给来源文档浏览器池。成功后浏览器负责全文、原图、
+            # 截图与结构化，手机立即返回列表；失败才继续原有手机逐屏深采。
+            if source_url and not stop.is_set():
+                try:
+                    source_result = await ingest_source_url(
+                        st["db"],
+                        url=source_url,
+                        project_id=st["project_id"] or "",
+                        target=st.get("target"),
+                        task_def_id=st["task_def_id"],
+                        run_task_id=run_task_id,
+                        keyword=keyword,
+                        extract_fields=st["extract_fields"],
+                        discovery_score=candidate.get("score"),
+                        discovery_subject_match=candidate.get("subject_match"),
+                        discovery_context={
+                            "candidate_fields": candidate.get("fields") or {},
+                            "tap": [tap_x, tap_y],
+                        },
+                        persist=not bool(st.get("dry_run")),
+                    )
+                    if source_result.get("ok"):
+                        browser_ids = list(
+                            source_result.get("browser_screenshot_ids") or []
+                        )
+                        browser_urls = list(
+                            source_result.get("browser_screenshot_urls") or []
+                        )
+                        await ctx.emit(
+                            "persist",
+                            {
+                                "fields": source_result.get("fields") or candidate.get("fields") or {},
+                                "score": source_result.get("score"),
+                                "subject_match": source_result.get("subject_match"),
+                                "score_reason": source_result.get("score_reason") or "",
+                                "source_url": source_result.get("source_url") or source_url,
+                                "source_type": source_result.get("source_type") or "wechat_article",
+                                "source_document_id": source_result.get("document_id") or "",
+                                "source_document_version_id": source_result.get("version_id") or "",
+                                "target_id": source_result.get("target_id") or "",
+                                "target_name": source_result.get("target_name") or "",
+                                "contacts": source_result.get("contacts") or [],
+                                "keyword": keyword,
+                                "screenshot_id": shot_ids[0] if shot_ids else sid,
+                                "screenshot_url": shot_urls[0] if shot_urls else url,
+                                "screenshot_ids": [*shot_ids, *browser_ids],
+                                "screenshot_urls": [*shot_urls, *browser_urls],
+                                "browser_screenshot_ids": browser_ids,
+                                "browser_screenshot_urls": browser_urls,
+                                "discovery_screenshot_ids": shot_ids,
+                                "discovery_screenshot_urls": shot_urls,
+                                "detail": True,
+                            },
+                        )
+                        st["counters"]["documents"] = (
+                            st["counters"].get("documents", 0) + 1
+                        )
+                        obs_log(
+                            "公众号原文已由浏览器池完整读取，跳过手机详情滚动",
+                            project_id=st["project_id"] or "",
+                            task_id=run_task_id,
+                            source=_OBS_SOURCE,
+                            level="notice",
+                            event="collect_source_document_ready",
+                            data={
+                                "keyword": keyword,
+                                "document_id": source_result.get("document_id"),
+                                "version_id": source_result.get("version_id"),
+                                "cached": source_result.get("cached"),
+                                "images": source_result.get("image_count"),
+                                "screenshots": source_result.get("screenshot_count"),
+                            },
+                        )
+                        return
+                except Exception as exc:  # noqa: BLE001
+                    ctx.logger.warning(
+                        f"[collect] 来源文档浏览器读取失败，回退手机深采: {exc}"
+                    )
+                    obs_log(
+                        f"来源文档读取失败，回退手机深采: {exc}",
+                        project_id=st["project_id"] or "",
+                        task_id=run_task_id,
+                        source=_OBS_SOURCE,
+                        level="warning",
+                        event="collect_source_document_fallback",
+                        data={"keyword": keyword, "url": source_url, "error": str(exc)},
+                    )
+
             # 详情页滑动到底: 逐屏截图, 需连续两屏几乎一致才判定到底(避免单帧误判提前退出)
             reached_bottom = False
             swipes = 0
@@ -305,6 +394,8 @@ class _CollectStage(Stage):
                         or candidate.get("subject_match"),
                         "score_reason": rec.get("score_reason", ""),
                         "source_url": source_url or rec.get("source_url"),
+                        "target_id": str((st.get("target") or {}).get("target_id") or ""),
+                        "target_name": str((st.get("target") or {}).get("canonical_name") or ""),
                         "keyword": keyword,
                         "screenshot_id": shot_ids[0] if shot_ids else sid,
                         "screenshot_url": shot_urls[0] if shot_urls else url,
@@ -519,7 +610,7 @@ class _PersistStage(Stage):
 
         # 分级规则: 有联系方式才能给高分, 没有的一定压到低分带
         blob = record_text_blob(payload["fields"], source_url)
-        contacts = extract_contacts(blob)
+        contacts = list(payload.get("contacts") or extract_contacts(blob))
         score = grade_with_contacts(raw_score, bool(contacts))
 
         min_persist = int(st.get("min_score_to_persist", 0) or 0)
@@ -542,6 +633,11 @@ class _PersistStage(Stage):
                         "keyword": payload["keyword"],
                         "screenshot_id": payload["screenshot_id"],
                         "screenshot_url": payload["screenshot_url"],
+                        "source_document_id": payload.get("source_document_id") or "",
+                        "source_document_version_id": payload.get("source_document_version_id") or "",
+                        "target_id": payload.get("target_id") or "",
+                        "target_name": payload.get("target_name") or "",
+                        "browser_screenshot_urls": payload.get("browser_screenshot_urls") or [],
                     }
                 )
             return
@@ -561,6 +657,24 @@ class _PersistStage(Stage):
             score=score,
             subject_match=subject_match,
             source_url=source_url,
+            source_document_id=str(payload.get("source_document_id") or ""),
+            source_document_version_id=str(
+                payload.get("source_document_version_id") or ""
+            ),
+            target_id=str(payload.get("target_id") or ""),
+            target_name=str(payload.get("target_name") or ""),
+            browser_screenshot_ids=list(
+                payload.get("browser_screenshot_ids") or []
+            ),
+            browser_screenshot_urls=list(
+                payload.get("browser_screenshot_urls") or []
+            ),
+            discovery_screenshot_ids=list(
+                payload.get("discovery_screenshot_ids") or []
+            ),
+            discovery_screenshot_urls=list(
+                payload.get("discovery_screenshot_urls") or []
+            ),
         )
         counters["total"] += 1
         if result["is_new"]:
@@ -578,6 +692,11 @@ class _PersistStage(Stage):
                 "record_id": result["record_id"],
                 "keyword": payload["keyword"],
                 "screenshot_url": payload["screenshot_url"],
+                "target_id": payload.get("target_id") or "",
+                "target_name": payload.get("target_name") or "",
+                "source_type": payload.get("source_type") or "mobile",
+                "source_document_id": payload.get("source_document_id") or "",
+                "source_document_version_id": payload.get("source_document_version_id") or "",
             }
             findings = build_contact_findings(
                 project_id=project_id,
@@ -674,8 +793,48 @@ async def run_collect_task(
     _running[run_task_id] = stop_event
 
     keywords = list(task_def.get("keywords") or []) or [""]
-    counters = {"total": 0, "new": 0, "changed": 0, "contacts": 0}
+    counters = {
+        "total": 0,
+        "new": 0,
+        "changed": 0,
+        "contacts": 0,
+        "documents": 0,
+    }
     preview: list[dict[str, Any]] = []
+
+    target: dict[str, Any] | None = None
+    try:
+        if dry_run:
+            target_name = str(task_def.get("target_name") or "").strip()
+            target_id = str(task_def.get("target_id") or "").strip()
+            if target_id:
+                from api.dao import targets as targets_dao
+
+                target = await targets_dao.get_target(db, target_id)
+            if not target and target_name:
+                target = {
+                    "target_id": target_id,
+                    "target_type": str(task_def.get("target_type") or "company"),
+                    "canonical_name": target_name,
+                }
+        else:
+            from api.services.targets import resolve_collection_target
+
+            target = await resolve_collection_target(
+                db,
+                task_def=task_def,
+                project_id=project_id or "",
+            )
+            if target and str(task_def.get("target_id") or "") != str(
+                target.get("target_id") or ""
+            ):
+                await collect_dao.update_task_def(
+                    db,
+                    task_def_id,
+                    {"target_id": target.get("target_id")},
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[collect] Target 解析失败，继续执行未聚类采集: %s", exc)
 
     device_key = await asyncio.to_thread(resolve_device_key, device_id)
     pool = DevicePool.get_instance()
@@ -690,6 +849,7 @@ async def run_collect_task(
         "task_def_id": task_def_id,
         "task_name": task_def.get("name", task_def_id),
         "project_id": project_id,
+        "target": target,
         "device_id": device_id,
         "app_name": task_def.get("app_name", ""),
         "search_hint": task_def.get("search_hint", ""),

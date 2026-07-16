@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber, Image } from 'antd'
+import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
 import {
@@ -56,9 +56,13 @@ import {
 import CopywritingRenderer from '../../components/CopywritingRenderer/CopywritingRenderer'
 import {
   listRecords as listCollectRecords,
-  fetchScreenshotObjectUrl as fetchCollectScreenshotObjectUrl,
   type CollectRecord,
 } from '../../services/mobileCollectService'
+import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
+import {
+  listProjectTargets,
+  type ProjectTargetSummary,
+} from '../../services/sourceDocumentService'
 import {
   listScholarContacts,
   type ScholarContact,
@@ -410,203 +414,6 @@ function MobileScreenshotImage({ screenshot, variant = 'thumb' }: { screenshot: 
   return <img className={`mobile-shot-image ${variant}`} src={src} alt={screenshot.screenshot_id} />
 }
 
-function WechatShotImage({ url, width = 64, height, preview = true }: { url: string; width?: number; height?: number; preview?: boolean }) {
-  const [src, setSrc] = useState<string>('')
-  useEffect(() => {
-    let objectUrl = ''
-    let alive = true
-    fetchCollectScreenshotObjectUrl(url)
-      .then((u) => {
-        if (alive) {
-          objectUrl = u
-          setSrc(u)
-        } else {
-          URL.revokeObjectURL(u)
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [url])
-  if (!src) {
-    return (
-      <div className="wechat-shot-loading" style={{ width, height: height ?? width }}>
-        <Spin size="small" />
-      </div>
-    )
-  }
-  if (!preview) {
-    return <img src={src} alt="collect" style={{ width, borderRadius: 4 }} />
-  }
-  return (
-    <Image
-      src={src}
-      alt="collect"
-      width={width}
-      height={height}
-      className="wechat-shot-thumb"
-      preview={{ mask: <EyeOutlined /> }}
-    />
-  )
-}
-
-function scoreColor(n: number): string {
-  if (n >= 80) return 'green'
-  if (n >= 60) return 'blue'
-  if (n >= 40) return 'orange'
-  return 'default'
-}
-
-const WECHAT_MOBILE_RE = /(?<!\d)(1[3-9]\d{9})(?!\d)/g
-const WECHAT_TEL_KW_RE = /(?:联系电话|电话|联系方式|Tel|TEL|tel)\s*[:：]?\s*(\d{11}|(?:0\d{2,3}[-\s]?)?\d{7,8})(?!\d)/g
-const WECHAT_EMAIL_RE = /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g
-
-function fieldsToText(fields: Record<string, unknown>): string {
-  const parts: string[] = []
-  for (const v of Object.values(fields || {})) {
-    if (Array.isArray(v)) parts.push(v.map((x) => String(x)).join(' '))
-    else if (v != null && v !== '') parts.push(String(v))
-  }
-  return parts.join('\n')
-}
-
-function extractContactsFromFields(fields: Record<string, unknown>): { channel: string; value: string }[] {
-  const text = fieldsToText(fields)
-  const out: { channel: string; value: string }[] = []
-  const seen = new Set<string>()
-  const add = (channel: string, value: string) => {
-    const v = value.trim()
-    if (!v) return
-    const key = `${channel}:${v.toLowerCase()}`
-    if (seen.has(key)) return
-    seen.add(key)
-    out.push({ channel, value: v })
-  }
-  for (const m of text.matchAll(WECHAT_EMAIL_RE)) add('email', m[1])
-  for (const m of text.matchAll(WECHAT_MOBILE_RE)) add('phone', m[1])
-  for (const m of text.matchAll(WECHAT_TEL_KW_RE)) {
-    const digits = m[1].replace(/[\s-]/g, '')
-    add('phone', digits)
-  }
-  return out
-}
-
-function renderWechatContacts(record: CollectRecord): React.ReactNode {
-  const contacts = extractContactsFromFields((record.fields || {}) as Record<string, unknown>)
-  if (contacts.length === 0) return <Text type="secondary">-</Text>
-  return (
-    <Space direction="vertical" size={2}>
-      {contacts.slice(0, 4).map((c, i) => (
-        <span key={`${c.channel}-${c.value}-${i}`}>{renderFindingValue(c.value, { copyable: true, maxWidth: 150 })}</span>
-      ))}
-    </Space>
-  )
-}
-
-function classifyFieldKey(key: string): 'basic' | 'body' {
-  const k = key.toLowerCase()
-  const bodyHints = ['正文', '摘要', '内容', '背景', '简介', '详情', 'summary', 'content', 'background', 'desc', 'body']
-  if (bodyHints.some((h) => k.includes(h))) return 'body'
-  return 'basic'
-}
-
-function WechatRecordDetail({ record }: { record: CollectRecord }) {
-  const fields = (record.fields || {}) as Record<string, unknown>
-  const entries = Object.entries(fields).filter(([, v]) => {
-    if (Array.isArray(v)) return v.length > 0
-    return v != null && v !== ''
-  })
-  const basicEntries = entries.filter(([k]) => classifyFieldKey(k) === 'basic')
-  const bodyEntries = entries.filter(([k]) => classifyFieldKey(k) === 'body')
-  const contacts = extractContactsFromFields(fields)
-  const shots = record.screenshot_urls || []
-  const renderVal = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(x)).join('、') : String(v))
-  return (
-    <div className="wechat-record-detail">
-      <div className="wechat-detail-header">
-        <Space size={6} wrap>
-          {record.score != null && <Tag color={scoreColor(record.score)}>相关性 {record.score}</Tag>}
-          {record.subject_match != null && (
-            <Tag color={scoreColor(record.subject_match)}>主体对应 {record.subject_match}</Tag>
-          )}
-          {record.keyword && <Tag>{record.keyword}</Tag>}
-          {shots.length > 0 && <Tag icon={<PictureOutlined />}>{shots.length} 张截图</Tag>}
-        </Space>
-      </div>
-
-      {contacts.length > 0 && (
-        <div className="wechat-detail-section">
-          <div className="wechat-detail-section-title">联系方式</div>
-          <Space direction="vertical" size={4} style={{ width: '100%' }}>
-            {contacts.map((c, i) => (
-              <div key={`${c.channel}-${c.value}-${i}`} className="wechat-contact-row">
-                <Tag color="blue" className="wechat-contact-channel">{c.channel}</Tag>
-                {renderFindingValue(c.value, { copyable: true, maxWidth: 320 })}
-              </div>
-            ))}
-          </Space>
-        </div>
-      )}
-
-      {basicEntries.length > 0 && (
-        <div className="wechat-detail-section">
-          <div className="wechat-detail-section-title">基本信息</div>
-          <Descriptions
-            size="small"
-            bordered
-            column={{ xxl: 2, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }}
-            className="wechat-detail-descriptions"
-          >
-            {basicEntries.map(([k, v]) => (
-              <Descriptions.Item key={k} label={k}>{renderVal(v)}</Descriptions.Item>
-            ))}
-            {record.source_url && (
-              <Descriptions.Item label="原文链接" span={2}>
-                <a href={record.source_url} target="_blank" rel="noopener noreferrer">
-                  {record.source_url}
-                </a>
-              </Descriptions.Item>
-            )}
-          </Descriptions>
-        </div>
-      )}
-
-      {bodyEntries.length > 0 && (
-        <div className="wechat-detail-section">
-          <div className="wechat-detail-section-title">正文 / 背景</div>
-          <Descriptions
-            size="small"
-            bordered
-            column={1}
-            className="wechat-detail-descriptions"
-          >
-            {bodyEntries.map(([k, v]) => (
-              <Descriptions.Item key={k} label={k}>{renderVal(v)}</Descriptions.Item>
-            ))}
-          </Descriptions>
-        </div>
-      )}
-
-      {entries.length === 0 && <Empty description="无结构化字段" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
-
-      {shots.length > 0 && (
-        <div className="wechat-detail-section">
-          <div className="wechat-detail-section-title">截图 ({shots.length})</div>
-          <Image.PreviewGroup>
-            <div className="wechat-shot-gallery">
-              {shots.map((u, i) => (
-                <WechatShotImage key={`${u}-${i}`} url={u} width={96} />
-              ))}
-            </div>
-          </Image.PreviewGroup>
-        </div>
-      )}
-    </div>
-  )
-}
-
 export default function ProjectDetail() {
   const navigate = useNavigate()
   const { projectId } = useParams<{ projectId: string }>()
@@ -713,7 +520,8 @@ export default function ProjectDetail() {
   const [wechatRecordsTotal, setWechatRecordsTotal] = useState(0)
   const [wechatLoading, setWechatLoading] = useState(false)
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
-  const [wechatDetail, setWechatDetail] = useState<CollectRecord | null>(null)
+  const [wechatTargets, setWechatTargets] = useState<ProjectTargetSummary[]>([])
+  const [wechatTargetId, setWechatTargetId] = useState('')
   const [scholarContacts, setScholarContacts] = useState<ScholarContact[]>([])
   const [scholarContactsTotal, setScholarContactsTotal] = useState(0)
   const [scholarLoading, setScholarLoading] = useState(false)
@@ -741,15 +549,21 @@ export default function ProjectDetail() {
   }
 
   // 加载公众号采集记录(复用手机采集框架的记录, 按 project_id 过滤)
-  const fetchWechatRecords = async (pid: string, incremental?: boolean) => {
+  const fetchWechatRecords = async (pid: string, incremental?: boolean, targetId?: string) => {
     const onlyInc = incremental ?? wechatOnlyIncremental
+    const selectedTargetId = targetId ?? wechatTargetId
     setWechatLoading(true)
     try {
-      const res = await listCollectRecords({
-        project_id: pid,
-        only_incremental: onlyInc,
-        limit: 100,
-      })
+      const [res, targetResult] = await Promise.all([
+        listCollectRecords({
+          project_id: pid,
+          target_id: selectedTargetId || undefined,
+          only_incremental: onlyInc,
+          limit: 100,
+        }),
+        listProjectTargets(pid),
+      ])
+      setWechatTargets(targetResult.items)
       const sorted = [...res.items].sort((a, b) => {
         const ca = extractContactsFromFields((a.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
         const cb = extractContactsFromFields((b.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
@@ -2904,125 +2718,51 @@ export default function ProjectDetail() {
   }
 
   const renderWechatContent = () => {
-    const columns: ColumnsType<CollectRecord> = [
-      {
-        title: '',
-        key: 'shot',
-        width: 52,
-        render: (_, r) =>
-          r.screenshot_urls?.length ? (
-            <WechatShotImage url={r.screenshot_urls[0]} width={40} height={40} />
-          ) : (
-            <div className="wechat-shot-empty sm">无图</div>
-          ),
-      },
-      {
-        title: '内容',
-        key: 'content',
-        render: (_, r) => {
-          const f = (r.fields || {}) as Record<string, unknown>
-          const title = String(f.title ?? f.name ?? r.keyword ?? '无标题')
-          const account = f.account != null ? String(f.account) : ''
-          const publishTime = f.publish_time != null ? String(f.publish_time) : ''
-          const meta = [account, publishTime].filter(Boolean).join(' · ')
-          return (
-            <div className="wechat-row-cell">
-              <div className="wechat-row-title">
-                {title}
-                {r.is_new ? (
-                  <Tag color="green" className="wechat-row-tag">新</Tag>
-                ) : r.is_changed ? (
-                  <Tag color="orange" className="wechat-row-tag">改</Tag>
-                ) : null}
-              </div>
-              {meta && <div className="wechat-row-meta">{meta}</div>}
-            </div>
-          )
-        },
-      },
-      {
-        title: '相关性',
-        key: 'score',
-        width: 84,
-        render: (_, r) =>
-          r.score != null ? <Tag color={scoreColor(r.score)}>{r.score}</Tag> : <Text type="secondary">-</Text>,
-      },
-      {
-        title: '联系方式',
-        key: 'contacts',
-        width: 160,
-        render: (_, r) => renderWechatContacts(r),
-      },
-      {
-        title: '',
-        key: 'action',
-        width: 48,
-        render: (_, r) => (
-          <Tooltip title="预览">
-            <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => setWechatDetail(r)} />
-          </Tooltip>
-        ),
-      },
-    ]
-
     return (
       <div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
           <Text type="secondary">
-            公众号采集记录来自「手机采集」框架(app=微信 · 结构化入库),此处按当前项目过滤展示。
+            手机负责发现文章，浏览器池永久保存全文、原图、截图和结构化版本；记录按 Target 聚类。
           </Text>
           <Space>
+            <Select
+              value={wechatTargetId}
+              style={{ width: 220 }}
+              options={[
+                { value: '', label: `全部 Target (${wechatTargets.length})` },
+                ...wechatTargets.map((target) => ({
+                  value: target.target_id,
+                  label: `${target.target_name} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
+                })),
+              ]}
+              onChange={(value) => {
+                setWechatTargetId(value)
+                if (projectId) fetchWechatRecords(projectId, wechatOnlyIncremental, value)
+              }}
+            />
             <span>仅增量</span>
             <Checkbox
               checked={wechatOnlyIncremental}
               onChange={(e) => {
                 setWechatOnlyIncremental(e.target.checked)
-                if (projectId) fetchWechatRecords(projectId, e.target.checked)
+                if (projectId) fetchWechatRecords(projectId, e.target.checked, wechatTargetId)
               }}
             />
             <Button
               size="small"
               icon={<SyncOutlined />}
               loading={wechatLoading}
-              onClick={() => { if (projectId) fetchWechatRecords(projectId) }}
+              onClick={() => { if (projectId) fetchWechatRecords(projectId, wechatOnlyIncremental, wechatTargetId) }}
             >
               刷新
             </Button>
           </Space>
         </div>
-        <Table<CollectRecord>
-          className="wechat-records-table"
-          rowKey="record_id"
-          size="small"
+        <CollectRecordsView
+          records={wechatRecords}
           loading={wechatLoading}
-          columns={columns}
-          dataSource={wechatRecords}
-          locale={{
-            emptyText: (
-              <Empty description="暂无公众号采集记录，请在「手机采集」中用公众号预设创建任务并绑定本项目" />
-            ),
-          }}
-          pagination={{ pageSize: 10, hideOnSinglePage: true, showTotal: (t) => `共 ${t} 条` }}
+          emptyText="暂无公众号采集记录，请在手机采集中创建任务并绑定本项目与 Target"
         />
-        <Modal
-          open={!!wechatDetail}
-          onCancel={() => setWechatDetail(null)}
-          footer={null}
-          width={720}
-          title={
-            wechatDetail
-              ? String(
-                  (wechatDetail.fields as Record<string, unknown>)?.title ??
-                    (wechatDetail.fields as Record<string, unknown>)?.name ??
-                    wechatDetail.keyword ??
-                    '采集详情',
-                )
-              : '采集详情'
-          }
-          destroyOnClose
-        >
-          {wechatDetail && <WechatRecordDetail record={wechatDetail} />}
-        </Modal>
       </div>
     )
   }

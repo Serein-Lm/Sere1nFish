@@ -28,6 +28,11 @@ class CollectTaskDef(BaseModel):
 
     name: str = Field(description="任务名称")
     project_id: str | None = Field(default=None, description="归属项目")
+    target_id: str | None = Field(default=None, description="关联的全局 Target ID")
+    target_name: str | None = Field(
+        default=None, description="明确的目标公司/机构名称，用于跨项目聚类"
+    )
+    target_type: str = Field(default="company", description="Target 类型")
     device_id: str = Field(description="执行设备 device_id")
     app_name: str = Field(description="目标应用名,如 微信 / 小红书")
     keywords: list[str] = Field(default_factory=list, description="搜索关键词列表(逐个执行)")
@@ -76,6 +81,9 @@ class CollectTaskUpdate(BaseModel):
 
     name: str | None = None
     project_id: str | None = None
+    target_id: str | None = None
+    target_name: str | None = None
+    target_type: str | None = None
     device_id: str | None = None
     app_name: str | None = None
     keywords: list[str] | None = None
@@ -133,6 +141,7 @@ class RecordsListRequest(BaseModel):
 
     task_def_id: str | None = None
     project_id: str | None = None
+    target_id: str | None = None
     only_incremental: bool = Field(default=False, description="仅返回 new/changed 记录")
     min_score: int | None = Field(
         default=None, ge=0, le=100, description="仅返回相关性分>=该值的记录"

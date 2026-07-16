@@ -31,6 +31,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await coll.create_index("meta_id", unique=True)
     await coll.create_index([("project_id", 1), ("normalized_name", 1)])
     await coll.create_index("root_domain")
+    await coll.create_index("target_id", sparse=True)
 
 
 async def upsert_company_meta(
@@ -44,6 +45,7 @@ async def upsert_company_meta(
     confidence: float | None = None,
     source: str = "",
     task_id: str = "",
+    target_id: str = "",
 ) -> dict[str, Any]:
     """写入/更新一条公司元信息，返回最新文档。"""
     meta_id = company_meta_id(project_id, input_name)
@@ -60,6 +62,8 @@ async def upsert_company_meta(
         "latest_task_id": task_id,
         "updated_at": now,
     }
+    if target_id:
+        set_fields["target_id"] = target_id
     await db[COMPANY_META_COLLECTION].update_one(
         {"meta_id": meta_id},
         {"$set": set_fields, "$setOnInsert": {"created_at": now}},

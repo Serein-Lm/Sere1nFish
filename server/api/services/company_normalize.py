@@ -90,6 +90,30 @@ async def normalize_company(
     # 1. 增量复用：已缓存则直接返回
     cached = await company_meta_dao.get_company_meta(db, project_id, input_name)
     if cached and cached.get("normalized_name"):
+        if not cached.get("target_id"):
+            from api.services.targets import attach_normalized_company
+
+            target = await attach_normalized_company(
+                db,
+                project_id=project_id,
+                input_name=input_name,
+                normalized_name=str(cached.get("normalized_name") or input_name),
+                root_domain=str(cached.get("root_domain") or ""),
+                aliases=list(cached.get("aliases") or []),
+                task_id=task_id,
+            )
+            cached = await company_meta_dao.upsert_company_meta(
+                db,
+                project_id=project_id,
+                input_name=input_name,
+                normalized_name=str(cached.get("normalized_name") or input_name),
+                root_domain=str(cached.get("root_domain") or ""),
+                aliases=list(cached.get("aliases") or []),
+                confidence=cached.get("confidence"),
+                source=str(cached.get("source") or "cached"),
+                task_id=task_id,
+                target_id=str(target.get("target_id") or ""),
+            )
         logger.info(f"[normalize] 命中缓存: {input_name} → {cached.get('normalized_name')}")
         return cached
 
@@ -133,6 +157,17 @@ async def normalize_company(
             source = "tianyancha_icp"
 
     # 4. 落库
+    from api.services.targets import attach_normalized_company
+
+    target = await attach_normalized_company(
+        db,
+        project_id=project_id,
+        input_name=input_name,
+        normalized_name=normalized_name,
+        root_domain=root_domain,
+        aliases=[str(a) for a in aliases if a],
+        task_id=task_id,
+    )
     doc = await company_meta_dao.upsert_company_meta(
         db,
         project_id=project_id,
@@ -143,6 +178,7 @@ async def normalize_company(
         confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
         source=source,
         task_id=task_id,
+        target_id=str(target.get("target_id") or ""),
     )
     logger.info(
         f"[normalize] {input_name} → name='{normalized_name}' domain='{root_domain}' "

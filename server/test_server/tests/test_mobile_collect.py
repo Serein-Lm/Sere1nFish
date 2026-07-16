@@ -42,6 +42,24 @@ class _FakeCollection:
                     arr.append(value)
         self.docs[rid] = existing
 
+    async def update_many(self, query: dict, update: dict):
+        task_def_id = query.get("task_def_id")
+        project_id = query.get("project_id")
+        keywords = set((query.get("keyword") or {}).get("$in") or [])
+        modified = 0
+        for doc in self.docs.values():
+            if task_def_id and doc.get("task_def_id") != task_def_id:
+                continue
+            if project_id and doc.get("project_id") != project_id:
+                continue
+            if keywords and doc.get("keyword") not in keywords:
+                continue
+            if doc.get("target_id") not in (None, ""):
+                continue
+            doc.update(update.get("$set", {}))
+            modified += 1
+        return type("UpdateResult", (), {"modified_count": modified})()
+
 
 class _FakeDB:
     def __init__(self) -> None:
@@ -80,6 +98,71 @@ def test_stable_record_id_without_dedup_keys_uses_full_content():
     c = dao._stable_record_id("t1", {"k": "2"}, [])
     assert a == b
     assert a != c
+
+
+def test_backfill_task_target_only_updates_unassigned_records():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+    coll = db[dao.MOBILE_COLLECT_RECORDS_COLLECTION]
+    coll.docs = {
+        "missing": {"task_def_id": "task-1"},
+        "empty": {"task_def_id": "task-1", "target_id": ""},
+        "assigned": {"task_def_id": "task-1", "target_id": "target-old"},
+        "other-task": {"task_def_id": "task-2"},
+    }
+
+    changed = _run(
+        dao.backfill_task_target(
+            db,
+            task_def_id="task-1",
+            target_id="target-new",
+            target_name="新目标",
+        )
+    )
+
+    assert changed == 2
+    assert coll.docs["missing"]["target_id"] == "target-new"
+    assert coll.docs["empty"]["target_name"] == "新目标"
+    assert coll.docs["assigned"]["target_id"] == "target-old"
+    assert "target_id" not in coll.docs["other-task"]
+
+
+def test_backfill_project_target_recovers_deleted_task_records_by_keyword():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+    coll = db[dao.MOBILE_COLLECT_RECORDS_COLLECTION]
+    coll.docs = {
+        "match": {
+            "project_id": "project-1",
+            "keyword": "目标公司 招标",
+            "task_def_id": "deleted-task",
+        },
+        "other-keyword": {
+            "project_id": "project-1",
+            "keyword": "其他公司 招标",
+        },
+        "other-project": {
+            "project_id": "project-2",
+            "keyword": "目标公司 招标",
+        },
+    }
+
+    changed = _run(
+        dao.backfill_project_target_by_keywords(
+            db,
+            project_id="project-1",
+            keywords=["目标公司 招标"],
+            target_id="target-1",
+            target_name="目标公司",
+        )
+    )
+
+    assert changed == 1
+    assert coll.docs["match"]["target_id"] == "target-1"
+    assert "target_id" not in coll.docs["other-keyword"]
+    assert "target_id" not in coll.docs["other-project"]
 
 
 # ── DAO: 增量 upsert 语义 ───────────────────────────────

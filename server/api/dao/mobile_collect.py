@@ -39,6 +39,8 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await records.create_index([("task_def_id", 1), ("last_seen", -1)])
     await records.create_index([("task_def_id", 1), ("is_new", 1)])
     await records.create_index([("project_id", 1), ("last_seen", -1)])
+    await records.create_index([("target_id", 1), ("last_seen", -1)])
+    await records.create_index("source_document_id", sparse=True)
 
 
 # ── 任务定义 CRUD ──────────────────────────────────────
@@ -115,13 +117,81 @@ async def delete_task_def(db: AsyncIOMotorDatabase, task_def_id: str) -> int:
     return result.deleted_count
 
 
+async def backfill_task_target(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_def_id: str,
+    target_id: str,
+    target_name: str,
+) -> int:
+    """只补齐任务历史记录缺失的 Target，不覆盖已有实体归属。"""
+    if not task_def_id or not target_id:
+        return 0
+    result = await db[MOBILE_COLLECT_RECORDS_COLLECTION].update_many(
+        {
+            "task_def_id": task_def_id,
+            "$or": [
+                {"target_id": {"$exists": False}},
+                {"target_id": None},
+                {"target_id": ""},
+            ],
+        },
+        {
+            "$set": {
+                "target_id": target_id,
+                "target_name": target_name,
+                "updated_at": _now(),
+            }
+        },
+    )
+    return int(result.modified_count)
+
+
+async def backfill_project_target_by_keywords(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    keywords: list[str],
+    target_id: str,
+    target_name: str,
+) -> int:
+    """恢复已删除任务留下的记录；调用侧必须只传明确包含 Target 的搜索词。"""
+    terms = sorted({str(item).strip() for item in keywords if str(item).strip()})
+    if not project_id or not terms or not target_id:
+        return 0
+    result = await db[MOBILE_COLLECT_RECORDS_COLLECTION].update_many(
+        {
+            "project_id": project_id,
+            "keyword": {"$in": terms},
+            "$or": [
+                {"target_id": {"$exists": False}},
+                {"target_id": None},
+                {"target_id": ""},
+            ],
+        },
+        {
+            "$set": {
+                "target_id": target_id,
+                "target_name": target_name,
+                "updated_at": _now(),
+            }
+        },
+    )
+    return int(result.modified_count)
+
+
 # ── 采集结果增量入库 ───────────────────────────────────
 
 def _stable_record_id(
-    task_def_id: str, fields: dict[str, Any], dedup_key_fields: list[str]
+    task_def_id: str,
+    fields: dict[str, Any],
+    dedup_key_fields: list[str],
+    source_document_id: str = "",
 ) -> str:
     """由去重键派生稳定 record_id;无去重键时退回整条内容哈希。"""
-    if dedup_key_fields:
+    if source_document_id:
+        key_repr = f"source_document={source_document_id}"
+    elif dedup_key_fields:
         key_repr = "|".join(
             f"{k}={fields.get(k, '')}" for k in sorted(dedup_key_fields)
         )
@@ -132,10 +202,15 @@ def _stable_record_id(
 
 
 def stable_record_id(
-    task_def_id: str, fields: dict[str, Any], dedup_key_fields: list[str]
+    task_def_id: str,
+    fields: dict[str, Any],
+    dedup_key_fields: list[str],
+    source_document_id: str = "",
 ) -> str:
     """公共封装:供 pipeline 等模块计算稳定去重键(到底检测用)。"""
-    return _stable_record_id(task_def_id, fields, dedup_key_fields)
+    return _stable_record_id(
+        task_def_id, fields, dedup_key_fields, source_document_id
+    )
 
 
 def _content_hash(fields: dict[str, Any], source_url: str | None = None) -> str:
@@ -160,9 +235,22 @@ async def upsert_record(
     score: int | None = None,
     subject_match: int | None = None,
     source_url: str | None = None,
+    source_document_id: str = "",
+    source_document_version_id: str = "",
+    target_id: str = "",
+    target_name: str = "",
+    browser_screenshot_ids: list[str] | None = None,
+    browser_screenshot_urls: list[str] | None = None,
+    discovery_screenshot_ids: list[str] | None = None,
+    discovery_screenshot_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """增量 upsert 一条采集记录。返回 {record_id, is_new, is_changed}。"""
-    record_id = _stable_record_id(task_def_id, fields, dedup_key_fields)
+    record_id = _stable_record_id(
+        task_def_id,
+        fields,
+        dedup_key_fields,
+        source_document_id=source_document_id,
+    )
     content_hash = _content_hash(fields, source_url)
     now = _now()
     coll = db[MOBILE_COLLECT_RECORDS_COLLECTION]
@@ -191,6 +279,18 @@ async def upsert_record(
         set_fields["subject_match"] = subject_match
     if source_url:
         set_fields["source_url"] = source_url
+    if source_document_id:
+        set_fields["source_document_id"] = source_document_id
+    if source_document_version_id:
+        set_fields["source_document_version_id"] = source_document_version_id
+    if target_id:
+        set_fields["target_id"] = target_id
+    if target_name:
+        set_fields["target_name"] = target_name
+    if browser_screenshot_ids is not None:
+        set_fields["browser_screenshot_ids"] = browser_screenshot_ids
+    if browser_screenshot_urls is not None:
+        set_fields["browser_screenshot_urls"] = browser_screenshot_urls
 
     update: dict[str, Any] = {
         "$set": set_fields,
@@ -203,6 +303,14 @@ async def upsert_record(
         add_to_set["screenshot_ids"] = {"$each": screenshot_ids}
     if screenshot_urls:
         add_to_set["screenshot_urls"] = {"$each": screenshot_urls}
+    if discovery_screenshot_ids:
+        add_to_set["discovery_screenshot_ids"] = {
+            "$each": discovery_screenshot_ids
+        }
+    if discovery_screenshot_urls:
+        add_to_set["discovery_screenshot_urls"] = {
+            "$each": discovery_screenshot_urls
+        }
     if add_to_set:
         update["$addToSet"] = add_to_set
 
@@ -215,6 +323,7 @@ async def list_records(
     *,
     task_def_id: str | None = None,
     project_id: str | None = None,
+    target_id: str | None = None,
     only_incremental: bool = False,
     min_score: int | None = None,
     skip: int = 0,
@@ -225,6 +334,8 @@ async def list_records(
         query["task_def_id"] = task_def_id
     if project_id:
         query["project_id"] = project_id
+    if target_id:
+        query["target_id"] = target_id
     if only_incremental:
         query["$or"] = [{"is_new": True}, {"is_changed": True}]
     if min_score is not None:

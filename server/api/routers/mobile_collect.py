@@ -85,7 +85,12 @@ async def update_task_def(task_def_id: str, payload: CollectTaskUpdate):
     existing = await collect_dao.get_task_def(db, task_def_id)
     if not existing:
         raise HTTPException(404, "采集任务定义不存在")
-    doc = await collect_dao.update_task_def(db, task_def_id, payload.model_dump(exclude_none=True))
+    patch = payload.model_dump(exclude_none=True)
+    if "target_name" in patch and str(patch["target_name"] or "").strip() != str(
+        existing.get("target_name") or ""
+    ).strip():
+        patch["target_id"] = ""
+    doc = await collect_dao.update_task_def(db, task_def_id, patch)
     return doc
 
 
@@ -204,6 +209,7 @@ async def list_records(payload: RecordsListRequest):
         db,
         task_def_id=payload.task_def_id,
         project_id=payload.project_id,
+        target_id=payload.target_id,
         only_incremental=payload.only_incremental,
         min_score=payload.min_score,
         skip=payload.skip,

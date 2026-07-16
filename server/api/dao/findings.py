@@ -179,13 +179,25 @@ async def upsert_contact_finding(
     now = _now()
     task_id = finding.get("task_id")
     set_fields = {k: v for k, v in finding.items() if k not in ("created_at",)}
+    evidence_ref = set_fields.pop("evidence_ref", None)
+    if evidence_ref:
+        set_fields["latest_evidence_ref"] = evidence_ref
     set_fields["updated_at"] = now
     update: dict[str, Any] = {
         "$set": set_fields,
         "$setOnInsert": {"created_at": now},
     }
+    additions: dict[str, Any] = {}
     if task_id:
-        update["$addToSet"] = {"task_ids": task_id}
+        additions["task_ids"] = task_id
+    if evidence_ref:
+        additions["evidence_refs"] = evidence_ref
+    if finding.get("source_document_id"):
+        additions["source_document_ids"] = finding["source_document_id"]
+    if finding.get("target_id"):
+        additions["target_ids"] = finding["target_id"]
+    if additions:
+        update["$addToSet"] = additions
     await db[FINDINGS_COLLECTION].update_one(
         {"finding_id": finding_id}, update, upsert=True
     )

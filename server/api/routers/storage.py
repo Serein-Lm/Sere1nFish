@@ -48,7 +48,10 @@ async def get_storage_object(object_id: str, _: User = Depends(require_admin)):
 
 
 @router.get("/objects/{object_id}/content")
-async def read_storage_object(object_id: str):
+async def read_storage_object(
+    object_id: str,
+    proxy: bool = Query(default=False),
+):
     doc = await storage_dao.get_object(get_db(), object_id)
     if not doc or doc.get("status") != "ready":
         raise HTTPException(status_code=404, detail="存储对象不存在")
@@ -61,12 +64,21 @@ async def read_storage_object(object_id: str):
         raise HTTPException(status_code=503, detail=f"存储对象暂时不可读取: {exc}") from exc
     if access.mode == "redirect":
         content_type = str(doc.get("content_type") or "application/octet-stream")
-        if content_type.startswith("image/"):
+        if proxy or content_type.startswith("image/"):
             try:
+                response_type = (
+                    "text/plain; charset=utf-8"
+                    if content_type.split(";", 1)[0].lower()
+                    in {"text/html", "application/xhtml+xml"}
+                    else content_type
+                )
                 return Response(
                     content=await service.get_bytes(object_id),
-                    media_type=content_type,
-                    headers={"Cache-Control": "private, max-age=60"},
+                    media_type=response_type,
+                    headers={
+                        "Cache-Control": "private, max-age=60",
+                        "X-Content-Type-Options": "nosniff",
+                    },
                 )
             except Exception as exc:
                 raise HTTPException(status_code=503, detail="存储对象暂时不可读取") from exc

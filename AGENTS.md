@@ -64,6 +64,18 @@
   - `view/src/styles/*`：全局主题和样式 token。
   - `view/src/types/*`、`view/src/utils/*`：共享类型与工具。
 
+## Project、Target 与来源文档关系
+
+- `Project` 是一次工作的组织边界，承载任务、搜索目标和项目内展示；它不是公司实体，也不能作为跨项目公司的唯一标识。
+- `Target` 是跨项目复用的全局目标实体，当前主要表示公司或机构，持久化在 `targets`。公司规范化结果通过 `target_id` 归入同一实体，名称别名和根域名只用于解析，调用侧使用稳定 `target_id`。
+- `ProjectTarget` 是项目关注某个 Target 的关系，持久化在 `project_targets`，保存搜索词、目标、采集任务和最近增量采集时间。一个 Project 可关联多个 Target，一个 Target 也可被多个 Project 复用。
+- `SourceDocument` 是按规范 URL 全局去重的来源文档，持久化在 `source_documents`；同一文章在不同项目或 Target 中只保存一份来源身份。
+- `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
+- `SourceDocumentLink` 是 Project、Target、任务、关键词发现某个文档的关系，持久化在 `source_document_links`。任务字段、主体对应度和相关性评分属于该场景关联，不得写成全局来源事实；相同场景可按分析指纹复用，不同 Target 必须独立分析。
+- `Finding` 是从来源证据派生的项目级事实。联系方式 Finding 必须保留 `target_id`、`source_document_id`、`source_document_version_id`、原文 URL、联系方式邻近上下文和证据引用；同一联系方式的多次发现累计 evidence，不覆盖历史来源。
+- 公众号深采采用“手机发现、浏览器读取”的职责划分：手机只负责应用内搜索、命中文章和复制真实链接；链接交给 `api.services.source_documents` 的 Provider registry，由项目 Chrome 池读取全文和媒体。浏览器读取失败时才回退原有手机逐屏深采。
+- 来源版本层只保存文章自身事实和证据；ProjectTarget 关联层保存搜索场景和任务分析；手机采集记录保存本次任务结果；前端按项目过滤记录并可按 Target 聚合。禁止在这些层之间复制原始 HTML 或把搜索关键词自动当作公司名。
+
 ## 分层规范与记录
 
 - 新增能力前先记录归属：它是 API 表面、领域服务、持久化、运行时适配、前端页面、前端 service、部署配置还是测试工具。

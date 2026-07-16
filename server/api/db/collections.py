@@ -71,6 +71,16 @@ PROFILE_COPYWRITINGS_COLLECTION = "profile_copywritings"
 # 公司元信息（规范化全称 + 根域名 + 别名）
 COMPANY_META_COLLECTION = "company_meta"
 
+# 全局目标实体与项目关联。Target 跨项目聚类，ProjectTarget 保存项目搜索意图。
+TARGETS_COLLECTION = "targets"
+PROJECT_TARGETS_COLLECTION = "project_targets"
+
+# 永久来源文档。文档按规范 URL 去重，版本按稳定内容哈希不可变保存；
+# link 记录文档被哪个项目/Target/任务/关键词发现。
+SOURCE_DOCUMENTS_COLLECTION = "source_documents"
+SOURCE_DOCUMENT_VERSIONS_COLLECTION = "source_document_versions"
+SOURCE_DOCUMENT_LINKS_COLLECTION = "source_document_links"
+
 # FOFA 资产情报（按稳定 asset_id 增量入库）
 FOFA_ASSETS_COLLECTION = "fofa_assets"
 

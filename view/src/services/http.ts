@@ -51,6 +51,41 @@ export async function apiFetch<T>(
   return (await response.text()) as T
 }
 
+function resolveAuthenticatedResourceUrl(pathOrUrl: string): string {
+  const url = new URL(pathOrUrl, window.location.origin)
+  if (url.origin !== window.location.origin) {
+    throw new Error('资源地址必须使用本站鉴权接口')
+  }
+  const path = `${url.pathname}${url.search}${url.hash}`
+  if (url.pathname.startsWith('/api/')) return path
+  return `${API_CONFIG.BASE_URL}${path.startsWith('/') ? path : `/${path}`}`
+}
+
+export async function fetchBlobWithAuth(
+  pathOrUrl: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const headers = new Headers()
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  const response = await fetch(resolveAuthenticatedResourceUrl(pathOrUrl), {
+    headers,
+    signal,
+    cache: 'no-store',
+  })
+  if (response.status === 401) {
+    clearToken()
+    redirectToLogin()
+    throw new Error('Unauthorized')
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(text || `HTTP error! status: ${response.status}`)
+  }
+  return response.blob()
+}
+
 function resolveAuthenticatedDownloadUrl(pathOrUrl: string): string {
   const url = new URL(pathOrUrl, window.location.origin)
   if (url.origin !== window.location.origin) {

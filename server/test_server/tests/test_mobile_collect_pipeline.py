@@ -207,10 +207,15 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
     class _Context:
         logger = _Logger()
         state = {
+            "db": _FakeDB(),
             "stop_event": asyncio.Event(),
             "device_id": "devA",
             "run_task_id": "run-link",
             "project_id": "projectA",
+            "task_def_id": "task-link",
+            "target": None,
+            "dry_run": False,
+            "counters": {"documents": 0},
             "detail_max_swipes": 0,
             "swipe_interval": 0.01,
             "extract_fields": [],
@@ -234,6 +239,9 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
     async def _no_sleep(_seconds):
         return None
 
+    async def _source_archive_unavailable(*args, **kwargs):
+        return {"ok": False}
+
     stage = pl._CollectStage()
     monkeypatch.setattr(stage, "_capture_save", _capture)
     monkeypatch.setattr(pl, "_do_tap", lambda *args, **kwargs: None)
@@ -241,6 +249,7 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
     monkeypatch.setattr(pl, "analyze_detail", _analyze_detail)
     monkeypatch.setattr(pl, "obs_log", lambda *args, **kwargs: "")
     monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(pl, "ingest_source_url", _source_archive_unavailable)
     monkeypatch.setattr(
         pl,
         "extract_source_link",
@@ -262,3 +271,119 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
     assert len(emitted) == 1
     assert emitted[0][0] == "persist"
     assert emitted[0][1]["source_url"] == "https://mp.weixin.qq.com/s/runtime-link"
+
+
+def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+    from core.mobile.collect.source_links import SourceLinkResult
+
+    emitted: list[tuple[str, dict]] = []
+    analyzed = False
+
+    class _Logger:
+        def warning(self, message):
+            raise AssertionError(message)
+
+    class _Context:
+        logger = _Logger()
+        state = {
+            "db": _FakeDB(),
+            "stop_event": asyncio.Event(),
+            "device_id": "devA",
+            "run_task_id": "run-browser",
+            "project_id": "projectA",
+            "task_def_id": "task-browser",
+            "target": {
+                "target_id": "target-airport",
+                "canonical_name": "目标机场",
+            },
+            "dry_run": False,
+            "counters": {"documents": 0},
+            "detail_max_swipes": 8,
+            "swipe_interval": 0.01,
+            "extract_fields": [],
+            "app_name": "微信",
+            "source_link_strategy": "wechat_copy_link",
+        }
+
+        async def emit(self, stage, payload):
+            emitted.append((stage, payload))
+
+    async def _capture(ctx, keyword, note):
+        return "QUJD", "phone-shot", "https://oss.example/phone-shot.png"
+
+    async def _ingest(db, **kwargs):
+        assert kwargs["target"]["target_id"] == "target-airport"
+        return {
+            "ok": True,
+            "fields": {"title": "浏览器全文", "content": "完整文章上下文"},
+            "score": 91,
+            "subject_match": 96,
+            "source_url": "https://mp.weixin.qq.com/s/browser-link",
+            "source_type": "wechat_article",
+            "document_id": "source-doc-1",
+            "version_id": "source-version-1",
+            "target_id": "target-airport",
+            "target_name": "目标机场",
+            "contacts": [
+                {
+                    "type": "phone",
+                    "value": "13800138000",
+                    "context": "联系人张三 13800138000",
+                }
+            ],
+            "browser_screenshot_ids": ["browser-shot-1"],
+            "browser_screenshot_urls": [
+                "/api/v1/storage/objects/browser-shot-1/content"
+            ],
+            "image_count": 3,
+            "screenshot_count": 1,
+            "cached": False,
+        }
+
+    async def _analyze_detail(*args, **kwargs):
+        nonlocal analyzed
+        analyzed = True
+        raise AssertionError("浏览器读取成功后不应再调用手机详情分析")
+
+    async def _no_sleep(_seconds):
+        return None
+
+    stage = pl._CollectStage()
+    monkeypatch.setattr(stage, "_capture_save", _capture)
+    monkeypatch.setattr(pl, "_do_tap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pl, "_do_back", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pl, "_do_swipe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pl, "analyze_detail", _analyze_detail)
+    monkeypatch.setattr(pl, "ingest_source_url", _ingest)
+    monkeypatch.setattr(pl, "obs_log", lambda *args, **kwargs: "")
+    monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(
+        pl,
+        "extract_source_link",
+        lambda device_id, strategy: SourceLinkResult(
+            strategy=strategy,
+            ok=True,
+            url="https://mp.weixin.qq.com/s/browser-link",
+        ),
+    )
+
+    asyncio.new_event_loop().run_until_complete(
+        stage._deep_dive(
+            _Context(),
+            "keyword",
+            {"tap_x": 100, "tap_y": 200, "score": 80, "subject_match": 90},
+        )
+    )
+
+    assert analyzed is False
+    assert len(emitted) == 1
+    assert emitted[0][0] == "persist"
+    payload = emitted[0][1]
+    assert payload["source_document_id"] == "source-doc-1"
+    assert payload["source_document_version_id"] == "source-version-1"
+    assert payload["contacts"][0]["context"] == "联系人张三 13800138000"
+    assert payload["browser_screenshot_ids"] == ["browser-shot-1"]
+    assert payload["discovery_screenshot_ids"] == ["phone-shot"]
+    assert payload["screenshot_ids"] == ["phone-shot", "browser-shot-1"]
+    assert _Context.state["counters"]["documents"] == 1

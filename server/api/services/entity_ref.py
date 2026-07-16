@@ -61,9 +61,13 @@ def ref_company(
     doc = company or {}
     return make_ref(
         EntityType.COMPANY,
-        doc.get("meta_id", ""),
+        doc.get("meta_id") or doc.get("target_id", ""),
         label=doc.get("normalized_name") or name,
-        meta={"root_domain": doc.get("root_domain") or root_domain},
+        meta={
+            "root_domain": doc.get("root_domain") or root_domain,
+            "target_id": doc.get("target_id") or "",
+            "company_meta_id": doc.get("meta_id") or "",
+        },
     )
 
 

@@ -35,6 +35,7 @@ from api.routers import (
     context,
     scholar_contact,
     dingtalk,
+    source_documents,
 )
 from api.config import get_settings
 from api.auth import get_current_active_user, User
@@ -143,6 +144,8 @@ async def lifespan(app: FastAPI):
         await db["findings"].create_index("xhs_user_id", sparse=True)
         await db["findings"].create_index("note_id", sparse=True)
         await db["findings"].create_index("task_id")
+        await db["findings"].create_index("target_id", sparse=True)
+        await db["findings"].create_index("source_document_id", sparse=True)
         # copywritings
         try:
             await db["copywritings"].create_index("finding_id")
@@ -204,6 +207,10 @@ async def lifespan(app: FastAPI):
         from api.dao import company_meta as company_meta_dao
         await fofa_assets_dao.ensure_indexes(db)
         await company_meta_dao.ensure_indexes(db)
+        from api.dao import targets as targets_dao
+        from api.dao import source_documents as source_documents_dao
+        await targets_dao.ensure_indexes(db)
+        await source_documents_dao.ensure_indexes(db)
         # 学者学术联系发现索引
         from api.dao import scholar_contact as scholar_contact_dao
         await scholar_contact_dao.ensure_indexes(db)
@@ -399,6 +406,7 @@ app.include_router(downloads.router, prefix="/api/v1/downloads", tags=["下载"]
 app.include_router(voice.router, prefix="/api/v1/voice", tags=["声音复刻"])
 app.include_router(aigc.router, prefix="/api/v1/aigc", tags=["AIGC"])
 app.include_router(dingtalk.router, prefix="/api/v1/dingtalk", tags=["钉钉机器人"])
+app.include_router(source_documents.router, prefix="/api/v1", tags=["来源文档与目标"])
 
 
 @app.get("/")

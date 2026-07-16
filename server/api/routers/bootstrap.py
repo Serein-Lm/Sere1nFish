@@ -37,6 +37,9 @@ _CORE_ENDPOINTS: dict[str, str] = {
     "xhs_cookies": "GET /api/v1/xhs/cookies",
     "douyin_cookies": "GET /api/v1/douyin/cookies",
     "agent": "POST /api/v1/agent/...",
+    "project_targets": "GET /api/v1/targets?project_id={project_id}",
+    "target_documents": "GET /api/v1/targets/{target_id}/documents",
+    "source_document": "GET /api/v1/source-documents/{document_id}",
     **_MOBILE_ENDPOINTS,
 }
 
@@ -107,5 +110,7 @@ async def frontend_bootstrap() -> dict[str, Any]:
             "mobile_visualization": True,
             "mobile_control": True,
             "mobile_ai_task": bool(rt.base_url),
+            "source_document_archive": True,
+            "target_clustering": True,
         },
     }

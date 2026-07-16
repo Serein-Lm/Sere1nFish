@@ -10,10 +10,18 @@ import Descriptions from 'antd/es/descriptions'
 import Empty from 'antd/es/empty'
 import Spin from 'antd/es/spin'
 import Typography from 'antd/es/typography'
+import Alert from 'antd/es/alert'
+import Divider from 'antd/es/divider'
 import type { ColumnsType } from 'antd/es/table'
-import { EyeOutlined, PictureOutlined } from '@ant-design/icons'
+import { CodeOutlined, DatabaseOutlined, EyeOutlined, FileTextOutlined, PictureOutlined } from '@ant-design/icons'
 
 import { fetchScreenshotObjectUrl, type CollectRecord } from '../../services/mobileCollectService'
+import {
+  getSourceDocument,
+  openAuthenticatedArtifact,
+  type SourceContact,
+  type SourceDocumentDetail,
+} from '../../services/sourceDocumentService'
 import { renderFindingValue } from '../../utils/findingValueRenderer'
 import './CollectRecordsView.css'
 
@@ -105,7 +113,7 @@ export function CollectShotImage({
     return <img src={src} alt="collect" style={{ width, borderRadius: 4 }} />
   }
   return (
-    <Image src={src} alt="collect" width={width} height={height} className="collect-shot-thumb" preview={{ mask: <EyeOutlined /> }} />
+    <Image src={src} alt="collect" width={width} height={height} className="collect-shot-thumb" preview={{ cover: <EyeOutlined /> }} />
   )
 }
 
@@ -113,7 +121,7 @@ function renderContacts(record: CollectRecord) {
   const contacts = extractContactsFromFields((record.fields || {}) as Record<string, unknown>)
   if (contacts.length === 0) return <Text type="secondary">-</Text>
   return (
-    <Space direction="vertical" size={2}>
+    <Space orientation="vertical" size={2}>
       {contacts.slice(0, 4).map((c, i) => (
         <span key={`${c.channel}-${c.value}-${i}`}>{renderFindingValue(c.value, { copyable: true, maxWidth: 150 })}</span>
       ))}
@@ -121,83 +129,219 @@ function renderContacts(record: CollectRecord) {
   )
 }
 
+function renderDetailValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'object' ? JSON.stringify(item, null, 2) : String(item)))
+      .join('\n')
+  }
+  if (typeof value === 'object' && value !== null) return JSON.stringify(value, null, 2)
+  return String(value)
+}
+
 function CollectRecordDetail({ record }: { record: CollectRecord }) {
   const fields = (record.fields || {}) as Record<string, unknown>
-  const entries = Object.entries(fields).filter(([, v]) => {
-    if (Array.isArray(v)) return v.length > 0
-    return v != null && v !== ''
+  const [sourceDetail, setSourceDetail] = useState<SourceDocumentDetail | null>(null)
+  const [sourceLoading, setSourceLoading] = useState(false)
+  const [sourceError, setSourceError] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    if (!record.source_document_id) {
+      setSourceDetail(null)
+      return () => { alive = false }
+    }
+    setSourceLoading(true)
+    setSourceError('')
+    getSourceDocument(
+      record.source_document_id,
+      record.project_id || undefined,
+      record.source_document_version_id || undefined,
+    )
+      .then((detail) => { if (alive) setSourceDetail(detail) })
+      .catch((error) => { if (alive) setSourceError((error as Error).message) })
+      .finally(() => { if (alive) setSourceLoading(false) })
+    return () => { alive = false }
+  }, [record.project_id, record.source_document_id, record.source_document_version_id])
+
+  const version = sourceDetail?.version
+  const sourceContacts = (version?.contacts || []) as SourceContact[]
+  const fallbackContacts = extractContactsFromFields(fields).map((item) => ({ ...item } as SourceContact))
+  const contacts = sourceContacts.length ? sourceContacts : fallbackContacts
+  const browserShots = version?.screenshots?.map((item) => item.url).filter(Boolean)
+    || record.browser_screenshot_urls
+    || []
+  const browserShotSet = new Set(browserShots)
+  const collectShots = record.discovery_screenshot_urls?.length
+    ? record.discovery_screenshot_urls
+    : (record.screenshot_urls || []).filter((url) => !browserShotSet.has(url))
+  const images = version?.images || []
+  const articleText = String(version?.content?.text || fields.content || fields.article_content || '')
+  const excludedKeys = new Set(['content', 'article_content', 'image_context', 'contact'])
+  const entries = Object.entries(fields).filter(([key, value]) => {
+    if (excludedKeys.has(key)) return false
+    if (Array.isArray(value)) return value.length > 0
+    return value != null && value !== ''
   })
-  const basicEntries = entries.filter(([k]) => classifyFieldKey(k) === 'basic')
-  const bodyEntries = entries.filter(([k]) => classifyFieldKey(k) === 'body')
-  const contacts = extractContactsFromFields(fields)
-  const shots = record.screenshot_urls || []
-  const renderVal = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(x)).join('、') : String(v))
+  const basicEntries = entries.filter(([key]) => classifyFieldKey(key) === 'basic')
+  const bodyEntries = entries.filter(([key]) => classifyFieldKey(key) === 'body')
+  const artifacts = version?.artifacts || {}
+
+  const openArtifact = (path?: string) => {
+    if (!path) return
+    setSourceError('')
+    openAuthenticatedArtifact(path).catch((error) => setSourceError((error as Error).message))
+  }
+
   return (
     <div className="collect-record-detail">
       <div className="collect-detail-header">
         <Space size={6} wrap>
+          {record.target_name && <Tag color="cyan">Target: {record.target_name}</Tag>}
           {record.score != null && <Tag color={scoreColor(record.score)}>相关性 {record.score}</Tag>}
           {record.subject_match != null && <Tag color={scoreColor(record.subject_match)}>主体对应 {record.subject_match}</Tag>}
           {record.keyword && <Tag>{record.keyword}</Tag>}
-          {shots.length > 0 && <Tag icon={<PictureOutlined />}>{shots.length} 张截图</Tag>}
+          {version?.version_id && <Tag>版本 {version.version_id.slice(-8)}</Tag>}
+          {browserShots.length > 0 && <Tag icon={<PictureOutlined />}>浏览器截图 {browserShots.length}</Tag>}
         </Space>
       </div>
 
+      {sourceLoading && (
+        <Space size={8}>
+          <Spin size="small" />
+          <Text type="secondary">加载永久文章资产...</Text>
+        </Space>
+      )}
+      {sourceError && <Alert type="warning" showIcon message="文章资产暂时无法读取" description={sourceError} />}
+
       {contacts.length > 0 && (
         <div className="collect-detail-section">
-          <div className="collect-detail-section-title">联系方式</div>
-          <Space direction="vertical" size={4} style={{ width: '100%' }}>
-            {contacts.map((c, i) => (
-              <div key={`${c.channel}-${c.value}-${i}`} className="collect-contact-row">
-                <Tag color="blue" className="collect-contact-channel">{c.channel}</Tag>
-                {renderFindingValue(c.value, { copyable: true, maxWidth: 320 })}
+          <div className="collect-detail-section-title">联系方式与证据上下文</div>
+          <div className="collect-contact-list">
+            {contacts.map((contact, index) => (
+              <div key={`${contact.channel}-${contact.value}-${index}`} className="collect-contact-evidence">
+                <div className="collect-contact-row">
+                  <Tag color="blue" className="collect-contact-channel">{contact.channel}</Tag>
+                  {renderFindingValue(contact.value, { copyable: true, maxWidth: 420 })}
+                  {contact.source === 'image' || contact.sources?.includes('image') ? <Tag>图片识别</Tag> : null}
+                </div>
+                {(contact.context || contact.contexts?.[0]) && (
+                  <Text type="secondary" className="collect-contact-context">
+                    {contact.context || contact.contexts?.[0]}
+                  </Text>
+                )}
               </div>
             ))}
-          </Space>
+          </div>
         </div>
       )}
 
-      {basicEntries.length > 0 && (
-        <div className="collect-detail-section">
-          <div className="collect-detail-section-title">基本信息</div>
-          <Descriptions size="small" bordered column={{ xxl: 2, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }} className="collect-detail-descriptions">
-            {basicEntries.map(([k, v]) => (
-              <Descriptions.Item key={k} label={k}>{renderVal(v)}</Descriptions.Item>
-            ))}
-            {record.source_url && (
-              <Descriptions.Item label="原文链接" span={2}>
-                <a href={record.source_url} target="_blank" rel="noopener noreferrer">{record.source_url}</a>
-              </Descriptions.Item>
-            )}
-          </Descriptions>
-        </div>
-      )}
+      <div className="collect-detail-section">
+        <div className="collect-detail-section-title">来源与结构化信息</div>
+        <Descriptions
+          size="small"
+          bordered
+          column={{ xxl: 2, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }}
+          className="collect-detail-descriptions"
+        >
+          {record.target_name && <Descriptions.Item label="目标实体">{record.target_name}</Descriptions.Item>}
+          {basicEntries.map(([key, value]) => (
+            <Descriptions.Item key={key} label={key}>{renderDetailValue(value)}</Descriptions.Item>
+          ))}
+          {record.source_url && (
+            <Descriptions.Item label="原文链接" span="filled">
+              <a href={record.source_url} target="_blank" rel="noopener noreferrer">{record.source_url}</a>
+            </Descriptions.Item>
+          )}
+        </Descriptions>
+        {(artifacts.raw_html_url || artifacts.rendered_html_url || artifacts.structured_url) && (
+          <Space wrap className="collect-artifact-actions">
+            <Button size="small" icon={<FileTextOutlined />} onClick={() => openArtifact(artifacts.raw_html_url)}>
+              原始响应 HTML
+            </Button>
+            <Button size="small" icon={<CodeOutlined />} onClick={() => openArtifact(artifacts.rendered_html_url)}>
+              渲染后 DOM
+            </Button>
+            <Button size="small" icon={<DatabaseOutlined />} onClick={() => openArtifact(artifacts.structured_url)}>
+              结构化 JSON
+            </Button>
+          </Space>
+        )}
+      </div>
 
       {bodyEntries.length > 0 && (
         <div className="collect-detail-section">
-          <div className="collect-detail-section-title">正文 / 背景</div>
+          <div className="collect-detail-section-title">分层结构化输出</div>
           <Descriptions size="small" bordered column={1} className="collect-detail-descriptions">
-            {bodyEntries.map(([k, v]) => (
-              <Descriptions.Item key={k} label={k}>{renderVal(v)}</Descriptions.Item>
+            {bodyEntries.map(([key, value]) => (
+              <Descriptions.Item key={key} label={key}>
+                <span className="collect-detail-prewrap">{renderDetailValue(value)}</span>
+              </Descriptions.Item>
             ))}
           </Descriptions>
         </div>
       )}
 
-      {entries.length === 0 && <Empty description="无结构化字段" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
-
-      {shots.length > 0 && (
+      {articleText && (
         <div className="collect-detail-section">
-          <div className="collect-detail-section-title">截图 ({shots.length})</div>
+          <div className="collect-detail-section-title">完整文章上下文</div>
+          <div className="collect-article-context">{articleText}</div>
+        </div>
+      )}
+
+      {images.length > 0 && (
+        <div className="collect-detail-section">
+          <div className="collect-detail-section-title">公众号原图与图片识别 ({images.length})</div>
           <Image.PreviewGroup>
-            <div className="collect-shot-gallery">
-              {shots.map((u, i) => (
-                <CollectShotImage key={`${u}-${i}`} url={u} width={96} />
+            <div className="collect-source-image-list">
+              {images.map((item) => (
+                <div className="collect-source-image-item" key={`${item.storage_object_id}-${item.index}`}>
+                  {item.url && <CollectShotImage url={item.url} width={132} />}
+                  <div className="collect-source-image-analysis">
+                    <Text strong>图片 {item.index + 1}</Text>
+                    <Text>{item.analysis?.description || '已保存原图，暂无语义描述'}</Text>
+                    {item.analysis?.visible_text && (
+                      <Text type="secondary">可见文字：{item.analysis.visible_text}</Text>
+                    )}
+                  </div>
+                </div>
               ))}
             </div>
           </Image.PreviewGroup>
         </div>
       )}
+
+      {browserShots.length > 0 && (
+        <div className="collect-detail-section">
+          <div className="collect-detail-section-title">浏览器全文截图 ({browserShots.length})</div>
+          <Image.PreviewGroup>
+            <div className="collect-shot-gallery">
+              {browserShots.map((url, index) => (
+                <CollectShotImage key={`${url}-${index}`} url={url} width={112} />
+              ))}
+            </div>
+          </Image.PreviewGroup>
+        </div>
+      )}
+
+      {collectShots.length > 0 && (
+        <div className="collect-detail-section">
+          <div className="collect-detail-section-title">手机发现截图 ({collectShots.length})</div>
+          <Image.PreviewGroup>
+            <div className="collect-shot-gallery">
+              {collectShots.map((url, index) => (
+                <CollectShotImage key={`${url}-${index}`} url={url} width={96} />
+              ))}
+            </div>
+          </Image.PreviewGroup>
+        </div>
+      )}
+
+      {!entries.length && !articleText && !sourceLoading && (
+        <Empty description="无结构化字段" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      )}
+      <Divider className="collect-detail-footer-divider" />
+      <Text type="secondary">文档按规范 URL 去重；内容变化时生成新版本，历史原始产物不会覆盖。</Text>
     </div>
   )
 }
@@ -264,6 +408,13 @@ export default function CollectRecordsView({
       sorter: (a, b) => (a.score ?? -1) - (b.score ?? -1),
       render: (_, r) => (r.score != null ? <Tag color={scoreColor(r.score)}>{r.score}</Tag> : <Text type="secondary">-</Text>),
     },
+    {
+      title: 'Target',
+      key: 'target',
+      width: 150,
+      ellipsis: true,
+      render: (_, r) => r.target_name ? <Tag color="cyan">{r.target_name}</Tag> : <Text type="secondary">未关联</Text>,
+    },
     ...(showSubjectMatch
       ? ([
           {
@@ -310,7 +461,7 @@ export default function CollectRecordsView({
         open={!!detail}
         onCancel={() => setDetail(null)}
         footer={null}
-        width={720}
+        width={960}
         title={
           detail
             ? String(
@@ -321,7 +472,7 @@ export default function CollectRecordsView({
               )
             : '采集详情'
         }
-        destroyOnClose
+        destroyOnHidden
       >
         {detail && <CollectRecordDetail record={detail} />}
       </Modal>

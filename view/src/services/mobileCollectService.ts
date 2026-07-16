@@ -16,6 +16,9 @@ export interface CollectTaskDef {
   task_def_id: string
   name: string
   project_id?: string | null
+  target_id?: string | null
+  target_name?: string | null
+  target_type?: string
   device_id: string
   app_name: string
   keywords: string[]
@@ -42,6 +45,9 @@ export interface CollectTaskDef {
 export interface CollectTaskInput {
   name: string
   project_id?: string | null
+  target_id?: string | null
+  target_name?: string | null
+  target_type?: string
   device_id: string
   app_name: string
   keywords: string[]
@@ -72,6 +78,14 @@ export interface CollectRecord {
   screenshot_urls?: string[]
   content_hash?: string
   source_url?: string | null
+  source_document_id?: string
+  source_document_version_id?: string
+  target_id?: string
+  target_name?: string
+  browser_screenshot_ids?: string[]
+  browser_screenshot_urls?: string[]
+  discovery_screenshot_ids?: string[]
+  discovery_screenshot_urls?: string[]
   is_new?: boolean
   is_changed?: boolean
   first_seen?: string
@@ -84,6 +98,11 @@ export interface DryRunPreviewItem {
   subject_match?: number | null
   score_reason?: string
   source_url?: string | null
+  source_document_id?: string
+  source_document_version_id?: string
+  target_id?: string
+  target_name?: string
+  browser_screenshot_urls?: string[]
   contacts_count?: number
   detail?: boolean
   keyword?: string
@@ -198,6 +217,7 @@ export function dryRunTaskDef(taskDefId: string, previewLimit = 50) {
 export function listRecords(params: {
   task_def_id?: string
   project_id?: string
+  target_id?: string
   only_incremental?: boolean
   skip?: number
   limit?: number

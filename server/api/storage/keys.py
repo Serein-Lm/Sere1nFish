@@ -47,6 +47,17 @@ def build_object_key(
         parts = root + ["projects", safe_segment(project_id), "collect", "xhs", scope, safe_segment(subject_id), *date_parts, filename]
     elif kind == "douyin_profile_screenshot":
         parts = root + ["projects", safe_segment(project_id), "collect", "douyin", "profile", safe_segment(subject_id), *date_parts, filename]
+    elif kind.startswith("source_document_"):
+        artifact = kind.removeprefix("source_document_") or "artifact"
+        rel = [safe_segment(part) for part in PurePosixPath(relative_path).parts]
+        parts = root + [
+            "targets",
+            safe_segment(subject_id, fallback="unassigned"),
+            "sources",
+            *rel,
+            safe_segment(artifact),
+            filename,
+        ]
     elif kind in {"word", "payload_word", "persona_word"}:
         parts = root + ["users", owner_hash(owner), "ai-hub", safe_segment(conversation_id), "artifacts", *date_parts, filename]
     elif kind == "voice_upload":

@@ -160,6 +160,8 @@ export default function MobileCollect() {
     setEditing(null)
     const base: CollectTaskInput = {
       name: '',
+      target_name: '',
+      target_type: 'company',
       device_id: '',
       app_name: '',
       keywords: [],
@@ -185,6 +187,8 @@ export default function MobileCollect() {
     setEditing(task)
     form.setFieldsValue({
       name: task.name,
+      target_name: task.target_name ?? undefined,
+      target_type: task.target_type ?? 'company',
       device_id: task.device_id,
       app_name: task.app_name,
       keywords: task.keywords || [],
@@ -357,6 +361,14 @@ export default function MobileCollect() {
 
   const columns: ColumnsType<CollectTaskDef> = [
     { title: '名称', dataIndex: 'name', key: 'name', width: 160, ellipsis: true },
+    {
+      title: 'Target',
+      dataIndex: 'target_name',
+      key: 'target_name',
+      width: 160,
+      ellipsis: true,
+      render: (value?: string) => value ? <Tag color="cyan">{value}</Tag> : <span style={{ color: '#999' }}>未关联</span>,
+    },
     { title: '应用', dataIndex: 'app_name', key: 'app_name', width: 90 },
     {
       title: '关键词',
@@ -494,7 +506,7 @@ export default function MobileCollect() {
           dataSource={tasks}
           locale={{ emptyText: <Empty description="暂无采集任务，点击右上角新建" /> }}
           pagination={{ pageSize: 10, hideOnSinglePage: true }}
-          scroll={{ x: 1110 }}
+          scroll={{ x: 1270 }}
         />
       </Card>
 
@@ -527,6 +539,16 @@ export default function MobileCollect() {
           </Form.Item>
           <Form.Item name="app_name" label="目标应用" rules={[{ required: true, message: '请输入应用名' }]}>
             <Input placeholder="如: 微信 / 小红书" />
+          </Form.Item>
+          <Form.Item
+            name="target_name"
+            label="目标公司 / 机构"
+            tooltip="Target 是跨项目永久实体；同一公司后续项目会复用已有文章、联系方式和历史版本"
+          >
+            <Input placeholder="如: 天津滨海国际机场；不要把“招标”等搜索意图写进名称" />
+          </Form.Item>
+          <Form.Item name="target_type" hidden>
+            <Input />
           </Form.Item>
           <Form.Item name="keywords" label="搜索关键词" tooltip="留空则仅打开应用浏览(如养号)">
             <Select mode="tags" placeholder="输入关键词后回车，可多个" tokenSeparators={[',']} />
