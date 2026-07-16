@@ -35,6 +35,7 @@ AUTO_CHAT_SESSIONS_COLLECTION = "auto_chat_sessions"
 MOBILE_SCREENSHOTS_COLLECTION = "mobile_screenshots"
 MOBILE_OPERATION_LOGS_COLLECTION = "mobile_operation_logs"
 MOBILE_PROFILE_OBSERVATIONS_COLLECTION = "mobile_profile_observations"
+MOBILE_TRANSFERS_COLLECTION = "mobile_transfers"
 
 # URL 扫描（旧集合，保留兼容）
 URL_SCAN_TASKS_COLLECTION = "url_scan_tasks"

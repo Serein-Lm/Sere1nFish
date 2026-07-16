@@ -42,6 +42,16 @@ def build_object_key(
 
     if kind == "mobile_screenshot":
         parts = root + ["projects", safe_segment(project_id), "mobile", "screenshots", *date_parts, filename]
+    elif kind == "mobile_transfer":
+        parts = root + [
+            "users",
+            owner_hash(owner),
+            "mobile",
+            "transfers",
+            safe_segment(subject_id, fallback="unknown-device"),
+            *date_parts,
+            filename,
+        ]
     elif kind in {"xhs_profile_screenshot", "xhs_note_screenshot"}:
         scope = "note" if kind == "xhs_note_screenshot" else "profile"
         parts = root + ["projects", safe_segment(project_id), "collect", "xhs", scope, safe_segment(subject_id), *date_parts, filename]

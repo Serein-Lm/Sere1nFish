@@ -86,6 +86,10 @@ async def _ensure_device_access(device_id: str, current_user: User) -> None:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+# 供手机子路由复用同一设备权限语义，避免各能力各自实现预约校验。
+ensure_device_access = _ensure_device_access
+
+
 def _refresh_and_list(mgr: MobileDeviceManager) -> list:
     """单次线程内刷新并列设备,避免两次 to_thread 往返。"""
     mgr.refresh()

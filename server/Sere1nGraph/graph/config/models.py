@@ -89,6 +89,9 @@ class MobileConfig:
     keepalive_screen_always_on: bool = True
     keepalive_reconnect: bool = True
     keepalive_probe_timeout: int = 5
+    # 上传文件先归档到对象存储，再通过 ADB 推送；本地只使用短生命周期临时文件。
+    transfer_max_bytes: int = 536_870_912
+    transfer_timeout_seconds: int = 300
 
 
 @dataclass

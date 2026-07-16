@@ -10,9 +10,11 @@ import {
   StopOutlined,
   DisconnectOutlined,
   MobileOutlined,
+  PaperClipOutlined,
 } from '@ant-design/icons'
 import DeviceScreen from './DeviceScreen'
 import CopilotPanel from './CopilotPanel'
+import DeviceTransferDrawer from './DeviceTransferDrawer'
 import {
   getHealth,
   getCurrentApp,
@@ -61,6 +63,7 @@ export default function DeviceConsole({
   const [textOpen, setTextOpen] = useState(false)
   const [textVal, setTextVal] = useState('')
   const [appOpen, setAppOpen] = useState(false)
+  const [transferOpen, setTransferOpen] = useState(false)
   const [appVal, setAppVal] = useState('')
   const [busy, setBusy] = useState(false)
   const [stayOn, setStayOn] = useState(false)
@@ -245,6 +248,11 @@ export default function DeviceConsole({
             输入文本
           </Button>
         </Tooltip>
+        <Tooltip title="上传图片、音频或附件到手机">
+          <Button icon={<PaperClipOutlined />} onClick={() => setTransferOpen(true)}>
+            传文件
+          </Button>
+        </Tooltip>
         <Tooltip title="启动指定 App">
           <Button icon={<AppstoreAddOutlined />} onClick={() => setAppOpen(true)}>
             启动应用
@@ -347,6 +355,12 @@ export default function DeviceConsole({
           <ThunderboltOutlined /> 支持中文/英文应用名，由执行层智能匹配并打开。
         </div>
       </Modal>
+
+      <DeviceTransferDrawer
+        deviceId={device.device_id}
+        open={transferOpen}
+        onClose={() => setTransferOpen(false)}
+      />
     </div>
   )
 }

@@ -21,6 +21,7 @@ from api.routers import (
     project_api,
     agent,
     mobile,
+    mobile_transfers,
     bootstrap,
     observability,
     downloads,
@@ -181,12 +182,14 @@ async def lifespan(app: FastAPI):
         from api.dao import mobile_profile_observations as mobile_profile_observations_dao
         from api.dao import device_reservations as device_reservations_dao
         from api.dao import device_metadata as device_metadata_dao
+        from api.dao import mobile_transfers as mobile_transfers_dao
         await chat_suggestions_dao.ensure_indexes(db)
         await auto_chat_sessions_dao.ensure_indexes(db)
         await mobile_artifacts_dao.ensure_indexes(db)
         await mobile_profile_observations_dao.ensure_indexes(db)
         await device_reservations_dao.ensure_indexes(db)
         await device_metadata_dao.ensure_indexes(db)
+        await mobile_transfers_dao.ensure_indexes(db)
         # Skills / Prompts 技能库与提示词库索引
         from api.dao import skills as skills_dao
         from api.dao import prompts as prompts_dao
@@ -395,6 +398,7 @@ app.include_router(project_api.router, prefix="/api/v1", tags=["项目统一API"
 app.include_router(scholar_contact.router, prefix="/api/v1", tags=["学者学术联系"])
 app.include_router(agent.router, prefix="/api/v1/agent", tags=["Agent"])
 app.include_router(mobile.router, prefix="/api/v1/mobile", tags=["手机"])
+app.include_router(mobile_transfers.router, prefix="/api/v1/mobile", tags=["手机文件传递"])
 app.include_router(mobile_collect.router, prefix="/api/v1/mobile-collect", tags=["手机采集任务"])
 app.include_router(persons.router, prefix="/api/v1/persons", tags=["人设库"])
 app.include_router(artifacts.router, prefix="/api/v1/artifacts", tags=["产物"])

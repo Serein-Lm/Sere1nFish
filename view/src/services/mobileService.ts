@@ -1043,6 +1043,76 @@ export interface MobileOperationLog {
   created_at: string
 }
 
+export type MobileTransferCategory = 'auto' | 'image' | 'audio' | 'attachment'
+
+export interface MobileTransfer {
+  transfer_id: string
+  device_id: string
+  filename: string
+  content_type: string
+  category: Exclude<MobileTransferCategory, 'auto'>
+  size: number
+  status: 'archiving' | 'pushing' | 'completed' | 'failed'
+  storage_object_id?: string
+  remote_path?: string
+  attempts: number
+  last_error?: string
+  created_at: string
+  updated_at: string
+  completed_at?: string
+}
+
+export function uploadMobileTransfer(
+  deviceId: string,
+  file: File,
+  category: MobileTransferCategory = 'auto',
+  onProgress?: (percent: number) => void,
+): Promise<MobileTransfer> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    form.append('category', category)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', resolveApiUrl(`${MOBILE}/devices/${encodeURIComponent(deviceId)}/transfers`))
+    const token = getToken()
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(Math.round((event.loaded / event.total) * 100))
+    }
+    xhr.onerror = () => reject(new MobileError('网络异常，文件上传失败', 0))
+    xhr.onload = () => {
+      let body: { detail?: string } & Partial<MobileTransfer> = {}
+      try {
+        body = JSON.parse(xhr.responseText || '{}')
+      } catch {
+        body = {}
+      }
+      if (xhr.status === 401) {
+        handleUnauthorized()
+        reject(new MobileError('登录已过期，请重新登录', 401))
+        return
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new MobileError(body.detail || `文件发送失败 (${xhr.status})`, xhr.status))
+        return
+      }
+      resolve(body as MobileTransfer)
+    }
+    xhr.send(form)
+  })
+}
+
+export const listMobileTransfers = (deviceId: string, limit = 50) =>
+  request<{ items: MobileTransfer[]; total: number }>(
+    `${MOBILE}/devices/${encodeURIComponent(deviceId)}/transfers?limit=${limit}`,
+  )
+
+export const retryMobileTransfer = (deviceId: string, transferId: string) =>
+  request<MobileTransfer>(
+    `${MOBILE}/devices/${encodeURIComponent(deviceId)}/transfers/${encodeURIComponent(transferId)}/retry`,
+    { method: 'POST' },
+  )
+
 export interface MobileProfileObservation {
   observation_id: string
   project_id?: string | null

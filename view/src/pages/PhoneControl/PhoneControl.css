@@ -1786,6 +1786,87 @@ button.ctrl-btn {
   padding: 16px;
 }
 
+.device-transfer-content {
+  width: 100%;
+}
+
+.device-transfer-dropzone .ant-upload-drag {
+  min-height: 168px;
+  border-radius: 6px;
+}
+
+.device-transfer-dropzone .ant-upload-text,
+.device-transfer-dropzone .ant-upload-hint {
+  padding-inline: 16px;
+  overflow-wrap: anywhere;
+}
+
+.device-transfer-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  align-items: center;
+  gap: 12px;
+}
+
+.device-transfer-history-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.device-transfer-history-title .ant-typography {
+  margin: 0;
+}
+
+.device-transfer-item .ant-list-item-meta,
+.device-transfer-item .ant-list-item-meta-content,
+.device-transfer-item-title {
+  min-width: 0;
+}
+
+.device-transfer-item-title {
+  display: flex;
+  max-width: 100%;
+}
+
+.device-transfer-item-title > .ant-typography {
+  min-width: 0;
+  max-width: 320px;
+}
+
+.device-transfer-item .ant-list-item-meta-avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin-inline-end: 12px;
+  color: var(--accent-color);
+  background: var(--secondary-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+@media (max-width: 560px) {
+  .device-transfer-drawer .ant-drawer-body {
+    padding: 16px;
+  }
+
+  .device-transfer-progress {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .device-transfer-item {
+    align-items: flex-start;
+  }
+
+  .device-transfer-item-title > .ant-typography {
+    max-width: 190px;
+  }
+}
+
 .operation-drawer-summary {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: 14px;
