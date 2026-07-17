@@ -59,8 +59,13 @@ def test_xhs_keywords_keep_brand_aliases_and_are_deterministic() -> None:
         router,
     )
 
-    assert keywords[:2] == ["B站 实习", "bilibili 内推"]
-    assert "哔哩哔哩 招聘" in keywords
+    assert keywords[:3] == [
+        "B站 实习",
+        "上海宽娱数码科技有限公司 实习",
+        "bilibili 实习",
+    ]
+    assert "bilibili 内推" in keywords
+    assert "哔哩哔哩 实习" in keywords
     assert len(keywords) == len(set(keywords))
 
 
@@ -205,7 +210,7 @@ async def test_asset_and_manual_urls_share_one_deep_scan(
 
 
 @pytest.mark.asyncio
-async def test_controlled_entity_setup_failure_still_notifies_target(
+async def test_wholly_owned_entity_setup_failure_still_notifies_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services import notifications
@@ -227,7 +232,7 @@ async def test_controlled_entity_setup_failure_still_notifies_target(
         capture_notification,
     )
 
-    result = await pipeline._scan_controlled_entities(
+    result = await pipeline._scan_wholly_owned_entities(
         task_id="task-1",
         project_id="project-1",
         entities=[{"name": "子公司", "target_id": "target-child"}],
@@ -257,7 +262,7 @@ async def test_controlled_entity_setup_failure_still_notifies_target(
 
 
 @pytest.mark.asyncio
-async def test_controlled_entity_runs_profile_copywriting_after_xhs(
+async def test_wholly_owned_entity_runs_profile_copywriting_after_xhs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services import notifications
@@ -280,7 +285,7 @@ async def test_controlled_entity_runs_profile_copywriting_after_xhs(
         lambda **kwargs: captured.append(kwargs) or True,
     )
 
-    result = await pipeline._scan_controlled_entities(
+    result = await pipeline._scan_wholly_owned_entities(
         task_id="task-1",
         project_id="project-1",
         entities=[{"name": "子公司", "target_id": "target-child"}],

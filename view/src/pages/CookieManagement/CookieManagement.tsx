@@ -608,7 +608,14 @@ export default function CookieManagement() {
                         </Tag>
                         <Tag color="blue">策略 {xhsRuntimeStatus.account_pool.strategy}</Tag>
                         <Tag color="blue">搜索轮换 {xhsRuntimeStatus.account_pool.search_pages_per_account} 页/账号</Tag>
+                        <Tag color="purple">
+                          单关键词 {xhsRuntimeStatus.account_pool.search_max_pages_per_keyword} 页 × {xhsRuntimeStatus.account_pool.search_page_size} 条
+                        </Tag>
                         <Tag color="purple">单页重试 {xhsRuntimeStatus.account_pool.search_retries_per_page}</Tag>
+                        <Tag color="cyan">
+                          请求错峰 {xhsRuntimeStatus.account_pool.request_interval_min_seconds}–{xhsRuntimeStatus.account_pool.request_interval_max_seconds} 秒
+                        </Tag>
+                        <Tag color="orange">失败 {xhsRuntimeStatus.account_pool.max_consecutive_failures} 次隔离</Tag>
                         <Tag color="green">可用 {xhsRuntimeStatus.account_pool.usable}/{xhsRuntimeStatus.account_pool.total}</Tag>
                         {xhsRuntimeStatus.account_pool.cooling_down > 0 && (
                           <Tag color="orange">冷却 {xhsRuntimeStatus.account_pool.cooling_down}</Tag>

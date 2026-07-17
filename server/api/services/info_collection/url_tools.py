@@ -172,6 +172,7 @@ class UrlWebScanTool:
 
     async def scan(self, request: ScanRequest) -> ScanResult:
         from browser_manager.provider import get_browser_provider
+        from core.observability import observation_context
         from langchain_core.messages import HumanMessage
         from Sere1nGraph.graph.agents.factory import create_web_tagging_agent
         from Sere1nGraph.graph.agents.runtime import extract_with_retry
@@ -195,12 +196,18 @@ class UrlWebScanTool:
             started = time.time()
             worker_config = _build_worker_chrome_config(self._app_config, cdp_url)
             agent = await create_web_tagging_agent(worker_config, streaming=False)
-            raw = await agent({"messages": [HumanMessage(content=f"请分析以下 URL：{url}")]})
-            tagging = await extract_with_retry(
-                raw,
-                worker_config,
-                system_prompt=self._get_prompt(),
-            )
+            with observation_context(
+                project_id=request.project_id,
+                task_id=request.task_id,
+                phase="url_scan",
+                agent="web_tagging",
+            ):
+                raw = await agent({"messages": [HumanMessage(content=f"请分析以下 URL：{url}")]})
+                tagging = await extract_with_retry(
+                    raw,
+                    worker_config,
+                    system_prompt=self._get_prompt(),
+                )
             if not tagging:
                 raise RuntimeError(f"agent 输出解析失败 (url={url})")
 

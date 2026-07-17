@@ -280,3 +280,51 @@ def test_xhs_account_invalidates_only_after_failure_threshold(monkeypatch):
         assert "达到阈值 3" in db.collection.docs[0]["quarantine_reason"]
 
     asyncio.run(_run())
+
+
+def test_xhs_account_is_quarantined_after_first_failure_by_default(monkeypatch):
+    async def _run():
+        from api.services import xhs_runtime
+
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        async def fake_config():
+            return {"account_pool": {"enabled": True}}
+
+        monkeypatch.setattr(xhs_runtime, "_now", lambda: now)
+        monkeypatch.setattr(xhs_runtime, "get_xhs_runtime_config", fake_config)
+        db = _FakeDB([
+            {
+                "account_name": "risk",
+                "cookie_string": "cookie",
+                "is_enabled": True,
+                "is_valid": True,
+                "consecutive_failures": 0,
+            }
+        ])
+
+        await xhs_runtime.record_xhs_account_result(
+            db,
+            "risk",
+            success=False,
+            error="访问频繁",
+            cooldown_seconds=60,
+        )
+
+        assert db.collection.docs[0]["consecutive_failures"] == 1
+        assert db.collection.docs[0]["quarantined_at"] == now
+        with pytest.raises(RuntimeError):
+            await xhs_runtime.select_xhs_account(db, purpose="search")
+
+    asyncio.run(_run())
+
+
+def test_xhs_request_policy_caps_each_keyword_to_one_page_by_default():
+    from api.services.xhs_runtime import XhsRequestPolicy
+
+    policy = XhsRequestPolicy.from_config({})
+
+    assert policy.page_size == 20
+    assert policy.max_pages_per_keyword == 1
+    assert policy.interval_min_seconds == 4.0
+    assert policy.interval_max_seconds == 8.0

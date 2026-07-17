@@ -30,7 +30,7 @@ const { Title, Paragraph } = Typography
 
 // 预定义的工具列表
 const KNOWN_TOOLS = [
-  { name: 'tianyancha', label: '天眼查', icon: <SearchOutlined />, description: '企业主体、实际控制权与 ICP' },
+  { name: 'tianyancha', label: '天眼查', icon: <SearchOutlined />, description: '企业主体、对外投资与 ICP' },
   { name: 'hunter', label: '奇安信 Hunter', icon: <AimOutlined />, description: '互联网资产发现' },
   { name: 'fofa', label: 'FOFA', icon: <GlobalOutlined />, description: '互联网资产发现与指纹检索' },
   { name: 'bocha', label: '博查', icon: <ApiOutlined />, description: '公网搜索' },

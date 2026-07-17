@@ -176,6 +176,7 @@ def create_llm(
     model_name: str | None = None,
     temperature: float = 0,
     streaming: bool = True,
+    extra_body: dict[str, Any] | None = None,
 ) -> ChatOpenAI:
     """
     基于配置创建 ChatOpenAI。
@@ -187,7 +188,8 @@ def create_llm(
     kwargs: dict[str, Any] = {
         "temperature": temperature,
         "streaming": streaming,
-        "extra_body": disable_thinking_extra_body(),
+        "stream_usage": streaming,
+        "extra_body": disable_thinking_extra_body(extra_body),
     }
 
     # 注入观测层 callback

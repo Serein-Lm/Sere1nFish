@@ -1,4 +1,4 @@
-"""公司控股结构统一服务。"""
+"""公司第一层全资子公司统一服务。"""
 
 from .service import CompanyControlService
 

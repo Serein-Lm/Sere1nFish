@@ -48,6 +48,38 @@ def _dedupe(values: list[str], *, limit: int | None = None) -> list[str]:
     return result[:limit] if limit else result
 
 
+def _merge_generated_and_routed(
+    generated: list[str],
+    routed: list[str],
+    *,
+    limit: int,
+) -> list[str]:
+    """以 3:1 合并稳定 Skill 词和 Agent 路由词，避免任一来源独占上限。"""
+    merged: list[str] = []
+    seen: set[str] = set()
+    generated_index = 0
+    routed_index = 0
+
+    def _append(value: str) -> None:
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        if normalized and normalized not in seen and len(merged) < limit:
+            seen.add(normalized)
+            merged.append(normalized)
+
+    while len(merged) < limit and (
+        generated_index < len(generated) or routed_index < len(routed)
+    ):
+        for _ in range(3):
+            if generated_index >= len(generated):
+                break
+            _append(generated[generated_index])
+            generated_index += 1
+        if routed_index < len(routed):
+            _append(routed[routed_index])
+            routed_index += 1
+    return merged
+
+
 def load_keyword_skill(channel: str) -> tuple[str, str]:
     """按渠道只加载一个 Layer 2 Skill，未同步时返回空正文。"""
     slug = CHANNEL_SKILLS.get(str(channel or "").strip().lower(), "")
@@ -89,12 +121,17 @@ def build_channel_terms(
 ) -> list[str]:
     """合并 Agent 路由结果与 DB 词库模板，并用真实目标别名展开。"""
     clean_names = _dedupe(names, limit=4)
+    # 按模板轮询别名，避免较小 limit 被第一个法定名独占。
     generated = [
         template.replace("{company}", name)
-        for name in clean_names
         for template in get_keyword_templates(channel)
+        for name in clean_names
     ]
-    return _dedupe([*(routed_terms or []), *generated], limit=limit)
+    return _merge_generated_and_routed(
+        _dedupe(generated),
+        _dedupe(list(routed_terms or [])),
+        limit=max(1, limit),
+    )
 
 
 def build_target_channel_terms(
@@ -152,7 +189,7 @@ async def resolve_project_target_terms(
     include_direct_children: bool = True,
     max_keywords: int = 60,
 ) -> ResolvedSearchTerms:
-    """解析根 Target 及其第一层控股单位的渠道词，供手机/浏览器任务复用。"""
+    """解析根 Target 及其第一层全资子公司的渠道词，供手机/浏览器任务复用。"""
     from api.dao import targets as targets_dao
 
     channel = str(channel or "").strip().lower()

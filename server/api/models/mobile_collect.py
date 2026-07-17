@@ -43,7 +43,7 @@ class CollectTaskDef(BaseModel):
     keywords: list[str] = Field(default_factory=list, description="搜索关键词列表(逐个执行)")
     use_target_keyword_library: bool = Field(
         default=True,
-        description="合并项目 Target、第一层控股单位及数据库渠道 Skill 的搜索词",
+        description="合并项目 Target、第一层全资子公司及数据库渠道 Skill 的搜索词",
     )
     max_resolved_keywords: int = Field(
         default=60,

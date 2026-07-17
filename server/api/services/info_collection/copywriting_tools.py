@@ -51,11 +51,18 @@ class AgentCopywritingTool:
         return None
 
     async def generate(self, request: CopywritingRequest) -> CopywritingResult:
+        from core.observability import observation_context
         from langchain_core.messages import HumanMessage
 
         try:
             agent = await self._get_agent()
-            raw = await agent({"messages": [HumanMessage(content=request.context)]})
+            with observation_context(
+                project_id=request.project_id,
+                task_id=request.task_id,
+                phase="copywriting",
+                agent="copywriting",
+            ):
+                raw = await agent({"messages": [HumanMessage(content=request.context)]})
             parsed = self._parse_response(raw)
         except Exception as exc:
             return CopywritingResult(

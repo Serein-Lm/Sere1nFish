@@ -668,6 +668,12 @@ export interface XhsRuntimeStatus {
     strategy: string
     search_pages_per_account: number
     search_retries_per_page: number
+    search_page_size: number
+    search_max_pages_per_keyword: number
+    request_interval_min_seconds: number
+    request_interval_max_seconds: number
+    search_fallback_enabled: boolean
+    search_health_check_enabled: boolean
     total: number
     usable: number
     invalid: number

@@ -1167,6 +1167,9 @@ def test_xhs_search_tool_rotates_accounts_and_persists_v2_results(monkeypatch):
                 "account_pool": {
                     "search_pages_per_account": 1,
                     "search_retries_per_page": 1,
+                    "search_max_pages_per_keyword": 2,
+                    "request_interval_min_seconds": 0,
+                    "request_interval_max_seconds": 0,
                 },
                 "proxy_pool": {"request_timeout": 12.5},
             }
@@ -1558,7 +1561,13 @@ def test_xhs_detail_tool_leases_runtime_account_and_proxy():
         }
 
         async def runtime_config_loader():
-            return {"proxy_pool": {"request_timeout": 12.5}}
+            return {
+                "account_pool": {
+                    "request_interval_min_seconds": 0,
+                    "request_interval_max_seconds": 0,
+                },
+                "proxy_pool": {"request_timeout": 12.5},
+            }
 
         async def account_selector(db, purpose, config):
             calls["accounts"].append({"db": db, "purpose": purpose, "config": config})

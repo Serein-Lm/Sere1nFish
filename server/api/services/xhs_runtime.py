@@ -7,6 +7,7 @@ health instead of hard-coding active-cookie or proxy selection rules.
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,14 @@ _static_proxy_idx = 0
 _static_proxy_lock = asyncio.Lock()
 _provider_pool_cache: dict[str, Any] = {}
 _provider_pool_lock = asyncio.Lock()
+_request_pacer_lock = asyncio.Lock()
+_next_request_at = 0.0
+
+DEFAULT_XHS_SEARCH_PAGE_SIZE = 20
+DEFAULT_XHS_SEARCH_MAX_PAGES_PER_KEYWORD = 1
+DEFAULT_XHS_REQUEST_INTERVAL_MIN_SECONDS = 4.0
+DEFAULT_XHS_REQUEST_INTERVAL_MAX_SECONDS = 8.0
+DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES = 1
 
 
 @dataclass
@@ -129,6 +138,86 @@ def _as_utc_datetime(value: Any) -> datetime | None:
 def _account_pool_config(config: dict[str, Any]) -> dict[str, Any]:
     pool = config.get("account_pool", {})
     return pool if isinstance(pool, dict) else {}
+
+
+@dataclass(frozen=True)
+class XhsRequestPolicy:
+    """小红书请求节奏策略；业务流水线不感知具体限速字段。"""
+
+    page_size: int = DEFAULT_XHS_SEARCH_PAGE_SIZE
+    max_pages_per_keyword: int = DEFAULT_XHS_SEARCH_MAX_PAGES_PER_KEYWORD
+    interval_min_seconds: float = DEFAULT_XHS_REQUEST_INTERVAL_MIN_SECONDS
+    interval_max_seconds: float = DEFAULT_XHS_REQUEST_INTERVAL_MAX_SECONDS
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any] | None) -> "XhsRequestPolicy":
+        pool = _account_pool_config(config or {})
+        interval_min = max(
+            0.0,
+            min(
+                _as_float(
+                    pool.get("request_interval_min_seconds"),
+                    DEFAULT_XHS_REQUEST_INTERVAL_MIN_SECONDS,
+                ),
+                60.0,
+            ),
+        )
+        interval_max = max(
+            interval_min,
+            min(
+                _as_float(
+                    pool.get("request_interval_max_seconds"),
+                    DEFAULT_XHS_REQUEST_INTERVAL_MAX_SECONDS,
+                ),
+                120.0,
+            ),
+        )
+        return cls(
+            page_size=DEFAULT_XHS_SEARCH_PAGE_SIZE,
+            max_pages_per_keyword=max(
+                1,
+                min(
+                    _as_int(
+                        pool.get("search_max_pages_per_keyword"),
+                        DEFAULT_XHS_SEARCH_MAX_PAGES_PER_KEYWORD,
+                    ),
+                    5,
+                ),
+            ),
+            interval_min_seconds=interval_min,
+            interval_max_seconds=interval_max,
+        )
+
+
+async def wait_for_xhs_request_slot(
+    purpose: str,
+    *,
+    config: dict[str, Any] | None = None,
+) -> float:
+    """在进程内统一串行分配请求时隙，避免多个 stage 同时冲击账号池。"""
+    global _next_request_at
+
+    policy = XhsRequestPolicy.from_config(
+        config if config is not None else await get_xhs_runtime_config()
+    )
+    if policy.interval_max_seconds <= 0:
+        return 0.0
+
+    async with _request_pacer_lock:
+        wait_seconds = max(0.0, _next_request_at - time.monotonic())
+        if wait_seconds > 0:
+            logger.info(
+                "小红书请求错峰 purpose=%s wait=%.2fs",
+                purpose,
+                wait_seconds,
+            )
+            await asyncio.sleep(wait_seconds)
+        interval = random.uniform(
+            policy.interval_min_seconds,
+            policy.interval_max_seconds,
+        )
+        _next_request_at = time.monotonic() + interval
+        return wait_seconds
 
 
 def _proxy_pool_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -281,7 +370,10 @@ async def select_xhs_account(
 
     now = _now()
     include_unverified = _as_bool(pool.get("include_unverified"), default=True)
-    max_consecutive_failures = _as_int(pool.get("max_consecutive_failures"), 3)
+    max_consecutive_failures = _as_int(
+        pool.get("max_consecutive_failures"),
+        DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES,
+    )
     strategy = str(pool.get("strategy") or "least_recently_used")
 
     query = _account_selection_query(
@@ -425,7 +517,10 @@ async def record_xhs_account_result(
 
     config = await get_xhs_runtime_config()
     pool = _account_pool_config(config)
-    max_consecutive_failures = _as_int(pool.get("max_consecutive_failures"), 3)
+    max_consecutive_failures = _as_int(
+        pool.get("max_consecutive_failures"),
+        DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES,
+    )
     current = await db[XHS_COOKIES_COLLECTION].find_one({"account_name": account_name}) or {}
     next_failures = _as_int(current.get("consecutive_failures"), 0) + 1
     should_quarantine = max_consecutive_failures > 0 and next_failures >= max_consecutive_failures
@@ -591,7 +686,11 @@ async def get_xhs_runtime_status(db: AsyncIOMotorDatabase) -> dict[str, Any]:
     proxy_pool = _proxy_pool_config(config)
     now = _now()
     include_unverified = _as_bool(pool.get("include_unverified"), default=True)
-    max_consecutive_failures = _as_int(pool.get("max_consecutive_failures"), 3)
+    max_consecutive_failures = _as_int(
+        pool.get("max_consecutive_failures"),
+        DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES,
+    )
+    request_policy = XhsRequestPolicy.from_config(config)
     total = await db[XHS_COOKIES_COLLECTION].count_documents({})
     usable_query = _account_selection_query(
         now=now,
@@ -613,7 +712,19 @@ async def get_xhs_runtime_status(db: AsyncIOMotorDatabase) -> dict[str, Any]:
             "enabled": _as_bool(pool.get("enabled"), default=True),
             "strategy": pool.get("strategy", "least_recently_used"),
             "search_pages_per_account": max(1, _as_int(pool.get("search_pages_per_account"), 1)),
-            "search_retries_per_page": max(1, _as_int(pool.get("search_retries_per_page"), 3)),
+            "search_retries_per_page": max(1, _as_int(pool.get("search_retries_per_page"), 1)),
+            "search_page_size": request_policy.page_size,
+            "search_max_pages_per_keyword": request_policy.max_pages_per_keyword,
+            "request_interval_min_seconds": request_policy.interval_min_seconds,
+            "request_interval_max_seconds": request_policy.interval_max_seconds,
+            "search_fallback_enabled": _as_bool(
+                pool.get("search_fallback_enabled"),
+                default=False,
+            ),
+            "search_health_check_enabled": _as_bool(
+                pool.get("search_health_check_enabled"),
+                default=False,
+            ),
             "total": total,
             "usable": usable,
             "invalid": invalid,

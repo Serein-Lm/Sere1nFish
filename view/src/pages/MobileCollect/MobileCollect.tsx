@@ -554,7 +554,7 @@ export default function MobileCollect() {
           <Form.Item name="target_type" hidden>
             <Input />
           </Form.Item>
-          <Form.Item name="keywords" label="搜索关键词" tooltip="显式关键词优先；开启目标词库后会合并公司和控股单位的渠道词">
+          <Form.Item name="keywords" label="搜索关键词" tooltip="显式关键词优先；开启目标词库后会合并公司和第一层全资子公司的渠道词">
             <Select mode="tags" placeholder="输入关键词后回车，可多个" tokenSeparators={[',']} />
           </Form.Item>
           <Space wrap size="large">
@@ -562,7 +562,7 @@ export default function MobileCollect() {
               name="use_target_keyword_library"
               label="项目目标词库"
               valuePropName="checked"
-              tooltip="从数据库 Skill、项目 Target 及第一层 100% 控股单位补全当前渠道搜索词"
+              tooltip="从数据库 Skill、项目 Target 及第一层全资子公司补全当前渠道搜索词"
             >
               <Switch />
             </Form.Item>

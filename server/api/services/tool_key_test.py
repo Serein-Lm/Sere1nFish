@@ -4,7 +4,7 @@
 router 只做薄层分派，具体校验按 tool_name 收敛到各自适配层：
 - fofa   → crawler_tools.fofa_tools.validate_key
 - hunter → crawler_tools.hunter_tools.validate_key
-- tianyancha → ICP 备案接口最小查询
+- tianyancha → ICP 备案与对外投资接口最小查询
 - bocha  → Web Search 接口最小检索
 
 统一返回 (ok, message)，不向 router 暴露具体 HTTP 细节。
@@ -32,7 +32,7 @@ async def _load_tool_api_key(tool_name: str) -> str:
 
 
 async def _validate_tianyancha(api_key: str) -> tuple[bool, str]:
-    """校验 ICP 与公司扫描必需的实际控制权接口 ID 747。"""
+    """校验 ICP 与公司扫描必需的对外投资接口 ID 823。"""
     from crawler_tools.tianyancha_tools import (
         TianyanchaApiError,
         TianyanchaClient,
@@ -44,14 +44,14 @@ async def _validate_tianyancha(api_key: str) -> tuple[bool, str]:
         return False, icp_message
     try:
         client = TianyanchaClient(api_key, timeout_seconds=15)
-        await client.list_direct_wholly_controlled(
+        await client.list_direct_wholly_owned_investments(
             "天津滨海国际机场",
             max_entities=1,
             page_concurrency=1,
         )
     except TianyanchaApiError as exc:
-        return False, f"ICP备案接口可用；实际控制权 ID 747 不可用({exc.code}): {exc.reason}"
-    return True, "天眼查 API Key 可用（ICP备案 + 实际控制权 ID 747）"
+        return False, f"ICP备案接口可用；对外投资 ID 823 不可用({exc.code}): {exc.reason}"
+    return True, "天眼查 API Key 可用（ICP备案 + 对外投资 ID 823）"
 
 
 async def _validate_bocha(api_key: str) -> tuple[bool, str]:

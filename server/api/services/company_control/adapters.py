@@ -1,4 +1,4 @@
-"""公司控股结构供应商适配。"""
+"""公司全资子公司供应商适配。"""
 from __future__ import annotations
 
 from crawler_tools.tianyancha_tools import TianyanchaClient
@@ -6,14 +6,14 @@ from crawler_tools.tianyancha_tools import TianyanchaClient
 from .contracts import ControlDiscovery, ControlledEntity
 
 
-class TianyanchaControlProvider:
-    name = "tianyancha_control_right"
+class TianyanchaInvestmentProvider:
+    name = "tianyancha_outbound_investment"
 
     def __init__(self, client: TianyanchaClient) -> None:
         self.client = client
 
     @classmethod
-    async def create(cls) -> "TianyanchaControlProvider":
+    async def create(cls) -> "TianyanchaInvestmentProvider":
         return cls(await TianyanchaClient.from_runtime_config())
 
     async def discover(
@@ -23,7 +23,7 @@ class TianyanchaControlProvider:
         max_entities: int,
         page_concurrency: int,
     ) -> ControlDiscovery:
-        result = await self.client.list_direct_wholly_controlled(
+        result = await self.client.list_direct_wholly_owned_investments(
             company_name,
             max_entities=max_entities,
             page_concurrency=page_concurrency,

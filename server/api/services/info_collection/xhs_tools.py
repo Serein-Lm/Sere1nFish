@@ -42,6 +42,7 @@ class XhsSearchTool:
         result_recorder: Any | None = None,
         client_factory: Any | None = None,
         sleep_func: Any | None = None,
+        request_pacer: Any | None = None,
     ) -> None:
         self._db = db
         self._crawler_factory = crawler_factory
@@ -51,6 +52,7 @@ class XhsSearchTool:
         self._result_recorder = result_recorder
         self._client_factory = client_factory
         self._sleep = sleep_func or asyncio.sleep
+        self._request_pacer = request_pacer
 
     @staticmethod
     def _as_int(value: Any, default: int, minimum: int = 1) -> int:
@@ -65,6 +67,16 @@ class XhsSearchTool:
             return float(value)
         except Exception:
             return default
+
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return bool(value)
 
     @staticmethod
     def _extract_publish_time_text(item: dict[str, Any]) -> str:
@@ -186,6 +198,14 @@ class XhsSearchTool:
 
         await record_xhs_account_result(self._db, account_name, **kwargs)
 
+    async def _wait_for_request(self, purpose: str, runtime_config: dict[str, Any]) -> None:
+        if self._request_pacer:
+            await self._request_pacer(purpose, config=runtime_config)
+            return
+        from api.services.xhs_runtime import wait_for_xhs_request_slot
+
+        await wait_for_xhs_request_slot(purpose, config=runtime_config)
+
     async def _new_v2_client(self, cookie_string: str, *, proxy_url: str | None, request_timeout: float) -> Any:
         if self._client_factory:
             return self._client_factory(
@@ -223,7 +243,7 @@ class XhsSearchTool:
 
     async def search(self, request: SearchRequest) -> SearchResult:
         from api.dao import xhs as xhs_dao
-        from api.services.xhs_runtime import classify_xhs_account_error
+        from api.services.xhs_runtime import XhsRequestPolicy, classify_xhs_account_error
 
         project_id = request.project_id
         task_id = request.task_id
@@ -241,10 +261,22 @@ class XhsSearchTool:
         if not isinstance(proxy_config, dict):
             proxy_config = {}
 
-        page_size = 20
+        request_policy = XhsRequestPolicy.from_config(runtime_config)
+        page_size = request_policy.page_size
         pages_per_account = self._as_int(account_pool.get("search_pages_per_account"), 1)
-        retries_per_page = self._as_int(account_pool.get("search_retries_per_page"), 3)
-        total_pages = max(1, (max_notes + page_size - 1) // page_size)
+        retries_per_page = self._as_int(account_pool.get("search_retries_per_page"), 1)
+        total_pages = min(
+            request_policy.max_pages_per_keyword,
+            max(1, (max_notes + page_size - 1) // page_size),
+        )
+        fallback_enabled = self._as_bool(
+            account_pool.get("search_fallback_enabled"),
+            default=False,
+        )
+        health_check_enabled = self._as_bool(
+            account_pool.get("search_health_check_enabled"),
+            default=False,
+        )
         sort_map = {
             "time_descending": "time_descending",
             "general": "general",
@@ -292,17 +324,19 @@ class XhsSearchTool:
                 f"[XHS] 搜索账号租用 | account={current_account.account_name} "
                 f"source={current_account.source} proxy={self._proxy_log_context(current_proxy)}"
             )
-            if hasattr(current_client, "pong") and not await current_client.pong():
-                await self._record_result(
-                    current_account.account_name,
-                    success=False,
-                    error="V2 Cookie 验证失败",
-                    invalidate=True,
-                    cooldown_seconds=900,
-                )
-                await _close_v2_client()
-                raise RuntimeError("V2 Cookie 验证失败")
-            await self._record_result(current_account.account_name, success=True)
+            if health_check_enabled and hasattr(current_client, "pong"):
+                await self._wait_for_request("search_health", runtime_config)
+                if not await current_client.pong():
+                    await self._record_result(
+                        current_account.account_name,
+                        success=False,
+                        error="V2 Cookie 验证失败",
+                        invalidate=True,
+                        cooldown_seconds=900,
+                    )
+                    await _close_v2_client()
+                    raise RuntimeError("V2 Cookie 验证失败")
+                await self._record_result(current_account.account_name, success=True)
             current_client_pages_left = pages_per_account
 
         # V2: 每页动态调度账号；仅排除当前页已失败账号，冷却到期后自动回到候选集合。
@@ -318,6 +352,7 @@ class XhsSearchTool:
                         or current_client_pages_left <= 0
                     ):
                         await _lease_v2_client(list(dict.fromkeys(tried_this_page)))
+                    await self._wait_for_request("search", runtime_config)
                     result = await current_client.search_notes(
                         keyword=keyword,
                         page=page,
@@ -386,7 +421,7 @@ class XhsSearchTool:
 
         await _close_v2_client()
 
-        if not notes_to_insert:
+        if not notes_to_insert and fallback_enabled:
             if last_v2_error:
                 logger.warning(f"[XHS] V2 搜索无结果，启用 MediaCrawler fallback: {last_v2_error}")
             else:
@@ -411,6 +446,7 @@ class XhsSearchTool:
                             f"[XHS] fallback 搜索账号租用 | page={page} account={account.account_name} "
                             f"source={account.source} proxy={self._proxy_log_context(proxy)}"
                         )
+                        await self._wait_for_request("search_fallback_login", runtime_config)
                         login_result = await crawler.login_by_cookie_string(account.cookie_string)
                         if not login_result.success:
                             decision = classify_xhs_account_error(login_result.message, config=runtime_config)
@@ -424,6 +460,7 @@ class XhsSearchTool:
                             tried_this_page.append(account.account_name)
                             raise RuntimeError(f"登录失败: {login_result.message}")
 
+                        await self._wait_for_request("search_fallback", runtime_config)
                         search_result = await crawler.search_notes(
                             keyword=keyword,
                             page=page,
@@ -495,8 +532,11 @@ class XhsSearchTool:
                 "limit": max_notes,
                 "sort_type": sort_type,
                 "pages": total_pages,
+                "page_size": page_size,
                 "pages_per_account": pages_per_account,
                 "retries_per_page": retries_per_page,
+                "fallback_enabled": fallback_enabled,
+                "health_check_enabled": health_check_enabled,
             },
         )
 
@@ -521,6 +561,7 @@ class XhsDetailTool:
         proxy_selector: Any | None = None,
         result_recorder: Any | None = None,
         client_factory: Any | None = None,
+        request_pacer: Any | None = None,
     ) -> None:
         self._v2_client = v2_client
         self._db = db
@@ -529,6 +570,7 @@ class XhsDetailTool:
         self._proxy_selector = proxy_selector
         self._result_recorder = result_recorder
         self._client_factory = client_factory
+        self._request_pacer = request_pacer
         self._client_lock = asyncio.Lock()
         self._account_name: str | None = None
         self._proxy: Any | None = None
@@ -606,6 +648,14 @@ class XhsDetailTool:
         except Exception as exc:
             logger.warning(f"[xhs-detail] 账号结果记录失败 account={self._account_name}: {exc}")
 
+    async def _wait_for_request(self, purpose: str) -> None:
+        if self._request_pacer:
+            await self._request_pacer(purpose, config=self._runtime_config)
+            return
+        from api.services.xhs_runtime import wait_for_xhs_request_slot
+
+        await wait_for_xhs_request_slot(purpose, config=self._runtime_config)
+
     async def _new_runtime_client(self) -> Any | None:
         if not self._db:
             return None
@@ -637,6 +687,8 @@ class XhsDetailTool:
                 request_timeout=request_timeout,
             )
 
+        if hasattr(client, "pong"):
+            await self._wait_for_request("detail_health")
         if hasattr(client, "pong") and not await client.pong():
             await self._safe_close(client)
             await self._record_result(
@@ -699,6 +751,7 @@ class XhsDetailTool:
         client = await self._get_client()
         if client:
             try:
+                await self._wait_for_request("detail")
                 detail = await client.get_note_by_id(
                     note_id=request.item_id,
                     xsec_token=request.xsec_token,
@@ -706,6 +759,7 @@ class XhsDetailTool:
                 )
                 await self._record_result(success=True)
                 if request.options.get("enable_comments") and hasattr(client, "get_note_all_comments"):
+                    await self._wait_for_request("comments")
                     comments_data = await client.get_note_all_comments(
                         note_id=request.item_id,
                         xsec_token=request.xsec_token,
@@ -766,6 +820,7 @@ class XhsNoteTaggingTool:
         self._agent = agent
 
     async def tag(self, request: TagRequest) -> TagResult:
+        from core.observability import observation_context
         from langchain_core.messages import HumanMessage
 
         keyword = str(request.context.get("keyword") or "")
@@ -773,7 +828,13 @@ class XhsNoteTaggingTool:
             request.item,
             keyword=keyword,
         )
-        raw = await self._agent({"messages": [HumanMessage(content=input_text)]})
+        with observation_context(
+            project_id=request.project_id,
+            task_id=request.task_id,
+            phase="xhs_note_tagging",
+            agent="xhs_note_tagging",
+        ):
+            raw = await self._agent({"messages": [HumanMessage(content=input_text)]})
         tagging = self._pipeline_owner._parse_agent_response(raw) or {}
         return TagResult(
             source="xhs",
@@ -795,6 +856,7 @@ class XhsDetailTaggingTool:
         self._agent = agent
 
     async def tag(self, request: TagRequest) -> TagResult:
+        from core.observability import observation_context
         from langchain_core.messages import HumanMessage
 
         content = str(request.context.get("content") or "")
@@ -804,7 +866,13 @@ class XhsDetailTaggingTool:
             content,
             comments_summary,
         )
-        raw = await self._agent({"messages": [HumanMessage(content=input_text)]})
+        with observation_context(
+            project_id=request.project_id,
+            task_id=request.task_id,
+            phase="xhs_detail_tagging",
+            agent="xhs_detail_tagging",
+        ):
+            raw = await self._agent({"messages": [HumanMessage(content=input_text)]})
         tagging = self._pipeline_owner._parse_agent_response(raw) or {}
         return TagResult(
             source="xhs",
@@ -825,19 +893,27 @@ class XhsProfileTool:
         self._pipeline_owner = pipeline_owner
 
     async def generate_profile(self, request: ProfileRequest) -> ProfileResult:
+        from core.observability import observation_context
+
         options: dict[str, Any] = {
-            "screenshot_concurrency": int(request.options.get("screenshot_concurrency", 2)),
-            "profile_concurrency": int(request.options.get("profile_concurrency", 3)),
+            "screenshot_concurrency": int(request.options.get("screenshot_concurrency", 1)),
+            "profile_concurrency": int(request.options.get("profile_concurrency", 2)),
         }
         target_id = str(request.options.get("target_id") or "")
         if target_id:
             options["target_id"] = target_id
-        profiles = await self._pipeline_owner._stage_profile_generation(
-            request.task_id,
-            request.project_id,
-            request.keyword,
-            **options,
-        )
+        with observation_context(
+            project_id=request.project_id,
+            task_id=request.task_id,
+            phase="xhs_profile",
+            agent="xhs_profile",
+        ):
+            profiles = await self._pipeline_owner._stage_profile_generation(
+                request.task_id,
+                request.project_id,
+                request.keyword,
+                **options,
+            )
         return ProfileResult(
             source="xhs",
             project_id=request.project_id,
@@ -845,7 +921,7 @@ class XhsProfileTool:
             profiles=profiles,
             meta={
                 "keyword": request.keyword,
-                "screenshot_concurrency": int(request.options.get("screenshot_concurrency", 2)),
-                "profile_concurrency": int(request.options.get("profile_concurrency", 3)),
+                "screenshot_concurrency": int(request.options.get("screenshot_concurrency", 1)),
+                "profile_concurrency": int(request.options.get("profile_concurrency", 2)),
             },
         )

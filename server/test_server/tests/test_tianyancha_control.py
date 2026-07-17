@@ -5,23 +5,15 @@ from typing import Any
 import pytest
 
 from crawler_tools.tianyancha_tools import (
-    CONTROL_RIGHT_PATH,
+    OUTBOUND_INVESTMENT_INTERFACE_ID,
+    OUTBOUND_INVESTMENT_PATH,
     PERMISSION_DENIED_CODE,
     TianyanchaApiError,
     TianyanchaClient,
-    parse_direct_wholly_controlled_items,
+    parse_direct_wholly_owned_investments,
     parse_icp_records,
     parse_percent,
 )
-
-
-def _path(*companies: str, percent: str = "100%") -> list[dict[str, Any]]:
-    nodes: list[dict[str, Any]] = [{"type": "percent", "value": percent}]
-    for index, company in enumerate(companies):
-        nodes.append({"type": "company", "value": company, "cid": index + 1})
-        if index < len(companies) - 1:
-            nodes.append({"type": "percent", "value": percent})
-    return nodes
 
 
 def test_percent_parser_accepts_supplier_variants_but_keeps_exact_value() -> None:
@@ -31,38 +23,47 @@ def test_percent_parser_accepts_supplier_variants_but_keeps_exact_value() -> Non
     assert parse_percent("99.9%") != 100
 
 
-def test_control_parser_keeps_only_direct_exact_wholly_owned_company() -> None:
+def test_investment_parser_keeps_only_exact_wholly_owned_company() -> None:
     root = "根公司"
     items = [
         {
             "name": "直属全资公司",
-            "cid": 2,
+            "id": 2,
             "percent": "100%",
-            "chainList": [_path(root, "直属全资公司")],
+            "regStatus": "存续",
         },
         {
-            "name": "间接全资公司",
-            "cid": 3,
+            "name": "已注销全资公司",
+            "id": 5,
             "percent": "100%",
-            "chainList": [_path(root, "中间公司", "间接全资公司")],
+            "regStatus": "注销",
+        },
+        {
+            "name": root,
+            "id": 3,
+            "percent": "100%",
         },
         {
             "name": "直属非全资公司",
-            "cid": 4,
+            "id": 4,
             "percent": "99.9%",
-            "chainList": [_path(root, "直属非全资公司", percent="99.9%")],
         },
     ]
 
-    parsed = parse_direct_wholly_controlled_items(items, root_name=root)
+    parsed = parse_direct_wholly_owned_investments(items, root_name=root)
 
     assert [item.name for item in parsed] == ["直属全资公司"]
     assert parsed[0].provider_id == "2"
     assert parsed[0].ownership_percent == 100.0
+    assert [node["value"] for node in parsed[0].relation_paths[0]] == [
+        root,
+        "100%",
+        "直属全资公司",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_control_query_keeps_paging_until_direct_match_is_found() -> None:
+async def test_investment_query_keeps_paging_until_wholly_owned_match_is_found() -> None:
     root = "根公司"
 
     class _Client(TianyanchaClient):
@@ -74,26 +75,23 @@ async def test_control_query_keeps_paging_until_direct_match_is_found() -> None:
             items_by_page = {
                 1: [
                     {
-                        "name": "间接公司",
-                        "cid": 2,
-                        "percent": "100%",
-                        "chainList": [_path(root, "中间公司", "间接公司")],
+                        "name": "非全资公司A",
+                        "id": 2,
+                        "percent": "80%",
                     }
                 ],
                 2: [
                     {
                         "name": "非全资公司",
-                        "cid": 3,
+                        "id": 3,
                         "percent": "99%",
-                        "chainList": [_path(root, "非全资公司", percent="99%")],
                     }
                 ],
                 3: [
                     {
                         "name": "直属全资公司",
-                        "cid": 4,
+                        "id": 4,
                         "percent": "100%",
-                        "chainList": [_path(root, "直属全资公司")],
                     }
                 ],
             }
@@ -102,7 +100,7 @@ async def test_control_query_keeps_paging_until_direct_match_is_found() -> None:
                 "result": {"total": 60, "items": items_by_page[page]},
             }
 
-    result = await _Client().list_direct_wholly_controlled(
+    result = await _Client().list_direct_wholly_owned_investments(
         root,
         max_entities=1,
         page_concurrency=2,
@@ -149,42 +147,66 @@ def test_keyword_skill_ignores_standalone_company_placeholder(
     assert search_terms.get_keyword_templates("weixin") == ["{company} 招标"]
 
 
+def test_channel_terms_interleave_aliases_before_applying_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import search_terms
+
+    monkeypatch.setattr(
+        search_terms,
+        "get_keyword_templates",
+        lambda _channel: ["{company} 实习", "{company} 招聘"],
+    )
+
+    assert search_terms.build_channel_terms(
+        channel="xhs",
+        names=["法定名", "品牌名"],
+        routed_terms=["动态行业词"],
+        limit=4,
+    ) == ["法定名 实习", "品牌名 实习", "法定名 招聘", "动态行业词"]
+
+
 @pytest.mark.asyncio
-async def test_provider_does_not_substitute_outbound_investment_for_control_rights() -> None:
-    from api.services.company_control.adapters import TianyanchaControlProvider
+async def test_provider_uses_outbound_investment_endpoint() -> None:
+    from api.services.company_control.adapters import TianyanchaInvestmentProvider
 
     class _Client:
-        async def list_direct_wholly_controlled(self, *_args: Any, **_kwargs: Any) -> Any:
+        async def list_direct_wholly_owned_investments(
+            self,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> Any:
             raise TianyanchaApiError(
                 code=PERMISSION_DENIED_CODE,
                 reason="无权限访问此api",
-                endpoint=CONTROL_RIGHT_PATH,
+                endpoint=OUTBOUND_INVESTMENT_PATH,
             )
 
     with pytest.raises(TianyanchaApiError) as raised:
-        await TianyanchaControlProvider(_Client()).discover(
+        await TianyanchaInvestmentProvider(_Client()).discover(
             "根公司",
             max_entities=10,
             page_concurrency=2,
         )
     assert raised.value.code == PERMISSION_DENIED_CODE
+    assert raised.value.endpoint == OUTBOUND_INVESTMENT_PATH
 
 
 @pytest.mark.asyncio
-async def test_control_service_marks_missing_interface_permission_without_failing_parent(
+async def test_subsidiary_service_marks_missing_interface_permission_without_failing_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services.company_control.factory import CompanyControlProviderFactory
     from api.services.company_control.service import CompanyControlService
 
     class _DeniedProvider:
-        name = "tianyancha_control_right"
+        name = "tianyancha_outbound_investment"
 
         async def discover(self, *_args: Any, **_kwargs: Any) -> Any:
             raise TianyanchaApiError(
                 code=PERMISSION_DENIED_CODE,
                 reason="无权限访问此api",
-                endpoint=CONTROL_RIGHT_PATH,
+                endpoint=OUTBOUND_INVESTMENT_PATH,
             )
 
     async def _create(_provider: str = "tianyancha") -> Any:
@@ -202,6 +224,80 @@ async def test_control_service_marks_missing_interface_permission_without_failin
     assert result["permission_required"] is True
     assert result["error_code"] == PERMISSION_DENIED_CODE
     assert result["entities"] == []
+    assert result["provider"] == "tianyancha_outbound_investment"
+    assert result["relation_type"] == "wholly_owned_direct_investment"
+
+
+@pytest.mark.asyncio
+async def test_subsidiary_service_persists_outbound_investment_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import company_meta as company_meta_dao
+    from api.dao import targets as targets_dao
+    from api.services.company_control.contracts import ControlDiscovery, ControlledEntity
+    from api.services.company_control.factory import CompanyControlProviderFactory
+    from api.services.company_control.service import CompanyControlService
+
+    class _Provider:
+        name = "tianyancha_outbound_investment"
+
+        async def discover(self, *_args: Any, **_kwargs: Any) -> ControlDiscovery:
+            return ControlDiscovery(
+                provider=self.name,
+                entities=[
+                    ControlledEntity(
+                        name="全资子公司",
+                        provider_id="company-2",
+                        ownership_percent=100.0,
+                    )
+                ],
+                total_reported=2,
+                pages_fetched=1,
+            )
+
+        async def lookup_icp(self, entity: ControlledEntity) -> ControlledEntity:
+            entity.root_domain = "child.example.com"
+            entity.icp_domains = [entity.root_domain]
+            return entity
+
+    async def _create(_provider: str = "tianyancha") -> _Provider:
+        return _Provider()
+
+    captured: dict[str, Any] = {}
+
+    async def _upsert_target(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "target_id": "child",
+            "canonical_name": "全资子公司",
+            "root_domain": "child.example.com",
+        }
+
+    async def _link_target(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured["relation"] = kwargs["relation"]
+        return {"project_target_id": "project-child"}
+
+    async def _upsert_meta(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured["provenance"] = kwargs["provenance"]
+        return {}
+
+    monkeypatch.setattr(CompanyControlProviderFactory, "create", _create)
+    monkeypatch.setattr(targets_dao, "upsert_target", _upsert_target)
+    monkeypatch.setattr(targets_dao, "link_project_target", _link_target)
+    monkeypatch.setattr(company_meta_dao, "upsert_company_meta", _upsert_meta)
+
+    result = await CompanyControlService(object()).discover_and_persist(
+        project_id="project-1",
+        task_id="task-1",
+        parent_target={"target_id": "root", "canonical_name": "根公司"},
+        company_name="根公司",
+    )
+
+    assert result["status"] == "completed"
+    assert result["persisted"] == 1
+    assert captured["relation"]["relation_type"] == "wholly_owned_direct_investment"
+    assert captured["relation"]["relation_source"] == "tianyancha_outbound_investment"
+    assert captured["provenance"]["investment_interface_id"] == OUTBOUND_INVESTMENT_INTERFACE_ID
+    assert "control_interface_id" not in captured["provenance"]
 
 
 @pytest.mark.asyncio

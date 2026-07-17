@@ -1,11 +1,12 @@
 """
 综合公司扫描流水线（Company Scan Pipeline）
 
-整合四条链路：
+整合五条链路：
 1. URL 扫描 → findings → 话术生成
 2. 小红书搜索（多关键词）→ 打标 → 画像
 3. 画像 → 话术生成（每个高分画像生成多套话术）
-4. 微信公众号手机发现 → 原文链接 → Chrome 全文与图片归档
+4. 第一层全资子公司发现 → ICP 补全 → 资产与社媒采集
+5. 微信公众号手机发现 → 原文链接 → Chrome 全文与图片归档
 
 前端只需传 company_name + 勾选项，后端自动编排。
 """
@@ -199,15 +200,15 @@ class CompanyScanPipeline:
         control_max_entities: int = 100,
         control_lookup_concurrency: int = 4,
         control_icp_concurrency: int = 6,
-        control_scan_concurrency: int = 4,
+        control_scan_concurrency: int = 1,
     ) -> dict[str, Any]:
         """
         运行综合扫描流水线
 
         阶段:
         1. CompanyRouter 分析公司 → 生成搜索策略
-        2. 并行执行: URL扫描 + XHS搜索 + 控股结构查询
-        3. 并行执行: 控股单位采集 + 可选公众号手机采集
+        2. 并行执行: URL扫描 + XHS搜索 + 全资子公司查询
+        3. 并行执行: 全资子公司采集 + 可选公众号手机采集
         4. XHS画像 → 话术生成
         """
         from core.observability import obs_log
@@ -221,7 +222,7 @@ class CompanyScanPipeline:
             "control_structure": {
                 "enabled": enable_control_structure,
                 "status": "pending" if enable_control_structure else "disabled",
-                "relation_type": "wholly_owned_controlled_entity",
+                "relation_type": "wholly_owned_direct_investment",
                 "relation_depth": 1,
                 "ownership_percent": 100.0,
                 "entities": [],
@@ -384,7 +385,7 @@ class CompanyScanPipeline:
             xhs_succeeded = False
             if enable_control_structure:
                 tasks.append(
-                    self._run_control_structure(
+                    self._run_wholly_owned_investments(
                         task_id=task_id,
                         project_id=project_id,
                         parent_target=target,
@@ -448,15 +449,15 @@ class CompanyScanPipeline:
                 if result["sub_errors"] and len(result["sub_errors"]) == len(tasks):
                     raise RuntimeError("所有公司扫描子流水线均失败: " + "; ".join(result["sub_errors"]))
 
-            controlled_entities = list(result["control_structure"].get("entities") or [])
+            wholly_owned_entities = list(result["control_structure"].get("entities") or [])
             followups: list[tuple[str, Any]] = []
-            if controlled_entities and (enable_asset_discovery or enable_xhs):
+            if wholly_owned_entities and (enable_asset_discovery or enable_xhs):
                 followups.append((
-                    "controlled_entities",
-                    self._scan_controlled_entities(
+                    "wholly_owned_entities",
+                    self._scan_wholly_owned_entities(
                         task_id=task_id,
                         project_id=project_id,
-                        entities=controlled_entities,
+                        entities=wholly_owned_entities,
                         enable_asset_discovery=enable_asset_discovery,
                         enable_url_scan=enable_url_scan,
                         enable_copywriting=enable_copywriting,
@@ -492,7 +493,7 @@ class CompanyScanPipeline:
                 await self._update_progress(
                     task_id,
                     "followup_collection",
-                    "并发采集控股单位与公众号...",
+                    "并发采集全资子公司与公众号...",
                 )
                 followup_results = await asyncio.gather(
                     *(operation for _kind, operation in followups),
@@ -507,7 +508,7 @@ class CompanyScanPipeline:
                         else:
                             raise outcome
                         continue
-                    if kind == "controlled_entities":
+                    if kind == "wholly_owned_entities":
                         result["control_structure"]["entities"] = outcome["entities"]
                         result["control_structure"]["scan_summary"] = outcome["summary"]
                         result["control_structure"]["errors"].extend(outcome["errors"])
@@ -571,7 +572,7 @@ class CompanyScanPipeline:
                     "wechat_documents": result["wechat"].get("documents", 0),
                     "wechat_contacts": result["wechat"].get("contacts", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
-                    "controlled_entities": len(controlled_entities),
+                    "wholly_owned_entities": len(wholly_owned_entities),
                 },
             )
             await self._update_progress(task_id, "completed", "综合公司扫描完成")
@@ -655,7 +656,7 @@ class CompanyScanPipeline:
         ):
             return await router.route(company_name)
 
-    async def _run_control_structure(
+    async def _run_wholly_owned_investments(
         self,
         *,
         task_id: str,
@@ -699,7 +700,7 @@ class CompanyScanPipeline:
             device_id=device_id,
         )
 
-    async def _scan_controlled_entities(
+    async def _scan_wholly_owned_entities(
         self,
         *,
         task_id: str,
@@ -723,7 +724,7 @@ class CompanyScanPipeline:
         xhs_search_concurrency: int,
         entity_concurrency: int,
     ) -> dict[str, Any]:
-        """按控股单位限流并发，单位内部继续并行资产与社媒流水线。"""
+        """按全资子公司限流并发，单位内部继续并行资产与社媒流水线。"""
         from api.services.search_terms import build_channel_terms
 
         semaphore = asyncio.Semaphore(max(1, entity_concurrency))
@@ -744,7 +745,7 @@ class CompanyScanPipeline:
                 if enable_asset_discovery:
                     subtasks.append(
                         self._run_asset_and_url_scan(
-                            task_id=f"{task_id}_controlled_{index}",
+                            task_id=f"{task_id}_wholly_owned_{index}",
                             project_id=project_id,
                             identity=identity,
                             url_text="",
@@ -771,7 +772,7 @@ class CompanyScanPipeline:
                     )
                     subtasks.append(
                         self._run_xhs_search(
-                            f"{task_id}_controlled_{index}",
+                            f"{task_id}_wholly_owned_{index}",
                             project_id,
                             xhs_keywords,
                             xhs_max_notes,
@@ -804,7 +805,7 @@ class CompanyScanPipeline:
                     try:
                         scan_result["profile_copywritings"]["count"] = (
                             await self._run_profile_copywriting(
-                                f"{task_id}_controlled_{index}",
+                                f"{task_id}_wholly_owned_{index}",
                                 project_id,
                                 name,
                                 CompanyRouterResult(success=False),
@@ -818,10 +819,10 @@ class CompanyScanPipeline:
 
                 notify_target_collection_completed(
                     project_id=project_id,
-                    task_id=f"{task_id}_controlled_{index}",
+                    task_id=f"{task_id}_wholly_owned_{index}",
                     target_id=target_id,
                     target_name=name,
-                    source="company_scan_pipeline.controlled_entity",
+                    source="company_scan_pipeline.wholly_owned_entity",
                     summary={
                         "assets_discovered": scan_result["assets"].get("discovered", 0),
                         "assets_alive": scan_result["assets"].get("alive", 0),
@@ -855,7 +856,7 @@ class CompanyScanPipeline:
             if isinstance(item, Exception):
                 entity = entities[index]
                 entity_name = str(entity.get("name") or index)
-                entity_task_id = f"{task_id}_controlled_{index}"
+                entity_task_id = f"{task_id}_wholly_owned_{index}"
                 error_message = str(item)
                 errors.append(f"{entity_name}: {error_message}")
                 output_entities.append({**entity, "scan": {"errors": [error_message]}})
@@ -867,7 +868,7 @@ class CompanyScanPipeline:
                     task_id=entity_task_id,
                     target_id=str(entity.get("target_id") or ""),
                     target_name=entity_name,
-                    source="company_scan_pipeline.controlled_entity",
+                    source="company_scan_pipeline.wholly_owned_entity",
                     summary={"error": error_message},
                     status="failed",
                 )
@@ -1076,7 +1077,7 @@ class CompanyScanPipeline:
             db=self.db, pipeline_owner=pipeline,
         )
         detail_stage = _XhsDetailStage(
-            concurrency=4, project_id=project_id, db=self.db, pipeline_owner=pipeline,
+            concurrency=1, project_id=project_id, db=self.db, pipeline_owner=pipeline,
         )
 
         try:
@@ -1104,37 +1105,29 @@ class CompanyScanPipeline:
             f"[xhs-stream] 流式三阶段完成 | notes={all_notes_count} suspicious={all_suspicious_count}"
         )
 
-        # ── 阶段 D: 画像生成（并发，所有关键词同时跑）──
-        logger.info(f"[xhs-stream] 阶段D: 画像生成（并发）")
-
-        async def _gen_profile(idx, keyword):
-            sub_task_id = f"{task_id}_xhs_{idx}"
-            try:
-                profile_result = await toolset.profile_tool.generate_profile(
-                    ProfileRequest(
-                        source="xhs",
-                        project_id=project_id,
-                        task_id=sub_task_id,
-                        keyword=keyword,
-                        options={"target_id": target_id},
-                    )
-                )
-                logger.info(f"[xhs-stream] 画像完成 keyword='{keyword}' profiles={profile_result.count}")
-                return profile_result.count
-            except Exception as e:
-                logger.error(f"[xhs-stream] 画像失败 keyword='{keyword}': {e}")
-                return 0
-
+        # 画像阶段按目标聚合执行一次。此前按关键词并发会重复查询同一批 finding，
+        # 造成重复截图、重复 Agent 调用和无意义的 Token 消耗。
+        logger.info("[xhs-stream] 阶段D: 目标画像生成（单批次）")
         try:
-            profile_results = await asyncio.gather(
-                *[_gen_profile(i, kw) for i, kw in enumerate(keywords)],
-                return_exceptions=True,
+            profile_result = await toolset.profile_tool.generate_profile(
+                ProfileRequest(
+                    source="xhs",
+                    project_id=project_id,
+                    task_id=f"{task_id}_xhs_profile",
+                    keyword=" / ".join(keywords[:4]),
+                    options={
+                        "target_id": target_id,
+                        "screenshot_concurrency": 1,
+                        "profile_concurrency": 2,
+                    },
+                )
             )
+            all_profiles_count = profile_result.count
+            logger.info("[xhs-stream] 画像完成 profiles=%s", all_profiles_count)
+        except Exception as exc:
+            logger.error("[xhs-stream] 画像失败: %s", exc)
         finally:
             await toolset.close()
-        for r in profile_results:
-            if isinstance(r, int):
-                all_profiles_count += r
 
         elapsed = _time.time() - t0
         logger.info(
@@ -1224,19 +1217,20 @@ class CompanyScanPipeline:
         )
 
     def _get_xhs_keywords(self, search_names: list[str], router_output: Any) -> list[str]:
-        """组合真实品牌别名与场景词，法定名不再是唯一检索入口。"""
+        """组合路由结果与数据库 XHS Skill，法定名不再是唯一检索入口。"""
+        from api.services.search_terms import build_channel_terms
+
         routed = (
             list(router_output.all_keywords.get("xhs") or [])
             if router_output.success
             else []
         )
-        scene_terms = ["实习", "内推", "招聘", "工作体验"]
-        generated = [
-            f"{name} {term}"
-            for name in search_names[:4]
-            for term in scene_terms
-        ]
-        return self._dedupe_text([*routed, *generated])[:20]
+        return build_channel_terms(
+            channel="xhs",
+            names=search_names,
+            routed_terms=routed,
+            limit=20,
+        )
 
     def _build_profile_copywriting_context(
         self,

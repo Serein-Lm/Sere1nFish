@@ -12,27 +12,40 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from openai import OpenAI
 
 from core.logger import get_logger
-from core.llm_params import disable_thinking_extra_body
 
 logger = get_logger("xhs_vision")
 
 
-async def _get_vision_runtime() -> tuple[str, str, str] | None:
-    """Return vision model, base_url and api_key from encrypted DB config."""
+async def _get_observed_vision_llm(*, streaming: bool = False) -> Any | None:
+    """通过统一模型工厂创建 VL 客户端，使任务 Token 自动归因。"""
     from api.services.runtime_config import get_runtime_app_config
+    from Sere1nGraph.graph.agents.runtime import create_llm
 
     app_config = await get_runtime_app_config()
     runtime = getattr(app_config, "runtime", None)
-    if not runtime:
+    if not runtime or not getattr(runtime, "api_key", ""):
         return None
     models = getattr(runtime, "models", None)
     vision_model = getattr(models, "vision", "qwen3.7-plus") if models else "qwen3.7-plus"
-    base_url = getattr(runtime, "base_url", "") or ""
-    api_key = getattr(runtime, "api_key", "") or ""
-    return vision_model, base_url, api_key
+    return create_llm(
+        app_config,
+        model_name=vision_model,
+        streaming=streaming,
+        extra_body={"vl_high_resolution_images": True},
+    )
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    return "".join(
+        str(item.get("text") or "") if isinstance(item, dict) else str(item)
+        for item in content
+    )
 
 
 def _run_async_config(coro):
@@ -351,18 +364,11 @@ def _load_prompt(prompt_name: str) -> str:
 
 async def analyze_screenshots_with_vision_async(screenshots: list[dict[str, str]]) -> str:
     """使用视觉模型分析截图"""
-    runtime = await _get_vision_runtime()
-
-    if not runtime:
-        return "配置未找到"
-
-    vision_model, base_url, api_key = runtime
-    if not api_key:
+    llm = await _get_observed_vision_llm()
+    if llm is None:
         return "视觉模型 API Key 未配置"
     
     prompt = _load_prompt("vision_analysis")
-    
-    client = OpenAI(api_key=api_key, base_url=base_url)
     
     content = []
     for screenshot in screenshots:
@@ -375,13 +381,12 @@ async def analyze_screenshots_with_vision_async(screenshots: list[dict[str, str]
     
     content.append({"type": "text", "text": prompt})
     
-    completion = client.chat.completions.create(
-        model=vision_model,
-        messages=[{"role": "user", "content": content}],
-        extra_body=disable_thinking_extra_body({"vl_high_resolution_images": True}),
-    )
-    
-    return completion.choices[0].message.content
+    from core.observability import observation_context
+    from langchain_core.messages import HumanMessage
+
+    with observation_context(phase="xhs_profile_vision", agent="xhs_profile_vision"):
+        response = await llm.ainvoke([HumanMessage(content=content)])
+    return _message_text(response.content)
 
 
 def analyze_screenshots_with_vision(screenshots: list[dict[str, str]]) -> str:
@@ -481,20 +486,12 @@ async def get_user_profile_vision_analysis(
 
 async def analyze_screenshots_with_vision_stream(screenshots: list[dict[str, str]]):
     """使用视觉模型流式分析截图（用于 SSE）"""
-    runtime = await _get_vision_runtime()
-
-    if not runtime:
-        yield "配置未找到"
-        return
-
-    vision_model, base_url, api_key = runtime
-    if not api_key:
+    llm = await _get_observed_vision_llm(streaming=True)
+    if llm is None:
         yield "视觉模型 API Key 未配置"
         return
     
     prompt = _load_prompt("vision_analysis")
-    
-    client = OpenAI(api_key=api_key, base_url=base_url)
     
     content = []
     for screenshot in screenshots:
@@ -507,18 +504,14 @@ async def analyze_screenshots_with_vision_stream(screenshots: list[dict[str, str
     
     content.append({"type": "text", "text": prompt})
     
-    # 流式调用
-    stream = client.chat.completions.create(
-        model=vision_model,
-        messages=[{"role": "user", "content": content}],
-        extra_body=disable_thinking_extra_body({"vl_high_resolution_images": True}),
-        stream=True,
-        stream_options={"include_usage": True},
-    )
-    
-    for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+    from core.observability import observation_context
+    from langchain_core.messages import HumanMessage
+
+    with observation_context(phase="xhs_profile_vision_stream", agent="xhs_profile_vision"):
+        async for chunk in llm.astream([HumanMessage(content=content)]):
+            text = _message_text(chunk.content)
+            if text:
+                yield text
 
 
 # ═══════════════════════════════════════════
@@ -731,19 +724,13 @@ async def screenshot_note_detail_stream(
 
 async def analyze_note_screenshots_with_vision_async(screenshots: list[dict[str, str]]) -> str:
     """使用视觉模型分析笔记详情截图"""
-    runtime = await _get_vision_runtime()
-    if not runtime:
-        return "配置未找到"
-
-    vision_model, base_url, api_key = runtime
-    if not api_key:
+    llm = await _get_observed_vision_llm()
+    if llm is None:
         return "视觉模型 API Key 未配置"
 
     from Sere1nGraph.graph.prompts.loader import load_prompt
 
     prompt = load_prompt("xhs_note_detail_vl/note_detail_analysis")
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
 
     content = []
     for screenshot in screenshots:
@@ -756,13 +743,12 @@ async def analyze_note_screenshots_with_vision_async(screenshots: list[dict[str,
 
     content.append({"type": "text", "text": prompt})
 
-    completion = client.chat.completions.create(
-        model=vision_model,
-        messages=[{"role": "user", "content": content}],
-        extra_body=disable_thinking_extra_body({"vl_high_resolution_images": True}),
-    )
+    from core.observability import observation_context
+    from langchain_core.messages import HumanMessage
 
-    return completion.choices[0].message.content
+    with observation_context(phase="xhs_note_vision", agent="xhs_note_vision"):
+        response = await llm.ainvoke([HumanMessage(content=content)])
+    return _message_text(response.content)
 
 
 def analyze_note_screenshots_with_vision(screenshots: list[dict[str, str]]) -> str:

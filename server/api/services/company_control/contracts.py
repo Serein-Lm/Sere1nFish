@@ -1,4 +1,4 @@
-"""公司控股结构领域协议。"""
+"""公司第一层全资子公司领域协议。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

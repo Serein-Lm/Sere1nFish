@@ -1,4 +1,4 @@
-"""公司控股结构发现、ICP 补全和项目 Target 持久化。"""
+"""公司第一层全资子公司发现、ICP 补全和项目 Target 持久化。"""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,11 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from crawler_tools.tianyancha_tools import PERMISSION_DENIED_CODE, TianyanchaApiError
+from crawler_tools.tianyancha_tools import (
+    OUTBOUND_INVESTMENT_INTERFACE_ID,
+    PERMISSION_DENIED_CODE,
+    TianyanchaApiError,
+)
 from core.logger import get_logger
 
 from .contracts import ControlledEntity
@@ -35,8 +39,8 @@ class CompanyControlService:
         base_result: dict[str, Any] = {
             "enabled": True,
             "status": "running",
-            "provider": "tianyancha_control_right",
-            "relation_type": "wholly_owned_controlled_entity",
+            "provider": "tianyancha_outbound_investment",
+            "relation_type": "wholly_owned_direct_investment",
             "relation_depth": 1,
             "ownership_percent": 100.0,
             "total_reported": 0,
@@ -64,11 +68,11 @@ class CompanyControlService:
                     "permission_required": exc.code == PERMISSION_DENIED_CODE,
                 }
             )
-            logger.warning("控股结构发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
+            logger.warning("全资子公司发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
             return base_result
         except Exception as exc:  # noqa: BLE001
             base_result.update({"status": "error", "errors": [str(exc)]})
-            logger.exception("控股结构发现异常 company=%s", company_name)
+            logger.exception("全资子公司发现异常 company=%s", company_name)
             return base_result
 
         base_result.update(
@@ -87,10 +91,10 @@ class CompanyControlService:
                 try:
                     return await provider.lookup_icp(entity), ""
                 except TianyanchaApiError as exc:
-                    logger.warning("控股单位 ICP 查询失败 company=%s code=%s", entity.name, exc.code)
+                    logger.warning("全资子公司 ICP 查询失败 company=%s code=%s", entity.name, exc.code)
                     return entity, f"{entity.name}: ICP 查询失败({exc.code}) {exc.reason}"
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("控股单位 ICP 查询异常 company=%s: %s", entity.name, exc)
+                    logger.warning("全资子公司 ICP 查询异常 company=%s: %s", entity.name, exc)
                     return entity, f"{entity.name}: ICP 查询异常 {exc}"
 
         enriched = await asyncio.gather(*[_enrich(entity) for entity in discovery.entities])
@@ -110,7 +114,7 @@ class CompanyControlService:
             relation = {
                 "parent_target_id": parent_target_id,
                 "parent_target_name": parent_target_name,
-                "relation_type": "wholly_owned_controlled_entity",
+                "relation_type": "wholly_owned_direct_investment",
                 "relation_depth": 1,
                 "ownership_percent": 100.0,
                 "relation_source": discovery.provider,
@@ -142,8 +146,8 @@ class CompanyControlService:
                 icp_domains=entity.icp_domains,
                 relation=relation,
                 provenance={
-                    "control_provider": discovery.provider,
-                    "control_interface_id": 747,
+                    "investment_provider": discovery.provider,
+                    "investment_interface_id": OUTBOUND_INVESTMENT_INTERFACE_ID,
                     "domain_provider": "tianyancha_icp",
                     "domain_interface_id": 1038,
                 },

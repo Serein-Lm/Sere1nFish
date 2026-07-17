@@ -79,7 +79,7 @@ const TASK_TUNING_DEFAULTS = {
   url_probe_concurrency: 64,
   url_scan_concurrency: 10,
   copywriting_concurrency: 6,
-  xhs_search_concurrency: 3,
+  xhs_search_concurrency: 1,
 }
 
 const TASK_TUNING_FORM_DEFAULTS = {
@@ -2809,7 +2809,7 @@ export default function ProjectDetail() {
                 { value: '', label: `全部 Target (${wechatTargets.length})` },
                 ...wechatTargets.map((target) => ({
                   value: target.target_id,
-                  label: `${target.relation_type === 'wholly_owned_controlled_entity' ? '[100% 控股] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count} · 存活资产 ${target.alive_asset_count})`,
+                  label: `${['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(target.relation_type || '') ? '[全资子公司] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count} · 存活资产 ${target.alive_asset_count})`,
                 })),
               ]}
               onChange={(value) => {
@@ -3660,7 +3660,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 4, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -3689,7 +3689,7 @@ export default function ProjectDetail() {
                               <Checkbox>公司标准化 + FOFA/Hunter 资产发现与存活去重</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_control_structure" valuePropName="checked" noStyle>
-                              <Checkbox title="仅使用天眼查实际控制权 ID 747，未授权时明确标记不可用">天眼查控股结构：第一层 100% 控股单位 + ICP 域名</Checkbox>
+                              <Checkbox title="使用天眼查对外投资 ID 823，仅保留直接持股比例恰好为 100% 的企业">天眼查对外投资：第一层全资子公司 + ICP 域名</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_url_scan" valuePropName="checked" noStyle>
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
@@ -3732,12 +3732,12 @@ export default function ProjectDetail() {
                         </Form.Item>
                         <Row gutter={16}>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="control_max_entities" label="控股单位上限">
+                            <Form.Item name="control_max_entities" label="全资子公司上限">
                               <InputNumber min={1} max={500} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="control_lookup_concurrency" label="控股查询并发">
+                            <Form.Item name="control_lookup_concurrency" label="投资查询并发">
                               <InputNumber min={1} max={12} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
@@ -3747,7 +3747,11 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="control_scan_concurrency" label="控股采集并发">
+                            <Form.Item
+                              name="control_scan_concurrency"
+                              label="子公司采集并发"
+                              tooltip="默认逐个处理，避免多个子公司同时占用小红书账号"
+                            >
                               <InputNumber min={1} max={12} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
@@ -3786,14 +3790,22 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="xhs_search_concurrency" label="小红书搜索并发">
+                            <Form.Item
+                              name="xhs_search_concurrency"
+                              label="小红书搜索并发"
+                              tooltip="默认单并发；账号仍按最少最近使用策略从任务开始轮换"
+                            >
                               <InputNumber min={1} max={8} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                         </Row>
                         <Row gutter={16}>
                           <Col xs={24} sm={12}>
-                            <Form.Item name="xhs_max_notes" label="小红书最大笔记数">
+                            <Form.Item
+                              name="xhs_max_notes"
+                              label="小红书最大入库笔记数"
+                              tooltip="每个关键词最多请求 1 页，每页最多 20 条；此值控制任务最终入库预算"
+                            >
                               <InputNumber min={1} max={100} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>

@@ -560,7 +560,7 @@ class XhsPipeline:
         enable_images: bool = True,
         max_comments: int = 20,
         api_max_retries: int = 2,
-        screenshot_concurrency: int = 4,
+        screenshot_concurrency: int = 1,
     ) -> dict[str, Any]:
         """
         阶段 4: 获取详情、评论、图片并打标
@@ -579,6 +579,7 @@ class XhsPipeline:
             record_xhs_account_result,
             select_xhs_account,
             select_xhs_proxy,
+            wait_for_xhs_request_slot,
         )
 
         runtime_config = await get_xhs_runtime_config()
@@ -627,6 +628,7 @@ class XhsPipeline:
             detail = None
             if v2_client:
                 try:
+                    await wait_for_xhs_request_slot("detail", config=runtime_config)
                     detail = await v2_client.get_note_by_id(
                         note_id=note_id, xsec_token=xsec_token, xsec_source=xsec_source or "pc_feed",
                     )
@@ -649,6 +651,7 @@ class XhsPipeline:
                 if hasattr(crawler, "config"):
                     crawler.config.proxy_url = proxy.proxy_url
                 if not getattr(crawler, "_client", None):
+                    await wait_for_xhs_request_slot("detail_fallback_login", config=runtime_config)
                     login_result = await crawler.login_by_cookie_string(cookie_str)
                     if not login_result.success:
                         await record_xhs_account_result(
@@ -664,6 +667,7 @@ class XhsPipeline:
                     await record_xhs_account_result(self.db, detail_account.account_name, success=True)
                 for attempt in range(1, api_max_retries + 1):
                     try:
+                        await wait_for_xhs_request_slot("detail_fallback", config=runtime_config)
                         detail = await crawler._client.get_note_by_id(
                             note_id=note_id, xsec_source=xsec_source, xsec_token=xsec_token,
                         )
@@ -687,6 +691,7 @@ class XhsPipeline:
             comments_summary = ""
             if enable_comments:
                 try:
+                    await wait_for_xhs_request_slot("comments", config=runtime_config)
                     if v2_client:
                         comments = await v2_client.get_note_all_comments(
                             note_id=note_id, xsec_token=xsec_token,
@@ -862,7 +867,7 @@ class XhsPipeline:
         task_id: str,
         project_id: str,
         keyword: str = "",
-        screenshot_concurrency: int = 2,
+        screenshot_concurrency: int = 1,
         profile_concurrency: int = 3,
         target_id: str = "",
     ) -> list[dict[str, Any]]:

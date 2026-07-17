@@ -19,11 +19,20 @@ from core.logger import get_logger
 logger = get_logger("tianyancha_tools")
 
 TIANYANCHA_API_BASE = "https://open.api.tianyancha.com"
-CONTROL_RIGHT_PATH = "/services/v4/open/companyholding"
+OUTBOUND_INVESTMENT_PATH = "/services/open/ic/inverst/2.0"
+OUTBOUND_INVESTMENT_INTERFACE_ID = 823
 ICP_PATH = "/services/open/ipr/icp/3.0"
 SUCCESS_CODE = 0
 NO_RESULT_CODE = 300000
 PERMISSION_DENIED_CODE = 300005
+INACTIVE_REGISTRATION_MARKERS = (
+    "注销",
+    "吊销",
+    "撤销",
+    "清算",
+    "歇业",
+    "迁出",
+)
 
 
 class TianyanchaApiError(RuntimeError):
@@ -83,7 +92,7 @@ class ControlledCompany:
 
 
 @dataclass(slots=True)
-class ControlRightResult:
+class OutboundInvestmentResult:
     companies: list[ControlledCompany] = field(default_factory=list)
     total_reported: int = 0
     pages_fetched: int = 0
@@ -139,32 +148,18 @@ def parse_percent(value: Any) -> Decimal | None:
     return number
 
 
-def _company_nodes(path: Any) -> list[dict[str, Any]]:
-    if not isinstance(path, list):
-        return []
-    return [
-        node
-        for node in path
-        if isinstance(node, dict) and str(node.get("type") or "").lower() == "company"
-    ]
+def is_operating_registration_status(value: Any) -> bool:
+    """未知状态保留，仅排除供应商明确标记为非经营的主体。"""
+    status = str(value or "").strip()
+    return not any(marker in status for marker in INACTIVE_REGISTRATION_MARKERS)
 
 
-def _is_direct_path(path: Any, *, root_name: str, child_name: str) -> bool:
-    companies = _company_nodes(path)
-    if len(companies) != 2:
-        return False
-    names = [str(node.get("value") or "").strip() for node in companies]
-    if root_name and names[0] and names[0] != root_name:
-        return False
-    return not child_name or not names[1] or names[1] == child_name
-
-
-def parse_direct_wholly_controlled_items(
+def parse_direct_wholly_owned_investments(
     items: Any,
     *,
     root_name: str,
 ) -> list[ControlledCompany]:
-    """只保留实际控制权结果中的第一层、最终持股恰好 100% 的企业。"""
+    """保留直接持股恰好 100% 且仍经营的第一层企业。"""
     if not isinstance(items, list):
         return []
     parsed: dict[str, ControlledCompany] = {}
@@ -172,18 +167,24 @@ def parse_direct_wholly_controlled_items(
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
-        if not name or name == root_name or parse_percent(item.get("percent")) != Decimal("100"):
+        if (
+            not name
+            or name == root_name
+            or parse_percent(item.get("percent")) != Decimal("100")
+            or not is_operating_registration_status(item.get("regStatus"))
+        ):
             continue
-        raw_paths = item.get("chainList") or []
-        direct_paths = [
-            path
-            for path in raw_paths
-            if _is_direct_path(path, root_name=root_name, child_name=name)
-        ]
-        if not direct_paths:
-            continue
-        provider_id = str(item.get("cid") or item.get("id") or "").strip()
+        provider_id = str(item.get("id") or item.get("cid") or "").strip()
         key = provider_id or name
+        relation_path: list[dict[str, Any]] = []
+        if root_name:
+            relation_path.append({"type": "company", "value": root_name})
+        relation_path.extend(
+            [
+                {"type": "percent", "value": str(item.get("percent") or "100%")},
+                {"type": "company", "value": name, "cid": provider_id},
+            ]
+        )
         parsed[key] = ControlledCompany(
             name=name,
             provider_id=provider_id,
@@ -197,7 +198,7 @@ def parse_direct_wholly_controlled_items(
                 if isinstance(item.get("estiblishTime"), (int, float))
                 else None
             ),
-            relation_paths=direct_paths,
+            relation_paths=[relation_path],
         )
     return list(parsed.values())
 
@@ -310,17 +311,17 @@ class TianyanchaClient:
             if owns_session:
                 await session.close()
 
-    async def list_direct_wholly_controlled(
+    async def list_direct_wholly_owned_investments(
         self,
         company_name: str,
         *,
         max_entities: int = 100,
         page_concurrency: int = 4,
-    ) -> ControlRightResult:
-        """分页读取实际控制权，并筛出一层 100% 控股企业。"""
+    ) -> OutboundInvestmentResult:
+        """分页读取对外投资，并筛出第一层直接持股 100% 的经营中企业。"""
         page_size = 20
         first = await self._request(
-            CONTROL_RIGHT_PATH,
+            OUTBOUND_INVESTMENT_PATH,
             {"keyword": company_name, "pageNum": 1, "pageSize": page_size},
         )
         result = first.get("result") if isinstance(first.get("result"), dict) else {}
@@ -330,13 +331,11 @@ class TianyanchaClient:
         companies: dict[str, ControlledCompany] = {}
 
         def _consume(payload: dict[str, Any]) -> None:
-            for company in parse_direct_wholly_controlled_items(
+            for company in parse_direct_wholly_owned_investments(
                 payload.get("items") or [],
                 root_name=company_name,
             ):
                 companies[company.provider_id or company.name] = company
-                if len(companies) >= entity_limit:
-                    break
 
         _consume(result)
         pages_fetched = 1
@@ -349,7 +348,7 @@ class TianyanchaClient:
             payloads = await asyncio.gather(
                 *[
                     self._request(
-                        CONTROL_RIGHT_PATH,
+                        OUTBOUND_INVESTMENT_PATH,
                         {"keyword": company_name, "pageNum": page, "pageSize": page_size},
                     )
                     for page in page_numbers
@@ -364,11 +363,9 @@ class TianyanchaClient:
                     else {}
                 )
                 _consume(page_result)
-                if len(companies) >= entity_limit:
-                    break
 
         values = list(companies.values())[:entity_limit]
-        return ControlRightResult(
+        return OutboundInvestmentResult(
             companies=values,
             total_reported=total,
             pages_fetched=pages_fetched,

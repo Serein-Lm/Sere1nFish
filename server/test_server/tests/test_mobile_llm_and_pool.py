@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from types import SimpleNamespace
 
@@ -37,6 +38,76 @@ def test_executor_model_config_disables_thinking() -> None:
 
     assert model_config.extra_body["enable_thinking"] is False
     assert model_config.extra_body["vl_high_resolution_images"] is True
+
+
+def test_shared_llm_factory_preserves_vision_parameters(monkeypatch) -> None:
+    from Sere1nGraph.graph.agents import runtime as agent_runtime
+    from Sere1nGraph.graph import observability
+
+    captured = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(agent_runtime, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr(
+        observability,
+        "get_global_tracker",
+        lambda: SimpleNamespace(callback=object()),
+    )
+    app_config = SimpleNamespace(
+        runtime=SimpleNamespace(
+            base_url="https://example.test/v1",
+            api_key="test-key",
+            models=SimpleNamespace(default="qwen3.7-plus"),
+        )
+    )
+
+    agent_runtime.create_llm(
+        app_config,
+        model_name="qwen3.7-plus",
+        streaming=False,
+        extra_body={"vl_high_resolution_images": True},
+    )
+
+    assert captured["extra_body"] == {
+        "enable_thinking": False,
+        "vl_high_resolution_images": True,
+    }
+    assert captured["stream_usage"] is False
+    assert len(captured["callbacks"]) == 1
+
+
+def test_xhs_vision_uses_observed_async_llm(monkeypatch) -> None:
+    from api.services import xhs_vision_tools
+
+    async def _run() -> None:
+        calls = {}
+
+        class FakeLlm:
+            async def ainvoke(self, messages):
+                calls["messages"] = messages
+                return SimpleNamespace(content=[{"type": "text", "text": "画像结果"}])
+
+        async def fake_llm(*, streaming: bool = False):
+            calls["streaming"] = streaming
+            return FakeLlm()
+
+        monkeypatch.setattr(xhs_vision_tools, "_get_observed_vision_llm", fake_llm)
+        monkeypatch.setattr(xhs_vision_tools, "_load_prompt", lambda _name: "分析提示")
+
+        result = await xhs_vision_tools.analyze_screenshots_with_vision_async(
+            [{"base64": "aGVsbG8=", "format": "png"}]
+        )
+
+        assert result == "画像结果"
+        assert calls["streaming"] is False
+        content = calls["messages"][0].content
+        assert content[0]["type"] == "image_url"
+        assert content[-1] == {"type": "text", "text": "分析提示"}
+
+    asyncio.run(_run())
 
 
 def test_pairing_candidate_survives_stale_offline_adb_record(monkeypatch) -> None:

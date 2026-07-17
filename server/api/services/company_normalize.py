@@ -64,6 +64,7 @@ async def normalize_company(
 
     from api.dao import company_meta as company_meta_dao
     from api.services.info_collection.url_tools import _build_worker_chrome_config
+    from core.observability import observation_context
     from Sere1nGraph.graph.agents.factory import create_company_normalize_agent
     from Sere1nGraph.graph.agents.runtime import extract_with_retry
     from Sere1nGraph.graph.prompts.loader import load_prompt
@@ -165,10 +166,16 @@ async def normalize_company(
     try:
         worker_config = _build_worker_chrome_config(app_config, cdp_url)
         agent = await create_company_normalize_agent(worker_config)
-        raw = await agent(
-            {"messages": [HumanMessage(content=f"请规范化以下公司名并给出官网根域名：{input_name}")]}
-        )
-        parsed = await extract_with_retry(raw, worker_config, system_prompt=prompt) or {}
+        with observation_context(
+            project_id=project_id,
+            task_id=task_id,
+            phase="company_normalize",
+            agent="company_normalize",
+        ):
+            raw = await agent(
+                {"messages": [HumanMessage(content=f"请规范化以下公司名并给出官网根域名：{input_name}")]}
+            )
+            parsed = await extract_with_retry(raw, worker_config, system_prompt=prompt) or {}
     finally:
         try:
             await provider.release_cdp_endpoint(cdp_task_id)
