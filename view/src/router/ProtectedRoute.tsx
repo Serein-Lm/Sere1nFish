@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import { Spin } from 'antd'
 import { checkAuth } from '../services/authService'
+import { buildLoginPath } from '../utils/authNavigation'
 
 interface ProtectedRouteProps {
   children: React.ReactNode
@@ -54,7 +55,7 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
 
   if (!token || !authed) {
     const from = `${location.pathname}${location.search}${location.hash}`
-    return <Navigate to="/login" replace state={{ from }} />
+    return <Navigate to={buildLoginPath(from)} replace state={{ from }} />
   }
 
   return <>{children}</>

@@ -13,6 +13,7 @@ from api.auth import User, get_current_active_user
 from api.db.mongodb import get_db
 from api.dao import ai_hub as ai_hub_dao
 from api.services.runtime_config import get_runtime_app_config
+from api.services.agent_references import compose_reference_query, normalize_references
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
@@ -131,6 +132,8 @@ async def stream(
     owner = getattr(current_user, "username", "") or ""
     request_options = request.options or {}
     display_query = str(request_options.get("display_query") or request.query)
+    references = normalize_references(request_options.get("references"))
+    execution_query = compose_reference_query(request.query, references)
 
     # 会话留存：先落库 user query（会话存在且属于当前用户才留存）
     if conversation_id:
@@ -155,7 +158,11 @@ async def stream(
         sections: dict[str, str] = {}
         opts = request_options
         project_id = str(opts.get("project_id") or "").strip()
-        references = opts.get("references") if isinstance(opts.get("references"), list) else []
+        if not project_id:
+            project_id = next(
+                (ref["id"] for ref in references if ref["type"] == "project"),
+                "",
+            )
         attribution_id = conversation_id or ""
         artifact_run = None
         try:
@@ -176,7 +183,7 @@ async def stream(
             ) as artifact_run:
                 async for event in execute_stream(
                     workflow=request.workflow,
-                    query=request.query,
+                    query=execution_query,
                     app_config=app_config,
                     options=request.options,
                 ):

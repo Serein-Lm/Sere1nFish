@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { message } from 'antd'
 import { login } from '../../services/authService'
+import { resolveLoginReturnPath } from '../../utils/authNavigation'
 import './Login.css'
 
 interface LoginForm {
@@ -14,14 +15,6 @@ interface InputActiveState {
   username: boolean
   password: boolean
   key: boolean
-}
-
-function loginReturnPath(state: unknown): string {
-  const from = (state as { from?: unknown } | null)?.from
-  if (typeof from !== 'string' || !from.startsWith('/') || from.startsWith('//')) {
-    return '/dashboard'
-  }
-  return from.startsWith('/login') ? '/dashboard' : from
 }
 
 // 粒子类
@@ -227,7 +220,7 @@ export default function Login() {
 
       localStorage.setItem('token', result.access_token)
       localStorage.setItem('userInfo', JSON.stringify({ username: loginForm.username }))
-      navigate(loginReturnPath(location.state), { replace: true })
+      navigate(resolveLoginReturnPath(location.state, location.search), { replace: true })
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : ''
       messageApi.error(errMsg || '登录失败，请检查用户名、密码或访问密钥')

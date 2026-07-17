@@ -321,3 +321,48 @@ async def list_target_documents(
         {**link, "document": documents.get(str(link.get("document_id") or ""), {})}
         for link in links
     ], total
+
+
+async def list_project_documents(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    *,
+    skip: int = 0,
+    limit: int = 50,
+) -> tuple[list[dict[str, Any]], int]:
+    """List permanent source documents linked to a project, including latest content."""
+    query = {"project_id": project_id}
+    bounded_limit = max(1, min(int(limit or 50), 200))
+    total = await db[SOURCE_DOCUMENT_LINKS_COLLECTION].count_documents(query)
+    links = await (
+        db[SOURCE_DOCUMENT_LINKS_COLLECTION]
+        .find(query, {"_id": 0})
+        .sort("last_seen_at", -1)
+        .skip(max(0, int(skip or 0)))
+        .limit(bounded_limit)
+        .to_list(bounded_limit)
+    )
+    document_ids = list(
+        dict.fromkeys(str(link.get("document_id") or "") for link in links)
+    )
+    documents = {
+        doc["document_id"]: doc
+        async for doc in db[SOURCE_DOCUMENTS_COLLECTION].find(
+            {"document_id": {"$in": document_ids}}, {"_id": 0}
+        )
+    }
+    version_ids = [
+        str(doc.get("latest_version_id") or "") for doc in documents.values()
+    ]
+    versions = {
+        doc["version_id"]: doc
+        async for doc in db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].find(
+            {"version_id": {"$in": version_ids}}, {"_id": 0}
+        )
+    }
+    items: list[dict[str, Any]] = []
+    for link in links:
+        document = documents.get(str(link.get("document_id") or ""), {})
+        version = versions.get(str(document.get("latest_version_id") or ""), {})
+        items.append({**link, "document": document, "version": version})
+    return items, total

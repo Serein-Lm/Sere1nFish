@@ -46,6 +46,8 @@ TOOL_DISPLAY_NAMES = {
     "generate_persona_word": "生成人物 Word",
     "generate_payload_word": "生成载荷 Word",
     "get_artifact_content": "读取历史产物",
+    "get_project_data_catalog": "检查项目数据源",
+    "read_project_dataset": "读取项目数据",
     "list_my_artifacts": "查询历史产物",
 }
 

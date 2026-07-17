@@ -1,4 +1,5 @@
 import { API_CONFIG } from '../config/api'
+import { redirectToLogin } from '../utils/authNavigation'
 
 export function getToken(): string | null {
   return localStorage.getItem('token')
@@ -7,12 +8,6 @@ export function getToken(): string | null {
 export function clearToken(): void {
   localStorage.removeItem('token')
   localStorage.removeItem('userInfo')
-}
-
-function redirectToLogin(): void {
-  if (window.location.pathname !== '/login') {
-    window.location.href = '/login'
-  }
 }
 
 export async function apiFetch<T>(

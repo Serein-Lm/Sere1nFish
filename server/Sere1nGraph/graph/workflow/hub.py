@@ -71,8 +71,14 @@ def _data_tools() -> list[Any]:
     from ..tools.read_tools import READ_TOOLS
     from ..tools.analysis_tools import ANALYSIS_TOOLS
     from ..tools.artifact_tools import ARTIFACT_QUERY_TOOLS
+    from ..tools.project_data_tools import PROJECT_DATA_TOOLS
 
-    return list(READ_TOOLS) + list(ANALYSIS_TOOLS) + list(ARTIFACT_QUERY_TOOLS)
+    return (
+        list(READ_TOOLS)
+        + list(ANALYSIS_TOOLS)
+        + list(PROJECT_DATA_TOOLS)
+        + list(ARTIFACT_QUERY_TOOLS)
+    )
 
 
 def _persona_tools() -> list[Any]:
@@ -110,6 +116,7 @@ def _payload_tools() -> list[Any]:
     from ..tools.artifact_tools import ARTIFACT_QUERY_TOOLS
     from ..tools.context_tools import CONTEXT_TOOLS
     from ..tools.persona_tools import PERSONA_TOOLS
+    from ..tools.project_data_tools import PROJECT_DATA_TOOLS
     from ..tools.read_tools import READ_TOOLS
     from ..tools.skill_tools import SKILL_TOOLS
     from ..tools.word_tools import PAYLOAD_WORD_TOOLS
@@ -119,6 +126,7 @@ def _payload_tools() -> list[Any]:
         + list(ANALYSIS_TOOLS)
         + list(PERSONA_TOOLS)
         + list(CONTEXT_TOOLS)
+        + list(PROJECT_DATA_TOOLS)
         + list(ARTIFACT_QUERY_TOOLS)
         + list(SKILL_TOOLS)
         + list(PAYLOAD_WORD_TOOLS)

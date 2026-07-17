@@ -18,6 +18,7 @@
  */
 
 import { API_CONFIG } from '../config/api'
+import { redirectToLogin } from '../utils/authNavigation'
 import { getToken, clearToken } from './http'
 
 const MOBILE = '/v1/mobile'
@@ -48,9 +49,7 @@ function buildHeaders(json = true): Headers {
 
 function handleUnauthorized(): void {
   clearToken()
-  if (window.location.pathname !== '/login') {
-    window.location.href = '/login'
-  }
+  redirectToLogin()
 }
 
 function resolveApiUrl(pathOrUrl: string): string {

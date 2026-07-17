@@ -33,6 +33,13 @@ def _truncate(text: str, limit: int = 600) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _execution_owner() -> str:
+    from api.services.artifact_context import get_artifact_context
+
+    context = get_artifact_context()
+    return str(context.owner or "").strip() if context else ""
+
+
 # ============ 项目与任务 ============
 
 @tool(
@@ -462,13 +469,18 @@ def list_mobile_operations(
 )
 def list_recent_conversations(limit: int = 10) -> str:
     """列出历史会话摘要。"""
+    owner = _execution_owner()
+    if not owner:
+        return "当前执行上下文没有用户归属，无法查询历史会话。"
 
     async def _load() -> list[dict[str, Any]]:
         from api.dao import ai_hub as ai_hub_dao
         from api.db.mongodb import get_db
 
         return await ai_hub_dao.list_conversations(
-            get_db(), limit=max(1, min(int(limit or 10), 30))
+            get_db(),
+            owner=owner,
+            limit=max(1, min(int(limit or 10), 30)),
         )
 
     try:

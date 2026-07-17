@@ -20,6 +20,7 @@ import { ThoughtChain } from '@ant-design/x'
 import XMarkdown from '@ant-design/x-markdown'
 import React from 'react'
 import { API_CONFIG, API_ENDPOINTS, REQUEST_HEADERS } from '../config/api'
+import { redirectToLogin } from '../utils/authNavigation'
 import { apiFetch, clearToken, getToken } from './http'
 
 // ============================================
@@ -327,9 +328,7 @@ export class AgentStreamService {
 
       if (response.status === 401) {
         clearToken()
-        if (window.location.pathname !== '/login') {
-          window.location.href = '/login'
-        }
+        redirectToLogin()
         throw new Error('Unauthorized')
       }
 

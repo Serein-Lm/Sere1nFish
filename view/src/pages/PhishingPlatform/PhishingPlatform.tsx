@@ -426,6 +426,7 @@ export default function PhishingPlatform() {
   const [dataRefs, setDataRefs] = useState<DataReference[]>([])
   const [artifactRefs, setArtifactRefs] = useState<Artifact[]>([])
   const [artifacts, setArtifacts] = useState<Artifact[]>([])
+  const [focusedArtifact, setFocusedArtifact] = useState<Artifact | null>(null)
   const [artifactsLoading, setArtifactsLoading] = useState(false)
   const [artifactsOpen, setArtifactsOpen] = useState(false)
   const [artifactScope, setArtifactScope] = useState<'conversation' | 'all'>('conversation')
@@ -494,6 +495,7 @@ export default function PhishingPlatform() {
     getArtifact(artifactId)
       .then(artifact => {
         if (cancelled) return
+        setFocusedArtifact(artifact)
         setArtifactRefs(prev => prev.some(item => item.artifact_id === artifact.artifact_id)
           ? prev
           : [...prev, artifact])
@@ -666,6 +668,7 @@ export default function PhishingPlatform() {
       ? prev
       : [...prev, artifact])
     setArtifactsOpen(false)
+    setFocusedArtifact(null)
     message.success(`已引用产物：${artifact.title}`)
     setTimeout(() => senderRef.current?.focus?.(), 0)
   }
@@ -704,44 +707,6 @@ export default function PhishingPlatform() {
 
   const handleRemoveReference = (type: DataReference['type'], id: string) => {
     setDataRefs(prev => prev.filter(r => !(r.type === type && r.id === id)))
-  }
-
-  // 把已引用的数据实体转成给 agent 的指令前缀：只声明"读什么"，不固定编排
-  const buildReferencePreamble = (refs: DataReference[]): string => {
-    if (!refs.length) return ''
-    const persons = refs.filter(r => r.type === 'person')
-    const projects = refs.filter(r => r.type === 'project')
-    const findings = refs.filter(r => r.type === 'finding')
-    const lines: string[] = ['【引用数据】用户在中台引用了以下平台数据，请用你的工具自主读取后再完成任务：']
-    persons.forEach(r => {
-      lines.push(`- 人物画像：${r.label}（person_id=${r.id}）${r.desc ? `，${r.desc}` : ''}`)
-    })
-    projects.forEach(r => {
-      lines.push(`- 项目数据：${r.label}（project_id=${r.id}）${r.desc ? `，${r.desc}` : ''}`)
-    })
-    findings.forEach(r => {
-      lines.push(`- 发现节点：${r.label}（finding_id=${r.id}）${r.desc ? `，${r.desc}` : ''}`)
-    })
-    if (persons.length) {
-      lines.push('可用 get_entity_context / get_persona 拉取人物完整背景，并结合人设库检索更合适的信息综合判断。')
-    }
-    if (projects.length) {
-      lines.push('可用 get_project_dashboard / query_findings 分析该项目数据、定位高价值目标。')
-    }
-    if (findings.length) {
-      lines.push('可用 query_findings / get_entity_context 读取该发现节点的攻击面与关联情报。')
-    }
-    lines.push('请基于以上引用数据满足下面的需求；如需产出可下载文件，调用相应 Word 工具并返回下载链接。')
-    return lines.join('\n')
-  }
-
-  const buildArtifactPreamble = (refs: Artifact[]): string => {
-    if (!refs.length) return ''
-    return [
-      '【引用产物】用户引用了以下历史 AI 产物，请先调用 get_artifact_content 读取正文与来源：',
-      ...refs.map(item => `- ${item.title}（artifact_id=${item.artifact_id}，kind=${item.kind}）`),
-      '基于这些产物完成新需求；需要更新交付物时生成新的 Artifact，不要覆盖历史文件。',
-    ].join('\n')
   }
 
   // 快捷提示 - 已移除
@@ -931,11 +896,6 @@ export default function PhishingPlatform() {
     // 清空输入
     setInputValue('')
 
-    // 组装给 agent 的查询：引用数据前缀（只声明读什么，不固定编排）+ 用户需求
-    const preamble = buildReferencePreamble(refsSnapshot)
-    const artifactPreamble = buildArtifactPreamble(artifactRefsSnapshot)
-    const contextPreamble = [preamble, artifactPreamble].filter(Boolean).join('\n\n')
-    const agentQuery = contextPreamble ? `${contextPreamble}\n\n【需求】${value}` : value
     // 发送后清空已引用数据，避免带入下一轮
     setDataRefs([])
     setArtifactRefs([])
@@ -953,7 +913,7 @@ export default function PhishingPlatform() {
 
     // 调用真实的 SSE 流式 API
     await streamResponse(
-      agentQuery,
+      value,
       aiMessageKey,
       skill,
       conversationId,
@@ -967,6 +927,11 @@ export default function PhishingPlatform() {
     message.warning('已取消请求')
   }
 
+  const drawerArtifacts = focusedArtifact
+    ? [focusedArtifact, ...artifacts.filter(
+      artifact => artifact.artifact_id !== focusedArtifact.artifact_id,
+    )]
+    : artifacts
 
   // Bubble.List 角色配置
   const roles: BubbleListProps['role'] = {
@@ -1566,7 +1531,10 @@ export default function PhishingPlatform() {
         rootClassName="ai-hub-drawer"
         title="AI 产物"
         open={artifactsOpen}
-        onClose={() => setArtifactsOpen(false)}
+        onClose={() => {
+          setArtifactsOpen(false)
+          setFocusedArtifact(null)
+        }}
         size={420}
       >
         <Segmented
@@ -1579,17 +1547,18 @@ export default function PhishingPlatform() {
           ]}
           onChange={value => {
             const nextScope = value as 'conversation' | 'all'
+            setFocusedArtifact(null)
             setArtifactScope(nextScope)
             loadArtifactList(activeConversationId, nextScope)
           }}
         />
         {artifactsLoading ? (
           <div className="artifact-drawer-loading"><Spin /></div>
-        ) : artifacts.length === 0 ? (
+        ) : drawerArtifacts.length === 0 ? (
           <Empty description="暂无 AI 产物" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <div className="artifact-drawer-list">
-            {artifacts.map(artifact => {
+            {drawerArtifacts.map(artifact => {
               const presentation = getArtifactPresentation(artifact)
               const size = formatArtifactSize(artifact.size)
               return (
@@ -1605,6 +1574,9 @@ export default function PhishingPlatform() {
                         ? <span>{artifact.meta.sources.length} 个公网来源</span>
                         : null}
                       {artifact.meta?.channel === 'dingtalk_stream' ? <Tag color="cyan">钉钉</Tag> : null}
+                      {artifact.artifact_id === focusedArtifact?.artifact_id
+                        ? <Tag color="blue">当前产物</Tag>
+                        : null}
                     </Space>
                   </div>
                   <Space size={4}>

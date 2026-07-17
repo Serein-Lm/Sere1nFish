@@ -17,11 +17,17 @@ def _tool_groups() -> dict[str, list[Any]]:
     from .artifact_tools import ARTIFACT_QUERY_TOOLS
     from .context_tools import CONTEXT_TOOLS
     from .persona_tools import PERSONA_TOOLS
+    from .project_data_tools import PROJECT_DATA_TOOLS
     from .read_tools import READ_TOOLS
     from .skill_tools import SKILL_TOOLS
     from .word_tools import PAYLOAD_WORD_TOOLS, WORD_TOOLS
 
-    data = list(READ_TOOLS) + list(ANALYSIS_TOOLS) + list(ARTIFACT_QUERY_TOOLS)
+    data = (
+        list(READ_TOOLS)
+        + list(ANALYSIS_TOOLS)
+        + list(PROJECT_DATA_TOOLS)
+        + list(ARTIFACT_QUERY_TOOLS)
+    )
     persona = list(PERSONA_TOOLS) + list(CONTEXT_TOOLS) + [
         tool
         for tool in READ_TOOLS
@@ -33,6 +39,7 @@ def _tool_groups() -> dict[str, list[Any]]:
         + list(ANALYSIS_TOOLS)
         + list(PERSONA_TOOLS)
         + list(CONTEXT_TOOLS)
+        + list(PROJECT_DATA_TOOLS)
         + list(ARTIFACT_QUERY_TOOLS)
         + list(SKILL_TOOLS)
         + list(PAYLOAD_WORD_TOOLS)
@@ -65,6 +72,7 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
     from .artifact_tools import ARTIFACT_QUERY_TOOLS
     from .context_tools import CONTEXT_TOOLS
     from .persona_tools import PERSONA_TOOLS
+    from .project_data_tools import PROJECT_DATA_TOOLS
     from .read_tools import READ_TOOLS
 
     query_names = {
@@ -74,6 +82,7 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
             + list(ANALYSIS_TOOLS)
             + list(PERSONA_TOOLS)
             + list(CONTEXT_TOOLS)
+            + list(PROJECT_DATA_TOOLS)
             + list(ARTIFACT_QUERY_TOOLS)
         )
     }
