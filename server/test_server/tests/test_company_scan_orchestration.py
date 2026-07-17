@@ -142,6 +142,7 @@ async def test_low_authority_alias_does_not_downgrade_canonical_target(
         (
             False,
             [
+                "https://bilibili.com",
                 "https://manual.example.com",
                 "https://new.example.com",
                 "https://stable.example.com",
@@ -154,7 +155,11 @@ async def test_low_authority_alias_does_not_downgrade_canonical_target(
         ),
         (
             True,
-            ["https://manual.example.com", "https://new.example.com"],
+            [
+                "https://bilibili.com",
+                "https://manual.example.com",
+                "https://new.example.com",
+            ],
             ["https://new.example.com"],
         ),
     ],

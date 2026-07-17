@@ -7,6 +7,28 @@ from typing import Any
 from core.stream import Item, RetryPolicy, Stage
 
 
+async def _archive_detail_payload(
+    ctx: Any,
+    *,
+    project_id: str,
+    task_id: str,
+    note_id: str,
+    raw: dict[str, Any],
+    comments_data: list[dict[str, Any]],
+) -> dict[str, str]:
+    archive_service = ctx.state.get("xhs_archive_service")
+    if archive_service is None:
+        return {}
+    return await archive_service.archive_json(
+        {"detail": raw, "comments": comments_data},
+        kind="detail",
+        project_id=project_id,
+        task_id=task_id,
+        source_id=note_id,
+        meta={"note_id": note_id},
+    )
+
+
 class XhsSearchStage(Stage):
     """Search one keyword and emit normalized notes to tagging workers."""
 
@@ -122,7 +144,13 @@ class XhsTaggingStage(Stage):
             )
             tagging = tag_result.tagging
             if tagging:
-                await xhs_dao.update_note_tagging(self.db, note_id, tagging)
+                await xhs_dao.update_note_tagging(
+                    self.db,
+                    note_id,
+                    tagging,
+                    project_id=note.get("project_id", ""),
+                    task_id=note.get("_sub_task_id", note.get("task_id", "")),
+                )
                 if tag_result.score >= self.attention_threshold:
                     ctx.state["all_suspicious_count"] = ctx.state.get("all_suspicious_count", 0) + 1
                     note["_tagging"] = tagging
@@ -133,14 +161,14 @@ class XhsTaggingStage(Stage):
                     "attention_score": 0,
                     "attack_surface_types": [],
                     "reason": "打标解析失败",
-                })
+                }, project_id=note.get("project_id", ""), task_id=note.get("_sub_task_id", note.get("task_id", "")))
         except Exception as exc:
             ctx.logger.warning(f"[xhs-stream] 打标失败 note={note_id}: {exc}")
             await xhs_dao.update_note_tagging(self.db, note_id, {
                 "is_suspicious": False,
                 "attention_score": 0,
                 "reason": f"打标失败: {exc}",
-            })
+            }, project_id=note.get("project_id", ""), task_id=note.get("_sub_task_id", note.get("task_id", "")))
 
         if ctx.state["tagging_count"] % 10 == 0:
             ctx.logger.info(
@@ -188,7 +216,13 @@ class XhsNoteTaggingPersistStage(Stage):
                 )
             )
             if tag_result.tagging:
-                await xhs_dao.update_note_tagging(self.db, note_id, tag_result.tagging)
+                await xhs_dao.update_note_tagging(
+                    self.db,
+                    note_id,
+                    tag_result.tagging,
+                    project_id=note.get("project_id", ""),
+                    task_id=note.get("_sub_task_id", note.get("task_id", "")),
+                )
         except Exception as exc:
             ctx.logger.warning(f"[xhs-stream] 兼容笔记打标失败 note={note_id}: {exc}")
             await xhs_dao.update_note_tagging(self.db, note_id, {
@@ -197,7 +231,7 @@ class XhsNoteTaggingPersistStage(Stage):
                 "attack_surface_types": [],
                 "reason": f"打标失败: {exc}",
                 "key_info_extracted": [],
-            })
+            }, project_id=note.get("project_id", ""), task_id=note.get("_sub_task_id", note.get("task_id", "")))
 
 
 async def _insert_detail_findings(
@@ -288,9 +322,26 @@ class XhsPrefetchedDetailTaggingStage(Stage):
         comments_summary = payload.get("comments_summary", "")
         comments_data = payload.get("comments_data", [])
         images_urls = payload.get("images_urls", [])
+        raw_payload = payload.get("raw", {}) if isinstance(payload.get("raw"), dict) else {}
         tagging_tool = ctx.state.get("xhs_detail_tagging_tool")
         if not tagging_tool:
             raise RuntimeError("xhs_detail_tagging_tool 未初始化")
+
+        archive_ref: dict[str, str] = {}
+        archive_error = ""
+        if raw_payload:
+            try:
+                archive_ref = await _archive_detail_payload(
+                    ctx,
+                    project_id=self.project_id,
+                    task_id=note.get("_sub_task_id", note.get("task_id", "")),
+                    note_id=note_id,
+                    raw=raw_payload,
+                    comments_data=comments_data,
+                )
+            except Exception as exc:
+                archive_error = str(exc)
+                ctx.logger.warning(f"[xhs-stream] 预取详情原始响应归档失败 note={note_id}: {exc}")
 
         await xhs_dao.create_note_detail(
             self.db,
@@ -302,6 +353,11 @@ class XhsPrefetchedDetailTaggingStage(Stage):
             images_urls=images_urls,
             xsec_token=note.get("xsec_token", ""),
             xsec_source=note.get("xsec_source", ""),
+            task_id=note.get("_sub_task_id", note.get("task_id", "")),
+            raw_payload=raw_payload,
+            raw_payload_object_id=archive_ref.get("storage_object_id", ""),
+            raw_payload_url=archive_ref.get("url", ""),
+            archive_error=archive_error,
         )
         ctx.state["detail_count"] = ctx.state.get("detail_count", 0) + 1
         tag_result = await tagging_tool.tag(
@@ -320,7 +376,12 @@ class XhsPrefetchedDetailTaggingStage(Stage):
         )
         detail_tagging = tag_result.tagging
         if detail_tagging:
-            await xhs_dao.update_note_detail_tagging(self.db, note_id, detail_tagging)
+            await xhs_dao.update_note_detail_tagging(
+                self.db,
+                note_id,
+                detail_tagging,
+                project_id=self.project_id,
+            )
             inserted = await _insert_detail_findings(
                 db=self.db,
                 project_id=self.project_id,
@@ -397,6 +458,21 @@ class XhsDetailStage(Stage):
                 ctx.logger.warning(f"[xhs-stream] 详情获取失败 note={note_id}")
                 return
 
+            archive_ref: dict[str, str] = {}
+            archive_error = ""
+            try:
+                archive_ref = await _archive_detail_payload(
+                    ctx,
+                    project_id=self.project_id,
+                    task_id=note.get("_sub_task_id", note.get("task_id", "")),
+                    note_id=note_id,
+                    raw=detail_result.raw,
+                    comments_data=detail_result.comments_data,
+                )
+            except Exception as exc:
+                archive_error = str(exc)
+                ctx.logger.warning(f"[xhs-stream] 详情原始响应归档失败 note={note_id}: {exc}")
+
             await xhs_dao.create_note_detail(
                 self.db,
                 note_id=note_id,
@@ -407,6 +483,11 @@ class XhsDetailStage(Stage):
                 images_urls=detail_result.images_urls,
                 xsec_token=xsec_token,
                 xsec_source=xsec_source,
+                task_id=note.get("_sub_task_id", note.get("task_id", "")),
+                raw_payload=detail_result.raw,
+                raw_payload_object_id=archive_ref.get("storage_object_id", ""),
+                raw_payload_url=archive_ref.get("url", ""),
+                archive_error=archive_error,
             )
             ctx.state["detail_count"] = ctx.state.get("detail_count", 0) + 1
             ctx.state["comments_count"] = ctx.state.get("comments_count", 0) + len(detail_result.comments_data)
@@ -427,7 +508,12 @@ class XhsDetailStage(Stage):
             )
             detail_tagging = tag_result.tagging
             if detail_tagging:
-                await xhs_dao.update_note_detail_tagging(self.db, note_id, detail_tagging)
+                await xhs_dao.update_note_detail_tagging(
+                    self.db,
+                    note_id,
+                    detail_tagging,
+                    project_id=self.project_id,
+                )
                 inserted = await self._insert_detail_findings(note, note_id, detail_tagging)
                 ctx.state["detail_findings_count"] = ctx.state.get("detail_findings_count", 0) + inserted
             ctx.logger.info(f"[xhs-stream] 详情+打标完成 note={note_id}")

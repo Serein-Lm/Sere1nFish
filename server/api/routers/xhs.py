@@ -116,6 +116,9 @@ def _note_out(doc: dict) -> XhsNoteOut:
         id=str(doc.get("_id")),
         project_id=doc.get("project_id"),
         task_id=doc.get("task_id"),
+        keyword=doc.get("keyword"),
+        target_id=doc.get("target_id"),
+        target_name=doc.get("target_name"),
         note_id=doc.get("note_id"),
         xsec_token=doc.get("xsec_token"),  # 用于前端跳转
         xsec_source=doc.get("xsec_source"),
@@ -129,6 +132,11 @@ def _note_out(doc: dict) -> XhsNoteOut:
         ),
         cover=doc.get("cover"),
         publish_time_text=doc.get("publish_time_text"),
+        search_provider=doc.get("search_provider"),
+        search_page=doc.get("search_page"),
+        search_payload_object_id=doc.get("search_payload_object_id"),
+        search_payload_url=doc.get("search_payload_url"),
+        search_archive_error=doc.get("search_archive_error"),
         tagging=XhsNoteTagging(**tagging_data) if tagging_data else None,
         created_at=doc.get("created_at"),
     )
@@ -144,6 +152,9 @@ def _detail_out(doc: dict) -> XhsNoteDetailOut:
         xsec_source=doc.get("xsec_source"),
         content=doc.get("content"),
         comments_summary=doc.get("comments_summary"),
+        raw_payload_object_id=doc.get("raw_payload_object_id"),
+        raw_payload_url=doc.get("raw_payload_url"),
+        archive_error=doc.get("archive_error"),
         tagging=XhsDetailTagging(**tagging_data) if tagging_data else None,
         created_at=doc.get("created_at"),
     )

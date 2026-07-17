@@ -137,6 +137,33 @@ def test_xhs_cookie_upsert_has_no_conflicting_update_paths():
     asyncio.run(_run())
 
 
+def test_successful_cookie_verification_clears_cooldown_and_quarantine():
+    async def _run():
+        from api.dao import xhs as xhs_dao
+
+        db = _FakeDB([
+            {
+                "account_name": "account-a",
+                "is_valid": False,
+                "consecutive_failures": 2,
+                "cooldown_until": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "quarantined_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "quarantine_reason": "连续失败 2 次",
+            }
+        ])
+
+        doc = await xhs_dao.set_cookie_valid(db, "account-a", True)
+
+        assert doc is not None
+        assert doc["is_valid"] is True
+        assert doc["consecutive_failures"] == 0
+        assert doc["cooldown_until"] is None
+        assert doc["quarantined_at"] is None
+        assert doc["quarantine_reason"] is None
+
+    asyncio.run(_run())
+
+
 def test_xhs_account_cooldown_rejoins_after_expiry(monkeypatch):
     async def _run():
         from api.services import xhs_runtime
@@ -282,7 +309,7 @@ def test_xhs_account_invalidates_only_after_failure_threshold(monkeypatch):
     asyncio.run(_run())
 
 
-def test_xhs_account_is_quarantined_after_first_failure_by_default(monkeypatch):
+def test_xhs_account_cools_after_first_failure_and_quarantines_after_second(monkeypatch):
     async def _run():
         from api.services import xhs_runtime
 
@@ -312,11 +339,35 @@ def test_xhs_account_is_quarantined_after_first_failure_by_default(monkeypatch):
         )
 
         assert db.collection.docs[0]["consecutive_failures"] == 1
-        assert db.collection.docs[0]["quarantined_at"] == now
+        assert not db.collection.docs[0].get("quarantined_at")
         with pytest.raises(RuntimeError):
             await xhs_runtime.select_xhs_account(db, purpose="search")
 
+        await xhs_runtime.record_xhs_account_result(
+            db,
+            "risk",
+            success=False,
+            error="访问频繁",
+            cooldown_seconds=60,
+        )
+        assert db.collection.docs[0]["consecutive_failures"] == 2
+        assert db.collection.docs[0]["quarantined_at"] == now
+
     asyncio.run(_run())
+
+
+def test_xhs_account_abnormal_error_is_cooled_before_account_rotation():
+    from api.services.xhs_runtime import classify_xhs_account_error
+
+    decision = classify_xhs_account_error(
+        "XHS API 失败: code=300011 msg=Account abnormal. Switch account and retry.",
+        config={"account_pool": {"error_cooldown_seconds": 300}},
+    )
+
+    assert decision.reason == "account_abnormal"
+    assert decision.cooldown_seconds == 300
+    assert decision.invalidate is False
+    assert decision.risk_control is False
 
 
 def test_xhs_request_policy_caps_each_keyword_to_one_page_by_default():

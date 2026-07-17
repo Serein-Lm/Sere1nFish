@@ -136,6 +136,18 @@ class AdbAppLauncher:
                 return f"{package}/{activity}"
         raise RuntimeError(f"未找到应用启动 Activity: {package_name}")
 
+    def _collapse_system_panels(self, adb_device_id: str) -> None:
+        """避免通知栏等系统浮层遮住 OEM 应用选择器。"""
+        try:
+            self._shell(
+                adb_device_id,
+                ["cmd", "statusbar", "collapse"],
+                timeout=5,
+            )
+        except Exception:
+            # 部分 Android 版本不提供 statusbar service，应用启动仍可继续。
+            return
+
     def _dump_ui(self, adb_device_id: str) -> ElementTree.Element:
         output = self._run(
             [
@@ -236,6 +248,7 @@ class AdbAppLauncher:
 
         try:
             component = self._resolve_launcher_component(adb_device_id, package_name)
+            self._collapse_system_panels(adb_device_id)
             self._shell(
                 adb_device_id,
                 ["am", "start", "-n", component],

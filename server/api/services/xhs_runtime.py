@@ -36,7 +36,7 @@ DEFAULT_XHS_SEARCH_PAGE_SIZE = 20
 DEFAULT_XHS_SEARCH_MAX_PAGES_PER_KEYWORD = 1
 DEFAULT_XHS_REQUEST_INTERVAL_MIN_SECONDS = 4.0
 DEFAULT_XHS_REQUEST_INTERVAL_MAX_SECONDS = 8.0
-DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES = 1
+DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES = 2
 
 
 @dataclass
@@ -435,6 +435,17 @@ def classify_xhs_account_error(
     pool = _account_pool_config(config)
     text = str(error or "").lower()
 
+    account_abnormal_keywords = (
+        "code=300011",
+        "account abnormal",
+        "switch account and retry",
+    )
+    if any(keyword in text for keyword in account_abnormal_keywords):
+        return XhsErrorDecision(
+            cooldown_seconds=_as_int(pool.get("error_cooldown_seconds"), 300),
+            reason="account_abnormal",
+        )
+
     invalid_keywords = (
         "cookie 已失效",
         "cookie失效",
@@ -712,7 +723,10 @@ async def get_xhs_runtime_status(db: AsyncIOMotorDatabase) -> dict[str, Any]:
             "enabled": _as_bool(pool.get("enabled"), default=True),
             "strategy": pool.get("strategy", "least_recently_used"),
             "search_pages_per_account": max(1, _as_int(pool.get("search_pages_per_account"), 1)),
-            "search_retries_per_page": max(1, _as_int(pool.get("search_retries_per_page"), 1)),
+            "search_retries_per_page": min(
+                5,
+                max(2, _as_int(pool.get("search_retries_per_page"), 2)),
+            ),
             "search_page_size": request_policy.page_size,
             "search_max_pages_per_keyword": request_policy.max_pages_per_keyword,
             "request_interval_min_seconds": request_policy.interval_min_seconds,

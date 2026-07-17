@@ -8,7 +8,7 @@ from typing import Any
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import ReturnDocument
+from pymongo import ReturnDocument, UpdateOne
 
 from api.db.collections import (
     XHS_COOKIES_COLLECTION,
@@ -115,14 +115,21 @@ async def set_cookie_valid(
     is_valid: bool,
 ) -> dict[str, Any] | None:
     """设置 Cookie 有效性"""
-    return await update_cookie(db, account_name, {
+    patch: dict[str, Any] = {
         "is_valid": is_valid,
         "last_verified_at": _now(),
         "last_error": None if is_valid else "Cookie 验证失败",
         "consecutive_failures": 0 if is_valid else 1,
         "last_success_at": _now() if is_valid else None,
         "last_failure_at": None if is_valid else _now(),
-    })
+    }
+    if is_valid:
+        patch.update(
+            cooldown_until=None,
+            quarantined_at=None,
+            quarantine_reason=None,
+        )
+    return await update_cookie(db, account_name, patch)
 
 
 async def activate_cookie(
@@ -249,12 +256,33 @@ async def create_notes_batch(
     if not notes:
         return []
     now = _now()
+    operations: list[UpdateOne] = []
     for note in notes:
-        note["created_at"] = now
-        note["tagging"] = None
-    result = await db[XHS_NOTES_COLLECTION].insert_many(notes)
-    for i, oid in enumerate(result.inserted_ids):
-        notes[i]["_id"] = oid
+        identity = {
+            "project_id": str(note.get("project_id") or ""),
+            "task_id": str(note.get("task_id") or ""),
+            "keyword": str(note.get("keyword") or ""),
+            "note_id": str(note.get("note_id") or ""),
+        }
+        set_fields = {
+            key: value
+            for key, value in note.items()
+            if key not in {"_id", "created_at", "tagging"}
+        }
+        set_fields["updated_at"] = now
+        operations.append(
+            UpdateOne(
+                identity,
+                {
+                    "$set": set_fields,
+                    "$setOnInsert": {"created_at": now, "tagging": None},
+                },
+                upsert=True,
+            )
+        )
+        note.setdefault("created_at", now)
+        note.setdefault("tagging", None)
+    await db[XHS_NOTES_COLLECTION].bulk_write(operations, ordered=False)
     return notes
 
 
@@ -281,11 +309,19 @@ async def update_note_tagging(
     db: AsyncIOMotorDatabase,
     note_id: str,
     tagging: dict[str, Any],
+    *,
+    project_id: str = "",
+    task_id: str = "",
 ) -> dict[str, Any] | None:
     """更新笔记打标结果"""
+    query: dict[str, Any] = {"note_id": note_id}
+    if project_id:
+        query["project_id"] = project_id
+    if task_id:
+        query["task_id"] = task_id
     return await db[XHS_NOTES_COLLECTION].find_one_and_update(
-        {"note_id": note_id},
-        {"$set": {"tagging": tagging}},
+        query,
+        {"$set": {"tagging": tagging, "updated_at": _now()}},
         return_document=ReturnDocument.AFTER,
     )
 
@@ -367,24 +403,39 @@ async def create_note_detail(
     images_urls: list[str] | None = None,
     xsec_token: str | None = None,
     xsec_source: str | None = None,
+    task_id: str = "",
+    raw_payload: dict[str, Any] | None = None,
+    raw_payload_object_id: str = "",
+    raw_payload_url: str = "",
+    archive_error: str = "",
 ) -> dict[str, Any]:
-    """创建笔记详情"""
+    """幂等保存笔记详情及原始响应归档引用。"""
     now = _now()
-    doc = {
+    set_fields = {
         "note_id": note_id,
         "project_id": project_id,
+        "task_id": task_id,
         "xsec_token": xsec_token,
         "xsec_source": xsec_source,
         "content": content,
         "comments_summary": comments_summary,
         "comments_data": comments_data or [],
         "images_urls": images_urls or [],
-        "tagging": None,
-        "created_at": now,
+        "raw_payload": raw_payload or {},
+        "raw_payload_object_id": raw_payload_object_id,
+        "raw_payload_url": raw_payload_url,
+        "archive_error": archive_error,
+        "updated_at": now,
     }
-    result = await db[XHS_NOTE_DETAILS_COLLECTION].insert_one(doc)
-    doc["_id"] = result.inserted_id
-    return doc
+    return await db[XHS_NOTE_DETAILS_COLLECTION].find_one_and_update(
+        {"project_id": project_id, "note_id": note_id},
+        {
+            "$set": set_fields,
+            "$setOnInsert": {"created_at": now, "tagging": None},
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
 
 
 async def get_note_detail(
@@ -410,11 +461,16 @@ async def update_note_detail_tagging(
     db: AsyncIOMotorDatabase,
     note_id: str,
     tagging: dict[str, Any],
+    *,
+    project_id: str = "",
 ) -> dict[str, Any] | None:
     """更新笔记详情打标"""
+    query: dict[str, Any] = {"note_id": note_id}
+    if project_id:
+        query["project_id"] = project_id
     return await db[XHS_NOTE_DETAILS_COLLECTION].find_one_and_update(
-        {"note_id": note_id},
-        {"$set": {"tagging": tagging}},
+        query,
+        {"$set": {"tagging": tagging, "updated_at": _now()}},
         return_document=ReturnDocument.AFTER,
     )
 

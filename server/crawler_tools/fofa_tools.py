@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -108,19 +109,44 @@ def _format_fofa_query(search_type: str, query: str) -> str:
     return query
 
 
-def _parse_results(results: list[list[Any]], fields: list[str]) -> list[FofaAsset]:
-    """把 FOFA results 二维数组按 fields 顺序映射为 FofaAsset。"""
+def _stringify_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        return ",".join(
+            item for item in (_stringify_cell(raw) for raw in value.values()) if item
+        )
+    if isinstance(value, (list, tuple, set)):
+        return ",".join(
+            item for item in (_stringify_cell(raw) for raw in value) if item
+        )
+    return str(value).strip()
+
+
+def _parse_results(results: list[Any], fields: list[str]) -> list[FofaAsset]:
+    """兼容 FOFA 的二维数组与 ``r_type=json`` 对象行响应。"""
     field_index = {name: idx for idx, name in enumerate(fields)}
 
-    def _cell(row: list[Any], name: str) -> str:
+    def _cell(row: Any, name: str) -> str:
+        if isinstance(row, Mapping):
+            if name in row:
+                return _stringify_cell(row[name])
+            value: Any = row
+            for part in name.split("."):
+                if not isinstance(value, Mapping) or part not in value:
+                    return ""
+                value = value[part]
+            return _stringify_cell(value)
+        if not isinstance(row, (list, tuple)):
+            return ""
         idx = field_index.get(name)
         if idx is None or idx >= len(row):
             return ""
-        return str(row[idx] or "").strip()
+        return _stringify_cell(row[idx])
 
     assets: list[FofaAsset] = []
     for row in results:
-        if not isinstance(row, list):
+        if not isinstance(row, (Mapping, list, tuple)):
             continue
         assets.append(
             FofaAsset(

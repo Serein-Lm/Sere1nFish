@@ -164,10 +164,14 @@ async def lifespan(app: FastAPI):
         # xhs 集合
         await db["xhs_notes"].create_index("note_id")
         await db["xhs_notes"].create_index([("project_id", 1), ("task_id", 1)])
+        await db["xhs_notes"].create_index(
+            [("project_id", 1), ("task_id", 1), ("keyword", 1), ("note_id", 1)]
+        )
         await db["xhs_notes"].create_index([("project_id", 1), ("target_id", 1)])
         await db["xhs_notes"].create_index([("task_id", 1), ("tagging.is_suspicious", 1)])
         await db["xhs_note_details"].create_index("note_id")
         await db["xhs_note_details"].create_index("project_id")
+        await db["xhs_note_details"].create_index([("project_id", 1), ("note_id", 1)])
         await db["xhs_profiles"].create_index([("project_id", 1), ("user_id", 1)])
         await db["xhs_profiles"].create_index([("project_id", 1), ("target_ids", 1)])
         await db["company_scan_results"].create_index([("project_id", 1), ("updated_at", -1)])

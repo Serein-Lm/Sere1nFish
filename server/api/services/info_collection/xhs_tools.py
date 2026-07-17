@@ -43,6 +43,7 @@ class XhsSearchTool:
         client_factory: Any | None = None,
         sleep_func: Any | None = None,
         request_pacer: Any | None = None,
+        archive_service: Any | None = None,
     ) -> None:
         self._db = db
         self._crawler_factory = crawler_factory
@@ -53,6 +54,7 @@ class XhsSearchTool:
         self._client_factory = client_factory
         self._sleep = sleep_func or asyncio.sleep
         self._request_pacer = request_pacer
+        self._archive_service = archive_service
 
     @staticmethod
     def _as_int(value: Any, default: int, minimum: int = 1) -> int:
@@ -228,6 +230,27 @@ class XhsSearchTool:
 
         return await create_crawler()
 
+    async def _archive_search_page(
+        self,
+        *,
+        payload: Any,
+        project_id: str,
+        task_id: str,
+        keyword: str,
+        page: int,
+        provider: str,
+    ) -> dict[str, str]:
+        if self._archive_service is None:
+            return {}
+        return await self._archive_service.archive_json(
+            payload,
+            kind="search",
+            project_id=project_id,
+            task_id=task_id,
+            source_id=f"{task_id}:page:{page}",
+            meta={"keyword": keyword, "page": page, "provider": provider},
+        )
+
     @staticmethod
     async def _safe_close(client: Any) -> None:
         close = getattr(client, "close", None)
@@ -264,7 +287,10 @@ class XhsSearchTool:
         request_policy = XhsRequestPolicy.from_config(runtime_config)
         page_size = request_policy.page_size
         pages_per_account = self._as_int(account_pool.get("search_pages_per_account"), 1)
-        retries_per_page = self._as_int(account_pool.get("search_retries_per_page"), 1)
+        retries_per_page = min(
+            5,
+            max(2, self._as_int(account_pool.get("search_retries_per_page"), 2)),
+        )
         total_pages = min(
             request_policy.max_pages_per_keyword,
             max(1, (max_notes + page_size - 1) // page_size),
@@ -342,6 +368,7 @@ class XhsSearchTool:
         # V2: 每页动态调度账号；仅排除当前页已失败账号，冷却到期后自动回到候选集合。
         for page in range(1, total_pages + 1):
             page_items: list[dict[str, Any]] | None = None
+            page_payload: dict[str, Any] | None = None
             tried_this_page: list[str] = []
             stop_after_page = False
             for attempt in range(1, retries_per_page + 1):
@@ -360,6 +387,7 @@ class XhsSearchTool:
                         sort=sort_map.get(sort_type, "general"),
                     )
                     page_items = result.get("items", []) or []
+                    page_payload = result
                     stop_after_page = result.get("has_more") is False
                     await self._record_result(current_account.account_name, success=True)
                     current_client_pages_left -= 1
@@ -399,6 +427,26 @@ class XhsSearchTool:
             if not page_items:
                 break
 
+            archive_ref: dict[str, str] = {}
+            archive_error = ""
+            try:
+                archive_ref = await self._archive_search_page(
+                    payload=page_payload or {"items": page_items},
+                    project_id=project_id,
+                    task_id=task_id,
+                    keyword=keyword,
+                    page=page,
+                    provider="v2",
+                )
+            except Exception as exc:
+                archive_error = str(exc)
+                logger.warning(
+                    "[XHS] 搜索原始响应归档失败 keyword='%s' page=%s: %s",
+                    keyword,
+                    page,
+                    exc,
+                )
+
             for item in page_items:
                 note_data = self._normalize_v2_item(
                     item=item,
@@ -411,6 +459,12 @@ class XhsSearchTool:
                 note_id = note_data.get("note_id", "")
                 if not note_id or note_id in seen_note_ids:
                     continue
+                note_data["raw_search_item"] = item
+                note_data["search_payload_object_id"] = archive_ref.get("storage_object_id", "")
+                note_data["search_payload_url"] = archive_ref.get("url", "")
+                note_data["search_archive_error"] = archive_error
+                note_data["search_page"] = page
+                note_data["search_provider"] = "v2"
                 seen_note_ids.add(note_id)
                 notes_to_insert.append(note_data)
                 if len(notes_to_insert) >= max_notes:
@@ -498,6 +552,31 @@ class XhsSearchTool:
                 if page_items is None or not page_items:
                     break
 
+                fallback_payload = {
+                    "success": bool(getattr(search_result, "success", True)),
+                    "message": str(getattr(search_result, "message", "") or ""),
+                    "items": page_items,
+                }
+                archive_ref: dict[str, str] = {}
+                archive_error = ""
+                try:
+                    archive_ref = await self._archive_search_page(
+                        payload=fallback_payload,
+                        project_id=project_id,
+                        task_id=task_id,
+                        keyword=keyword,
+                        page=page,
+                        provider="mediacrawler",
+                    )
+                except Exception as exc:
+                    archive_error = str(exc)
+                    logger.warning(
+                        "[XHS] fallback 原始响应归档失败 keyword='%s' page=%s: %s",
+                        keyword,
+                        page,
+                        exc,
+                    )
+
                 for item in page_items:
                     note_data = self._normalize_crawler_item(
                         item=item,
@@ -510,6 +589,12 @@ class XhsSearchTool:
                     note_id = note_data.get("note_id", "")
                     if not note_id or note_id in seen_note_ids:
                         continue
+                    note_data["raw_search_item"] = item
+                    note_data["search_payload_object_id"] = archive_ref.get("storage_object_id", "")
+                    note_data["search_payload_url"] = archive_ref.get("url", "")
+                    note_data["search_archive_error"] = archive_error
+                    note_data["search_page"] = page
+                    note_data["search_provider"] = "mediacrawler"
                     seen_note_ids.add(note_id)
                     notes_to_insert.append(note_data)
                     if len(notes_to_insert) >= max_notes:

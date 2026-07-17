@@ -33,6 +33,7 @@ from api.services.info_collection.xhs_stages import (
     XhsSearchStage as _XhsSearchStage,
     XhsTaggingStage as _XhsTaggingStage,
 )
+from api.services.company_url import normalize_url
 
 logger = get_logger("company_scan")
 
@@ -1097,7 +1098,9 @@ class CompanyScanPipeline:
             "copywritings_count": 0,
         }
         if enable_url_scan:
-            merged_urls = self._dedupe_text([*urls, *discovered_urls])
+            root_domain = str(identity.get("root_domain") or "").strip()
+            root_url = normalize_url(root_domain) if root_domain else ""
+            merged_urls = self._dedupe_text([root_url, *urls, *discovered_urls])
             if merged_urls or url_text.strip():
                 url_result.update(
                     await self._run_url_scan(

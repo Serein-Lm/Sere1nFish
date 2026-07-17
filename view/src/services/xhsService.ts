@@ -107,6 +107,11 @@ export interface XhsNote {
   liked_count?: string
   user: XhsNoteUser
   cover?: string
+  search_provider?: string
+  search_page?: number
+  search_payload_object_id?: string
+  search_payload_url?: string
+  search_archive_error?: string
   tagging: XhsNoteTagging
   created_at?: string
 }
@@ -153,8 +158,27 @@ export interface XhsNoteDetail {
   project_id: string
   content: string
   comments_summary: string
+  raw_payload_object_id?: string
+  raw_payload_url?: string
+  archive_error?: string
   tagging: XhsDetailTagging
   created_at?: string
+}
+
+function normalizeXhsMediaUrl(url?: string): string | undefined {
+  if (!url?.startsWith('http://')) return url
+  return `https://${url.slice('http://'.length)}`
+}
+
+function normalizeXhsNoteMedia(note: XhsNote): XhsNote {
+  return {
+    ...note,
+    cover: normalizeXhsMediaUrl(note.cover),
+    user: {
+      ...note.user,
+      avatar: normalizeXhsMediaUrl(note.user?.avatar),
+    },
+  }
 }
 
 /**
@@ -779,7 +803,7 @@ export async function listXhsNotes(
     sort_by?: 'relevance' | 'created_at'
   }
 ): Promise<{ items: XhsNote[]; total: number; page: number; page_size: number }> {
-  return apiFetch<{ items: XhsNote[]; total: number; page: number; page_size: number }>(
+  const response = await apiFetch<{ items: XhsNote[]; total: number; page: number; page_size: number }>(
     `/v1/projects/${encodeURIComponent(projectId)}/notes`,
     {
       method: 'POST',
@@ -793,15 +817,17 @@ export async function listXhsNotes(
       }),
     }
   )
+  return { ...response, items: response.items.map(normalizeXhsNoteMedia) }
 }
 
 /**
  * 获取单个笔记
  */
 export async function getXhsNote(noteId: string): Promise<XhsNote> {
-  return apiFetch<XhsNote>(`/v1/xhs/notes/${encodeURIComponent(noteId)}`, {
+  const note = await apiFetch<XhsNote>(`/v1/xhs/notes/${encodeURIComponent(noteId)}`, {
     method: 'GET',
   })
+  return normalizeXhsNoteMedia(note)
 }
 
 /**

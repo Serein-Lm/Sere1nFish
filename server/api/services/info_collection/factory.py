@@ -36,6 +36,7 @@ class XhsToolset:
     note_tagging_tool: Any
     detail_tagging_tool: Any
     profile_tool: Any
+    archive_service: Any | None = None
     v2_client: Any | None = None
 
     def state(self) -> dict[str, Any]:
@@ -46,6 +47,7 @@ class XhsToolset:
             "xhs_note_tagging_tool": self.note_tagging_tool,
             "xhs_detail_tagging_tool": self.detail_tagging_tool,
             "xhs_profile_tool": self.profile_tool,
+            "xhs_archive_service": self.archive_service,
         }
 
     async def close(self) -> None:
@@ -159,10 +161,13 @@ class InfoCollectionToolFactory:
             XhsProfileTool,
             XhsSearchTool,
         )
+        from api.services.xhs_archive import XhsArchiveService
 
+        archive_service = XhsArchiveService()
         search_tool = XhsSearchTool(
             db=self.db,
             crawler_factory=getattr(pipeline_owner, "_get_crawler", None),
+            archive_service=archive_service,
         )
         profile_tool = XhsProfileTool(pipeline_owner)
         note_tagging_tool = await self.create_xhs_note_tagging_tool(pipeline_owner)
@@ -174,4 +179,5 @@ class InfoCollectionToolFactory:
             note_tagging_tool=note_tagging_tool,
             detail_tagging_tool=detail_tagging_tool,
             profile_tool=profile_tool,
+            archive_service=archive_service,
         )

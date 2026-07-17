@@ -39,6 +39,20 @@ init_mongo()
 TASKS_COLLECTION = "tasks"
 
 
+def _project_note_out(doc: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a project note without dropping its stable table row ID."""
+    item = dict(doc)
+    mongo_id = item.pop("_id", None)
+    if mongo_id is not None:
+        item["id"] = str(mongo_id)
+    elif not item.get("id"):
+        item["id"] = ":".join(
+            str(item.get(key) or "")
+            for key in ("project_id", "task_id", "keyword", "note_id")
+        )
+    return item
+
+
 # ═══════════════════════════════════════════
 # Pipeline 分发器（原 tasks.py，已合并到此）
 # ═══════════════════════════════════════════
@@ -802,11 +816,8 @@ async def list_project_notes(project_id: str, body: ProjectNotesListRequest | No
         db, project_id=project_id, task_id=body.task_id or None,
         is_suspicious=body.is_suspicious, limit=body.limit, skip=body.skip, sort_by=body.sort_by,
     )
-    # 去掉 _id
-    for d in docs:
-        d.pop("_id", None)
     return PageResponse.build(
-        items=docs,
+        items=[_project_note_out(doc) for doc in docs],
         total=total,
         page=body.page,
         page_size=body.page_size,

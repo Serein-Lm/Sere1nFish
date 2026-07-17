@@ -274,7 +274,13 @@ async def list_web_tagging(project_id: str, body: WebTaggingListRequest | None =
     if body is None:
         body = WebTaggingListRequest(project_id=project_id)
     db = get_db()
-    docs, total = await web_dao.list_web_tagging_results(db, project_id=project_id, limit=body.limit, skip=body.skip)
+    docs, total = await web_dao.list_web_tagging_results(
+        db,
+        project_id=project_id,
+        limit=body.limit,
+        skip=body.skip,
+        source=body.source,
+    )
     return PageResponse.build(
         items=[_tag_out(d) for d in docs],
         total=total,

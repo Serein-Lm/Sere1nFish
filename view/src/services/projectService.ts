@@ -90,6 +90,44 @@ export interface WebTaggingRecord {
   data: WebTaggingData
 }
 
+// ============ 网站资产 ============
+
+export interface ProjectAssetProbe {
+  is_alive?: boolean
+  status_code?: number
+  title?: string
+  final_url?: string
+  error?: string
+}
+
+export interface ProjectAsset {
+  asset_id: string
+  project_id: string
+  target_id?: string
+  target_ids?: string[]
+  root_domain?: string
+  host?: string
+  ip?: string
+  port?: string
+  protocol?: string
+  domain?: string
+  title?: string
+  link?: string
+  canonical_url?: string
+  cert_domain?: string
+  fingerprints?: string[]
+  sources?: string[]
+  source_queries?: string[]
+  is_alive?: boolean
+  probe?: ProjectAssetProbe
+  updated_at?: string
+}
+
+export interface ProjectAssetsResponse {
+  items: ProjectAsset[]
+  total: number
+}
+
 // ============ 看板数据类型 ============
 
 export interface DashboardData {
@@ -232,11 +270,32 @@ export async function createCompanyWebTagging(body: {
 
 export async function listProjectWebTaggingRecords(
   projectId: string,
-  params?: PaginatedRequest
+  params?: PaginatedRequest & { source?: string }
 ): Promise<PaginatedResponse<WebTaggingRecord>> {
   return apiFetch<PaginatedResponse<WebTaggingRecord>>(
     `/v1/projects/${encodeURIComponent(projectId)}/web-tagging`,
-    { method: 'POST', body: JSON.stringify({ project_id: projectId, page: params?.page ?? 1, page_size: params?.page_size ?? 50 }) }
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        page: params?.page ?? 1,
+        page_size: params?.page_size ?? 50,
+        source: params?.source ?? '',
+      }),
+    }
+  )
+}
+
+export async function listProjectAssets(
+  projectId: string,
+  params?: { target_id?: string; root_domain?: string; limit?: number },
+): Promise<ProjectAssetsResponse> {
+  const query = new URLSearchParams({ limit: String(params?.limit ?? 500) })
+  if (params?.target_id) query.set('target_id', params.target_id)
+  if (params?.root_domain) query.set('root_domain', params.root_domain)
+  return apiFetch<ProjectAssetsResponse>(
+    `/v1/projects/${encodeURIComponent(projectId)}/assets?${query.toString()}`,
+    { method: 'GET' },
   )
 }
 

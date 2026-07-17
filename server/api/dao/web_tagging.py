@@ -64,6 +64,7 @@ async def list_web_tagging_results(
     project_id: str,
     limit: int = 50,
     skip: int = 0,
+    source: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     """
     列出项目的 web tagging 结果，返回 (items, total)。
@@ -78,10 +79,20 @@ async def list_web_tagging_results(
     except Exception:
         return [], 0
 
-    total = await db[WEB_TAGS_COLLECTION].count_documents({"project_id": pid})
+    query: dict[str, Any] = {"project_id": pid}
+    if source == "web_tagging":
+        query["$or"] = [
+            {"source": "web_tagging"},
+            {"source": {"$exists": False}},
+            {"source": None},
+        ]
+    elif source:
+        query["source"] = source
+
+    total = await db[WEB_TAGS_COLLECTION].count_documents(query)
 
     pipeline = [
-        {"$match": {"project_id": pid}},
+        {"$match": query},
         # 计算排序字段：findings 数组是否非空 + 最高 attention_score
         {"$addFields": {
             "_has_findings": {

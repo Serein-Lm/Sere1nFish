@@ -172,6 +172,9 @@ class XhsNoteOut(BaseModel):
     id: str
     project_id: str
     task_id: str
+    keyword: str | None = None
+    target_id: str | None = None
+    target_name: str | None = None
     note_id: str
     xsec_token: str | None = None
     xsec_source: str | None = None
@@ -181,6 +184,11 @@ class XhsNoteOut(BaseModel):
     user: XhsNoteUserInfo
     cover: str | None = None
     publish_time_text: str | None = None  # 发布时间文本（如"1小时前""3天前"）
+    search_provider: str | None = None
+    search_page: int | None = None
+    search_payload_object_id: str | None = None
+    search_payload_url: str | None = None
+    search_archive_error: str | None = None
     tagging: XhsNoteTagging | None = None
     created_at: datetime
 
@@ -234,6 +242,9 @@ class XhsNoteDetailOut(BaseModel):
     xsec_source: str | None = None
     content: str | None = None
     comments_summary: str | None = None
+    raw_payload_object_id: str | None = None
+    raw_payload_url: str | None = None
+    archive_error: str | None = None
     tagging: XhsDetailTagging | None = None
     created_at: datetime
 

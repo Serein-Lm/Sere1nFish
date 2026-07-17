@@ -11,7 +11,9 @@ import {
   updateProject,
   deleteProject,
   getProjectDashboard,
+  listProjectAssets,
   type Project,
+  type ProjectAsset,
   type WebTaggingRecord,
   type DashboardData,
 } from '../../services/projectService'
@@ -420,7 +422,7 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
               查看
             </Button>
           </Descriptions.Item>
-          <Descriptions.Item label="摘要" span={2}>{record.data?.intro?.summary || '-'}</Descriptions.Item>
+          <Descriptions.Item label="摘要">{record.data?.intro?.summary || '-'}</Descriptions.Item>
         </Descriptions>
       </div>
 
@@ -433,7 +435,7 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
             className="findings-table"
             dataSource={findings}
             columns={findingsColumns(onViewCopywriting)}
-            rowKey={(_, idx) => `finding-${idx}`}
+            rowKey={(finding) => finding.finding_id || `${finding.source_url}:${finding.type}:${finding.value || ''}`}
             pagination={false}
             size="small"
           />
@@ -493,6 +495,10 @@ export default function ProjectDetail() {
   const [taggingLoading, setTaggingLoading] = useState(false)
   const [taggingRecords, setTaggingRecords] = useState<WebTaggingRecord[]>([])
   const [taggingTotal, setTaggingTotal] = useState(0)
+  const [assets, setAssets] = useState<ProjectAsset[]>([])
+  const [assetsTotal, setAssetsTotal] = useState(0)
+  const [assetsLoading, setAssetsLoading] = useState(false)
+  const [assetTargetId, setAssetTargetId] = useState('')
   const [error, setError] = useState<string | null>(null)
 
   // Tab 状态
@@ -616,13 +622,35 @@ export default function ProjectDetail() {
   const fetchRecords = async (pid: string, page = 1, pageSize = 10) => {
     setTaggingLoading(true)
     try {
-      const res = await listProjectWebTaggingRecords(pid, { page, page_size: pageSize })
+      const res = await listProjectWebTaggingRecords(pid, {
+        page,
+        page_size: pageSize,
+        source: 'web_tagging',
+      })
       setTaggingRecords(res.items)
       setTaggingTotal(res.total)
     } catch (e) {
       console.error(e)
     } finally {
       setTaggingLoading(false)
+    }
+  }
+
+  const fetchAssets = async (pid: string, targetId = assetTargetId) => {
+    setAssetsLoading(true)
+    try {
+      const [result, targetResult] = await Promise.all([
+        listProjectAssets(pid, { target_id: targetId || undefined, limit: 500 }),
+        listProjectTargets(pid),
+      ])
+      setAssets(result.items)
+      setAssetsTotal(result.total)
+      setProjectTargets(targetResult.items)
+    } catch (e) {
+      console.error('加载网站资产失败:', e)
+      message.error(e instanceof Error ? e.message : '加载网站资产失败')
+    } finally {
+      setAssetsLoading(false)
     }
   }
 
@@ -953,7 +981,7 @@ export default function ProjectDetail() {
         const data = await getProject(projectId)
         if (!cancelled) {
           setProject(data)
-          await fetchRecords(projectId)
+          await Promise.all([fetchRecords(projectId), fetchAssets(projectId)])
           // 加载任务列表
           await fetchTasks(projectId)
           // 加载看板数据
@@ -981,6 +1009,9 @@ export default function ProjectDetail() {
           setError(msg)
           setProject(null)
           setTaggingRecords([])
+          setAssets([])
+          setAssetsTotal(0)
+          setAssetTargetId('')
           setXhsNotes([])
           setXhsProfiles([])
           setDouyinSearchResults([])
@@ -1241,6 +1272,15 @@ export default function ProjectDetail() {
     }
   }
 
+  const handleOpenArtifact = async (path?: string) => {
+    if (!path) return
+    try {
+      await openAuthenticatedArtifact(path)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '打开归档文件失败')
+    }
+  }
+
   // 构建笔记链接
   const buildNoteUrl = (note: XhsNote) => {
     // 优先使用 xsec_token，即使 xsec_source 为空也可以跳转
@@ -1302,7 +1342,7 @@ export default function ProjectDetail() {
       title: '关键词',
       dataIndex: 'keyword',
       key: 'keyword',
-      width: 100,
+      width: 132,
       render: (val: string) => val ? <Tag color="magenta">{val}</Tag> : <Text type="secondary">-</Text>,
     },
     {
@@ -1430,6 +1470,15 @@ export default function ProjectDetail() {
             <a className="xhs-detail-btn" onClick={() => handleViewNoteDetail(rec)}>
               <EyeOutlined />
             </a>
+          </Tooltip>
+          <Tooltip title="查看归档的原始搜索响应">
+            <Button
+              type="text"
+              size="small"
+              icon={<FileSearchOutlined />}
+              disabled={!rec.search_payload_url}
+              onClick={() => void handleOpenArtifact(rec.search_payload_url)}
+            />
           </Tooltip>
         </Space>
       ),
@@ -2263,34 +2312,131 @@ export default function ProjectDetail() {
   }
 
   // Tab 内容渲染
-  const renderWebsiteContent = () => (
-    <>
-      <div className="project-detail-section-title">
-        <Space><SearchOutlined /> Web Tagging 记录</Space>
-      </div>
-      <div className="tagging-table-container">
-        <Table
-          className="tagging-table"
-          dataSource={taggingRecords}
-          rowKey="id"
-          loading={taggingLoading}
-          locale={{ emptyText: <Empty description="暂无 Web Tagging 记录" /> }}
-          pagination={{
-            total: taggingTotal,
-            pageSize: 10,
-            showSizeChanger: true,
-            showTotal: (total) => `共 ${total} 条记录`,
-            onChange: (page, pageSize) => { if (projectId) fetchRecords(projectId, page, pageSize) },
-          }}
-          expandable={{
-            expandedRowRender: (rec) => <ExpandedRecordContent record={rec} onViewCopywriting={handleViewFindingCopywriting} />,
-            expandRowByClick: true,
-          }}
-          columns={taggingColumns}
+  const renderWebsiteContent = () => {
+    const assetColumns: ColumnsType<ProjectAsset> = [
+      {
+        title: 'URL',
+        key: 'url',
+        width: 320,
+        render: (_, record) => {
+          const url = record.canonical_url || record.link || record.host || ''
+          return url ? (
+            <a href={url} target="_blank" rel="noreferrer" title={url}>{url}</a>
+          ) : <Text type="secondary">-</Text>
+        },
+      },
+      {
+        title: '标题',
+        key: 'title',
+        width: 220,
+        ellipsis: true,
+        render: (_, record) => record.title || record.probe?.title || '-',
+      },
+      {
+        title: 'IP / 端口',
+        key: 'endpoint',
+        width: 180,
+        render: (_, record) => (
+          <Text copyable={Boolean(record.ip)}>{record.ip ? `${record.ip}${record.port ? `:${record.port}` : ''}` : '-'}</Text>
+        ),
+      },
+      {
+        title: '存活',
+        key: 'alive',
+        width: 86,
+        render: (_, record) => record.is_alive === true
+          ? <Tag color="success">存活</Tag>
+          : record.is_alive === false
+            ? <Tag color="error">失活</Tag>
+            : <Tag>未知</Tag>,
+      },
+      {
+        title: 'HTTP',
+        key: 'http',
+        width: 86,
+        render: (_, record) => record.probe?.status_code ?? '-',
+      },
+      {
+        title: '来源',
+        key: 'sources',
+        width: 150,
+        render: (_, record) => (
+          <Space size={4} wrap>
+            {(record.sources || []).map((source) => <Tag key={source}>{source.toUpperCase()}</Tag>)}
+            {!record.sources?.length && <Text type="secondary">-</Text>}
+          </Space>
+        ),
+      },
+      {
+        title: '更新时间',
+        dataIndex: 'updated_at',
+        key: 'updated_at',
+        width: 180,
+        render: (value: string) => <Text type="secondary">{formatDate(value)}</Text>,
+      },
+    ]
+
+    return (
+      <>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+          <Space><GlobalOutlined /><Text strong>FOFA / Hunter 网站资产</Text><Tag>{assetsTotal}</Tag></Space>
+          <Space wrap>
+            <Select
+              value={assetTargetId}
+              style={{ width: 320, maxWidth: '100%' }}
+              options={[
+                { value: '', label: `全部公司 (${projectTargets.length})` },
+                ...projectTargets.map((target) => ({
+                  value: target.target_id,
+                  label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+                })),
+              ]}
+              onChange={(value) => {
+                setAssetTargetId(value)
+                if (projectId) void fetchAssets(projectId, value)
+              }}
+            />
+            <Button size="small" icon={<SyncOutlined />} loading={assetsLoading} onClick={() => { if (projectId) void fetchAssets(projectId) }}>刷新</Button>
+          </Space>
+        </div>
+        <Table<ProjectAsset>
+          rowKey="asset_id"
+          size="small"
+          loading={assetsLoading}
+          columns={assetColumns}
+          dataSource={assets}
+          locale={{ emptyText: <Empty description="暂无 FOFA / Hunter 网站资产" /> }}
+          scroll={{ x: 1220 }}
+          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 个资产` }}
         />
-      </div>
-    </>
-  )
+
+        <div className="project-detail-section-title" style={{ marginTop: 24 }}>
+          <Space><SearchOutlined /> 网站分析记录</Space>
+        </div>
+        <div className="tagging-table-container">
+          <Table
+            className="tagging-table"
+            dataSource={taggingRecords}
+            rowKey="id"
+            loading={taggingLoading}
+            locale={{ emptyText: <Empty description="暂无网站分析记录" /> }}
+            pagination={{
+              total: taggingTotal,
+              pageSize: 10,
+              showSizeChanger: true,
+              showTotal: (total) => `共 ${total} 条记录`,
+              onChange: (page, pageSize) => { if (projectId) fetchRecords(projectId, page, pageSize) },
+            }}
+            expandable={{
+              expandedRowRender: (rec) => <ExpandedRecordContent record={rec} onViewCopywriting={handleViewFindingCopywriting} />,
+              expandRowByClick: true,
+            }}
+            columns={taggingColumns}
+          />
+        </div>
+      </>
+    )
+  }
 
   const renderXiaohongshuContent = () => {
     const items = [
@@ -2307,7 +2453,7 @@ export default function ProjectDetail() {
           <Table
             className="xhs-notes-table"
             dataSource={xhsNotes}
-            rowKey="id"
+            rowKey={(record) => record.id || `${record.task_id || ''}:${record.keyword || ''}:${record.note_id}`}
             loading={xhsNotesLoading}
             columns={xhsNotesColumns}
             locale={{ emptyText: <Empty description="暂无小红书笔记数据" /> }}
@@ -3132,9 +3278,12 @@ export default function ProjectDetail() {
       {
         title: '操作',
         key: 'actions',
-        width: 150,
+        width: 180,
         render: (_, record) => (
           <Space size={2}>
+            <Tooltip title="打开公告原文">
+              <Button type="text" size="small" icon={<LinkOutlined />} disabled={!record.detail_url} href={record.detail_url} target="_blank" />
+            </Tooltip>
             <Tooltip title="查看供应商原始记录">
               <Button type="text" size="small" icon={<FileSearchOutlined />} disabled={!record.provider_payload_url} onClick={() => openArtifact(record.provider_payload_url)} />
             </Tooltip>
@@ -3195,6 +3344,21 @@ export default function ProjectDetail() {
                   <Descriptions.Item label="命中身份">{record.enterprise_identity || '-'}</Descriptions.Item>
                   <Descriptions.Item label="正文长度">{record.content_length || 0} 字</Descriptions.Item>
                   <Descriptions.Item label="更新时间">{formatDate(record.updated_at)}</Descriptions.Item>
+                </Descriptions>
+                <Descriptions size="small" bordered column={1}>
+                  <Descriptions.Item label="公告原文">
+                    {record.detail_url ? <a href={record.detail_url} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{record.detail_url}</a> : '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="天眼查来源">
+                    {record.provider_url ? <a href={record.provider_url} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{record.provider_url}</a> : '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="归档证据">
+                    <Space wrap>
+                      <Button size="small" icon={<FileSearchOutlined />} disabled={!record.provider_payload_url} onClick={() => openArtifact(record.provider_payload_url)}>供应商原始 JSON</Button>
+                      <Button size="small" icon={<FileTextOutlined />} disabled={!record.raw_content_url} onClick={() => openArtifact(record.raw_content_url)}>API 原始正文</Button>
+                      <Button size="small" icon={<GlobalOutlined />} disabled={!record.detail_html_url} onClick={() => openArtifact(record.detail_html_url)}>详情页 HTML</Button>
+                    </Space>
+                  </Descriptions.Item>
                 </Descriptions>
                 <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }} ellipsis={{ rows: 8, expandable: true, symbol: '展开正文预览' }}>
                   {record.content_preview || record.detail_text_preview || '暂无正文预览'}
@@ -3286,6 +3450,7 @@ export default function ProjectDetail() {
         <Space>
           <GlobalOutlined />
           网站
+          <Tag>{assetsTotal}</Tag>
         </Space>
       ),
       children: renderWebsiteContent(),
@@ -3679,7 +3844,13 @@ export default function ProjectDetail() {
             <div className="project-detail-tabs slide-up stagger-3">
               <Tabs
                 activeKey={activeTab}
-                onChange={(key) => setActiveTab(key as TabKey)}
+                onChange={(key) => {
+                  const focused = document.activeElement
+                  if (focused instanceof HTMLElement && focused.closest('.ant-tabs-tabpane')) {
+                    focused.blur()
+                  }
+                  setActiveTab(key as TabKey)
+                }}
                 items={tabItems}
                 className="detail-tabs"
               />
@@ -4390,6 +4561,16 @@ export default function ProjectDetail() {
                     >
                       <LinkOutlined /> 查看原文
                     </a>
+                  )}
+                  {currentNoteDetail?.raw_payload_url && (
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<FileSearchOutlined />}
+                      onClick={() => void handleOpenArtifact(currentNoteDetail.raw_payload_url)}
+                    >
+                      原始响应归档
+                    </Button>
                   )}
                 </Space>
               }

@@ -482,7 +482,7 @@ def test_company_xhs_tagging_stage_uses_tagging_tool_contract(monkeypatch):
 
         stored = {}
 
-        async def fake_update_note_tagging(db, note_id, tagging):
+        async def fake_update_note_tagging(db, note_id, tagging, **_kwargs):
             stored["tagging"] = {"note_id": note_id, "tagging": tagging}
 
         monkeypatch.setattr(xhs_dao, "update_note_tagging", fake_update_note_tagging)
@@ -537,7 +537,7 @@ def test_xhs_note_tagging_persist_stage_uses_tool_without_downstream(monkeypatch
 
         stored = []
 
-        async def fake_update_note_tagging(db, note_id, tagging):
+        async def fake_update_note_tagging(db, note_id, tagging, **_kwargs):
             stored.append({"note_id": note_id, "tagging": tagging})
 
         monkeypatch.setattr(xhs_dao, "update_note_tagging", fake_update_note_tagging)
@@ -595,7 +595,7 @@ def test_company_xhs_detail_stage_uses_detail_tool_contract(monkeypatch):
         async def fake_create_note_detail(db, **kwargs):
             stored["detail"] = kwargs
 
-        async def fake_update_note_detail_tagging(db, note_id, tagging):
+        async def fake_update_note_detail_tagging(db, note_id, tagging, **_kwargs):
             stored["tagging"] = {"note_id": note_id, "tagging": tagging}
 
         async def fake_insert_finding(db, finding):
@@ -696,7 +696,7 @@ def test_xhs_prefetched_detail_tagging_stage_uses_tagging_tool_contract(monkeypa
         async def fake_create_note_detail(db, **kwargs):
             stored["details"].append(dict(kwargs))
 
-        async def fake_update_note_detail_tagging(db, note_id, tagging):
+        async def fake_update_note_detail_tagging(db, note_id, tagging, **_kwargs):
             stored["tagging"].append({"note_id": note_id, "tagging": dict(tagging)})
 
         async def fake_insert_finding(db, finding):
@@ -761,6 +761,11 @@ def test_xhs_prefetched_detail_tagging_stage_uses_tagging_tool_contract(monkeypa
             "images_urls": ["https://img.example/a.jpg"],
             "xsec_token": "token-1",
             "xsec_source": "pc_feed",
+            "task_id": "task-1_xhs_0",
+            "raw_payload": {},
+            "raw_payload_object_id": "",
+            "raw_payload_url": "",
+            "archive_error": "",
         }]
         assert len(tagging_tool.requests) == 1
         tag_req = tagging_tool.requests[0]
@@ -1272,6 +1277,104 @@ def test_xhs_search_tool_rotates_accounts_and_persists_v2_results(monkeypatch):
     asyncio.run(_run())
 
 
+def test_xhs_search_tool_cools_failed_account_and_hands_page_to_next_account(monkeypatch):
+    async def _run():
+        from api.dao import xhs as xhs_dao
+        from api.services.xhs_runtime import XhsAccountLease, XhsProxyLease
+
+        calls = {"accounts": [], "records": [], "stored": [], "archives": []}
+        accounts = [
+            XhsAccountLease(account_name="account-a", cookie_string="cookie-a"),
+            XhsAccountLease(account_name="account-b", cookie_string="cookie-b"),
+        ]
+
+        async def runtime_config_loader():
+            return {
+                "account_pool": {
+                    "search_retries_per_page": 2,
+                    "search_max_pages_per_keyword": 1,
+                    "request_interval_min_seconds": 0,
+                    "request_interval_max_seconds": 0,
+                },
+                "proxy_pool": {},
+            }
+
+        async def account_selector(db, purpose, config, exclude_accounts):
+            calls["accounts"].append(list(exclude_accounts))
+            return accounts.pop(0)
+
+        async def result_recorder(db, account_name, **kwargs):
+            calls["records"].append({"account_name": account_name, **kwargs})
+
+        async def fake_create_notes_batch(db, notes):
+            calls["stored"].extend(notes)
+            return notes
+
+        class _Client:
+            def __init__(self, cookie_string, **_kwargs):
+                self.cookie_string = cookie_string
+
+            async def search_notes(self, **_kwargs):
+                if self.cookie_string == "cookie-a":
+                    raise RuntimeError("Account abnormal. Switch account and retry.")
+                return {
+                    "items": [{
+                        "id": "note-b",
+                        "xsec_token": "token-b",
+                        "xsec_source": "pc_feed",
+                        "note_card": {"display_title": "账号 B 命中", "user": {}},
+                    }],
+                    "has_more": False,
+                }
+
+            async def close(self):
+                return None
+
+        class _Archive:
+            async def archive_json(self, payload, **kwargs):
+                calls["archives"].append({"payload": payload, **kwargs})
+                return {"storage_object_id": "obj-search", "url": "/archive/search"}
+
+        async def no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(xhs_dao, "create_notes_batch", fake_create_notes_batch)
+        result = await XhsSearchTool(
+            db=_FakeDB(),
+            runtime_config_loader=runtime_config_loader,
+            account_selector=account_selector,
+            proxy_selector=lambda _config: _async_value(XhsProxyLease()),
+            result_recorder=result_recorder,
+            client_factory=_Client,
+            sleep_func=no_sleep,
+            archive_service=_Archive(),
+        ).search(
+            SearchRequest(
+                source="xhs",
+                query="目标公司",
+                project_id="project-1",
+                task_id="task-1",
+                limit=20,
+            )
+        )
+
+        assert result.count == 1
+        assert calls["accounts"] == [[], ["account-a"]]
+        assert calls["records"][0]["account_name"] == "account-a"
+        assert calls["records"][0]["success"] is False
+        assert calls["records"][0]["cooldown_seconds"] == 300
+        assert calls["records"][-1]["account_name"] == "account-b"
+        assert calls["records"][-1]["success"] is True
+        assert calls["stored"][0]["search_payload_object_id"] == "obj-search"
+        assert calls["stored"][0]["raw_search_item"]["id"] == "note-b"
+        assert len(calls["archives"]) == 1
+
+    async def _async_value(value):
+        return value
+
+    asyncio.run(_run())
+
+
 def test_xhs_stage_search_wrapper_uses_search_tool(monkeypatch):
     async def _run():
         from api.services import xhs_pipeline as xhs_pipeline_module
@@ -1328,7 +1431,7 @@ def test_xhs_stage_note_tagging_wrapper_runs_streaming_tool(monkeypatch):
         max_active = 0
         lock = asyncio.Lock()
 
-        async def fake_update_note_tagging(db, note_id, tagging):
+        async def fake_update_note_tagging(db, note_id, tagging, **_kwargs):
             stored.append({"note_id": note_id, "tagging": tagging})
 
         class _Tool:
@@ -1475,7 +1578,7 @@ def test_xhs_stage_detail_tagging_wrapper_runs_prefetched_stream(monkeypatch):
         async def fake_create_note_detail(db, **kwargs):
             stored["details"].append(dict(kwargs))
 
-        async def fake_update_note_detail_tagging(db, note_id, tagging):
+        async def fake_update_note_detail_tagging(db, note_id, tagging, **_kwargs):
             stored["detail_tagging"].append({"note_id": note_id, "tagging": dict(tagging)})
 
         async def fake_insert_finding(db, finding):
@@ -1696,13 +1799,13 @@ def test_xhs_pipeline_run_pipeline_uses_streaming_toolset(monkeypatch):
             stored["notes"].extend([dict(note) for note in notes])
             return notes
 
-        async def fake_update_note_tagging(db, note_id, tagging):
+        async def fake_update_note_tagging(db, note_id, tagging, **_kwargs):
             stored["note_tagging"].append({"note_id": note_id, "tagging": tagging})
 
         async def fake_create_note_detail(db, **kwargs):
             stored["details"].append(dict(kwargs))
 
-        async def fake_update_note_detail_tagging(db, note_id, tagging):
+        async def fake_update_note_detail_tagging(db, note_id, tagging, **_kwargs):
             stored["detail_tagging"].append({"note_id": note_id, "tagging": tagging})
 
         async def fake_insert_finding(db, finding):

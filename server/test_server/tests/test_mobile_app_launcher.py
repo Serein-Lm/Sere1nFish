@@ -29,11 +29,15 @@ class _DualAppRunner:
     def __init__(self) -> None:
         self.foreground = "com.xingin.xhs"
         self.tap: tuple[int, int] | None = None
+        self.system_panels_collapsed = False
 
     def __call__(self, args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
         del timeout
         if "resolve-activity" in args:
             return _completed(args, "com.tencent.mm/.ui.LauncherUI\n")
+        if args[-3:] == ["cmd", "statusbar", "collapse"]:
+            self.system_panels_collapsed = True
+            return _completed(args)
         if "am" in args and "start" in args:
             self.foreground = "com.android.intentresolver"
             return _completed(args, "Starting: Intent\n")
@@ -83,6 +87,7 @@ def test_launch_selects_primary_app_from_dual_app_chooser() -> None:
     assert result.chooser_handled is True
     assert result.selected_instance == "primary"
     assert runner.tap == (100, 200)
+    assert runner.system_panels_collapsed is True
 
 
 def test_launch_can_select_cloned_app_from_dual_app_chooser() -> None:

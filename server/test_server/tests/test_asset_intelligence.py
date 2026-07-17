@@ -19,6 +19,7 @@ from api.services.asset_intelligence.triage import (
     AssetTriageDecision,
     AssetTriageService,
 )
+from crawler_tools.fofa_tools import FOFA_FIELDS, _parse_results
 
 
 class _Provider:
@@ -42,6 +43,29 @@ class _Probe:
             }
             for url in urls
         }
+
+
+def test_fofa_parser_accepts_json_object_rows() -> None:
+    assets = _parse_results(
+        [
+            {
+                "host": "https://portal.ahtv.cn",
+                "ip": "203.0.113.10",
+                "port": 443,
+                "protocol": "https",
+                "domain": "portal.ahtv.cn",
+                "title": "安徽广播电视台",
+                "link": "https://portal.ahtv.cn/login",
+                "cert": {"domain": ["ahtv.cn", "*.ahtv.cn"]},
+            }
+        ],
+        FOFA_FIELDS,
+    )
+
+    assert len(assets) == 1
+    assert assets[0].host == "https://portal.ahtv.cn"
+    assert assets[0].port == "443"
+    assert assets[0].cert_domain == "ahtv.cn,*.ahtv.cn"
 
 
 class _EmptyCursor:
