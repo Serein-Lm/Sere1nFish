@@ -357,6 +357,7 @@ class _CollectStage(Stage):
                                 "browser_screenshot_urls": browser_urls,
                                 "discovery_screenshot_ids": shot_ids,
                                 "discovery_screenshot_urls": shot_urls,
+                                "discovery_fields": candidate.get("fields") or {},
                                 "detail": True,
                             },
                         )
@@ -461,6 +462,7 @@ class _CollectStage(Stage):
                         "screenshot_url": shot_urls[0] if shot_urls else url,
                         "screenshot_ids": shot_ids,
                         "screenshot_urls": shot_urls,
+                        "discovery_fields": candidate.get("fields") or {},
                         "detail": True,
                     },
                 )
@@ -779,6 +781,7 @@ class _PersistStage(Stage):
             discovery_screenshot_urls=list(
                 payload.get("discovery_screenshot_urls") or []
             ),
+            discovery_fields=(payload.get("discovery_fields") or None),
         )
         counters["total"] += 1
         if result["is_new"]:

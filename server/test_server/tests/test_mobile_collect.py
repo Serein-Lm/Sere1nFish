@@ -19,12 +19,29 @@ class _FakeCollection:
 
     async def find_one(self, query: dict, projection: dict | None = None):
         rid = query.get("record_id")
-        doc = self.docs.get(rid)
-        if doc is None:
-            return None
-        return dict(doc)
+        if rid is not None:
+            doc = self.docs.get(rid)
+            candidates = [doc] if doc is not None else []
+        else:
+            candidates = list(self.docs.values())
+        for doc in candidates:
+            matched = True
+            for key, expected in query.items():
+                if isinstance(expected, dict) and "$exists" in expected:
+                    if (key in doc) != bool(expected["$exists"]):
+                        matched = False
+                        break
+                elif doc.get(key) != expected:
+                    matched = False
+                    break
+            if matched:
+                return dict(doc)
+        return None
 
     async def update_one(self, query: dict, update: dict, upsert: bool = False):
+        overlap = set(update.get("$set", {})) & set(update.get("$setOnInsert", {}))
+        if overlap:
+            raise AssertionError(f"conflicting update paths: {sorted(overlap)}")
         rid = query.get("record_id")
         existing = self.docs.get(rid)
         if existing is None:
@@ -257,6 +274,135 @@ def test_upsert_record_treats_new_source_url_as_content_change():
     assert first["is_new"] is True
     assert linked["is_changed"] is True
     assert same["is_changed"] is False
+
+
+def test_source_document_enriches_existing_list_record_without_duplicate():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+
+    async def scenario():
+        shallow = await dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id="p1",
+            fields={"title": "同一文章", "account": "测试公众号", "summary": "列表摘要"},
+            dedup_key_fields=["title", "account"],
+            screenshot_ids=["list-shot"],
+        )
+        detail = await dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id="p1",
+            fields={"title": "同一文章（全文标题）", "account": "测试公众号", "content": "完整正文"},
+            dedup_key_fields=["title", "account"],
+            source_document_id="doc-1",
+            source_document_version_id="version-1",
+            screenshot_ids=["detail-shot"],
+            browser_screenshot_ids=["browser-shot"],
+            score=95,
+            discovery_fields={"title": "同一文章", "account": "测试公众号", "summary": "列表摘要"},
+        )
+        rediscovered = await dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id="p1",
+            fields={"title": "同一文章", "account": "测试公众号", "summary": "新列表摘要"},
+            dedup_key_fields=["title", "account"],
+            screenshot_ids=["next-list-shot"],
+            score=39,
+        )
+        return shallow, detail, rediscovered
+
+    shallow, detail, rediscovered = _run(scenario())
+    coll = db[dao.MOBILE_COLLECT_RECORDS_COLLECTION]
+    record = coll.docs[detail["record_id"]]
+
+    assert shallow["record_id"] == detail["record_id"]
+    assert rediscovered["record_id"] == detail["record_id"]
+    assert rediscovered["is_changed"] is False
+    assert len(coll.docs) == 1
+    assert detail["is_new"] is False
+    assert detail["is_changed"] is True
+    assert record["source_document_id"] == "doc-1"
+    assert record["fields"]["content"] == "完整正文"
+    assert record["discovery_fields"]["summary"] == "新列表摘要"
+    assert record["score"] == 95
+    assert record["screenshot_ids"] == ["list-shot", "detail-shot", "next-list-shot"]
+    assert record["browser_screenshot_ids"] == ["browser-shot"]
+
+
+def test_source_document_archives_legacy_duplicate_and_merges_evidence():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+    coll = db[dao.MOBILE_COLLECT_RECORDS_COLLECTION]
+    fields = {"title": "同一文章", "account": "测试公众号", "content": "完整正文"}
+    list_id = dao.stable_record_id(
+        "t1", fields, ["title", "account"]
+    )
+    source_id = dao.stable_record_id(
+        "t1", fields, ["title", "account"], source_document_id="doc-1"
+    )
+    coll.docs = {
+        list_id: {
+            "record_id": list_id,
+            "task_def_id": "t1",
+            "fields": {"title": "同一文章", "account": "测试公众号", "summary": "列表摘要"},
+            "content_hash": "old-list-hash",
+            "screenshot_ids": ["list-shot"],
+        },
+        source_id: {
+            "record_id": source_id,
+            "task_def_id": "t1",
+            "fields": fields,
+            "content_hash": dao._content_hash(fields, "https://mp.weixin.qq.com/s/demo"),
+            "source_document_id": "doc-1",
+            "screenshot_ids": ["detail-shot"],
+            "first_seen": datetime(2026, 7, 17, 2, tzinfo=timezone.utc),
+        },
+    }
+    coll.docs[list_id]["first_seen"] = datetime(
+        2026, 7, 17, 1, tzinfo=timezone.utc
+    )
+
+    result = _run(
+        dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id="p1",
+            fields=fields,
+            dedup_key_fields=["title", "account"],
+            source_document_id="doc-1",
+            source_url="https://mp.weixin.qq.com/s/demo",
+        )
+    )
+
+    assert result["record_id"] == source_id
+    assert coll.docs[list_id]["superseded_by_record_id"] == source_id
+    assert coll.docs[source_id]["discovery_fields"]["summary"] == "列表摘要"
+    assert coll.docs[source_id]["screenshot_ids"] == ["detail-shot", "list-shot"]
+    assert coll.docs[source_id]["merged_record_ids"] == [list_id]
+    assert coll.docs[source_id]["first_seen"] == coll.docs[list_id]["first_seen"]
+
+    rediscovered = _run(
+        dao.upsert_record(
+            db,
+            task_def_id="t1",
+            project_id="p1",
+            fields={"title": "同一文章", "account": "测试公众号", "summary": "再次发现"},
+            dedup_key_fields=["title", "account"],
+            screenshot_ids=["next-list-shot"],
+        )
+    )
+    assert rediscovered["record_id"] == source_id
+    assert coll.docs[source_id]["fields"]["content"] == "完整正文"
+    assert coll.docs[source_id]["discovery_fields"]["summary"] == "再次发现"
+    assert coll.docs[source_id]["screenshot_ids"] == [
+        "detail-shot",
+        "list-shot",
+        "next-list-shot",
+    ]
 
 
 # ── 调度: interval next_run ─────────────────────────────

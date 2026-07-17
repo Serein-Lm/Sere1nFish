@@ -334,11 +334,18 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
         ),
     )
 
+    candidate = {
+        "tap_x": 100,
+        "tap_y": 200,
+        "score": 80,
+        "subject_match": 90,
+        "fields": {"title": "手机列表标题", "account": "测试公众号"},
+    }
     asyncio.new_event_loop().run_until_complete(
         stage._deep_dive(
             _Context(),
             "keyword",
-            {"tap_x": 100, "tap_y": 200, "score": 80, "subject_match": 90},
+            candidate,
         )
     )
 
@@ -442,11 +449,18 @@ def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
         ),
     )
 
+    candidate = {
+        "tap_x": 100,
+        "tap_y": 200,
+        "score": 80,
+        "subject_match": 90,
+        "fields": {"title": "手机列表标题", "account": "测试公众号"},
+    }
     asyncio.new_event_loop().run_until_complete(
         stage._deep_dive(
             _Context(),
             "keyword",
-            {"tap_x": 100, "tap_y": 200, "score": 80, "subject_match": 90},
+            candidate,
         )
     )
 
@@ -459,5 +473,6 @@ def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
     assert payload["contacts"][0]["context"] == "联系人张三 13800138000"
     assert payload["browser_screenshot_ids"] == ["browser-shot-1"]
     assert payload["discovery_screenshot_ids"] == ["phone-shot"]
+    assert payload["discovery_fields"] == candidate["fields"]
     assert payload["screenshot_ids"] == ["phone-shot", "browser-shot-1"]
     assert _Context.state["counters"]["documents"] == 1

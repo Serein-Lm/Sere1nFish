@@ -870,6 +870,125 @@ def test_agent_copywriting_tool_normalizes_agent_output():
     asyncio.run(_run())
 
 
+def test_agent_copywriting_tool_retries_invalid_format_with_correction_prompt():
+    async def _run():
+        from langchain_core.messages import AIMessage
+
+        class _Agent:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def __call__(self, payload):
+                self.calls.append(payload)
+                if len(self.calls) == 1:
+                    return {"messages": [AIMessage(content="这不是 JSON")]}
+                return {
+                    "messages": [
+                        AIMessage(content='[{"finding_id":"finding-1","url":"https://example.com"}]')
+                    ]
+                }
+
+        agent = _Agent()
+        tool = AgentCopywritingTool(agent=agent)
+        result = await tool.generate(
+            CopywritingRequest(
+                source="web_tagging",
+                project_id="project-1",
+                task_id="task-1",
+                target_id="finding-1",
+                context="原始任务及 JSON Schema",
+            )
+        )
+
+        assert result.ok
+        assert result.meta["attempts"] == 2
+        assert result.meta["format_retries"] == 1
+        assert len(agent.calls) == 2
+        retry_prompt = agent.calls[1]["messages"][0].content
+        assert "原始任务及 JSON Schema" in retry_prompt
+        assert "输出格式纠正" in retry_prompt
+        assert "这不是 JSON" in retry_prompt
+        assert "不要再次调用工具" in retry_prompt
+
+    asyncio.run(_run())
+
+
+def test_agent_copywriting_tool_stops_after_one_format_retry():
+    async def _run():
+        from langchain_core.messages import AIMessage
+
+        class _Agent:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def __call__(self, _payload):
+                self.calls += 1
+                return {"messages": [AIMessage(content="仍然不是 JSON")]}
+
+        agent = _Agent()
+        result = await AgentCopywritingTool(agent=agent).generate(
+            CopywritingRequest(
+                source="bidding",
+                project_id="project-1",
+                task_id="task-1",
+                target_id="finding-1",
+                context="生成结构化结果",
+            )
+        )
+
+        assert not result.ok
+        assert agent.calls == 2
+        assert result.meta["attempts"] == 2
+        assert result.meta["format_retries"] == 1
+        assert "Agent 输出解析失败" in result.meta["error"]
+
+    asyncio.run(_run())
+
+
+def test_agent_copywriting_tool_retries_json_that_fails_schema_validation():
+    async def _run():
+        from langchain_core.messages import AIMessage
+        from pydantic import BaseModel
+
+        class _Response(BaseModel):
+            finding_id: str
+            url: str
+
+        class _Agent:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def __call__(self, payload):
+                self.calls.append(payload)
+                content = (
+                    '{"message":"格式看似正确但缺少必填字段"}'
+                    if len(self.calls) == 1
+                    else '{"finding_id":"finding-1","url":"https://example.com"}'
+                )
+                return {"messages": [AIMessage(content=content)]}
+
+        agent = _Agent()
+        result = await AgentCopywritingTool(agent=agent).generate(
+            CopywritingRequest(
+                source="web_tagging",
+                project_id="project-1",
+                task_id="task-1",
+                target_id="finding-1",
+                context="原始任务及 JSON Schema",
+                options={"response_model": _Response},
+            )
+        )
+
+        assert result.ok
+        assert result.meta["format_retries"] == 1
+        assert result.copywritings[0]["finding_id"] == "finding-1"
+        retry_prompt = agent.calls[1]["messages"][0].content
+        assert "Field required" in retry_prompt
+        assert "格式看似正确但缺少必填字段" in retry_prompt
+
+    asyncio.run(_run())
+
+
 def test_url_probe_tool_normalizes_probe_results():
     async def _run():
         calls = []

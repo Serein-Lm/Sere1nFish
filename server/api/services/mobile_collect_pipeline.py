@@ -65,9 +65,9 @@ async def run_mobile_collect_definition(
         await collect_dao.set_task_status(db, task_def_id, "idle")
 
 
-async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) -> None:
+async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) -> dict:
     """统一任务分派入口(签名对齐 TASK_DISPATCHERS)。"""
-    await run_mobile_collect_definition(
+    return await run_mobile_collect_definition(
         get_db(),
         run_task_id=task_id,
         project_id=project_id,

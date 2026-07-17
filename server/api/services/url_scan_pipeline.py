@@ -601,7 +601,7 @@ class UrlScanPipeline:
             target_id=finding_id,
             target=finding,
             context=context,
-            options={"url": url},
+            options={"url": url, "response_model": FindingCopywriting},
         )
 
     async def generate_copywriting_for_finding(
@@ -631,7 +631,7 @@ class UrlScanPipeline:
         copywriting_tool = InfoCollectionToolFactory(
             db=self.db,
             app_config=self.app_config,
-        ).create_copywriting_tool(response_parser=self._parse_agent_response)
+        ).create_copywriting_tool()
         result = await copywriting_tool.generate(request)
         if result.ok:
             doc = dict(result.copywritings[0])
@@ -785,9 +785,10 @@ class UrlScanPipeline:
             all_findings: list[dict[str, Any]] = []
             copywriting_errors: list[dict[str, Any]] = []
             dlq = _ScanFailureCollector(scan_results, copywriting_errors)
-            toolset = InfoCollectionToolFactory(db=self.db, app_config=self.app_config).create_url_toolset(
-                response_parser=self._parse_agent_response,
-            )
+            toolset = InfoCollectionToolFactory(
+                db=self.db,
+                app_config=self.app_config,
+            ).create_url_toolset()
 
             # 闭包: 每个 URL 扫描成功后 → 提取 findings → 写库 → 推入话术队列
             # 用闭包是因为需要捕获 task_id / project_id / min_attention_score / pipeline 引用,

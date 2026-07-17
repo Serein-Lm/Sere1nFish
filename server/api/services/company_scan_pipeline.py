@@ -84,6 +84,7 @@ class _ProfileCopywritingStage(Stage):
     async def handle(self, item: Item, ctx) -> None:
         from api.dao import findings as findings_dao
         from api.services.info_collection import CopywritingRequest
+        from Sere1nGraph.graph.skills.schemas import FindingCopywriting
 
         profile = item.payload
         user_id = profile.get("user_id", "")
@@ -112,7 +113,7 @@ class _ProfileCopywritingStage(Stage):
                 target_id=user_id,
                 target=profile,
                 context=context,
-                options={"url": url},
+                options={"url": url, "response_model": FindingCopywriting},
             )
         )
         if not result.ok:
@@ -1318,7 +1319,7 @@ class CompanyScanPipeline:
         copywriting_tool = InfoCollectionToolFactory(
             db=self.db,
             app_config=self.app_config,
-        ).create_copywriting_tool(response_parser=self._parse_agent_response)
+        ).create_copywriting_tool()
         concurrency = min(6, max(1, len(high_profiles)))
         stage = _ProfileCopywritingStage(
             concurrency=concurrency,

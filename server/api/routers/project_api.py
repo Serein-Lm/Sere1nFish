@@ -217,7 +217,7 @@ async def _dispatch_scholar_contact(task_id: str, project_id: str, params: dict)
 async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict):
     from api.services.mobile_collect_pipeline import _dispatch_mobile_collect as _run
 
-    await _run(task_id, project_id, params)
+    return await _run(task_id, project_id, params)
 
 TASK_DISPATCHERS: dict[str, Any] = {
     "url_scan": _dispatch_url_scan,
@@ -251,11 +251,20 @@ async def _execute_task(task_id: str, project_id: str, task_type: str, params: d
             {"$set": {"status": "running", "started_at": datetime.now(), "updated_at": datetime.now()}},
         )
         dispatcher = TASK_DISPATCHERS[task_type]
-        await dispatcher(task_id, project_id, params)
+        result = await dispatcher(task_id, project_id, params)
         elapsed = _time.time() - t0
+        completed_at = datetime.now()
+        completed_fields = {
+            "status": "completed",
+            "elapsed_ms": round(elapsed * 1000),
+            "updated_at": completed_at,
+            "completed_at": completed_at,
+        }
+        if result is not None:
+            completed_fields["result"] = result
         await db[TASKS_COLLECTION].update_one(
             {"task_id": task_id},
-            {"$set": {"status": "completed", "elapsed_ms": round(elapsed * 1000), "updated_at": datetime.now()}},
+            {"$set": completed_fields},
         )
         obs_log(
             f"任务完成 ({elapsed:.1f}s)", task_id=task_id, project_id=project_id,
@@ -265,9 +274,16 @@ async def _execute_task(task_id: str, project_id: str, task_type: str, params: d
         logger.notice(f"✅ 任务完成 | task={task_id} ({elapsed:.1f}s)")
     except Exception as e:
         elapsed = _time.time() - t0
+        completed_at = datetime.now()
         await db[TASKS_COLLECTION].update_one(
             {"task_id": task_id},
-            {"$set": {"status": "error", "error": str(e), "elapsed_ms": round(elapsed * 1000), "updated_at": datetime.now()}},
+            {"$set": {
+                "status": "error",
+                "error": str(e),
+                "elapsed_ms": round(elapsed * 1000),
+                "updated_at": completed_at,
+                "completed_at": completed_at,
+            }},
         )
         obs_log(
             f"任务失败: {e}", task_id=task_id, project_id=project_id,

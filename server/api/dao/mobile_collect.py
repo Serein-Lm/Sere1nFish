@@ -254,6 +254,99 @@ def _content_hash(fields: dict[str, Any], source_url: str | None = None) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+_EVIDENCE_ARRAY_FIELDS = (
+    "run_task_ids",
+    "screenshot_ids",
+    "screenshot_urls",
+    "browser_screenshot_ids",
+    "browser_screenshot_urls",
+    "discovery_screenshot_ids",
+    "discovery_screenshot_urls",
+)
+
+
+async def _resolve_record_identity(
+    collection: Any,
+    *,
+    task_def_id: str,
+    fields: dict[str, Any],
+    dedup_key_fields: list[str],
+    source_document_id: str,
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve a source document back to its earlier list discovery record.
+
+    List extraction happens before browser-backed detail ingestion. When both
+    stages describe the same item, the configured list dedup key remains the
+    record identity and the immutable source document is attached to it. The
+    third return value is a legacy duplicate that should be archived after its
+    evidence has been folded into the canonical record.
+    """
+    source_record_id = _stable_record_id(
+        task_def_id,
+        fields,
+        dedup_key_fields,
+        source_document_id=source_document_id,
+    )
+    projection = {
+        "_id": 0,
+        "record_id": 1,
+        "content_hash": 1,
+        "fields": 1,
+        "discovery_fields": 1,
+        "source_document_id": 1,
+        "superseded_by_record_id": 1,
+        "first_seen": 1,
+        **{field: 1 for field in _EVIDENCE_ARRAY_FIELDS},
+    }
+    if not source_document_id:
+        existing = await collection.find_one(
+            {"record_id": source_record_id}, projection
+        )
+        superseded_by = str((existing or {}).get("superseded_by_record_id") or "")
+        if superseded_by:
+            canonical = await collection.find_one(
+                {"record_id": superseded_by}, projection
+            )
+            if canonical:
+                return superseded_by, canonical, None
+        return source_record_id, existing, None
+
+    source_existing = await collection.find_one(
+        {
+            "task_def_id": task_def_id,
+            "source_document_id": source_document_id,
+            "superseded_by_record_id": {"$exists": False},
+        },
+        projection,
+    )
+    list_record_id = _stable_record_id(
+        task_def_id,
+        fields,
+        dedup_key_fields,
+        source_document_id="",
+    )
+    list_existing = await collection.find_one(
+        {
+            "record_id": list_record_id,
+            "superseded_by_record_id": {"$exists": False},
+        },
+        projection,
+    )
+
+    if source_existing:
+        canonical_id = str(source_existing.get("record_id") or source_record_id)
+        duplicate = (
+            list_existing
+            if list_existing
+            and str(list_existing.get("record_id") or list_record_id) != canonical_id
+            else None
+        )
+        return canonical_id, source_existing, duplicate
+    if list_existing:
+        return list_record_id, list_existing, None
+    return source_record_id, None, None
+
+
 async def upsert_record(
     db: AsyncIOMotorDatabase,
     *,
@@ -276,59 +369,86 @@ async def upsert_record(
     browser_screenshot_urls: list[str] | None = None,
     discovery_screenshot_ids: list[str] | None = None,
     discovery_screenshot_urls: list[str] | None = None,
+    discovery_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """增量 upsert 一条采集记录。返回 {record_id, is_new, is_changed}。"""
-    record_id = _stable_record_id(
-        task_def_id,
-        fields,
-        dedup_key_fields,
-        source_document_id=source_document_id,
-    )
     content_hash = _content_hash(fields, source_url)
     now = _now()
     coll = db[MOBILE_COLLECT_RECORDS_COLLECTION]
-
-    existing = await coll.find_one(
-        {"record_id": record_id}, {"_id": 0, "content_hash": 1}
+    record_id, existing, legacy_duplicate = await _resolve_record_identity(
+        coll,
+        task_def_id=task_def_id,
+        fields=discovery_fields or fields,
+        dedup_key_fields=dedup_key_fields,
+        source_document_id=source_document_id,
+    )
+    preserve_source_detail = bool(
+        not source_document_id and (existing or {}).get("source_document_id")
     )
     is_new = existing is None
-    is_changed = (not is_new) and existing.get("content_hash") != content_hash
+    is_changed = (
+        (not is_new)
+        and not preserve_source_detail
+        and existing.get("content_hash") != content_hash
+    )
 
     set_fields: dict[str, Any] = {
         "record_id": record_id,
         "task_def_id": task_def_id,
         "project_id": project_id,
-        "fields": fields,
-        "content_hash": content_hash,
         "keyword": keyword,
         "last_seen": now,
         "latest_run_task_id": run_task_id,
         "is_new": is_new,
         "is_changed": is_changed,
     }
-    if score is not None:
+    if preserve_source_detail:
+        set_fields["discovery_fields"] = fields
+        set_fields["discovery_content_hash"] = content_hash
+    else:
+        set_fields["fields"] = fields
+        set_fields["content_hash"] = content_hash
+    if score is not None and not preserve_source_detail:
         set_fields["score"] = score
-    if subject_match is not None:
+    if subject_match is not None and not preserve_source_detail:
         set_fields["subject_match"] = subject_match
-    if source_url:
+    if source_url and not preserve_source_detail:
         set_fields["source_url"] = source_url
     if source_document_id:
         set_fields["source_document_id"] = source_document_id
     if source_document_version_id:
         set_fields["source_document_version_id"] = source_document_version_id
+    if source_document_id:
+        archived_discovery_fields = (
+            discovery_fields
+            or (legacy_duplicate or {}).get("discovery_fields")
+            or (legacy_duplicate or {}).get("fields")
+            or (existing or {}).get("discovery_fields")
+            or (
+                (existing or {}).get("fields")
+                if not (existing or {}).get("source_document_id")
+                else None
+            )
+        )
+        if archived_discovery_fields:
+            set_fields["discovery_fields"] = archived_discovery_fields
     if target_id:
         set_fields["target_id"] = target_id
     if target_name:
         set_fields["target_name"] = target_name
-    if browser_screenshot_ids is not None:
-        set_fields["browser_screenshot_ids"] = browser_screenshot_ids
-    if browser_screenshot_urls is not None:
-        set_fields["browser_screenshot_urls"] = browser_screenshot_urls
-
     update: dict[str, Any] = {
         "$set": set_fields,
         "$setOnInsert": {"first_seen": now},
     }
+    if legacy_duplicate and legacy_duplicate.get("first_seen"):
+        existing_first_seen = (existing or {}).get("first_seen")
+        duplicate_first_seen = legacy_duplicate["first_seen"]
+        try:
+            if not existing_first_seen or duplicate_first_seen < existing_first_seen:
+                set_fields["first_seen"] = duplicate_first_seen
+                update["$setOnInsert"].pop("first_seen", None)
+        except TypeError:
+            pass
     add_to_set: dict[str, Any] = {}
     if run_task_id:
         add_to_set["run_task_ids"] = run_task_id
@@ -336,6 +456,10 @@ async def upsert_record(
         add_to_set["screenshot_ids"] = {"$each": screenshot_ids}
     if screenshot_urls:
         add_to_set["screenshot_urls"] = {"$each": screenshot_urls}
+    if browser_screenshot_ids:
+        add_to_set["browser_screenshot_ids"] = {"$each": browser_screenshot_ids}
+    if browser_screenshot_urls:
+        add_to_set["browser_screenshot_urls"] = {"$each": browser_screenshot_urls}
     if discovery_screenshot_ids:
         add_to_set["discovery_screenshot_ids"] = {
             "$each": discovery_screenshot_ids
@@ -344,10 +468,38 @@ async def upsert_record(
         add_to_set["discovery_screenshot_urls"] = {
             "$each": discovery_screenshot_urls
         }
+    if legacy_duplicate:
+        duplicate_id = str(legacy_duplicate.get("record_id") or "")
+        if duplicate_id:
+            add_to_set["merged_record_ids"] = duplicate_id
+        for field in _EVIDENCE_ARRAY_FIELDS:
+            values = list(legacy_duplicate.get(field) or [])
+            if not values:
+                continue
+            current = add_to_set.get(field)
+            if isinstance(current, dict):
+                current["$each"] = list(dict.fromkeys([*current.get("$each", []), *values]))
+            elif current:
+                add_to_set[field] = {"$each": list(dict.fromkeys([current, *values]))}
+            else:
+                add_to_set[field] = {"$each": values}
     if add_to_set:
         update["$addToSet"] = add_to_set
 
     await coll.update_one({"record_id": record_id}, update, upsert=True)
+    if legacy_duplicate:
+        duplicate_id = str(legacy_duplicate.get("record_id") or "")
+        if duplicate_id and duplicate_id != record_id:
+            await coll.update_one(
+                {"record_id": duplicate_id},
+                {
+                    "$set": {
+                        "superseded_by_record_id": record_id,
+                        "superseded_reason": "source_document_match",
+                        "superseded_at": now,
+                    }
+                },
+            )
     return {"record_id": record_id, "is_new": is_new, "is_changed": is_changed}
 
 
@@ -362,7 +514,7 @@ async def list_records(
     skip: int = 0,
     limit: int = 50,
 ) -> tuple[list[dict[str, Any]], int]:
-    query: dict[str, Any] = {}
+    query: dict[str, Any] = {"superseded_by_record_id": {"$exists": False}}
     if task_def_id:
         query["task_def_id"] = task_def_id
     if project_id:
