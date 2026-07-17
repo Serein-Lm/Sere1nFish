@@ -2,7 +2,7 @@
 模型定价计算
 
 支持两种模式：
-- 阶梯定价 (tiered): qwen3-max, qwen3.5-plus
+- 阶梯定价 (tiered): qwen3-max, qwen3.5-plus, qwen3.7-plus
 - 固定定价 (flat): kimi, glm, claude 系列
 
 基于 token_cost_guide.md 的定价数据。
@@ -22,6 +22,13 @@ QWEN35_PLUS_TIERS = [
     (128_000, 0.8, 4.8),
     (256_000, 2.0, 12.0),
     (1_000_000, 4.0, 24.0),
+]
+
+# 阿里云百炼中国内地限时 8 折在线调用价。qwen3.7-plus 的思考与
+# 非思考输出同价；Batch 可在 calc_cost(batch=True) 时再享 5 折。
+QWEN37_PLUS_TIERS = [
+    (256_000, 1.6, 6.4),
+    (1_000_000, 4.8, 19.2),
 ]
 
 # ── 固定定价（元/百万 token）──
@@ -47,6 +54,8 @@ MODEL_PRICING_TYPE: dict[str, str] = {
     "qwen3-max": "qwen3_tiered",
     "qwen3-max-2026-01-23": "qwen3_tiered",
     "qwen3.5-plus": "qwen35_tiered",
+    "qwen3.7-plus": "qwen37_tiered",
+    "qwen3.7-plus-2026-05-26": "qwen37_tiered",
 }
 # flat 模型直接用名字查 FLAT_PRICING
 
@@ -62,7 +71,13 @@ def _calc_tiered(input_tokens: int, output_tokens: int, tiers: list[tuple]) -> f
     return (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
 
-def calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def calc_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    batch: bool = False,
+) -> float:
     """
     计算单次调用费用（元）
 
@@ -70,6 +85,7 @@ def calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
         model: 模型名
         input_tokens: 输入 token 数
         output_tokens: 输出 token 数
+        batch: qwen3.7-plus 是否通过 Batch 调用；Batch 在在线折后价基础上半价
 
     Returns:
         费用（元），未知模型按 glm-4.7 计算
@@ -78,8 +94,11 @@ def calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
     if pricing_type == "qwen3_tiered":
         return _calc_tiered(input_tokens, output_tokens, QWEN3_MAX_TIERS)
-    elif pricing_type == "qwen35_tiered":
+    if pricing_type == "qwen35_tiered":
         return _calc_tiered(input_tokens, output_tokens, QWEN35_PLUS_TIERS)
+    if pricing_type == "qwen37_tiered":
+        cost = _calc_tiered(input_tokens, output_tokens, QWEN37_PLUS_TIERS)
+        return cost * 0.5 if batch else cost
 
     # flat 定价
     if model in FLAT_PRICING:

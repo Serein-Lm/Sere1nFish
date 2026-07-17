@@ -400,6 +400,10 @@ obs_log(
 | qwen3.5-plus | 128K | 0.8 | 4.8 |
 | qwen3.5-plus | 256K | 2.0 | 12.0 |
 | qwen3.5-plus | 1M | 4.0 | 24.0 |
+| qwen3.7-plus | 256K | 1.6 | 6.4 |
+| qwen3.7-plus | 1M | 4.8 | 19.2 |
+
+`qwen3.7-plus` 与 `qwen3.7-plus-2026-05-26` 使用同一定价。表内为中国内地在线调用原价 8 折后的价格；`calc_cost(..., batch=True)` 支持 Batch 再半价。当前 Token tracker 没有可靠记录缓存命中 Token，因此不会臆测上下文缓存折扣，待供应商 usage 元数据接入后再单独核算。
 
 ### 固定定价
 
