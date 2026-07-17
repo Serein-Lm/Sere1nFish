@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, CloudServerOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
 import {
   getProject,
   listProjectWebTaggingRecords,
@@ -67,7 +67,6 @@ import {
   listScholarContacts,
   type ScholarContact,
 } from '../../services/scholarContactService'
-import { listProjectAssets, type ProjectAsset } from '../../services/assetService'
 import { getConfigSection } from '../../services/configService'
 import './ProjectDetail.css'
 
@@ -95,7 +94,7 @@ function boundedTaskTuning(value: unknown, fallback: number, maximum: number): n
   return Number.isFinite(parsed) ? Math.max(1, Math.min(Math.trunc(parsed), maximum)) : fallback
 }
 
-type TabKey = 'website' | 'assets' | 'xiaohongshu' | 'douyin' | 'wechat' | 'mobile' | 'scholars' | 'tasks' | 'stats'
+type TabKey = 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'mobile' | 'scholars' | 'tasks' | 'stats'
 
 /**
  * 抖音标签中文映射
@@ -455,10 +454,6 @@ export default function ProjectDetail() {
   // 看板状态
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [dashboardLoading, setDashboardLoading] = useState(false)
-  const [assets, setAssets] = useState<ProjectAsset[]>([])
-  const [assetsTotal, setAssetsTotal] = useState(0)
-  const [assetsLoading, setAssetsLoading] = useState(false)
-
   // 小红书状态
   const [xhsNotes, setXhsNotes] = useState<XhsNote[]>([])
   const [xhsNotesTotal, setXhsNotesTotal] = useState(0)
@@ -574,19 +569,6 @@ export default function ProjectDetail() {
       console.error(e)
     } finally {
       setTaggingLoading(false)
-    }
-  }
-
-  const fetchAssets = async (pid: string) => {
-    setAssetsLoading(true)
-    try {
-      const result = await listProjectAssets(pid)
-      setAssets(result.items)
-      setAssetsTotal(result.total)
-    } catch (e) {
-      console.error('加载资产情报失败:', e)
-    } finally {
-      setAssetsLoading(false)
     }
   }
 
@@ -883,7 +865,6 @@ export default function ProjectDetail() {
         if (!cancelled) {
           setProject(data)
           await fetchRecords(projectId)
-          fetchAssets(projectId)
           // 加载任务列表
           await fetchTasks(projectId)
           // 加载看板数据
@@ -916,7 +897,6 @@ export default function ProjectDetail() {
           setDouyinSearchResults([])
           setDouyinTaggedResults([])
           setDouyinProfiles([])
-          setAssets([])
           setMobileProfiles([])
           setMobileScreenshots([])
           setMobileOperations([])
@@ -3046,83 +3026,6 @@ export default function ProjectDetail() {
     )
   }
 
-  const renderAssetsContent = () => {
-    const columns: ColumnsType<ProjectAsset> = [
-      {
-        title: '资产地址',
-        dataIndex: 'canonical_url',
-        key: 'canonical_url',
-        width: 260,
-        ellipsis: true,
-        render: (value: string, record) => {
-          const href = value || record.link
-          return href ? <a href={href} target="_blank" rel="noreferrer">{href}</a> : '-'
-        },
-      },
-      {
-        title: 'IP / 端口',
-        key: 'endpoint',
-        width: 170,
-        render: (_, record) => `${record.ip || '-'}${record.port ? `:${record.port}` : ''}`,
-      },
-      {
-        title: '来源',
-        dataIndex: 'sources',
-        key: 'sources',
-        width: 150,
-        render: (values: string[] = []) => (
-          <Space size={[4, 4]} wrap>{values.map((value) => <Tag key={value}>{value.toUpperCase()}</Tag>)}</Space>
-        ),
-      },
-      {
-        title: '存活',
-        dataIndex: 'is_alive',
-        key: 'is_alive',
-        width: 90,
-        render: (value: boolean | null) => (
-          value === true ? <Tag color="success">存活</Tag> : value === false ? <Tag color="error">不可达</Tag> : <Tag>未探测</Tag>
-        ),
-      },
-      {
-        title: '状态码',
-        key: 'status_code',
-        width: 90,
-        render: (_, record) => record.probe?.status_code ?? '-',
-      },
-      { title: '标题', dataIndex: 'title', key: 'title', width: 220, ellipsis: true, render: (value) => value || '-' },
-      { title: '根域名', dataIndex: 'root_domain', key: 'root_domain', width: 150, ellipsis: true, render: (value) => value || '-' },
-      {
-        title: '最近发现',
-        dataIndex: 'updated_at',
-        key: 'updated_at',
-        width: 170,
-        render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-',
-      },
-    ]
-    return (
-      <div className="project-tab-section">
-        <div className="section-header-row">
-          <div>
-            <Title level={4}>资产情报</Title>
-            <Text type="secondary">FOFA 与 Hunter 跨源去重，展示最新探活状态和增量结果</Text>
-          </div>
-          <Button icon={<SyncOutlined />} loading={assetsLoading} onClick={() => projectId && fetchAssets(projectId)}>
-            刷新
-          </Button>
-        </div>
-        <Table<ProjectAsset>
-          rowKey="asset_id"
-          columns={columns}
-          dataSource={assets}
-          loading={assetsLoading}
-          scroll={{ x: 1320 }}
-          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: () => `共 ${assetsTotal} 条` }}
-          locale={{ emptyText: <Empty description="暂无资产，请下发综合公司扫描或资产采集任务" /> }}
-        />
-      </div>
-    )
-  }
-
   // Tab 配置
   const tabItems = [
     {
@@ -3134,17 +3037,6 @@ export default function ProjectDetail() {
         </Space>
       ),
       children: renderWebsiteContent(),
-    },
-    {
-      key: 'assets' as TabKey,
-      label: (
-        <Space>
-          <CloudServerOutlined />
-          资产情报
-          {assetsTotal > 0 && <Tag>{assetsTotal}</Tag>}
-        </Space>
-      ),
-      children: renderAssetsContent(),
     },
     {
       key: 'xiaohongshu' as TabKey,
