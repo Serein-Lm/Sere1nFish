@@ -16,6 +16,41 @@ export interface TaskProgress {
   total_copywritings?: number
 }
 
+export type XhsTargetSelectionMode = 'auto' | 'manual'
+export type XhsTargetSelectionStatus = 'pending' | 'completed' | 'fallback' | 'disabled'
+
+export interface XhsTargetDecision {
+  target_id: string
+  target_name: string
+  target_category: string
+  should_collect_xhs: boolean
+  reason: string
+  confidence: number
+  source: 'ai' | 'manual' | 'fallback'
+}
+
+export interface XhsTargetSelectionResult {
+  mode: XhsTargetSelectionMode
+  status: XhsTargetSelectionStatus
+  prompt_slug?: string | null
+  manual_targets: string[]
+  matched_manual_targets: string[]
+  unmatched_manual_targets: string[]
+  decisions: XhsTargetDecision[]
+  selected_count: number
+  skipped_count: number
+  error?: string | null
+}
+
+export interface TaskResult {
+  [key: string]: unknown
+  xhs?: {
+    enabled?: boolean
+    root_selected?: boolean
+    selection?: XhsTargetSelectionResult
+  }
+}
+
 export interface Task {
   task_id: string
   project_id: string
@@ -23,6 +58,7 @@ export interface Task {
   params: Record<string, unknown>
   status: TaskStatus
   progress: TaskProgress
+  result?: TaskResult
   elapsed_ms?: number
   error: string | null
   created_at: string

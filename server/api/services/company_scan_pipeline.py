@@ -184,6 +184,8 @@ class CompanyScanPipeline:
         enable_asset_discovery: bool = True,
         enable_xhs: bool = True,
         enable_subsidiary_xhs: bool = False,
+        xhs_target_selection_mode: str = "auto",
+        xhs_manual_targets: list[str] | str | None = None,
         enable_bidding: bool = True,
         bidding_page_size: int = 20,
         enable_wechat: bool = False,
@@ -218,8 +220,10 @@ class CompanyScanPipeline:
         4. 根 Target 的 XHS画像 → 话术生成
         """
         from core.observability import obs_log
+        from api.services.xhs_target_selection import parse_manual_targets
 
         subsidiary_xhs_enabled = bool(enable_xhs and enable_subsidiary_xhs)
+        manual_xhs_targets = parse_manual_targets(xhs_manual_targets)
         result = {
             "task_id": task_id,
             "company_name": company_name,
@@ -252,6 +256,19 @@ class CompanyScanPipeline:
                 "keywords_used": [],
                 "notes_count": 0,
                 "profiles_count": 0,
+                "root_selected": False,
+                "selection": {
+                    "mode": str(xhs_target_selection_mode or "auto"),
+                    "status": "pending" if enable_xhs else "disabled",
+                    "prompt_slug": None,
+                    "manual_targets": manual_xhs_targets,
+                    "matched_manual_targets": [],
+                    "unmatched_manual_targets": manual_xhs_targets,
+                    "decisions": [],
+                    "selected_count": 0,
+                    "skipped_count": 0,
+                    "error": None,
+                },
             },
             "bidding": {
                 "enabled": enable_bidding,
@@ -384,6 +401,59 @@ class CompanyScanPipeline:
                 "keywords": router_output.all_keywords,
             }
 
+            xhs_selector: Any = None
+            xhs_selection_result: Any = None
+            root_xhs_enabled = False
+            if enable_xhs:
+                from api.services.xhs_target_selection import (
+                    XhsTargetCandidate,
+                    XhsTargetSelectionService,
+                )
+
+                def _profile_value(field: str, default: Any = None) -> Any:
+                    value = getattr(router_profile, field, default) if router_profile else default
+                    return getattr(value, "value", value)
+
+                xhs_selector = XhsTargetSelectionService(
+                    self.app_config,
+                    mode=xhs_target_selection_mode,
+                    manual_targets=manual_xhs_targets,
+                )
+                xhs_selection_result = await xhs_selector.select(
+                    [
+                        XhsTargetCandidate(
+                            target_id=target_id,
+                            target_name=normalized_name,
+                            aliases=aliases,
+                            root_domain=root_domain,
+                            context={
+                                "industry": _profile_value("industry", "other"),
+                                "sub_industries": _profile_value("sub_industries", []),
+                                "business_nature": _profile_value("business_nature", "mixed"),
+                                "main_business": _profile_value("main_business", []),
+                                "tags": _profile_value("tags", []),
+                                "scale": _profile_value("scale", "unknown"),
+                                "is_listed": bool(_profile_value("is_listed", False)),
+                            },
+                        )
+                    ],
+                    project_id=project_id,
+                    task_id=task_id,
+                )
+                result["xhs"]["selection"] = xhs_selection_result.model_dump(mode="json")
+                root_decision = next(iter(xhs_selection_result.decisions), None)
+                root_xhs_enabled = bool(
+                    root_decision and root_decision.should_collect_xhs
+                )
+                result["xhs"]["root_selected"] = root_xhs_enabled
+                logger.info(
+                    "[company_scan] task=%s XHS 根目标选择 mode=%s selected=%s reason=%s",
+                    task_id,
+                    xhs_selector.mode,
+                    root_xhs_enabled,
+                    root_decision.reason if root_decision else "无判定结果",
+                )
+
             from api.dao import targets as targets_dao
             from api.services.search_terms import build_target_channel_terms
 
@@ -442,7 +512,7 @@ class CompanyScanPipeline:
                     ),
                 ))
 
-            if enable_xhs:
+            if root_xhs_enabled:
                 xhs_keywords = self._get_xhs_keywords(aliases, router_output)
                 result["xhs"]["keywords_used"] = xhs_keywords
                 primary_jobs.append((
@@ -558,8 +628,57 @@ class CompanyScanPipeline:
                     raise RuntimeError("所有公司扫描子流水线均失败: " + "; ".join(result["sub_errors"]))
 
             wholly_owned_entities = list(result["control_structure"].get("entities") or [])
+            child_xhs_decisions: dict[str, dict[str, Any]] = {}
+            selected_child_xhs = False
+            if wholly_owned_entities and subsidiary_xhs_enabled and xhs_selector:
+                from api.services.xhs_target_selection import (
+                    XhsTargetCandidate,
+                    merge_xhs_target_selection_results,
+                )
+
+                child_selection = await xhs_selector.select(
+                    [
+                        XhsTargetCandidate(
+                            target_id=str(entity.get("target_id") or ""),
+                            target_name=str(entity.get("name") or "").strip(),
+                            aliases=self._dedupe_text(
+                                [
+                                    str(entity.get("name") or ""),
+                                    *[str(item) for item in entity.get("aliases") or []],
+                                ]
+                            ),
+                            root_domain=str(entity.get("root_domain") or ""),
+                            context={
+                                "registration_status": str(
+                                    entity.get("registration_status") or ""
+                                ),
+                                "icp_domains": list(entity.get("icp_domains") or []),
+                                "relation_type": "wholly_owned_direct_investment",
+                                "parent_target_name": normalized_name,
+                            },
+                        )
+                        for entity in wholly_owned_entities
+                        if str(entity.get("target_id") or "")
+                        and str(entity.get("name") or "").strip()
+                    ],
+                    project_id=project_id,
+                    task_id=task_id,
+                )
+                xhs_selection_result = merge_xhs_target_selection_results(
+                    xhs_selection_result,
+                    child_selection,
+                )
+                result["xhs"]["selection"] = xhs_selection_result.model_dump(mode="json")
+                child_xhs_decisions = {
+                    item.target_id: item.model_dump(mode="json")
+                    for item in child_selection.decisions
+                }
+                selected_child_xhs = any(
+                    item.should_collect_xhs for item in child_selection.decisions
+                )
+
             followups: list[tuple[str, Any]] = []
-            if wholly_owned_entities and (enable_asset_discovery or subsidiary_xhs_enabled):
+            if wholly_owned_entities and (enable_asset_discovery or selected_child_xhs):
                 followups.append((
                     "wholly_owned_entities",
                     self._scan_wholly_owned_entities(
@@ -583,6 +702,7 @@ class CompanyScanPipeline:
                         copywriting_concurrency=copywriting_concurrency,
                         xhs_search_concurrency=xhs_search_concurrency,
                         entity_concurrency=control_scan_concurrency,
+                        xhs_decisions=child_xhs_decisions,
                     ),
                 ))
             if followups:
@@ -609,7 +729,7 @@ class CompanyScanPipeline:
                         )
 
             # ── 阶段 3: 画像→话术 ──
-            if enable_xhs and enable_copywriting and xhs_succeeded:
+            if root_xhs_enabled and enable_copywriting and xhs_succeeded:
                 logger.info(f"[company_scan] task={task_id} 阶段3: 画像话术生成")
                 await self._update_progress(task_id, "profile_copywriting", "为高分画像生成话术...")
 
@@ -662,6 +782,12 @@ class CompanyScanPipeline:
                     "bidding_copywritings": result["bidding"].get("copywritings_count", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                     "wholly_owned_entities": len(wholly_owned_entities),
+                    "xhs_targets_selected": result["xhs"]["selection"].get(
+                        "selected_count", 0
+                    ),
+                    "xhs_targets_skipped": result["xhs"]["selection"].get(
+                        "skipped_count", 0
+                    ),
                 },
             )
             await self._update_progress(task_id, "completed", "综合公司扫描完成")
@@ -679,6 +805,12 @@ class CompanyScanPipeline:
                     "bidding_records": result["bidding"].get("records_fetched", 0),
                     "bidding_findings": result["bidding"].get("findings_count", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
+                    "xhs_targets_selected": result["xhs"]["selection"].get(
+                        "selected_count", 0
+                    ),
+                    "xhs_targets_skipped": result["xhs"]["selection"].get(
+                        "skipped_count", 0
+                    ),
                 },
             )
 
@@ -861,6 +993,7 @@ class CompanyScanPipeline:
         copywriting_concurrency: int,
         xhs_search_concurrency: int,
         entity_concurrency: int,
+        xhs_decisions: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """按全资子公司限流并发，单位内部继续并行资产与社媒流水线。"""
         from api.services.search_terms import build_channel_terms
@@ -879,6 +1012,17 @@ class CompanyScanPipeline:
                     "aliases": aliases,
                     "target_id": target_id,
                 }
+                xhs_decision = (xhs_decisions or {}).get(target_id)
+                entity_xhs_enabled = bool(
+                    enable_xhs
+                    and (
+                        xhs_decisions is None
+                        or (
+                            xhs_decision
+                            and xhs_decision.get("should_collect_xhs")
+                        )
+                    )
+                )
                 subtasks: list[Any] = []
                 if enable_asset_discovery:
                     subtasks.append(
@@ -902,7 +1046,7 @@ class CompanyScanPipeline:
                         )
                     )
                 xhs_keywords: list[str] = []
-                if enable_xhs:
+                if entity_xhs_enabled:
                     xhs_keywords = build_channel_terms(
                         channel="xhs",
                         names=aliases,
@@ -923,10 +1067,12 @@ class CompanyScanPipeline:
                 scan_result: dict[str, Any] = {
                     "assets": {},
                     "url_scan": {},
-                    "xhs": {"enabled": enable_xhs, "keywords_used": xhs_keywords},
+                    "xhs": {"enabled": entity_xhs_enabled, "keywords_used": xhs_keywords},
                     "profile_copywritings": {"count": 0},
                     "errors": [],
                 }
+                if xhs_decision:
+                    scan_result["xhs"]["selection"] = xhs_decision
                 xhs_succeeded = False
                 for sub in await asyncio.gather(*subtasks, return_exceptions=True):
                     if isinstance(sub, Exception):
@@ -937,7 +1083,7 @@ class CompanyScanPipeline:
                     elif "notes_count" in sub:
                         scan_result["xhs"].update(sub)
                         xhs_succeeded = True
-                if enable_xhs and enable_copywriting and xhs_succeeded:
+                if entity_xhs_enabled and enable_copywriting and xhs_succeeded:
                     from Sere1nGraph.graph.company_router.router import CompanyRouterResult
 
                     try:

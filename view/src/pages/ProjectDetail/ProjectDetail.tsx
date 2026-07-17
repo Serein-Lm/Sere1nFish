@@ -4001,6 +4001,13 @@ export default function ProjectDetail() {
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? true
                     params.enable_subsidiary_xhs = Boolean(values.enable_xhs && values.enable_subsidiary_xhs)
+                    params.xhs_target_selection_mode = values.xhs_target_selection_mode ?? 'auto'
+                    if (values.enable_xhs && values.xhs_target_selection_mode === 'manual') {
+                      params.xhs_manual_targets = String(values.xhs_manual_targets || '')
+                        .split(/[\n\r,，;；]+/)
+                        .map((name: string) => name.trim())
+                        .filter(Boolean)
+                    }
                     params.enable_bidding = values.enable_bidding ?? true
                     if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
                     params.enable_wechat = values.enable_wechat ?? false
@@ -4088,7 +4095,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_subsidiary_xhs: false, enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_subsidiary_xhs: true, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4123,7 +4130,7 @@ export default function ProjectDetail() {
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_xhs" valuePropName="checked" noStyle>
-                              <Checkbox>小红书爬取（默认只采集根公司）</Checkbox>
+                              <Checkbox>小红书采集（按目标选择策略执行）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_bidding" valuePropName="checked" noStyle>
                               <Checkbox>招投标采集（法定主体，默认 20 条）</Checkbox>
@@ -4131,7 +4138,7 @@ export default function ProjectDetail() {
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (
                                 <Form.Item name="enable_subsidiary_xhs" valuePropName="checked" noStyle>
-                                  <Checkbox disabled={!getFieldValue('enable_xhs')}>额外采集第一层全资子公司的小红书（默认关闭）</Checkbox>
+                                  <Checkbox disabled={!getFieldValue('enable_xhs')}>将第一层全资子公司纳入小红书目标选择</Checkbox>
                                 </Form.Item>
                               )}
                             </Form.Item>
@@ -4142,6 +4149,31 @@ export default function ProjectDetail() {
                               <Checkbox>话术生成</Checkbox>
                             </Form.Item>
                           </Space>
+                        </Form.Item>
+                        <Form.Item noStyle shouldUpdate={(prev, cur) => (
+                          prev.enable_xhs !== cur.enable_xhs
+                          || prev.xhs_target_selection_mode !== cur.xhs_target_selection_mode
+                        )}>
+                          {({ getFieldValue }) => getFieldValue('enable_xhs') ? (
+                            <>
+                              <Form.Item name="xhs_target_selection_mode" label="小红书目标选择">
+                                <Segmented block options={[
+                                  { label: 'AI 自动判断', value: 'auto' },
+                                  { label: '手动名单', value: 'manual' },
+                                ]} />
+                              </Form.Item>
+                              {getFieldValue('xhs_target_selection_mode') === 'manual' ? (
+                                <Form.Item
+                                  name="xhs_manual_targets"
+                                  label="需要采集的公司名单"
+                                  rules={[{ required: true, whitespace: true, message: '请输入至少一个公司名称' }]}
+                                  extra="每行一个名称，也支持逗号分隔；按法定名和已有别名匹配根目标及第一层全资子公司。"
+                                >
+                                  <Input.TextArea rows={4} placeholder={'如：\n中国平安保险（集团）股份有限公司\n平安科技'} />
+                                </Form.Item>
+                              ) : null}
+                            </>
+                          ) : null}
                         </Form.Item>
                         <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_wechat !== cur.enable_wechat}>
                           {({ getFieldValue }) => getFieldValue('enable_wechat') ? (

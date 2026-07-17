@@ -68,6 +68,7 @@ CORE_PROMPT_SLUGS = {
     "xhs_note_tagging/xhs_note_tagging",
     "xhs_profile/xhs_profile",
     "xhs_profile_vl/vision_analysis",
+    "xhs_target_selection/xhs_target_selection",
 }
 
 

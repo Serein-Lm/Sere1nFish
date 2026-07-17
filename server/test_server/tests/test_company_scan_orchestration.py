@@ -17,6 +17,14 @@ def test_subsidiary_xhs_is_disabled_by_default() -> None:
     assert parameter.default is False
 
 
+def test_xhs_target_selection_is_automatic_by_default() -> None:
+    parameter = inspect.signature(CompanyScanPipeline.run_pipeline).parameters[
+        "xhs_target_selection_mode"
+    ]
+
+    assert parameter.default == "auto"
+
+
 def test_bidding_collection_is_enabled_by_default() -> None:
     parameters = inspect.signature(CompanyScanPipeline.run_pipeline).parameters
 
@@ -381,3 +389,70 @@ async def test_wholly_owned_entity_skips_xhs_when_disabled(
         "enabled": False,
         "keywords_used": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_wholly_owned_entity_respects_target_selection_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import notifications
+
+    pipeline = CompanyScanPipeline(object(), object())
+
+    async def unexpected_xhs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("被目标选择层跳过后不应执行 XHS 搜索")
+
+    monkeypatch.setattr(pipeline, "_run_xhs_search", unexpected_xhs)
+    monkeypatch.setattr(
+        notifications,
+        "notify_target_collection_completed",
+        lambda **_kwargs: True,
+    )
+    decision = {
+        "target_id": "target-public",
+        "target_name": "某事业单位",
+        "target_category": "public_institution",
+        "should_collect_xhs": False,
+        "reason": "事业单位默认不采集",
+        "confidence": 0.98,
+        "source": "ai",
+    }
+
+    result = await pipeline._scan_wholly_owned_entities(
+        task_id="task-1",
+        project_id="project-1",
+        entities=[
+            {"name": "某事业单位", "target_id": "target-public"},
+            {"name": "未取得判定的子公司", "target_id": "target-missing"},
+        ],
+        enable_asset_discovery=False,
+        enable_url_scan=False,
+        enable_copywriting=True,
+        enable_xhs=True,
+        xhs_max_notes=20,
+        xhs_attention_threshold=60,
+        min_attention_score=40,
+        profile_copywriting_threshold=60,
+        fofa_size=200,
+        hunter_size=200,
+        asset_probe_concurrency=48,
+        incremental_scan=False,
+        url_probe_concurrency=64,
+        url_scan_concurrency=10,
+        copywriting_concurrency=6,
+        xhs_search_concurrency=1,
+        entity_concurrency=1,
+        xhs_decisions={"target-public": decision},
+    )
+
+    assert result["summary"]["xhs_notes"] == 0
+    assert result["entities"][0]["scan"]["xhs"] == {
+        "enabled": False,
+        "keywords_used": [],
+        "selection": decision,
+    }
+    assert result["entities"][1]["scan"]["xhs"] == {
+        "enabled": False,
+        "keywords_used": [],
+    }
+    assert result["errors"] == []

@@ -144,6 +144,8 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         enable_asset_discovery=params.get("enable_asset_discovery", True),
         enable_xhs=params.get("enable_xhs", True),
         enable_subsidiary_xhs=params.get("enable_subsidiary_xhs", False),
+        xhs_target_selection_mode=params.get("xhs_target_selection_mode", "auto"),
+        xhs_manual_targets=params.get("xhs_manual_targets", []),
         enable_bidding=params.get("enable_bidding", True),
         bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
         enable_wechat=params.get("enable_wechat", False),
@@ -170,6 +172,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
     )
     if result.get("status") == "error":
         raise RuntimeError(str(result.get("error") or "综合公司扫描失败"))
+    return result
 
 async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
     from api.services.fofa_collect import run_fofa_collect

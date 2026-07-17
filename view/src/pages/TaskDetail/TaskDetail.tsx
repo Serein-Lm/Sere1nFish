@@ -9,7 +9,7 @@ import {
   ArrowLeftOutlined, ReloadOutlined, EyeOutlined, DeleteOutlined,
   ClockCircleOutlined, CheckCircleOutlined, SyncOutlined,
   ExclamationCircleOutlined, BarChartOutlined,
-  DollarOutlined,
+  DollarOutlined, FilterOutlined, FileTextOutlined,
 } from '@ant-design/icons'
 import CopywritingRenderer, {
   FINDING_TYPE_ICONS, CHANNEL_TYPE_LABELS,
@@ -18,7 +18,10 @@ import { renderFindingValue } from '../../utils/findingValueRenderer'
 import {
   getTask, getTaskStats, deleteTask, listProjectFindings, getFindingCopywriting,
 } from '../../services/taskService'
-import type { Task, FindingCopywriting, TaskStatsResponse, TaskProgress, UnifiedFinding } from '../../services/taskService'
+import type {
+  Task, FindingCopywriting, TaskStatsResponse, TaskProgress, UnifiedFinding,
+  XhsTargetDecision,
+} from '../../services/taskService'
 import './TaskDetail.css'
 
 const { Title, Paragraph, Text } = Typography
@@ -34,6 +37,27 @@ const STATUS_MAP: Record<string, { color: string; icon: React.ReactNode; label: 
   running: { color: 'processing', icon: <SyncOutlined spin />, label: '执行中' },
   completed: { color: 'success', icon: <CheckCircleOutlined />, label: '已完成' },
   error: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
+}
+
+const XHS_CATEGORY_LABELS: Record<string, string> = {
+  large_enterprise: '大型企业',
+  internet_platform: '互联网平台',
+  insurance_finance: '保险/金融',
+  large_commercial_organization: '大型商业单位',
+  government: '党政机关',
+  public_institution: '事业单位',
+  public_official: '公务人员/机构',
+  small_or_low_visibility: '小型或低曝光目标',
+  other: '其他',
+  unknown: '无法判断',
+  manual: '手动指定',
+}
+
+const XHS_SELECTION_STATUS: Record<string, { label: string; color: string }> = {
+  pending: { label: '等待判定', color: 'processing' },
+  completed: { label: '判定完成', color: 'success' },
+  fallback: { label: '保守降级', color: 'warning' },
+  disabled: { label: '未启用', color: 'default' },
 }
 
 export default function TaskDetail() {
@@ -104,6 +128,9 @@ export default function TaskDetail() {
   }
 
   const progress = task?.progress || {} as TaskProgress
+  const xhsSelection = task?.task_type === 'company_scan'
+    ? task.result?.xhs?.selection
+    : undefined
 
   const SOURCE_ICONS: Record<string, string> = { web_tagging: '🌐', xhs: '📕', douyin: '🎵' }
 
@@ -125,6 +152,84 @@ export default function TaskDetail() {
       }}>话术</Button>
     ) },
   ]
+
+  const xhsSelectionColumns: ColumnsType<XhsTargetDecision> = [
+    {
+      title: '目标', dataIndex: 'target_name', key: 'target_name', width: 220,
+      render: (value: string, record) => (
+        <Space orientation="vertical" size={0}>
+          <Text strong>{value}</Text>
+          <Text type="secondary" copyable={{ text: record.target_id }} style={{ fontSize: 11 }}>
+            {record.target_id}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '目标类型', dataIndex: 'target_category', key: 'target_category', width: 150,
+      render: (value: string) => <Tag>{XHS_CATEGORY_LABELS[value] || value}</Tag>,
+    },
+    {
+      title: '判定', dataIndex: 'should_collect_xhs', key: 'decision', width: 110,
+      render: (value: boolean) => (
+        <Tag color={value ? 'success' : 'default'}>{value ? '采集' : '跳过'}</Tag>
+      ),
+    },
+    {
+      title: '置信度', dataIndex: 'confidence', key: 'confidence', width: 140,
+      render: (value: number) => (
+        <Progress percent={Math.round((value || 0) * 100)} size="small" style={{ width: 100 }} />
+      ),
+    },
+    {
+      title: '依据', dataIndex: 'reason', key: 'reason', minWidth: 260,
+      render: (value: string, record) => (
+        <Space orientation="vertical" size={2}>
+          <Text>{value || '-'}</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {record.source === 'ai' ? 'AI 判定' : record.source === 'manual' ? '手动名单' : '失败降级'}
+          </Text>
+        </Space>
+      ),
+    },
+  ]
+
+  const renderXhsSelectionTab = () => {
+    if (!xhsSelection) return <Empty description="任务完成后显示小红书目标判定结果" />
+    const selectionStatus = XHS_SELECTION_STATUS[xhsSelection.status] || XHS_SELECTION_STATUS.pending
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <Row gutter={[16, 16]}>
+          <Col xs={12} sm={6}><Statistic title="选择方式" value={xhsSelection.mode === 'auto' ? 'AI 自动判断' : '手动名单'} /></Col>
+          <Col xs={12} sm={6}><Statistic title="纳入采集" value={xhsSelection.selected_count} /></Col>
+          <Col xs={12} sm={6}><Statistic title="跳过目标" value={xhsSelection.skipped_count} /></Col>
+          <Col xs={12} sm={6}><Statistic title="判定状态" valueRender={() => <Tag color={selectionStatus.color}>{selectionStatus.label}</Tag>} /></Col>
+        </Row>
+        <Space wrap>
+          {xhsSelection.prompt_slug ? (
+            <Button type="link" size="small" icon={<FileTextOutlined />} onClick={() => navigate('/prompts')}>
+              在 Prompt 库查看 {xhsSelection.prompt_slug}
+            </Button>
+          ) : null}
+          {xhsSelection.error ? <Text type="danger">判定异常：{xhsSelection.error}</Text> : null}
+        </Space>
+        {xhsSelection.unmatched_manual_targets.length > 0 ? (
+          <Text type="warning">
+            未匹配名单：{xhsSelection.unmatched_manual_targets.join('、')}
+          </Text>
+        ) : null}
+        <Table
+          dataSource={xhsSelection.decisions}
+          rowKey="target_id"
+          columns={xhsSelectionColumns}
+          pagination={false}
+          size="small"
+          scroll={{ x: 900 }}
+          locale={{ emptyText: '暂无目标判定记录' }}
+        />
+      </div>
+    )
+  }
 
   // Token 统计 — 完整表格展示
   const renderStatsTab = () => {
@@ -209,12 +314,24 @@ export default function TaskDetail() {
                 <Col xs={12} sm={6}><Statistic title="已生成话术" value={progress.total_copywritings ?? '-'} /></Col>
               </Row>
             )}
+            {task.task_type === 'company_scan' && xhsSelection && (
+              <Row gutter={16} style={{ marginTop: 12 }}>
+                <Col xs={12} sm={6}><Statistic title="XHS 选择方式" value={xhsSelection.mode === 'auto' ? 'AI 自动' : '手动名单'} /></Col>
+                <Col xs={12} sm={6}><Statistic title="XHS 纳入目标" value={xhsSelection.selected_count} /></Col>
+                <Col xs={12} sm={6}><Statistic title="XHS 跳过目标" value={xhsSelection.skipped_count} /></Col>
+              </Row>
+            )}
             {task.error && <div style={{ marginTop: 12 }}><Text type="danger">错误：{task.error}</Text></div>}
           </Card>
 
           {/* 主内容 Tab */}
           <Card className="glass-card slide-up stagger-2">
             <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
+              ...(task.task_type === 'company_scan' ? [{
+                key: 'xhs-selection',
+                label: <Space><FilterOutlined /> XHS 目标选择 <Tag>{xhsSelection?.decisions.length || 0}</Tag></Space>,
+                children: renderXhsSelectionTab(),
+              }] : []),
               {
                 key: 'findings',
                 label: <Space><EyeOutlined /> Findings <Tag color="blue">{findings.length}</Tag></Space>,
