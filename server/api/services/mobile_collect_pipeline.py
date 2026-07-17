@@ -14,10 +14,15 @@ from core.mobile.collect import run_collect_task
 logger = get_logger("mobile_collect_service")
 
 
-async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) -> None:
-    """统一任务分派入口(签名对齐 TASK_DISPATCHERS)。"""
-    db = get_db()
-    task_def_id = params.get("task_def_id", "")
+async def run_mobile_collect_definition(
+    db,
+    *,
+    run_task_id: str,
+    project_id: str,
+    task_def_id: str,
+    runtime_overrides: dict | None = None,
+) -> dict:
+    """原子占用并执行一个数据库任务定义，允许编排层注入本轮目标上下文。"""
     if not task_def_id:
         raise ValueError("缺少 task_def_id")
 
@@ -25,20 +30,40 @@ async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) 
     if not task_def:
         raise ValueError(f"采集任务定义不存在: {task_def_id}")
 
-    await collect_dao.set_task_status(db, task_def_id, "running", run_task_id=task_id)
+    claimed = await collect_dao.claim_task_run(
+        db,
+        task_def_id,
+        run_task_id=run_task_id,
+    )
+    if not claimed:
+        raise RuntimeError(f"采集任务正在运行中: {task_def_id}")
+
+    effective_task_def = {**claimed, **(runtime_overrides or {})}
+    effective_task_def["task_def_id"] = task_def_id
     try:
         result = await run_collect_task(
             db,
-            run_task_id=task_id,
-            project_id=project_id or task_def.get("project_id"),
-            task_def=task_def,
+            run_task_id=run_task_id,
+            project_id=project_id or effective_task_def.get("project_id"),
+            task_def=effective_task_def,
         )
         logger.notice(
-            f"采集任务完成 | def={task_def_id} run={task_id} "
+            f"采集任务完成 | def={task_def_id} run={run_task_id} "
             f"total={result['total']} new={result['new']} changed={result['changed']}"
         )
+        return result
     finally:
         await collect_dao.set_task_status(db, task_def_id, "idle")
+
+
+async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) -> None:
+    """统一任务分派入口(签名对齐 TASK_DISPATCHERS)。"""
+    await run_mobile_collect_definition(
+        get_db(),
+        run_task_id=task_id,
+        project_id=project_id,
+        task_def_id=params.get("task_def_id", ""),
+    )
 
 
 async def dry_run_collect(

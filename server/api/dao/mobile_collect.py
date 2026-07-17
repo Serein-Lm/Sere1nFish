@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReturnDocument
 
 from api.db.collections import (
     MOBILE_COLLECT_RECORDS_COLLECTION,
@@ -107,6 +108,29 @@ async def set_task_status(
         set_fields["last_run_at"] = _now()
     await db[MOBILE_COLLECT_TASKS_COLLECTION].update_one(
         {"task_def_id": task_def_id}, {"$set": set_fields}
+    )
+
+
+async def claim_task_run(
+    db: AsyncIOMotorDatabase,
+    task_def_id: str,
+    *,
+    run_task_id: str,
+) -> dict[str, Any] | None:
+    """原子占用一个空闲任务定义，避免手工与编排任务并发使用同一手机。"""
+    now = _now()
+    return await db[MOBILE_COLLECT_TASKS_COLLECTION].find_one_and_update(
+        {"task_def_id": task_def_id, "status": {"$ne": "running"}},
+        {
+            "$set": {
+                "status": "running",
+                "last_run_task_id": run_task_id,
+                "last_run_at": now,
+                "updated_at": now,
+            }
+        },
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
     )
 
 

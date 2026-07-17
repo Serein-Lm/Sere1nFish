@@ -10,7 +10,7 @@ from AutoGLM_GUI.device_protocol import Screenshot
 
 class TestDeviceTools:
     def test_tool_count(self):
-        assert len(DEVICE_TOOLS) == 12
+        assert len(DEVICE_TOOLS) == 14
 
     def test_all_tools_have_required_fields(self):
         for tool in DEVICE_TOOLS:
@@ -34,6 +34,8 @@ class TestDeviceTools:
             "press_key",
             "wait",
             "batch_actions",
+            "open_and_search",
+            "search",
             "finish",
         }
         assert names == expected
@@ -51,6 +53,12 @@ class TestActionMapper:
     def test_tap_accepts_point_object_alias(self):
         result = tool_call_to_action("tap", {"point": {"x": 120, "y": 240}})
         assert result == {"_metadata": "do", "action": "Tap", "element": [120, 240]}
+
+    def test_tap_accepts_coordinate_pair_in_x(self):
+        result = tool_call_to_action(
+            "tap", {"x": [308, 275], "y": [308, 275]}
+        )
+        assert result == {"_metadata": "do", "action": "Tap", "element": [308, 275]}
 
     def test_double_tap(self):
         result = tool_call_to_action("double_tap", {"x": 100, "y": 200})

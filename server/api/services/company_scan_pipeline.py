@@ -1,10 +1,11 @@
 """
 综合公司扫描流水线（Company Scan Pipeline）
 
-整合三条链路：
+整合四条链路：
 1. URL 扫描 → findings → 话术生成
 2. 小红书搜索（多关键词）→ 打标 → 画像
 3. 画像 → 话术生成（每个高分画像生成多套话术）
+4. 微信公众号手机发现 → 原文链接 → Chrome 全文与图片归档
 
 前端只需传 company_name + 勾选项，后端自动编排。
 """
@@ -179,6 +180,8 @@ class CompanyScanPipeline:
         enable_url_scan: bool = True,
         enable_asset_discovery: bool = True,
         enable_xhs: bool = True,
+        enable_wechat: bool = False,
+        wechat_device_id: str = "",
         enable_copywriting: bool = True,
         xhs_max_notes: int = 100,
         xhs_attention_threshold: int = 60,
@@ -203,8 +206,9 @@ class CompanyScanPipeline:
 
         阶段:
         1. CompanyRouter 分析公司 → 生成搜索策略
-        2. 并行执行: URL扫描 + XHS搜索
-        3. XHS画像 → 话术生成
+        2. 并行执行: URL扫描 + XHS搜索 + 控股结构查询
+        3. 并行执行: 控股单位采集 + 可选公众号手机采集
+        4. XHS画像 → 话术生成
         """
         from core.observability import obs_log
 
@@ -235,6 +239,18 @@ class CompanyScanPipeline:
             },
             "url_scan": {"enabled": enable_url_scan, "findings_count": 0, "copywritings_count": 0},
             "xhs": {"enabled": enable_xhs, "keywords_used": [], "notes_count": 0, "profiles_count": 0},
+            "wechat": {
+                "enabled": enable_wechat,
+                "status": "pending" if enable_wechat else "disabled",
+                "device_id": wechat_device_id,
+                "task_def_id": "",
+                "total": 0,
+                "new": 0,
+                "changed": 0,
+                "contacts": 0,
+                "documents": 0,
+                "keywords_used": [],
+            },
             "profile_copywritings": {"count": 0},
             "sub_errors": [],
             "error": None,
@@ -433,40 +449,77 @@ class CompanyScanPipeline:
                     raise RuntimeError("所有公司扫描子流水线均失败: " + "; ".join(result["sub_errors"]))
 
             controlled_entities = list(result["control_structure"].get("entities") or [])
+            followups: list[tuple[str, Any]] = []
             if controlled_entities and (enable_asset_discovery or enable_xhs):
+                followups.append((
+                    "controlled_entities",
+                    self._scan_controlled_entities(
+                        task_id=task_id,
+                        project_id=project_id,
+                        entities=controlled_entities,
+                        enable_asset_discovery=enable_asset_discovery,
+                        enable_url_scan=enable_url_scan,
+                        enable_copywriting=enable_copywriting,
+                        enable_xhs=enable_xhs,
+                        xhs_max_notes=xhs_max_notes,
+                        xhs_attention_threshold=xhs_attention_threshold,
+                        min_attention_score=min_attention_score,
+                        profile_copywriting_threshold=profile_copywriting_threshold,
+                        fofa_size=fofa_size,
+                        hunter_size=hunter_size,
+                        asset_probe_concurrency=asset_probe_concurrency,
+                        incremental_scan=incremental_scan,
+                        url_probe_concurrency=url_probe_concurrency,
+                        url_scan_concurrency=url_scan_concurrency,
+                        copywriting_concurrency=copywriting_concurrency,
+                        xhs_search_concurrency=xhs_search_concurrency,
+                        entity_concurrency=control_scan_concurrency,
+                    ),
+                ))
+            if enable_wechat:
+                followups.append((
+                    "wechat",
+                    self._run_wechat_collection(
+                        task_id=task_id,
+                        project_id=project_id,
+                        target_id=target_id,
+                        target_name=normalized_name,
+                        device_id=wechat_device_id,
+                    ),
+                ))
+
+            if followups:
                 await self._update_progress(
                     task_id,
-                    "controlled_entities",
-                    f"并发采集 {len(controlled_entities)} 个第一层全资控股单位...",
+                    "followup_collection",
+                    "并发采集控股单位与公众号...",
                 )
-                controlled_scans = await self._scan_controlled_entities(
-                    task_id=task_id,
-                    project_id=project_id,
-                    entities=controlled_entities,
-                    enable_asset_discovery=enable_asset_discovery,
-                    enable_url_scan=enable_url_scan,
-                    enable_copywriting=enable_copywriting,
-                    enable_xhs=enable_xhs,
-                    xhs_max_notes=xhs_max_notes,
-                    xhs_attention_threshold=xhs_attention_threshold,
-                    min_attention_score=min_attention_score,
-                    profile_copywriting_threshold=profile_copywriting_threshold,
-                    fofa_size=fofa_size,
-                    hunter_size=hunter_size,
-                    asset_probe_concurrency=asset_probe_concurrency,
-                    incremental_scan=incremental_scan,
-                    url_probe_concurrency=url_probe_concurrency,
-                    url_scan_concurrency=url_scan_concurrency,
-                    copywriting_concurrency=copywriting_concurrency,
-                    xhs_search_concurrency=xhs_search_concurrency,
-                    entity_concurrency=control_scan_concurrency,
+                followup_results = await asyncio.gather(
+                    *(operation for _kind, operation in followups),
+                    return_exceptions=True,
                 )
-                result["control_structure"]["entities"] = controlled_scans["entities"]
-                result["control_structure"]["scan_summary"] = controlled_scans["summary"]
-                result["control_structure"]["errors"].extend(controlled_scans["errors"])
-                result["profile_copywritings"]["count"] = int(
-                    controlled_scans["summary"].get("profile_copywritings") or 0
-                )
+                for (kind, _operation), outcome in zip(followups, followup_results):
+                    if isinstance(outcome, Exception):
+                        error_message = f"{kind}: {outcome}"
+                        result["sub_errors"].append(error_message)
+                        if kind == "wechat":
+                            result["wechat"].update(status="error", error=str(outcome))
+                        else:
+                            raise outcome
+                        continue
+                    if kind == "controlled_entities":
+                        result["control_structure"]["entities"] = outcome["entities"]
+                        result["control_structure"]["scan_summary"] = outcome["summary"]
+                        result["control_structure"]["errors"].extend(outcome["errors"])
+                        result["profile_copywritings"]["count"] = int(
+                            outcome["summary"].get("profile_copywritings") or 0
+                        )
+                    elif kind == "wechat":
+                        result["wechat"].update(outcome)
+                if result["wechat"].get("status") == "error":
+                    raise RuntimeError(
+                        "公众号采集失败: " + str(result["wechat"].get("error") or "未知错误")
+                    )
 
             # ── 阶段 3: 画像→话术 ──
             if enable_xhs and enable_copywriting and xhs_succeeded:
@@ -514,6 +567,9 @@ class CompanyScanPipeline:
                     "url_findings": result["url_scan"].get("findings_count", 0),
                     "xhs_notes": result["xhs"].get("notes_count", 0),
                     "xhs_profiles": result["xhs"].get("profiles_count", 0),
+                    "wechat_records": result["wechat"].get("total", 0),
+                    "wechat_documents": result["wechat"].get("documents", 0),
+                    "wechat_contacts": result["wechat"].get("contacts", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                     "controlled_entities": len(controlled_entities),
                 },
@@ -528,6 +584,8 @@ class CompanyScanPipeline:
                     "alive_assets": result["assets"].get("alive", 0),
                     "xhs_notes": result["xhs"].get("notes_count", 0),
                     "xhs_profiles": result["xhs"].get("profiles_count", 0),
+                    "wechat_records": result["wechat"].get("total", 0),
+                    "wechat_documents": result["wechat"].get("documents", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                 },
             )
@@ -620,6 +678,26 @@ class CompanyScanPipeline:
             icp_concurrency=icp_concurrency,
         )
         return {"kind": "control_structure", "result": result}
+
+    async def _run_wechat_collection(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        target_id: str,
+        target_name: str,
+        device_id: str,
+    ) -> dict[str, Any]:
+        from api.services.wechat_collection import run_company_wechat_collection
+
+        return await run_company_wechat_collection(
+            self.db,
+            task_id=task_id,
+            project_id=project_id,
+            target_id=target_id,
+            target_name=target_name,
+            device_id=device_id,
+        )
 
     async def _scan_controlled_entities(
         self,

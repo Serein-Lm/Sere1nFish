@@ -47,6 +47,7 @@ import {
   listProjectMobileProfileObservations,
   listProjectMobileProfiles,
   listProjectMobileScreenshots,
+  getPool,
   type AutoChatSession,
   type ContactProfile,
   type MobileOperationLog,
@@ -56,6 +57,7 @@ import {
 import CopywritingRenderer from '../../components/CopywritingRenderer/CopywritingRenderer'
 import {
   listRecords as listCollectRecords,
+  listTaskDefs as listMobileCollectTaskDefs,
   type CollectRecord,
 } from '../../services/mobileCollectService'
 import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
@@ -95,6 +97,12 @@ function boundedTaskTuning(value: unknown, fallback: number, maximum: number): n
 }
 
 type TabKey = 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'mobile' | 'scholars' | 'tasks' | 'stats'
+
+interface WechatDeviceOption {
+  deviceId: string
+  model: string
+  online: boolean
+}
 
 /**
  * 抖音标签中文映射
@@ -517,6 +525,7 @@ export default function ProjectDetail() {
   const [taskSubmitting, setTaskSubmitting] = useState(false)
   const [taskDefaultsLoading, setTaskDefaultsLoading] = useState(false)
   const [taskTuningValues, setTaskTuningValues] = useState(TASK_TUNING_FORM_DEFAULTS)
+  const [wechatDeviceOptions, setWechatDeviceOptions] = useState<WechatDeviceOption[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [tasksTotal, setTasksTotal] = useState(0)
   const [tasksLoading, setTasksLoading] = useState(false)
@@ -924,41 +933,41 @@ export default function ProjectDetail() {
   const handleOpenTaskModal = async () => {
     setTaskDefaultsLoading(true)
     try {
-      const { config } = await getConfigSection('collection_runtime')
-      setTaskTuningValues({
-        asset_probe_concurrency: boundedTaskTuning(
-          config.asset_probe_concurrency,
-          TASK_TUNING_DEFAULTS.asset_probe_concurrency,
-          128,
-        ),
-        probe_concurrency: boundedTaskTuning(
-          config.asset_probe_concurrency,
-          TASK_TUNING_DEFAULTS.asset_probe_concurrency,
-          128,
-        ),
-        url_probe_concurrency: boundedTaskTuning(
-          config.url_probe_concurrency,
-          TASK_TUNING_DEFAULTS.url_probe_concurrency,
-          128,
-        ),
-        url_scan_concurrency: boundedTaskTuning(
-          config.url_scan_concurrency,
-          TASK_TUNING_DEFAULTS.url_scan_concurrency,
-          16,
-        ),
-        copywriting_concurrency: boundedTaskTuning(
-          config.copywriting_concurrency,
-          TASK_TUNING_DEFAULTS.copywriting_concurrency,
-          12,
-        ),
-        xhs_search_concurrency: boundedTaskTuning(
-          config.xhs_search_concurrency,
-          TASK_TUNING_DEFAULTS.xhs_search_concurrency,
-          8,
-        ),
-      })
-    } catch {
-      setTaskTuningValues(TASK_TUNING_FORM_DEFAULTS)
+      const [configResult, poolResult, collectTasksResult] = await Promise.allSettled([
+        getConfigSection('collection_runtime'),
+        getPool(),
+        projectId ? listMobileCollectTaskDefs(projectId) : Promise.resolve({ items: [], total: 0 }),
+      ])
+      if (configResult.status === 'fulfilled') {
+        const { config } = configResult.value
+        setTaskTuningValues({
+          asset_probe_concurrency: boundedTaskTuning(config.asset_probe_concurrency, TASK_TUNING_DEFAULTS.asset_probe_concurrency, 128),
+          probe_concurrency: boundedTaskTuning(config.asset_probe_concurrency, TASK_TUNING_DEFAULTS.asset_probe_concurrency, 128),
+          url_probe_concurrency: boundedTaskTuning(config.url_probe_concurrency, TASK_TUNING_DEFAULTS.url_probe_concurrency, 128),
+          url_scan_concurrency: boundedTaskTuning(config.url_scan_concurrency, TASK_TUNING_DEFAULTS.url_scan_concurrency, 16),
+          copywriting_concurrency: boundedTaskTuning(config.copywriting_concurrency, TASK_TUNING_DEFAULTS.copywriting_concurrency, 12),
+          xhs_search_concurrency: boundedTaskTuning(config.xhs_search_concurrency, TASK_TUNING_DEFAULTS.xhs_search_concurrency, 8),
+        })
+      } else {
+        setTaskTuningValues(TASK_TUNING_FORM_DEFAULTS)
+      }
+
+      const poolDevices = poolResult.status === 'fulfilled' ? poolResult.value.devices : []
+      const collectTasks = collectTasksResult.status === 'fulfilled' ? collectTasksResult.value.items : []
+      const options = collectTasks
+        .filter((task) => task.app_name.toLowerCase().includes('微信') || task.app_name.toLowerCase().includes('wechat'))
+        .map((task) => {
+          const poolDevice = poolDevices.find((device) =>
+            device.device_key === task.device_id || device.device_id === task.device_id,
+          )
+          return {
+            deviceId: task.device_id,
+            model: poolDevice?.model || poolDevice?.meta?.display_name || task.device_id,
+            online: Boolean(poolDevice?.online),
+          }
+        })
+        .filter((option, index, all) => all.findIndex((item) => item.deviceId === option.deviceId) === index)
+      setWechatDeviceOptions(options)
     } finally {
       setTaskDefaultsLoading(false)
       setIsTaskModalOpen(true)
@@ -3566,6 +3575,8 @@ export default function ProjectDetail() {
                     params.enable_url_scan = values.enable_url_scan ?? true
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? true
+                    params.enable_wechat = values.enable_wechat ?? false
+                    if (values.enable_wechat) params.wechat_device_id = values.wechat_device_id
                     params.enable_copywriting = values.enable_copywriting ?? true
                     params.enable_control_structure = values.enable_control_structure ?? true
                     params.incremental_scan = values.asset_scan_mode === 'incremental'
@@ -3649,7 +3660,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 4, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 4, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -3686,10 +3697,32 @@ export default function ProjectDetail() {
                             <Form.Item name="enable_xhs" valuePropName="checked" noStyle>
                               <Checkbox>小红书爬取</Checkbox>
                             </Form.Item>
+                            <Form.Item name="enable_wechat" valuePropName="checked" noStyle>
+                              <Checkbox>微信公众号采集（默认关闭）</Checkbox>
+                            </Form.Item>
                             <Form.Item name="enable_copywriting" valuePropName="checked" noStyle>
                               <Checkbox>话术生成</Checkbox>
                             </Form.Item>
                           </Space>
+                        </Form.Item>
+                        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_wechat !== cur.enable_wechat}>
+                          {({ getFieldValue }) => getFieldValue('enable_wechat') ? (
+                            <Form.Item
+                              name="wechat_device_id"
+                              label="公众号执行手机"
+                              rules={[{ required: true, message: '请选择执行公众号采集的手机' }]}
+                              extra="任务会通过 ADB 打开微信；手机用于搜索文章，原文与图片由 Chrome 继续读取。"
+                            >
+                              <Select
+                                placeholder={wechatDeviceOptions.length ? '选择手机型号' : '当前项目没有可用的微信采集手机'}
+                                options={wechatDeviceOptions.map((device) => ({
+                                  value: device.deviceId,
+                                  label: `${device.model} · ${device.online ? '在线' : '离线'}`,
+                                  disabled: !device.online,
+                                }))}
+                              />
+                            </Form.Item>
+                          ) : null}
                         </Form.Item>
                         <Form.Item name="asset_scan_mode" label="资产深扫范围">
                           <Segmented block options={[

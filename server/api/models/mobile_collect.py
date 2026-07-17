@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 
 NotifyOn = Literal["new", "changed", "both", "none"]
+AppInstance = Literal["primary", "clone"]
 
 
 class ExtractField(BaseModel):
@@ -35,6 +36,10 @@ class CollectTaskDef(BaseModel):
     target_type: str = Field(default="company", description="Target 类型")
     device_id: str = Field(description="执行设备 device_id")
     app_name: str = Field(description="目标应用名,如 微信 / 小红书")
+    app_instance: AppInstance = Field(
+        default="primary",
+        description="双开应用实例;primary 为主应用,clone 为应用分身",
+    )
     keywords: list[str] = Field(default_factory=list, description="搜索关键词列表(逐个执行)")
     use_target_keyword_library: bool = Field(
         default=True,
@@ -96,6 +101,7 @@ class CollectTaskUpdate(BaseModel):
     target_type: str | None = None
     device_id: str | None = None
     app_name: str | None = None
+    app_instance: AppInstance | None = None
     keywords: list[str] | None = None
     use_target_keyword_library: bool | None = None
     max_resolved_keywords: int | None = Field(default=None, ge=1, le=200)

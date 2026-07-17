@@ -15,8 +15,9 @@ from core.logger import get_logger
 from core.observability import obs_log
 from core.stream import Pipeline, Stage, Item, RetryPolicy
 
-from core.mobile.manager import MobileDeviceManager
+from core.mobile.app_launcher import AdbAppLauncher, AppLaunchResult
 from core.mobile.coordinates import resolve_swipe, resolve_tap
+from core.mobile.manager import MobileDeviceManager
 from core.mobile.screen_capture import capture_ready_screen
 from core.mobile.planner import run_planned_task
 from core.mobile.identity import resolve_device_key
@@ -86,6 +87,56 @@ def _do_back(device_id: str) -> None:
     mgr = MobileDeviceManager()
     dev = mgr.get_device(device_id)
     dev.back(delay=0.1)
+
+
+def _do_launch_app(
+    device_id: str, app_name: str, app_instance: str = "primary"
+) -> AppLaunchResult:
+    """通过 ADB 启动并校验前台应用，统一处理系统双开选择器。"""
+    mgr = MobileDeviceManager()
+    adb_id = mgr.resolve_adb_device_id(device_id)
+    instance = "clone" if app_instance == "clone" else "primary"
+    return AdbAppLauncher().launch(adb_id, app_name, instance=instance)
+
+
+async def _run_search_navigation(
+    device_id: str,
+    goal: str,
+    *,
+    project_id: str | None,
+    owner: str,
+    plan_id: str,
+    stop_event: asyncio.Event,
+    preplanned: bool = False,
+) -> bool:
+    """执行看屏导航；只有明确完成才允许进入后续采集。"""
+    terminal_stage = ""
+    terminal_message = ""
+    async for nav_event in run_planned_task(
+        device_id,
+        goal,
+        project_id=project_id,
+        owner=owner,
+        plan_id=plan_id,
+        max_replans=1,
+        preplanned_subtasks=[goal] if preplanned else None,
+    ):
+        stage = str(nav_event.get("stage") or "")
+        if stage in {"done", "aborted", "error", "cancelled"}:
+            terminal_stage = stage
+            data = nav_event.get("data")
+            if isinstance(data, dict):
+                terminal_message = str(
+                    data.get("message") or data.get("reason") or ""
+                )
+        if stop_event.is_set():
+            return False
+    if terminal_stage != "done":
+        raise RuntimeError(
+            terminal_message
+            or f"导航未完成，终态: {terminal_stage or 'missing'}"
+        )
+    return True
 
 
 def _image_signature(image_base64: str) -> list[int] | None:
@@ -451,22 +502,61 @@ class _CollectStage(Stage):
         task_def_id = st["task_def_id"]
         dedup_key_fields = st["dedup_key_fields"]
 
-        goal = f"打开{app_name}并搜索{keyword}" if keyword else f"打开{app_name}"
+        direct_launch = bool(st.get("direct_launch_app"))
+        if direct_launch and not bool(st.get("direct_app_ready")):
+            launch_result = await asyncio.to_thread(
+                _do_launch_app,
+                device_id,
+                app_name,
+                str(st.get("app_instance") or "primary"),
+            )
+            if not launch_result.ok:
+                raise RuntimeError(
+                    f"ADB 启动应用失败: {app_name}: "
+                    f"{launch_result.error or '未进入前台'}"
+                )
+            obs_log(
+                f"ADB 已启动{app_name}",
+                project_id=project_id or "",
+                task_id=run_task_id,
+                source=_OBS_SOURCE,
+                level="info",
+                event="collect_app_launched",
+                data={
+                    "app_name": app_name,
+                    "package_name": launch_result.package_name,
+                    "app_instance": launch_result.selected_instance,
+                    "chooser_handled": launch_result.chooser_handled,
+                },
+            )
+            st["direct_app_ready"] = True
+        if direct_launch:
+            goal = (
+                f"{app_name}当前已在前台；保持在{app_name}内，"
+                f"根据当前页面定位搜索入口并搜索“{keyword}”"
+                if keyword
+                else f"{app_name}当前已在前台；确认当前页面可操作"
+            )
+        else:
+            goal = f"打开{app_name}并搜索{keyword}" if keyword else f"打开{app_name}"
         if st["search_hint"]:
             goal = f"{goal};{st['search_hint']}"
         nav_plan_id = f"{run_task_id}-nav-{item.item_id}"
         try:
-            async for _ev in run_planned_task(
+            navigated = await _run_search_navigation(
                 device_id,
                 goal,
                 project_id=project_id,
                 owner=st["owner"],
                 plan_id=nav_plan_id,
-                max_replans=1,
-            ):
-                if stop.is_set():
-                    break
+                stop_event=stop,
+                preplanned=direct_launch,
+            )
+            if not navigated:
+                return
         except Exception as exc:  # noqa: BLE001
+            if direct_launch:
+                st["direct_app_ready"] = False
             ctx.logger.warning(f"[collect] 导航失败 kw={keyword!r}: {exc}")
             obs_log(
                 f"采集导航失败: {exc}",
@@ -477,6 +567,7 @@ class _CollectStage(Stage):
                 event="collect_nav_error",
                 data={"keyword": keyword, "goal": goal, "error": str(exc)},
             )
+            raise
 
         swipe_times = int(st["swipe_times"])
         swipe_interval = float(st["swipe_interval"])
@@ -912,6 +1003,9 @@ async def run_collect_task(
         "notify_on": task_def.get("notify_on", "new"),
         "deep_collect": bool(task_def.get("deep_collect", False)),
         "source_link_strategy": str(task_def.get("source_link_strategy") or "none"),
+        "direct_launch_app": bool(task_def.get("direct_launch_app", False)),
+        "direct_app_ready": False,
+        "app_instance": str(task_def.get("app_instance") or "primary"),
         "detail_max_items": int(task_def.get("detail_max_items", 5) or 0),
         "detail_max_swipes": int(task_def.get("detail_max_swipes", 12) or 12),
         "min_score_to_detail": int(task_def.get("min_score_to_detail", 60) or 0),

@@ -24,12 +24,17 @@ def _run_adb_input_command(command: list[str]) -> subprocess.CompletedProcess[st
 
 def type_text(text: str, device_id: str | None = None) -> None:
     adb_prefix = build_adb_command(device_id)
-    encoded_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
 
     with trace_span(
         "adb.type_text",
         attrs={"device_id": device_id, "text_length": len(text)},
     ):
+        if not text:
+            _run_adb_input_command(
+                adb_prefix + ["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"]
+            )
+            return
+        encoded_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
         _run_adb_input_command(
             adb_prefix
             + [

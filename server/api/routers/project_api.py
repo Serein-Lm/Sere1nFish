@@ -129,6 +129,8 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         enable_url_scan=params.get("enable_url_scan", True),
         enable_asset_discovery=params.get("enable_asset_discovery", True),
         enable_xhs=params.get("enable_xhs", True),
+        enable_wechat=params.get("enable_wechat", False),
+        wechat_device_id=params.get("wechat_device_id", ""),
         enable_copywriting=params.get("enable_copywriting", True),
         xhs_max_notes=params.get("xhs_max_notes") or params.get("max_notes", 20),
         xhs_attention_threshold=params.get("xhs_attention_threshold") or params.get("attention_threshold", 60),
@@ -307,6 +309,18 @@ async def create_task(project_id: str, req: TaskCreateRequest, background_tasks:
     project = await projects_dao.get_project(db, project_id)
     if not project:
         raise HTTPException(404, "项目不存在")
+
+    if req.task_type == "company_scan" and req.params.get("enable_wechat", False):
+        from api.services.wechat_collection import resolve_wechat_task_definition
+
+        try:
+            await resolve_wechat_task_definition(
+                db,
+                project_id=project_id,
+                device_id=str(req.params.get("wechat_device_id") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     task_id = uuid.uuid4().hex[:12]
     task_doc = {

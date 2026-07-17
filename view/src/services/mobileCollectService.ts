@@ -5,6 +5,7 @@ import { fetchMobileScreenshotBlob } from './mobileService'
 
 export type FieldType = 'string' | 'number' | 'boolean' | 'list'
 export type NotifyOn = 'new' | 'changed' | 'both' | 'none'
+export type AppInstance = 'primary' | 'clone'
 
 export interface ExtractField {
   name: string
@@ -21,6 +22,7 @@ export interface CollectTaskDef {
   target_type?: string
   device_id: string
   app_name: string
+  app_instance?: AppInstance
   keywords: string[]
   use_target_keyword_library?: boolean
   max_resolved_keywords?: number
@@ -52,6 +54,7 @@ export interface CollectTaskInput {
   target_type?: string
   device_id: string
   app_name: string
+  app_instance?: AppInstance
   keywords: string[]
   use_target_keyword_library?: boolean
   max_resolved_keywords?: number

@@ -207,10 +207,12 @@ async def run_planned_task(
     contact_id: str | None = None,
     owner: str | None = None,
     plan_id: str | None = None,
+    preplanned_subtasks: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     规划 + 执行(流式)。关键改进:
     - 整个计划复用**同一个执行层 agent**,子任务间上下文(历史截图/动作)自动累积;
+    - 调用侧可提供已编排子任务,跳过重复规划,失败后仍可看屏重规划;
     - 子任务失败时,看当前屏幕**重规划**剩余步骤(最多 max_replans 次);
     - plan_id 即可作为 /agent/cancel 的 task_id 取消整轮。
 
@@ -218,14 +220,24 @@ async def run_planned_task(
     subtask_done / replanning / aborted / done / error / cancelled
     """
     plan_id = plan_id or uuid.uuid4().hex[:12]
-    compiled_actions = compile_mobile_actions(goal)
+    supplied_subtasks = [
+        str(item).strip() for item in (preplanned_subtasks or []) if str(item).strip()
+    ]
+    has_supplied_plan = preplanned_subtasks is not None
+    compiled_actions = None if has_supplied_plan else compile_mobile_actions(goal)
+    if has_supplied_plan:
+        planning_mode = "preplanned"
+    elif compiled_actions:
+        planning_mode = "compiled_tools"
+    else:
+        planning_mode = "planner"
     yield {
         "stage": "planning",
         "data": {
             "plan_id": plan_id,
             "project_id": project_id,
             "goal": goal,
-            "mode": "compiled_tools" if compiled_actions else "planner",
+            "mode": planning_mode,
         },
     }
     await _log_operation(
@@ -235,7 +247,12 @@ async def run_planned_task(
         task_id=plan_id,
         contact_id=contact_id,
         action="planning",
-        data={"goal": goal, "screen_aware": screen_aware, "max_replans": max_replans},
+        data={
+            "goal": goal,
+            "screen_aware": screen_aware,
+            "max_replans": max_replans,
+            "mode": planning_mode,
+        },
     )
 
     wake_result = await wake_device(device_id, stay_on=True)
@@ -350,25 +367,31 @@ async def run_planned_task(
         }
         return
 
-    screen_ctx: str | None = None
-    if screen_aware and _should_describe_screen_before_plan(goal):
-        try:
-            screen_ctx = await describe_screen(
-                device_id, project_id=project_id, plan_id=plan_id
-            )
-            yield {"stage": "screen", "data": {"analysis": screen_ctx}}
-        except Exception as exc:  # noqa: BLE001
-            yield {"stage": "screen_error", "data": {"message": str(exc)}}
+    if has_supplied_plan:
+        subtasks = supplied_subtasks
+    else:
+        screen_ctx: str | None = None
+        if screen_aware and _should_describe_screen_before_plan(goal):
+            try:
+                screen_ctx = await describe_screen(
+                    device_id, project_id=project_id, plan_id=plan_id
+                )
+                yield {"stage": "screen", "data": {"analysis": screen_ctx}}
+            except Exception as exc:  # noqa: BLE001
+                yield {"stage": "screen_error", "data": {"message": str(exc)}}
 
-    try:
-        subtasks = await plan_task(goal, screen_analysis=screen_ctx)
-    except Exception as exc:  # noqa: BLE001
-        yield {"stage": "error", "data": {"message": f"规划失败: {exc}"}}
-        return
+        try:
+            subtasks = await plan_task(goal, screen_analysis=screen_ctx)
+        except Exception as exc:  # noqa: BLE001
+            yield {"stage": "error", "data": {"message": f"规划失败: {exc}"}}
+            return
     if not subtasks:
         yield {"stage": "error", "data": {"message": "规划结果为空"}}
         return
-    yield {"stage": "plan", "data": {"plan_id": plan_id, "subtasks": subtasks}}
+    yield {
+        "stage": "plan",
+        "data": {"plan_id": plan_id, "subtasks": subtasks, "mode": planning_mode},
+    }
 
     try:
         app_config = await get_runtime_app_config()

@@ -48,6 +48,8 @@ def _require_xy(
     aliases: tuple[str, ...] = ("coordinate", "coordinates", "point", "element"),
 ) -> list[int]:
     """Return an [x, y] pair, accepting x/y or common coordinate aliases."""
+    if isinstance(args.get("x"), (list, tuple, dict)):
+        return _coordinate_pair(args["x"], key="x")
     if args.get("x") is not None or args.get("y") is not None:
         return [_require_int(args, "x"), _require_int(args, "y")]
     for alias in aliases:

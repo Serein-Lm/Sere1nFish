@@ -17,6 +17,7 @@ from typing import Any
 
 from AutoGLM_GUI.adb.apps import APP_PACKAGES
 
+from core.mobile.app_launcher import AdbAppLauncher
 from core.mobile.coordinates import resolve_swipe
 from core.mobile.manager import MobileDeviceManager
 
@@ -154,8 +155,19 @@ def _execute_action(device_id: str, action: MobileAction) -> tuple[bool, str]:
     adb_device_id = mgr.resolve_adb_device_id(device_id)
 
     if action.kind == "launch_app":
-        ok = dev.launch_app(str(action.args["app_name"]), delay=0.2)
-        return ok, "已发送启动命令" if ok else "应用未在支持列表中"
+        result = AdbAppLauncher().launch(
+            adb_device_id,
+            str(action.args["app_name"]),
+            instance=(
+                "clone" if action.args.get("app_instance") == "clone" else "primary"
+            ),
+        )
+        return (
+            result.ok,
+            "应用已进入前台"
+            if result.ok
+            else f"应用启动失败: {result.error or '未进入前台'}",
+        )
 
     if action.kind == "wait":
         seconds = float(action.args.get("seconds", 0.5))

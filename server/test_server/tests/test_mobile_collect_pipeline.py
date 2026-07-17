@@ -74,9 +74,7 @@ def _patch_pipeline(monkeypatch, *, analyze_returns):
     from core.mobile.collect import pipeline as pl
 
     async def _fake_run_planned(*a, **k):
-        if False:
-            yield None
-        return
+        yield {"stage": "done", "data": {"completed": 1}}
 
     async def _fake_capture(device_id, manager=None):
         return _FakeCap()
@@ -192,6 +190,59 @@ def test_request_stop_unknown_is_idempotent():
 
     assert pl.request_stop("never-started") is False
     assert pl.is_running("never-started") is False
+
+
+def test_search_navigation_requires_explicit_done(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    async def _aborted(*_args, **_kwargs):
+        yield {"stage": "aborted", "data": {"reason": "未找到搜索入口"}}
+
+    monkeypatch.setattr(pl, "run_planned_task", _aborted)
+
+    async def scenario():
+        await pl._run_search_navigation(
+            "device-1",
+            "微信当前已在前台；保持在微信内，根据当前页面定位搜索入口并搜索“测试”",
+            project_id="project-1",
+            owner="pytest",
+            plan_id="plan-1",
+            stop_event=asyncio.Event(),
+            preplanned=True,
+        )
+
+    with pytest.raises(RuntimeError, match="未找到搜索入口"):
+        asyncio.new_event_loop().run_until_complete(scenario())
+
+
+def test_search_navigation_accepts_done(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+    from core.mobile.planner import _should_describe_screen_before_plan
+
+    captured: dict = {}
+
+    async def _done(_device_id, goal, **kwargs):
+        captured.update(goal=goal, **kwargs)
+        yield {"stage": "done", "data": {"completed": 1}}
+
+    monkeypatch.setattr(pl, "run_planned_task", _done)
+
+    async def scenario():
+        return await pl._run_search_navigation(
+            "device-1",
+            "微信当前已在前台；保持在微信内，根据当前页面定位搜索入口并搜索“测试”",
+            project_id="project-1",
+            owner="pytest",
+            plan_id="plan-1",
+            stop_event=asyncio.Event(),
+            preplanned=True,
+        )
+
+    assert asyncio.new_event_loop().run_until_complete(scenario()) is True
+    assert captured["goal"].startswith("微信当前已在前台")
+    assert _should_describe_screen_before_plan(captured["goal"]) is True
+    assert captured["max_replans"] == 1
+    assert captured["preplanned_subtasks"] == [captured["goal"]]
 
 
 def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
