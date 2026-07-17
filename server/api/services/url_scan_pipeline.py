@@ -28,6 +28,14 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from api.services.company_url import normalize_url
+from api.services.info_collection.tuning import (
+    DEFAULT_COPYWRITING_CONCURRENCY,
+    DEFAULT_URL_PROBE_CONCURRENCY,
+    DEFAULT_URL_SCAN_CONCURRENCY,
+    MAX_COPYWRITING_CONCURRENCY,
+    MAX_URL_PROBE_CONCURRENCY,
+    MAX_URL_SCAN_CONCURRENCY,
+)
 from api.utils.json_extract import extract_json_object
 
 from core.logger import get_logger
@@ -62,7 +70,6 @@ URL_SCAN_TASKS = "url_scan_tasks"
 URL_SCAN_RESULTS = "url_scan_results"
 URL_SCAN_FINDINGS = "url_scan_findings"
 URL_SCAN_COPYWRITINGS = "url_scan_copywritings"
-
 
 class _ScanFailureCollector(DeadLetter):
     """把扫描最终失败的 URL 也补到 results 列表里, 与旧版 scan_urls 行为兼容."""
@@ -620,15 +627,18 @@ class UrlScanPipeline:
         task_id: str,
         project_id: str,
         url_content: str,
-        probe_concurrency: int = 20,
+        probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
         min_attention_score: int = 40,
         target_id: str = "",
-        scan_concurrency: int = 6,
-        copywriting_concurrency: int = 4,
+        scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
+        copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         enable_copywriting: bool = True,
+        known_alive_urls: list[str] | None = None,
     ) -> dict[str, Any]:
         """
-        完整流水线：url.txt → 探活 → 扫描 → 提取 → 话术生成 → 存储
+        完整流水线：url.txt → 探活 → 扫描 → 提取 → 话术生成 → 存储。
+
+        known_alive_urls 来自上游资产发现，用于跳过同一任务内的重复探活。
         """
         from core.observability import obs_log
 
@@ -639,6 +649,8 @@ class UrlScanPipeline:
             "status": "running",
             "total_urls": 0,
             "alive_urls": 0,
+            "probed_urls": 0,
+            "reused_alive_urls": 0,
             "scanned_urls": 0,
             "total_findings": 0,
             "total_copywritings": 0,
@@ -668,10 +680,43 @@ class UrlScanPipeline:
             await self._update_task(task_id, task_result)
             logger.info(f"[pipeline] task={task_id} 阶段2: 开始探活 ...")
 
-            alive = await self.probe_urls(urls, concurrency=probe_concurrency)
+            known_alive_set = {
+                normalized
+                for value in known_alive_urls or []
+                if (normalized := normalize_url(str(value)))
+            }
+            reused_alive = [url for url in urls if url in known_alive_set]
+            probe_targets = [url for url in urls if url not in known_alive_set]
+            probed_alive = (
+                await self.probe_urls(
+                    probe_targets,
+                    concurrency=max(1, min(int(probe_concurrency), MAX_URL_PROBE_CONCURRENCY)),
+                )
+                if probe_targets
+                else []
+            )
+            probed_by_url = {
+                normalized: item
+                for item in probed_alive
+                if (normalized := normalize_url(str(item.get("url") or "")))
+            }
+            alive = [
+                (
+                    {"url": url, "status_code": None, "preprobed": True}
+                    if url in known_alive_set
+                    else probed_by_url[url]
+                )
+                for url in urls
+                if url in known_alive_set or url in probed_by_url
+            ]
             task_result["alive_urls"] = len(alive)
+            task_result["probed_urls"] = len(probe_targets)
+            task_result["reused_alive_urls"] = len(reused_alive)
             await self._update_task(task_id, task_result)
-            logger.info(f"[pipeline] task={task_id} 阶段2: 探活完成, 存活={len(alive)}/{len(urls)}")
+            logger.info(
+                f"[pipeline] task={task_id} 阶段2: 探活完成, 存活={len(alive)}/{len(urls)} "
+                f"复用={len(reused_alive)} 新探活={len(probe_targets)}"
+            )
 
             if not alive:
                 logger.info(f"[pipeline] task={task_id} 无存活URL，结束")
@@ -742,13 +787,16 @@ class UrlScanPipeline:
                 )
 
             scan_stage = _UrlScanStage(
-                concurrency=max(1, min(scan_concurrency, 12)),
+                concurrency=max(1, min(int(scan_concurrency), MAX_URL_SCAN_CONCURRENCY)),
                 project_id=project_id,
                 task_id=task_id,
                 on_result=_on_scan_result,
             )
             cw_stage = _CopywritingStage(
-                concurrency=max(1, min(copywriting_concurrency, 8)),
+                concurrency=max(
+                    1,
+                    min(int(copywriting_concurrency), MAX_COPYWRITING_CONCURRENCY),
+                ),
                 project_id=project_id,
                 task_id=task_id,
                 pipeline_owner=self,
@@ -816,6 +864,8 @@ class UrlScanPipeline:
                 data={
                     "total_urls": task_result["total_urls"],
                     "alive": task_result["alive_urls"],
+                    "probed": task_result["probed_urls"],
+                    "reused_alive": task_result["reused_alive_urls"],
                     "scanned": task_result["scanned_urls"],
                     "findings": task_result["total_findings"],
                     "copywritings": copywriting_count,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
+import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, CloudServerOutlined } from '@ant-design/icons'
 import {
@@ -68,9 +68,32 @@ import {
   type ScholarContact,
 } from '../../services/scholarContactService'
 import { listProjectAssets, type ProjectAsset } from '../../services/assetService'
+import { getConfigSection } from '../../services/configService'
 import './ProjectDetail.css'
 
 const { Title, Paragraph, Text } = Typography
+
+const TASK_TUNING_DEFAULTS = {
+  asset_probe_concurrency: 96,
+  url_probe_concurrency: 64,
+  url_scan_concurrency: 10,
+  copywriting_concurrency: 6,
+  xhs_search_concurrency: 3,
+}
+
+const TASK_TUNING_FORM_DEFAULTS = {
+  asset_probe_concurrency: TASK_TUNING_DEFAULTS.asset_probe_concurrency,
+  probe_concurrency: TASK_TUNING_DEFAULTS.asset_probe_concurrency,
+  url_probe_concurrency: TASK_TUNING_DEFAULTS.url_probe_concurrency,
+  url_scan_concurrency: TASK_TUNING_DEFAULTS.url_scan_concurrency,
+  copywriting_concurrency: TASK_TUNING_DEFAULTS.copywriting_concurrency,
+  xhs_search_concurrency: TASK_TUNING_DEFAULTS.xhs_search_concurrency,
+}
+
+function boundedTaskTuning(value: unknown, fallback: number, maximum: number): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(Math.trunc(parsed), maximum)) : fallback
+}
 
 type TabKey = 'website' | 'assets' | 'xiaohongshu' | 'douyin' | 'wechat' | 'mobile' | 'scholars' | 'tasks' | 'stats'
 
@@ -497,6 +520,8 @@ export default function ProjectDetail() {
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
   const [taskForm] = Form.useForm()
   const [taskSubmitting, setTaskSubmitting] = useState(false)
+  const [taskDefaultsLoading, setTaskDefaultsLoading] = useState(false)
+  const [taskTuningValues, setTaskTuningValues] = useState(TASK_TUNING_FORM_DEFAULTS)
   const [tasks, setTasks] = useState<Task[]>([])
   const [tasksTotal, setTasksTotal] = useState(0)
   const [tasksLoading, setTasksLoading] = useState(false)
@@ -914,6 +939,50 @@ export default function ProjectDetail() {
   const handleAddTagging = () => {
     taggingForm.resetFields()
     setIsTaggingModalOpen(true)
+  }
+
+  const handleOpenTaskModal = async () => {
+    setTaskDefaultsLoading(true)
+    try {
+      const { config } = await getConfigSection('collection_runtime')
+      setTaskTuningValues({
+        asset_probe_concurrency: boundedTaskTuning(
+          config.asset_probe_concurrency,
+          TASK_TUNING_DEFAULTS.asset_probe_concurrency,
+          128,
+        ),
+        probe_concurrency: boundedTaskTuning(
+          config.asset_probe_concurrency,
+          TASK_TUNING_DEFAULTS.asset_probe_concurrency,
+          128,
+        ),
+        url_probe_concurrency: boundedTaskTuning(
+          config.url_probe_concurrency,
+          TASK_TUNING_DEFAULTS.url_probe_concurrency,
+          128,
+        ),
+        url_scan_concurrency: boundedTaskTuning(
+          config.url_scan_concurrency,
+          TASK_TUNING_DEFAULTS.url_scan_concurrency,
+          16,
+        ),
+        copywriting_concurrency: boundedTaskTuning(
+          config.copywriting_concurrency,
+          TASK_TUNING_DEFAULTS.copywriting_concurrency,
+          12,
+        ),
+        xhs_search_concurrency: boundedTaskTuning(
+          config.xhs_search_concurrency,
+          TASK_TUNING_DEFAULTS.xhs_search_concurrency,
+          8,
+        ),
+      })
+    } catch {
+      setTaskTuningValues(TASK_TUNING_FORM_DEFAULTS)
+    } finally {
+      setTaskDefaultsLoading(false)
+      setIsTaskModalOpen(true)
+    }
   }
 
   const handleTaggingSubmit = async () => {
@@ -1348,7 +1417,7 @@ export default function ProjectDetail() {
       width: 140,
       render: (_, rec) => rec.company_identification?.identified_company ? (
         <Tooltip title={rec.company_identification.evidence?.join(', ')}>
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             <Tag color="blue">{rec.company_identification.identified_company}</Tag>
             <Text type="secondary" style={{ fontSize: 11 }}>
               {rec.company_identification.confidence}
@@ -1626,7 +1695,7 @@ export default function ProjectDetail() {
       key: 'company_position',
       width: 120,
       render: (_, rec) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           {rec.company_mentioned && <Tag color="blue">{rec.company_mentioned}</Tag>}
           {rec.position_mentioned && <Tag color="cyan">{rec.position_mentioned}</Tag>}
           {!rec.company_mentioned && !rec.position_mentioned && '-'}
@@ -2400,7 +2469,7 @@ export default function ProjectDetail() {
         key: 'contact',
         width: 220,
         render: (_: unknown, rec) => (
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             <Text strong>{rec.name || rec.contact_id}</Text>
             <Text type="secondary" copyable={{ text: rec.contact_id }}>{rec.contact_id}</Text>
           </Space>
@@ -2411,7 +2480,7 @@ export default function ProjectDetail() {
         key: 'source',
         width: 180,
         render: (_: unknown, rec) => (
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             <Tag color="blue">{rec.platform || '未知平台'}</Tag>
             <Text type="secondary">{rec.device_id || '-'}</Text>
           </Space>
@@ -2421,7 +2490,7 @@ export default function ProjectDetail() {
         title: '画像摘要',
         key: 'persona',
         render: (_: unknown, rec) => (
-          <Space direction="vertical" size={4}>
+          <Space orientation="vertical" size={4}>
             <Text>{rec.persona?.summary || rec.persona?.background || '-'}</Text>
             <Space size={4} wrap>
               {(rec.persona?.tags ?? []).slice(0, 6).map((tag) => <Tag key={tag}>{tag}</Tag>)}
@@ -2480,7 +2549,7 @@ export default function ProjectDetail() {
         key: 'contact',
         width: 220,
         render: (_: unknown, rec) => (
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             <Text strong>{rec.contact_name || rec.contact_id}</Text>
             <Text type="secondary" copyable={{ text: rec.contact_id }}>{rec.contact_id}</Text>
           </Space>
@@ -2502,7 +2571,7 @@ export default function ProjectDetail() {
           const risks = Array.isArray(patch.risk_signals) ? patch.risk_signals : []
           const phrases = Array.isArray(patch.common_phrases) ? patch.common_phrases : []
           return (
-            <Space direction="vertical" size={4}>
+            <Space orientation="vertical" size={4}>
               <Text>{String(patch.summary || patch.communication_style || patch.background || '-')}</Text>
               <Space size={4} wrap>
                 {tags.slice(0, 4).map((tag) => <Tag key={String(tag)}>{String(tag)}</Tag>)}
@@ -2520,7 +2589,7 @@ export default function ProjectDetail() {
         render: (_: unknown, rec) => {
           const shot = typeof rec.evidence?.screenshot_id === 'string' ? rec.evidence.screenshot_id : ''
           return (
-            <Space direction="vertical" size={0}>
+            <Space orientation="vertical" size={0}>
               <Tag>{rec.source || 'profile'}</Tag>
               {shot ? <Text type="secondary" copyable={{ text: shot }}>{shot}</Text> : <Text type="secondary">-</Text>}
             </Space>
@@ -2563,7 +2632,7 @@ export default function ProjectDetail() {
         key: 'target',
         width: 210,
         render: (_: unknown, rec) => (
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             <Text>{rec.device_id || '-'}</Text>
             <Text type="secondary">{rec.contact_id || '-'}</Text>
           </Space>
@@ -3397,7 +3466,8 @@ export default function ProjectDetail() {
           <Button
             type="primary"
             icon={<ThunderboltOutlined />}
-            onClick={() => setIsTaskModalOpen(true)}
+            onClick={handleOpenTaskModal}
+            loading={taskDefaultsLoading}
             className="hover-float"
           >
             下发任务
@@ -3605,14 +3675,25 @@ export default function ProjectDetail() {
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? true
                     params.enable_copywriting = values.enable_copywriting ?? true
+                    params.incremental_scan = values.asset_scan_mode === 'incremental'
                     if (values.xhs_max_notes) params.xhs_max_notes = values.xhs_max_notes
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
                     if (values.fofa_size) params.fofa_size = values.fofa_size
                     if (values.hunter_size) params.hunter_size = values.hunter_size
                     if (values.asset_probe_concurrency) params.asset_probe_concurrency = values.asset_probe_concurrency
+                    if (values.url_probe_concurrency) params.url_probe_concurrency = values.url_probe_concurrency
+                    if (values.url_scan_concurrency) params.url_scan_concurrency = values.url_scan_concurrency
+                    if (values.copywriting_concurrency) params.copywriting_concurrency = values.copywriting_concurrency
+                    if (values.xhs_search_concurrency) params.xhs_search_concurrency = values.xhs_search_concurrency
                   }
-                  if (taskType === 'url_scan' && values.urls) {
-                    params.urls = values.urls.split('\n').map((u: string) => u.trim()).filter(Boolean)
+                  if (taskType === 'url_scan') {
+                    if (values.urls) {
+                      params.urls = values.urls.split('\n').map((u: string) => u.trim()).filter(Boolean)
+                    }
+                    params.enable_copywriting = values.enable_copywriting ?? true
+                    if (values.url_probe_concurrency) params.url_probe_concurrency = values.url_probe_concurrency
+                    if (values.url_scan_concurrency) params.url_scan_concurrency = values.url_scan_concurrency
+                    if (values.copywriting_concurrency) params.copywriting_concurrency = values.copywriting_concurrency
                   }
                   if (taskType === 'xhs_search') {
                     params.keyword = values.keyword
@@ -3629,9 +3710,13 @@ export default function ProjectDetail() {
                   if (taskType === 'fofa_collect') {
                     params.company_name = values.company_name
                     params.enable_scan = values.enable_scan ?? true
+                    params.incremental_scan = values.asset_scan_mode === 'incremental'
                     if (values.fofa_size) params.fofa_size = values.fofa_size
                     if (values.hunter_size) params.hunter_size = values.hunter_size
                     if (values.probe_concurrency) params.probe_concurrency = values.probe_concurrency
+                    if (values.url_probe_concurrency) params.url_probe_concurrency = values.url_probe_concurrency
+                    if (values.url_scan_concurrency) params.url_scan_concurrency = values.url_scan_concurrency
+                    if (values.copywriting_concurrency) params.copywriting_concurrency = values.copywriting_concurrency
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
                   }
                   if (taskType === 'scholar_contact') {
@@ -3657,12 +3742,17 @@ export default function ProjectDetail() {
                 }
               }}
               onCancel={() => setIsTaskModalOpen(false)}
+              afterOpenChange={(open) => {
+                if (!open) return
+                taskForm.resetFields()
+                taskForm.setFieldsValue(taskTuningValues)
+              }}
               confirmLoading={taskSubmitting}
               destroyOnHidden
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_copywriting: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, asset_probe_concurrency: 48, probe_concurrency: 48 }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_copywriting: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -3686,7 +3776,7 @@ export default function ProjectDetail() {
                           <Input.TextArea rows={3} placeholder="每行一个 URL；留空时由公司身份、FOFA 和 Hunter 自动发现" />
                         </Form.Item>
                         <Form.Item label="扫描模块">
-                          <Space direction="vertical">
+                          <Space orientation="vertical">
                             <Form.Item name="enable_asset_discovery" valuePropName="checked" noStyle>
                               <Checkbox>公司标准化 + FOFA/Hunter 资产发现与存活去重</Checkbox>
                             </Form.Item>
@@ -3701,6 +3791,12 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Space>
                         </Form.Item>
+                        <Form.Item name="asset_scan_mode" label="资产深扫范围">
+                          <Segmented block options={[
+                            { label: '全量扫描', value: 'full' },
+                            { label: '增量扫描', value: 'incremental' },
+                          ]} />
+                        </Form.Item>
                         <Row gutter={16}>
                           <Col xs={24} sm={8}>
                             <Form.Item name="fofa_size" label="FOFA 单路条数">
@@ -3713,18 +3809,40 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={8}>
-                            <Form.Item name="asset_probe_concurrency" label="探活并发">
+                            <Form.Item name="asset_probe_concurrency" label="资产探活并发">
                               <InputNumber min={1} max={128} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                         </Row>
                         <Row gutter={16}>
-                          <Col span={12}>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="url_probe_concurrency" label="URL 探活并发">
+                              <InputNumber min={1} max={128} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="url_scan_concurrency" label="浏览器深扫并发">
+                              <InputNumber min={1} max={16} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="copywriting_concurrency" label="话术生成并发">
+                              <InputNumber min={1} max={12} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="xhs_search_concurrency" label="小红书搜索并发">
+                              <InputNumber min={1} max={8} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Row gutter={16}>
+                          <Col xs={24} sm={12}>
                             <Form.Item name="xhs_max_notes" label="小红书最大笔记数">
                               <InputNumber min={1} max={100} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
-                          <Col span={12}>
+                          <Col xs={24} sm={12}>
                             <Form.Item name="min_attention_score" label="最低关注度阈值">
                               <InputNumber min={0} max={100} style={{ width: '100%' }} />
                             </Form.Item>
@@ -3733,9 +3851,31 @@ export default function ProjectDetail() {
                       </>
                     )
                     if (taskType === 'url_scan') return (
-                      <Form.Item name="urls" label="URL 列表" rules={[{ required: true, message: '请输入URL' }]}>
-                        <Input.TextArea rows={3} placeholder="每行一个 URL" />
-                      </Form.Item>
+                      <>
+                        <Form.Item name="urls" label="URL 列表" rules={[{ required: true, message: '请输入URL' }]}>
+                          <Input.TextArea rows={3} placeholder="每行一个 URL" />
+                        </Form.Item>
+                        <Form.Item name="enable_copywriting" valuePropName="checked">
+                          <Checkbox>生成话术</Checkbox>
+                        </Form.Item>
+                        <Row gutter={16}>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="url_probe_concurrency" label="URL 探活并发">
+                              <InputNumber min={1} max={128} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="url_scan_concurrency" label="浏览器深扫并发">
+                              <InputNumber min={1} max={16} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="copywriting_concurrency" label="话术生成并发">
+                              <InputNumber min={1} max={12} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </>
                     )
                     if (taskType === 'xhs_search') return (
                       <Form.Item name="keyword" label="搜索关键词" rules={[{ required: true }]}>
@@ -3758,7 +3898,13 @@ export default function ProjectDetail() {
                           <Input placeholder="支持法定名、品牌名和简称，如：B站" />
                         </Form.Item>
                         <Form.Item name="enable_scan" valuePropName="checked" noStyle>
-                          <Checkbox>对新增存活资产做深度扫描</Checkbox>
+                          <Checkbox>对存活资产做深度扫描</Checkbox>
+                        </Form.Item>
+                        <Form.Item name="asset_scan_mode" label="资产深扫范围" style={{ marginTop: 12 }}>
+                          <Segmented block options={[
+                            { label: '全量扫描', value: 'full' },
+                            { label: '增量扫描', value: 'incremental' },
+                          ]} />
                         </Form.Item>
                         <Row gutter={16} style={{ marginTop: 12 }}>
                           <Col xs={24} sm={8}>
@@ -3777,9 +3923,28 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Col>
                         </Row>
-                        <Form.Item name="probe_concurrency" label="URL 探活并发">
-                          <InputNumber min={1} max={128} style={{ width: '100%' }} />
-                        </Form.Item>
+                        <Row gutter={16}>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="probe_concurrency" label="资产探活并发">
+                              <InputNumber min={1} max={128} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="url_probe_concurrency" label="URL 补充探活并发">
+                              <InputNumber min={1} max={128} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="url_scan_concurrency" label="浏览器深扫并发">
+                              <InputNumber min={1} max={16} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="copywriting_concurrency" label="话术生成并发">
+                              <InputNumber min={1} max={12} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
                       </>
                     )
                     if (taskType === 'scholar_contact') return (
@@ -3796,7 +3961,7 @@ export default function ProjectDetail() {
                         <Form.Item name="limit" label="OpenAlex 返回文章数">
                           <InputNumber min={1} max={50} style={{ width: '100%' }} />
                         </Form.Item>
-                        <Space direction="vertical">
+                        <Space orientation="vertical">
                           <Form.Item name="enable_chrome_pmc" valuePropName="checked" noStyle>
                             <Checkbox>用 Chrome 打开 PMC 全文补抽通讯邮箱（较慢，默认关闭）</Checkbox>
                           </Form.Item>
@@ -4169,7 +4334,7 @@ export default function ProjectDetail() {
         {findingProfileLoading ? (
           <Skeleton active avatar paragraph={{ rows: 6 }} />
         ) : findingProfile ? (
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          <Space orientation="vertical" size="large" style={{ width: '100%' }}>
             <Space align="center" size="middle">
               <Avatar size={56} src={findingProfile.avatar_url} icon={<UserOutlined />} />
               <div>

@@ -19,6 +19,13 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from core.logger import get_logger
 from core.stream import Stage, Item, RetryPolicy
+from api.services.info_collection.tuning import (
+    DEFAULT_ASSET_PROBE_CONCURRENCY,
+    DEFAULT_COPYWRITING_CONCURRENCY,
+    DEFAULT_URL_PROBE_CONCURRENCY,
+    DEFAULT_URL_SCAN_CONCURRENCY,
+    DEFAULT_XHS_SEARCH_CONCURRENCY,
+)
 from api.services.info_collection.xhs_stages import (
     XhsDetailStage as _XhsDetailStage,
     XhsSearchStage as _XhsSearchStage,
@@ -179,7 +186,12 @@ class CompanyScanPipeline:
         profile_copywriting_threshold: int = 60,
         fofa_size: int = 200,
         hunter_size: int = 200,
-        asset_probe_concurrency: int = 48,
+        asset_probe_concurrency: int = DEFAULT_ASSET_PROBE_CONCURRENCY,
+        incremental_scan: bool = False,
+        url_probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
+        url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
+        copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
+        xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY,
     ) -> dict[str, Any]:
         """
         运行综合扫描流水线
@@ -203,6 +215,8 @@ class CompanyScanPipeline:
                 "alive": 0,
                 "inserted": 0,
                 "updated": 0,
+                "scan_mode": "incremental" if incremental_scan else "full",
+                "scan_candidates": 0,
                 "providers": {},
             },
             "url_scan": {"enabled": enable_url_scan, "findings_count": 0, "copywritings_count": 0},
@@ -332,6 +346,10 @@ class CompanyScanPipeline:
                         fofa_size=fofa_size,
                         hunter_size=hunter_size,
                         probe_concurrency=asset_probe_concurrency,
+                        incremental_scan=incremental_scan,
+                        url_probe_concurrency=url_probe_concurrency,
+                        url_scan_concurrency=url_scan_concurrency,
+                        copywriting_concurrency=copywriting_concurrency,
                     )
                 )
 
@@ -343,6 +361,7 @@ class CompanyScanPipeline:
                     xhs_max_notes, xhs_attention_threshold,
                     target_id=target_id,
                     target_name=normalized_name,
+                    search_concurrency=xhs_search_concurrency,
                 ))
 
             if tasks:
@@ -466,6 +485,10 @@ class CompanyScanPipeline:
         fofa_size: int,
         hunter_size: int,
         probe_concurrency: int,
+        incremental_scan: bool = False,
+        url_probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
+        url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
+        copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
     ) -> dict[str, Any]:
         from api.services.asset_intelligence import AssetIdentity, AssetIntelligenceService
 
@@ -476,6 +499,8 @@ class CompanyScanPipeline:
             "inserted": 0,
             "updated": 0,
             "unchanged": 0,
+            "scan_mode": "incremental" if incremental_scan else "full",
+            "scan_candidates": 0,
             "providers": {},
         }
         discovered_urls: list[str] = []
@@ -493,9 +518,14 @@ class CompanyScanPipeline:
                 provider_sizes={"fofa": fofa_size, "hunter": hunter_size},
                 probe_concurrency=probe_concurrency,
             )
+            candidate_key = "scan_urls" if incremental_scan else "alive_urls"
             discovered_urls = [
-                str(value) for value in asset_result.get("scan_urls") or [] if str(value).strip()
+                str(value)
+                for value in asset_result.get(candidate_key) or []
+                if str(value).strip()
             ]
+            asset_result["scan_mode"] = "incremental" if incremental_scan else "full"
+            asset_result["scan_candidates"] = len(discovered_urls)
 
         url_result: dict[str, Any] = {
             "enabled": enable_url_scan,
@@ -514,6 +544,10 @@ class CompanyScanPipeline:
                         min_attention_score,
                         enable_copywriting,
                         target_id=str(identity.get("target_id") or ""),
+                        known_alive_urls=discovered_urls,
+                        probe_concurrency=url_probe_concurrency,
+                        scan_concurrency=url_scan_concurrency,
+                        copywriting_concurrency=copywriting_concurrency,
                     )
                 )
         return {"kind": "asset_url", "assets": asset_result, "url_scan": url_result}
@@ -527,6 +561,10 @@ class CompanyScanPipeline:
         min_attention_score: int,
         enable_copywriting: bool,
         target_id: str = "",
+        known_alive_urls: list[str] | None = None,
+        probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
+        scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
+        copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
     ) -> dict[str, Any]:
         from api.services.url_scan_pipeline import UrlScanPipeline
 
@@ -542,6 +580,10 @@ class CompanyScanPipeline:
             min_attention_score=min_attention_score,
             target_id=target_id,
             enable_copywriting=enable_copywriting,
+            known_alive_urls=known_alive_urls,
+            probe_concurrency=probe_concurrency,
+            scan_concurrency=scan_concurrency,
+            copywriting_concurrency=copywriting_concurrency,
         )
         if scan_result.get("status") == "error":
             raise RuntimeError(str(scan_result.get("error") or "URL 深度扫描失败"))
@@ -566,11 +608,12 @@ class CompanyScanPipeline:
         attention_threshold: int,
         target_id: str = "",
         target_name: str = "",
+        search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY,
     ) -> dict[str, Any]:
         """
         流式队列架构的 XHS 搜索流水线
 
-        搜索(2并发) → 笔记入库 → 打标队列(Sem 7) → 详情队列(V2 Sem 3) → 截屏+画像(Sem 4)
+        搜索（受账号池容量约束）→ 笔记入库 → 打标队列 → 详情队列 → 画像
         """
         import time as _time
         from api.services.info_collection import ProfileRequest
@@ -589,8 +632,15 @@ class CompanyScanPipeline:
         # ── 三阶段流式管道 (search → tagging → detail) ──
         logger.info(f"[xhs-stream] ▶ 流式流水线启动 | keywords={len(keywords)} per_keyword={per_keyword}")
 
+        from api.services.xhs_runtime import resolve_xhs_search_concurrency
+
+        effective_search_concurrency = await resolve_xhs_search_concurrency(
+            self.db,
+            requested=search_concurrency,
+            workload_size=len(keywords),
+        )
         search_stage = _XhsSearchStage(
-            concurrency=min(3, max(1, len(keywords))), project_id=project_id, task_id=task_id,
+            concurrency=effective_search_concurrency, project_id=project_id, task_id=task_id,
             per_keyword=per_keyword, db=self.db, pipeline_owner=pipeline,
             target_id=target_id, target_name=target_name,
         )

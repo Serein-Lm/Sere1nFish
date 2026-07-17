@@ -7,6 +7,12 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.services.asset_intelligence import AssetIdentity, AssetIntelligenceService
+from api.services.info_collection.tuning import (
+    DEFAULT_ASSET_PROBE_CONCURRENCY,
+    DEFAULT_COPYWRITING_CONCURRENCY,
+    DEFAULT_URL_PROBE_CONCURRENCY,
+    DEFAULT_URL_SCAN_CONCURRENCY,
+)
 from core.logger import get_logger
 from core.observability import obs_log
 
@@ -24,7 +30,11 @@ async def run_fofa_collect(
     hunter_size: int = 200,
     enable_scan: bool = True,
     min_attention_score: int = 40,
-    probe_concurrency: int = 48,
+    probe_concurrency: int = DEFAULT_ASSET_PROBE_CONCURRENCY,
+    incremental_scan: bool = False,
+    url_probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
+    url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
+    copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
 ) -> dict[str, Any]:
     """保留旧 task_type/API，内部改走统一多 Provider 资产情报服务。"""
     from api.dao import targets as targets_dao
@@ -45,6 +55,8 @@ async def run_fofa_collect(
         "assets_unchanged": 0,
         "alive_assets": 0,
         "new_assets": 0,
+        "scan_mode": "incremental" if incremental_scan else "full",
+        "scan_candidates": 0,
         "scanned": False,
         "providers": {},
         "status": "running",
@@ -99,7 +111,9 @@ async def run_fofa_collect(
             providers=providers,
         )
 
-        scan_urls = [str(url) for url in assets.get("scan_urls") or [] if str(url).strip()]
+        candidate_key = "scan_urls" if incremental_scan else "alive_urls"
+        scan_urls = [str(url) for url in assets.get(candidate_key) or [] if str(url).strip()]
+        summary["scan_candidates"] = len(scan_urls)
         if enable_scan and scan_urls:
             from api.services.url_scan_pipeline import UrlScanPipeline
 
@@ -109,6 +123,10 @@ async def run_fofa_collect(
                 url_content="\n".join(scan_urls),
                 min_attention_score=min_attention_score,
                 target_id=identity.target_id,
+                known_alive_urls=scan_urls,
+                probe_concurrency=url_probe_concurrency,
+                scan_concurrency=url_scan_concurrency,
+                copywriting_concurrency=copywriting_concurrency,
             )
             if scan_result.get("status") == "error":
                 raise RuntimeError(str(scan_result.get("error") or "资产深度扫描失败"))
@@ -133,6 +151,8 @@ async def run_fofa_collect(
                 "asset_total": summary["asset_total"],
                 "alive_assets": summary["alive_assets"],
                 "changed_assets": summary["new_assets"],
+                "scan_mode": summary["scan_mode"],
+                "scan_candidates": summary["scan_candidates"],
             },
         )
     except Exception as exc:  # noqa: BLE001

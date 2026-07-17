@@ -56,6 +56,7 @@ export interface AllConfig {
   easytier?: ConfigSection
   notifications?: ConfigSection
   chrome_docker?: ConfigSection
+  collection_runtime?: ConfigSection
   xhs_crawler?: ConfigSection
   douyin_crawler?: ConfigSection
   object_storage?: ConfigSection

@@ -115,19 +115,52 @@ async def test_low_authority_alias_does_not_downgrade_canonical_target(
 
 
 @pytest.mark.asyncio
-async def test_asset_and_manual_urls_share_one_deep_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("incremental_scan", "expected_urls", "expected_known_alive"),
+    [
+        (
+            False,
+            [
+                "https://manual.example.com",
+                "https://new.example.com",
+                "https://stable.example.com",
+            ],
+            [
+                "https://new.example.com",
+                "https://manual.example.com",
+                "https://stable.example.com",
+            ],
+        ),
+        (
+            True,
+            ["https://manual.example.com", "https://new.example.com"],
+            ["https://new.example.com"],
+        ),
+    ],
+)
+async def test_asset_and_manual_urls_share_one_deep_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    incremental_scan: bool,
+    expected_urls: list[str],
+    expected_known_alive: list[str],
+) -> None:
     from api.services.asset_intelligence import AssetIntelligenceService
 
     async def discover(_self: Any, **_kwargs: Any) -> dict[str, Any]:
         return {
             "enabled": True,
-            "discovered": 2,
-            "alive": 2,
+            "discovered": 3,
+            "alive": 3,
             "inserted": 1,
             "updated": 1,
-            "unchanged": 0,
+            "unchanged": 1,
             "providers": {},
-            "scan_urls": ["https://new.example.com", "https://manual.example.com"],
+            "alive_urls": [
+                "https://new.example.com",
+                "https://manual.example.com",
+                "https://stable.example.com",
+            ],
+            "scan_urls": ["https://new.example.com"],
         }
 
     monkeypatch.setattr(AssetIntelligenceService, "discover", discover)
@@ -158,13 +191,14 @@ async def test_asset_and_manual_urls_share_one_deep_scan(monkeypatch: pytest.Mon
         fofa_size=100,
         hunter_size=100,
         probe_concurrency=48,
+        incremental_scan=incremental_scan,
     )
 
     assert result["kind"] == "asset_url"
     assert result["url_scan"]["findings_count"] == 3
     assert len(calls) == 1
-    assert calls[0]["args"][3] == [
-        "https://manual.example.com",
-        "https://new.example.com",
-    ]
+    assert calls[0]["args"][3] == expected_urls
+    assert calls[0]["kwargs"]["known_alive_urls"] == expected_known_alive
     assert calls[0]["kwargs"]["target_id"] == "tgt-1"
+    assert result["assets"]["scan_mode"] == ("incremental" if incremental_scan else "full")
+    assert result["assets"]["scan_candidates"] == len(expected_known_alive)

@@ -628,3 +628,32 @@ async def get_xhs_runtime_status(db: AsyncIOMotorDatabase) -> dict[str, Any]:
             "fail_open": _as_bool(proxy_pool.get("fail_open"), default=True),
         },
     }
+
+
+async def resolve_xhs_search_concurrency(
+    db: AsyncIOMotorDatabase,
+    *,
+    requested: int,
+    workload_size: int,
+) -> int:
+    """按任务上限、关键词数和当前可用账号数计算搜索 worker 数。"""
+    from api.services.info_collection.tuning import MAX_XHS_SEARCH_CONCURRENCY
+
+    requested = max(1, min(int(requested), MAX_XHS_SEARCH_CONCURRENCY))
+    workload_size = max(1, int(workload_size))
+    try:
+        status = await get_xhs_runtime_status(db)
+        usable_accounts = int((status.get("account_pool") or {}).get("usable") or 0)
+    except Exception as exc:
+        logger.warning("读取小红书账号池容量失败，搜索并发降级为 1: %s", exc)
+        usable_accounts = 0
+
+    effective = min(requested, workload_size, max(1, usable_accounts))
+    logger.info(
+        "小红书搜索并发预算 requested=%s workload=%s usable_accounts=%s effective=%s",
+        requested,
+        workload_size,
+        usable_accounts,
+        effective,
+    )
+    return effective

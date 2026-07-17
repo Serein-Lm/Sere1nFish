@@ -178,6 +178,22 @@ def test_xhs_account_pool_rotates_on_successive_leases(monkeypatch):
     asyncio.run(_run())
 
 
+def test_xhs_search_concurrency_is_bounded_by_usable_accounts(monkeypatch):
+    async def _run():
+        from api.services import xhs_runtime
+
+        async def fake_status(_db):
+            return {"account_pool": {"usable": 2}}
+
+        monkeypatch.setattr(xhs_runtime, "get_xhs_runtime_status", fake_status)
+
+        assert await xhs_runtime.resolve_xhs_search_concurrency(
+            object(), requested=6, workload_size=5
+        ) == 2
+
+    asyncio.run(_run())
+
+
 def test_xhs_account_invalidates_only_after_failure_threshold(monkeypatch):
     async def _run():
         from api.services import xhs_runtime

@@ -39,6 +39,7 @@ const CONFIG_SECTIONS = [
   { key: 'bailian', label: '百炼 AIGC', description: '图片编辑、文生视频、图生视频' },
   { key: 'cosyvoice', label: 'CosyVoice TTS', description: '声音复刻、语音合成' },
   { key: 'chrome_docker', label: 'Chrome Docker', description: '后端浏览器容器池' },
+  { key: 'collection_runtime', label: '采集并发', description: '资产探活、浏览器深扫、话术和账号池并发预算' },
   { key: 'easytier', label: 'EasyTier 组网', description: '公网 peer、虚拟网段、ADB 扫描和下载链接' },
   { key: 'notifications', label: '通知 Hook', description: '统一通知入口、默认通道、事件级路由策略' },
   { key: 'mobile', label: '手机 Agent', description: 'ADB 超时、视频流、执行参数' },

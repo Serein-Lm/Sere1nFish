@@ -425,7 +425,10 @@ def test_url_scan_pipeline_streams_findings_to_copywriting(monkeypatch):
                     "url_probe_tool": None,
                 }
 
+        probe_calls = []
+
         async def fake_probe_urls(urls, concurrency=20, timeout=10.0):
+            probe_calls.append({"urls": urls, "concurrency": concurrency, "timeout": timeout})
             return [{"url": urls[0], "title": "Example", "status_code": 200}]
 
         monkeypatch.setattr(
@@ -442,10 +445,13 @@ def test_url_scan_pipeline_streams_findings_to_copywriting(monkeypatch):
             project_id="project-1",
             url_content="example.com",
             min_attention_score=40,
+            known_alive_urls=["https://example.com"],
         )
 
         assert result["status"] == "completed"
         assert result["alive_urls"] == 1
+        assert result["probed_urls"] == 0
+        assert result["reused_alive_urls"] == 1
         assert result["scanned_urls"] == 1
         assert result["total_findings"] == 1
         assert result["total_copywritings"] == 1
@@ -455,6 +461,7 @@ def test_url_scan_pipeline_streams_findings_to_copywriting(monkeypatch):
         assert db["findings"].docs[0]["source"] == "web_tagging"
         assert db["url_scan_results"].docs[0]["url"] == "https://example.com"
         assert db["copywritings"].docs[0]["finding_id"] == "finding-1"
+        assert probe_calls == []
 
     asyncio.run(_run())
 

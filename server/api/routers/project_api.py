@@ -44,6 +44,7 @@ TASKS_COLLECTION = "tasks"
 # ═══════════════════════════════════════════
 
 async def _dispatch_url_scan(task_id: str, project_id: str, params: dict):
+    from api.services.info_collection.tuning import get_collection_runtime_tuning
     from api.services.url_scan_pipeline import UrlScanPipeline
     from api.services.runtime_config import get_runtime_app_config
 
@@ -53,11 +54,22 @@ async def _dispatch_url_scan(task_id: str, project_id: str, params: dict):
         url_content = "\n".join(urls)
     db = get_db()
     runtime_config = await get_runtime_app_config()
+    tuning = (await get_collection_runtime_tuning()).with_overrides(
+        url_probe_concurrency=params.get("url_probe_concurrency"),
+        url_scan_concurrency=params.get("url_scan_concurrency"),
+        copywriting_concurrency=params.get("copywriting_concurrency"),
+    )
     pipeline = UrlScanPipeline(db, runtime_config)
-    await pipeline.run_pipeline(
+    result = await pipeline.run_pipeline(
         task_id=task_id, project_id=project_id, url_content=url_content,
         min_attention_score=params.get("min_attention_score", 40),
+        probe_concurrency=tuning.url_probe_concurrency,
+        scan_concurrency=tuning.url_scan_concurrency,
+        copywriting_concurrency=tuning.copywriting_concurrency,
+        enable_copywriting=params.get("enable_copywriting", True),
     )
+    if result.get("status") == "error":
+        raise RuntimeError(str(result.get("error") or "URL 扫描失败"))
 
 async def _dispatch_xhs_search(task_id: str, project_id: str, params: dict):
     from api.services.xhs_pipeline import run_xhs_pipeline
@@ -97,10 +109,18 @@ async def _dispatch_web_tagging(task_id: str, project_id: str, params: dict):
 
 async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
     from api.services.company_scan_pipeline import CompanyScanPipeline
+    from api.services.info_collection.tuning import get_collection_runtime_tuning
     from api.services.runtime_config import get_runtime_app_config
 
     db = get_db()
     runtime_config = await get_runtime_app_config()
+    tuning = (await get_collection_runtime_tuning()).with_overrides(
+        asset_probe_concurrency=params.get("asset_probe_concurrency"),
+        url_probe_concurrency=params.get("url_probe_concurrency"),
+        url_scan_concurrency=params.get("url_scan_concurrency"),
+        copywriting_concurrency=params.get("copywriting_concurrency"),
+        xhs_search_concurrency=params.get("xhs_search_concurrency"),
+    )
     pipeline = CompanyScanPipeline(db, runtime_config)
     await pipeline.run_pipeline(
         task_id=task_id, project_id=project_id,
@@ -116,15 +136,27 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         profile_copywriting_threshold=params.get("profile_copywriting_threshold", 60),
         fofa_size=params.get("fofa_size", 200),
         hunter_size=params.get("hunter_size", 200),
-        asset_probe_concurrency=params.get("asset_probe_concurrency", 48),
+        asset_probe_concurrency=tuning.asset_probe_concurrency,
+        incremental_scan=params.get("incremental_scan", False),
+        url_probe_concurrency=tuning.url_probe_concurrency,
+        url_scan_concurrency=tuning.url_scan_concurrency,
+        copywriting_concurrency=tuning.copywriting_concurrency,
+        xhs_search_concurrency=tuning.xhs_search_concurrency,
     )
 
 async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
     from api.services.fofa_collect import run_fofa_collect
+    from api.services.info_collection.tuning import get_collection_runtime_tuning
     from api.services.runtime_config import get_runtime_app_config
 
     db = get_db()
     runtime_config = await get_runtime_app_config()
+    tuning = (await get_collection_runtime_tuning()).with_overrides(
+        asset_probe_concurrency=params.get("probe_concurrency"),
+        url_probe_concurrency=params.get("url_probe_concurrency"),
+        url_scan_concurrency=params.get("url_scan_concurrency"),
+        copywriting_concurrency=params.get("copywriting_concurrency"),
+    )
     await run_fofa_collect(
         db=db, app_config=runtime_config, task_id=task_id, project_id=project_id,
         company_name=params.get("company_name", ""),
@@ -132,7 +164,11 @@ async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
         hunter_size=params.get("hunter_size", 200),
         enable_scan=params.get("enable_scan", True),
         min_attention_score=params.get("min_attention_score", 40),
-        probe_concurrency=params.get("probe_concurrency", 48),
+        probe_concurrency=tuning.asset_probe_concurrency,
+        incremental_scan=params.get("incremental_scan", False),
+        url_probe_concurrency=tuning.url_probe_concurrency,
+        url_scan_concurrency=tuning.url_scan_concurrency,
+        copywriting_concurrency=tuning.copywriting_concurrency,
     )
 
 async def _dispatch_scholar_contact(task_id: str, project_id: str, params: dict):
