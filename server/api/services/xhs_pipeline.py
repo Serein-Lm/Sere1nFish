@@ -53,12 +53,14 @@ class _XhsScreenshotStage(Stage):
         db: Any,
         total_users: int,
         target_id: str = "",
+        target_name: str = "",
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
         self.db = db
         self.total_users = total_users
         self.target_id = target_id
+        self.target_name = target_name
         super().__init__(concurrency=concurrency)
 
     async def handle(self, item: Item, ctx) -> None:
@@ -80,7 +82,12 @@ class _XhsScreenshotStage(Stage):
         if self.target_id:
             await self.db[xhs_dao.XHS_PROFILES_COLLECTION].update_one(
                 {"project_id": self.project_id, "user_id": uid},
-                {"$addToSet": {"target_ids": self.target_id}},
+                {
+                    "$addToSet": {
+                        "target_ids": self.target_id,
+                        **({"target_names": self.target_name} if self.target_name else {}),
+                    }
+                },
             )
         ss_r = await screenshot_user_profile(
             f"https://www.xiaohongshu.com/user/profile/{uid}", self.db,
@@ -111,6 +118,7 @@ class _XhsProfileStage(Stage):
         pipeline_owner: "XhsPipeline",
         total_users: int,
         target_id: str = "",
+        target_name: str = "",
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
@@ -119,6 +127,7 @@ class _XhsProfileStage(Stage):
         self.pipeline_owner = pipeline_owner
         self.total_users = total_users
         self.target_id = target_id
+        self.target_name = target_name
         super().__init__(concurrency=concurrency)
 
     async def on_setup(self, state: dict[str, Any]) -> None:
@@ -192,12 +201,16 @@ class _XhsProfileStage(Stage):
             "attention_reason": tag.get("profile_summary", ""),
             "context": f"小红书用户 {nick}，关联 {len(nids)} 条笔记",
             **({"target_id": self.target_id} if self.target_id else {}),
+            **({"target_name": self.target_name} if self.target_name else {}),
         }
         await findings_dao.insert_finding(self.db, fd)
         ud["finding_id"] = fd["finding_id"]
         profile_update: dict[str, Any] = {"$set": ud}
         if self.target_id:
-            profile_update["$addToSet"] = {"target_ids": self.target_id}
+            profile_update["$addToSet"] = {
+                "target_ids": self.target_id,
+                **({"target_names": self.target_name} if self.target_name else {}),
+            }
         await self.db[xhs_dao.XHS_PROFILES_COLLECTION].update_one(
             {"project_id": self.project_id, "user_id": uid}, profile_update,
         )
@@ -307,6 +320,8 @@ class XhsPipeline:
         enable_comments: bool = False,  # 评论默认关闭
         enable_images: bool = True,  # 是否下载图片
         max_comments: int = 20,  # 每篇笔记最多获取评论数
+        target_id: str = "",
+        target_name: str = "",
     ) -> dict[str, Any]:
         """
         运行完整流水线
@@ -374,6 +389,8 @@ class XhsPipeline:
                 db=self.db,
                 pipeline_owner=self,
                 sort_type=sort_type,
+                target_id=target_id,
+                target_name=target_name,
             )
             tagging_stage = XhsTaggingStage(
                 concurrency=7,
@@ -437,7 +454,13 @@ class XhsPipeline:
             if result["suspicious_count"]:
                 t0 = _time.time()
                 logger.info(f"[XHS] task={task_id} 阶段5开始: 生成人物画像")
-                profiles = await self._stage_profile_generation(task_id, project_id, keyword)
+                profiles = await self._stage_profile_generation(
+                    task_id,
+                    project_id,
+                    keyword,
+                    target_id=target_id,
+                    target_name=target_name,
+                )
                 result["profiles_count"] = len(profiles)
                 logger.info(f"[XHS] task={task_id} 阶段5完成: 画像={len(profiles)} ({_time.time()-t0:.1f}s)")
                 obs_log(
@@ -870,6 +893,7 @@ class XhsPipeline:
         screenshot_concurrency: int = 1,
         profile_concurrency: int = 3,
         target_id: str = "",
+        target_name: str = "",
     ) -> list[dict[str, Any]]:
         """
         阶段 5: 流式画像 + 话术（队列 + 并发 worker）
@@ -905,7 +929,12 @@ class XhsPipeline:
                     "project_id": project_id,
                     "user_id": {"$in": [item.get("xhs_user_id") for item in user_findings]},
                 },
-                {"$addToSet": {"target_ids": target_id}},
+                {
+                    "$addToSet": {
+                        "target_ids": target_id,
+                        **({"target_names": target_name} if target_name else {}),
+                    }
+                },
             )
 
         # 获取项目的目标公司名（作为关键词传给画像 Agent）
@@ -946,12 +975,14 @@ class XhsPipeline:
             project_id=project_id, task_id=task_id, db=self.db,
             total_users=total_users,
             target_id=target_id,
+            target_name=target_name,
         )
         prof_stage = _XhsProfileStage(
             concurrency=profile_concurrency,
             project_id=project_id, task_id=task_id, db=self.db,
             keyword=keyword, pipeline_owner=self, total_users=total_users,
             target_id=target_id,
+            target_name=target_name,
         )
         cw_stage = _XhsCopywritingStage(
             concurrency=2,
@@ -1082,6 +1113,8 @@ async def run_xhs_pipeline(
     enable_comments: bool = False,
     enable_images: bool = True,
     max_comments: int = 20,
+    target_id: str = "",
+    target_name: str = "",
 ) -> dict[str, Any]:
     """运行 XHS 流水线的便捷函数"""
     pipeline = XhsPipeline(db, app_config)
@@ -1095,4 +1128,6 @@ async def run_xhs_pipeline(
         enable_comments=enable_comments,
         enable_images=enable_images,
         max_comments=max_comments,
+        target_id=target_id,
+        target_name=target_name,
     )

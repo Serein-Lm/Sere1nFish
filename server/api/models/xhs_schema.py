@@ -77,6 +77,8 @@ class XhsSearchTaskCreate(BaseModel):
     """创建搜索任务请求"""
     project_id: str = Field(..., description="项目 ID")
     keyword: str = Field(..., description="搜索关键词")
+    target_id: str | None = Field(default=None, description="项目内目标 ID")
+    target_name: str | None = Field(default=None, description="目标名称（兼容字段，服务端以 target_id 为准）")
     max_notes: int = Field(default=20, ge=1, le=100, description="最大笔记数")
     attention_threshold: int = Field(default=60, ge=0, le=100, description="关注度阈值")
 
@@ -86,6 +88,8 @@ class XhsSearchTaskOut(BaseModel):
     id: str
     project_id: str
     keyword: str
+    target_id: str | None = None
+    target_name: str | None = None
     max_notes: int
     attention_threshold: int
     status: TaskStatus
@@ -262,6 +266,8 @@ class XhsProfileOut(BaseModel):
     task_id: str = ""
     user_id: str
     finding_id: str | None = Field(default=None, description="关联的 finding ID，用于查话术")
+    target_ids: list[str] = Field(default_factory=list, description="关联的项目目标 ID")
+    target_names: list[str] = Field(default_factory=list, description="关联的项目目标名称")
     
     # 核心字段（顶层）
     nickname: str = Field(default="", description="用户昵称")

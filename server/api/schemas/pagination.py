@@ -84,6 +84,7 @@ class XhsNotesListRequest(PageRequest):
     """小红书笔记列表"""
     project_id: str = Field(description="项目 ID")
     task_id: str | None = Field(default=None, description="任务 ID 过滤")
+    target_id: str | None = Field(default=None, description="目标 ID 过滤")
     is_suspicious: bool | None = Field(default=None, description="是否可疑")
     sort_by: str = Field(default="relevance", description="排序: relevance / created_at")
 
@@ -92,6 +93,7 @@ class XhsProfilesListRequest(PageRequest):
     """小红书人物画像列表"""
     project_id: str = Field(description="项目 ID")
     task_id: str | None = Field(default=None, description="任务 ID 过滤")
+    target_id: str | None = Field(default=None, description="目标 ID 过滤")
 
 
 class XhsSearchTasksListRequest(PageRequest):
@@ -120,6 +122,7 @@ class ProjectNotesListRequest(PageRequest):
     """项目笔记列表（project_api）"""
     project_id: str = Field(description="项目 ID")
     task_id: str = Field(default="", description="任务 ID 过滤")
+    target_id: str = Field(default="", description="目标 ID 过滤")
     is_suspicious: bool | None = Field(default=None, description="是否可疑")
     sort_by: str = Field(default="relevance", description="排序: relevance / created_at")
 
@@ -127,6 +130,7 @@ class ProjectNotesListRequest(PageRequest):
 class ProjectProfilesListRequest(PageRequest):
     """项目画像列表（project_api）"""
     project_id: str = Field(description="项目 ID")
+    target_id: str = Field(default="", description="目标 ID 过滤")
     min_score: int = Field(default=0, ge=0, description="最低分数")
     sort: str = Field(default="score_desc", description="排序: score_desc / time_desc")
 

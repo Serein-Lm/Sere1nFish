@@ -242,6 +242,8 @@ def test_company_xhs_search_stage_uses_search_tool_contract():
             per_keyword=5,
             db=None,
             pipeline_owner=None,
+            target_id="target-1",
+            target_name="目标公司",
         )
 
         item = type("Item", (), {"payload": "目标公司 招聘", "meta": {"idx": 2, "total": 4}})()
@@ -255,6 +257,8 @@ def test_company_xhs_search_stage_uses_search_tool_contract():
         assert req.task_id == "task-1_xhs_2"
         assert req.limit == 5
         assert req.options["sort_type"] == "time_descending"
+        assert req.options["target_id"] == "target-1"
+        assert req.options["target_name"] == "目标公司"
 
         assert ctx.state["all_notes_count"] == 1
         assert len(ctx.emitted) == 1
@@ -800,6 +804,7 @@ def test_xhs_profile_tool_delegates_to_pipeline_runtime():
                 keyword,
                 screenshot_concurrency=2,
                 profile_concurrency=3,
+                target_id="",
             ):
                 calls.append({
                     "task_id": task_id,
@@ -807,6 +812,7 @@ def test_xhs_profile_tool_delegates_to_pipeline_runtime():
                     "keyword": keyword,
                     "screenshot_concurrency": screenshot_concurrency,
                     "profile_concurrency": profile_concurrency,
+                    "target_id": target_id,
                 })
                 return [{"user_id": "user-1"}]
 
@@ -817,7 +823,11 @@ def test_xhs_profile_tool_delegates_to_pipeline_runtime():
                 project_id="project-1",
                 task_id="task-1",
                 keyword="目标公司",
-                options={"screenshot_concurrency": 4, "profile_concurrency": 5},
+                options={
+                    "screenshot_concurrency": 4,
+                    "profile_concurrency": 5,
+                    "target_id": "target-1",
+                },
             )
         )
 
@@ -831,6 +841,7 @@ def test_xhs_profile_tool_delegates_to_pipeline_runtime():
             "keyword": "目标公司",
             "screenshot_concurrency": 4,
             "profile_concurrency": 5,
+            "target_id": "target-1",
         }]
 
     asyncio.run(_run())

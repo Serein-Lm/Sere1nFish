@@ -53,6 +53,27 @@ def _project_note_out(doc: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+async def _normalize_xhs_target_params(
+    db: Any,
+    *,
+    project_id: str,
+    params: dict[str, Any],
+) -> None:
+    """Canonicalize the optional project Target used by an XHS search task."""
+    target_id = str(params.get("target_id") or "").strip()
+    if not target_id:
+        params.pop("target_name", None)
+        return
+    from api.services.targets import require_project_target
+
+    target_ref = await require_project_target(
+        db,
+        project_id=project_id,
+        target_id=target_id,
+    )
+    params.update(target_ref)
+
+
 # ═══════════════════════════════════════════
 # Pipeline 分发器（原 tasks.py，已合并到此）
 # ═══════════════════════════════════════════
@@ -90,11 +111,14 @@ async def _dispatch_xhs_search(task_id: str, project_id: str, params: dict):
     from api.services.runtime_config import get_runtime_app_config
 
     db = get_db()
+    await _normalize_xhs_target_params(db, project_id=project_id, params=params)
     runtime_config = await get_runtime_app_config()
     await run_xhs_pipeline(
         db=db, app_config=runtime_config, task_id=task_id, project_id=project_id,
         keyword=params.get("keyword", ""), max_notes=params.get("max_notes", 20),
         attention_threshold=params.get("attention_threshold", 60),
+        target_id=str(params.get("target_id") or ""),
+        target_name=str(params.get("target_name") or ""),
     )
 
 async def _dispatch_douyin_search(task_id: str, project_id: str, params: dict):
@@ -382,6 +406,16 @@ async def create_task(
     if not project:
         raise HTTPException(404, "项目不存在")
 
+    if req.task_type == "xhs_search":
+        try:
+            await _normalize_xhs_target_params(
+                db,
+                project_id=project_id,
+                params=req.params,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     if req.task_type == "company_scan" and req.params.get("enable_wechat", False):
         from api.services.wechat_collection import resolve_wechat_task_definition
 
@@ -445,6 +479,16 @@ async def create_task_with_file(
         params = json.loads(params_json) if params_json.strip() else {}
     except json.JSONDecodeError:
         params = {}
+
+    if task_type == "xhs_search":
+        try:
+            await _normalize_xhs_target_params(
+                db,
+                project_id=project_id,
+                params=params,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     FILE_FIELD_MAP = {"url_scan": "url_text", "company_scan": "url_text"}
     field_name = FILE_FIELD_MAP.get(task_type)
@@ -833,6 +877,7 @@ async def list_project_notes(project_id: str, body: ProjectNotesListRequest | No
     from api.dao import xhs as xhs_dao
     docs, total = await xhs_dao.list_notes(
         db, project_id=project_id, task_id=body.task_id or None,
+        target_id=body.target_id or None,
         is_suspicious=body.is_suspicious, limit=body.limit, skip=body.skip, sort_by=body.sort_by,
     )
     return PageResponse.build(
@@ -851,6 +896,8 @@ async def list_project_profiles(project_id: str, body: ProjectProfilesListReques
     db = get_db()
     from api.db.collections import XHS_PROFILES_COLLECTION
     query: dict = {"project_id": project_id}
+    if body.target_id:
+        query["target_ids"] = body.target_id
     if body.min_score > 0:
         query["attention_score"] = {"$gte": body.min_score}
 

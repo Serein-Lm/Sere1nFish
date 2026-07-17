@@ -514,6 +514,7 @@ export default function ProjectDetail() {
   const [xhsProfilesTotal, setXhsProfilesTotal] = useState(0)
   const [xhsNotesLoading, setXhsNotesLoading] = useState(false)
   const [xhsProfilesLoading, setXhsProfilesLoading] = useState(false)
+  const [xhsTargetId, setXhsTargetId] = useState('')
   const [isXhsSearchModalOpen, setIsXhsSearchModalOpen] = useState(false)
   const [xhsSearchForm] = Form.useForm()
   const [xhsSearchSubmitting, setXhsSearchSubmitting] = useState(false)
@@ -895,10 +896,10 @@ export default function ProjectDetail() {
   }, [searchParams])
 
   // 加载小红书笔记
-  const fetchXhsNotes = async (pid: string, page = 1, pageSize = 10) => {
+  const fetchXhsNotes = async (pid: string, page = 1, pageSize = 10, targetId = xhsTargetId) => {
     setXhsNotesLoading(true)
     try {
-      const res = await listXhsNotes(pid, { page, page_size: pageSize })
+      const res = await listXhsNotes(pid, { page, page_size: pageSize, target_id: targetId || undefined })
       setXhsNotes(res.items)
       setXhsNotesTotal(res.total)
     } catch (e) {
@@ -909,10 +910,10 @@ export default function ProjectDetail() {
   }
 
   // 加载小红书人物画像
-  const fetchXhsProfiles = async (pid: string, page = 1, pageSize = 10) => {
+  const fetchXhsProfiles = async (pid: string, page = 1, pageSize = 10, targetId = xhsTargetId) => {
     setXhsProfilesLoading(true)
     try {
-      const res = await listXhsProfiles(pid, { page, page_size: pageSize })
+      const res = await listXhsProfiles(pid, { page, page_size: pageSize, target_id: targetId || undefined })
       setXhsProfiles(res.items)
       setXhsProfilesTotal(res.total)
     } catch (e) {
@@ -977,6 +978,7 @@ export default function ProjectDetail() {
 
       setLoading(true)
       setError(null)
+      setXhsTargetId('')
       try {
         const data = await getProject(projectId)
         if (!cancelled) {
@@ -1014,6 +1016,7 @@ export default function ProjectDetail() {
           setAssetTargetId('')
           setXhsNotes([])
           setXhsProfiles([])
+          setXhsTargetId('')
           setDouyinSearchResults([])
           setDouyinTaggedResults([])
           setDouyinProfiles([])
@@ -1184,6 +1187,7 @@ export default function ProjectDetail() {
       await createXhsSearchTask({
         project_id: projectId,
         keyword: values.keyword,
+        target_id: values.target_id,
         max_notes: values.max_notes || 20,
         attention_threshold: values.attention_threshold || 60,
       })
@@ -1192,8 +1196,8 @@ export default function ProjectDetail() {
       // 延迟刷新数据
       setTimeout(() => {
         if (projectId) {
-          fetchXhsNotes(projectId)
-          fetchXhsProfiles(projectId)
+          fetchXhsNotes(projectId, 1, 10, xhsTargetId)
+          fetchXhsProfiles(projectId, 1, 10, xhsTargetId)
         }
       }, 3000)
     } catch (e) {
@@ -1344,6 +1348,14 @@ export default function ProjectDetail() {
       key: 'keyword',
       width: 132,
       render: (val: string) => val ? <Tag color="magenta">{val}</Tag> : <Text type="secondary">-</Text>,
+    },
+    {
+      title: '目标公司',
+      key: 'target',
+      width: 180,
+      render: (_, rec) => rec.target_name
+        ? <Tag color="geekblue">{rec.target_name}</Tag>
+        : <Text type="secondary">未关联目标</Text>,
     },
     {
       title: '关联度',
@@ -1517,6 +1529,19 @@ export default function ProjectDetail() {
             </div>
           </Space>
         )
+      },
+    },
+    {
+      title: '目标公司',
+      key: 'target',
+      width: 180,
+      render: (_, rec) => {
+        const names = rec.target_names?.length
+          ? rec.target_names
+          : (rec.target_ids || []).map((id) => projectTargets.find((target) => target.target_id === id)?.target_name || id)
+        return names.length
+          ? <Space size={[4, 4]} wrap>{names.map((name) => <Tag color="geekblue" key={name}>{name}</Tag>)}</Space>
+          : <Text type="secondary">未关联目标</Text>
       },
     },
     {
@@ -2462,7 +2487,7 @@ export default function ProjectDetail() {
               pageSize: 10,
               showSizeChanger: true,
               showTotal: (total) => `共 ${total} 条笔记`,
-              onChange: (page, pageSize) => { if (projectId) fetchXhsNotes(projectId, page, pageSize) },
+              onChange: (page, pageSize) => { if (projectId) fetchXhsNotes(projectId, page, pageSize, xhsTargetId) },
             }}
             size="small"
           />
@@ -2503,7 +2528,7 @@ export default function ProjectDetail() {
               pageSize: 10,
               showSizeChanger: true,
               showTotal: (total) => `共 ${total} 个画像`,
-              onChange: (page, pageSize) => { if (projectId) fetchXhsProfiles(projectId, page, pageSize) },
+              onChange: (page, pageSize) => { if (projectId) fetchXhsProfiles(projectId, page, pageSize, xhsTargetId) },
             }}
             size="small"
           />
@@ -2513,7 +2538,28 @@ export default function ProjectDetail() {
 
     return (
       <>
-        <div className="xhs-content-header">
+        <div className="xhs-content-header" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <Select
+            value={xhsTargetId}
+            placeholder="按目标公司筛选"
+            allowClear
+            style={{ width: 320, maxWidth: '100%' }}
+            options={[
+              { value: '', label: `全部目标 (${projectTargets.length})` },
+              ...projectTargets.map((target) => ({
+                value: target.target_id,
+                label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+              })),
+            ]}
+            onChange={(value) => {
+              const nextTargetId = value || ''
+              setXhsTargetId(nextTargetId)
+              if (projectId) {
+                void fetchXhsNotes(projectId, 1, 10, nextTargetId)
+                void fetchXhsProfiles(projectId, 1, 10, nextTargetId)
+              }
+            }}
+          />
           <Button
             type="primary"
             icon={<SearchOutlined />}
@@ -3941,6 +3987,22 @@ export default function ProjectDetail() {
             >
               <Form form={xhsSearchForm} layout="vertical" initialValues={{ max_notes: 20, attention_threshold: 60 }}>
                 <Form.Item
+                  name="target_id"
+                  label="目标公司"
+                  rules={[{ required: true, message: '请选择项目内的目标公司' }]}
+                  extra="补采结果会写回当前项目，并按所选 Target 归属；首次综合扫描可保持小红书关闭。"
+                >
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder={projectTargets.length ? '选择要补采小红书的公司' : '当前项目暂无可选目标'}
+                    options={projectTargets.map((target) => ({
+                      value: target.target_id,
+                      label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+                    }))}
+                  />
+                </Form.Item>
+                <Form.Item
                   name="keyword"
                   label="搜索关键词"
                   rules={[{ required: true, message: '请输入搜索关键词' }]}
@@ -4040,6 +4102,7 @@ export default function ProjectDetail() {
                   }
                   if (taskType === 'xhs_search') {
                     params.keyword = values.keyword
+                    params.target_id = values.target_id
                     if (values.max_notes) params.max_notes = values.max_notes
                     if (values.attention_threshold) params.attention_threshold = values.attention_threshold
                   }
@@ -4095,7 +4158,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_subsidiary_xhs: true, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4320,9 +4383,26 @@ export default function ProjectDetail() {
                       </>
                     )
                     if (taskType === 'xhs_search') return (
-                      <Form.Item name="keyword" label="搜索关键词" rules={[{ required: true }]}>
-                        <Input placeholder="公司名+职位，如：字节跳动 产品经理" />
-                      </Form.Item>
+                      <>
+                        <Form.Item
+                          name="target_id"
+                          label="目标公司"
+                          rules={[{ required: true, message: '请选择项目内的目标公司' }]}
+                        >
+                          <Select
+                            showSearch
+                            optionFilterProp="label"
+                            placeholder={projectTargets.length ? '选择要补采的公司' : '当前项目暂无可选目标'}
+                            options={projectTargets.map((target) => ({
+                              value: target.target_id,
+                              label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+                            }))}
+                          />
+                        </Form.Item>
+                        <Form.Item name="keyword" label="搜索关键词" rules={[{ required: true }]}>
+                          <Input placeholder="公司名+职位，如：字节跳动 产品经理" />
+                        </Form.Item>
+                      </>
                     )
                     if (taskType === 'douyin_search') return (
                       <Form.Item name="keyword" label="搜索关键词" rules={[{ required: true }]}>

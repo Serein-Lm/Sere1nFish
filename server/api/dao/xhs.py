@@ -166,6 +166,8 @@ async def create_search_task(
     db: AsyncIOMotorDatabase,
     project_id: str,
     keyword: str,
+    target_id: str | None = None,
+    target_name: str | None = None,
     max_notes: int = 20,
     attention_threshold: int = 60,
 ) -> dict[str, Any]:
@@ -174,6 +176,8 @@ async def create_search_task(
     doc = {
         "project_id": project_id,
         "keyword": keyword,
+        "target_id": target_id or None,
+        "target_name": target_name or None,
         "max_notes": max_notes,
         "attention_threshold": attention_threshold,
         "status": "pending",
@@ -330,6 +334,7 @@ async def list_notes(
     db: AsyncIOMotorDatabase,
     project_id: str | None = None,
     task_id: str | None = None,
+    target_id: str | None = None,
     is_suspicious: bool | None = None,
     limit: int = 50,
     skip: int = 0,
@@ -341,6 +346,8 @@ async def list_notes(
         query["project_id"] = project_id
     if task_id:
         query["task_id"] = task_id
+    if target_id:
+        query["target_id"] = target_id
     if is_suspicious is not None:
         query["tagging.is_suspicious"] = is_suspicious
     

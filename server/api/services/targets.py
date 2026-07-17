@@ -42,6 +42,35 @@ async def resolve_target(
     )
 
 
+async def require_project_target(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+) -> dict[str, str]:
+    """校验 Target 属于项目，并返回稳定 ID 与正式名称。"""
+    normalized_target_id = str(target_id or "").strip()
+    if not normalized_target_id:
+        raise ValueError("目标公司 ID 不能为空")
+    relation = await targets_dao.get_project_target(
+        db,
+        project_id=project_id,
+        target_id=normalized_target_id,
+    )
+    if not relation:
+        raise ValueError("目标公司不属于当前项目")
+    target = await targets_dao.get_target(db, normalized_target_id)
+    if not target:
+        raise ValueError("目标公司不存在")
+    target_name = str(
+        relation.get("target_name")
+        or target.get("canonical_name")
+        or target.get("name")
+        or ""
+    ).strip()
+    return {"target_id": normalized_target_id, "target_name": target_name}
+
+
 async def resolve_collection_target(
     db: AsyncIOMotorDatabase,
     *,

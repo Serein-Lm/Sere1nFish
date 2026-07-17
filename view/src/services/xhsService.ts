@@ -49,6 +49,8 @@ export interface XhsSearchTask {
   id: string
   project_id: string
   keyword: string
+  target_id?: string | null
+  target_name?: string | null
   status: 'pending' | 'running' | 'completed' | 'failed'
   notes_count: number
   suspicious_count: number
@@ -63,6 +65,7 @@ export interface XhsSearchTask {
 export interface CreateSearchTaskRequest {
   project_id: string
   keyword: string
+  target_id?: string
   max_notes?: number
   attention_threshold?: number
 }
@@ -99,6 +102,8 @@ export interface XhsNote {
   project_id: string
   task_id?: string
   keyword?: string
+  target_id?: string | null
+  target_name?: string | null
   note_id: string
   xsec_token?: string
   xsec_source?: string
@@ -553,6 +558,8 @@ export interface XhsProfile {
   project_id: string
   task_id?: string
   finding_id?: string
+  target_ids?: string[]
+  target_names?: string[]
   user_id: string
   nickname: string
   avatar_url?: string
@@ -799,6 +806,7 @@ export async function listXhsNotes(
     page?: number
     page_size?: number
     task_id?: string
+    target_id?: string
     is_suspicious?: boolean | null
     sort_by?: 'relevance' | 'created_at'
   }
@@ -812,6 +820,7 @@ export async function listXhsNotes(
         page: params?.page ?? 1,
         page_size: params?.page_size ?? 50,
         task_id: params?.task_id ?? '',
+        target_id: params?.target_id ?? '',
         is_suspicious: params?.is_suspicious ?? null,
         sort_by: params?.sort_by ?? 'relevance',
       }),
@@ -850,6 +859,7 @@ export async function listXhsProfiles(
     page?: number
     page_size?: number
     min_score?: number
+    target_id?: string
     sort?: 'score_desc' | 'score_asc'
   }
 ): Promise<{ items: XhsProfile[]; total: number; page: number; page_size: number }> {
@@ -862,6 +872,7 @@ export async function listXhsProfiles(
         page: params?.page ?? 1,
         page_size: params?.page_size ?? 50,
         min_score: params?.min_score ?? 0,
+        target_id: params?.target_id ?? '',
         sort: params?.sort ?? 'score_desc',
       }),
     }

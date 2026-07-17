@@ -96,6 +96,8 @@ def _task_out(doc: dict) -> XhsSearchTaskOut:
         id=str(doc.get("_id")),
         project_id=doc.get("project_id"),
         keyword=doc.get("keyword"),
+        target_id=doc.get("target_id"),
+        target_name=doc.get("target_name"),
         max_notes=doc.get("max_notes", 20),
         attention_threshold=doc.get("attention_threshold", 60),
         status=doc.get("status", "pending"),
@@ -168,6 +170,8 @@ def _profile_out(doc: dict) -> XhsProfileOut:
         task_id=doc.get("task_id", ""),
         user_id=doc.get("user_id", ""),
         finding_id=doc.get("finding_id"),
+        target_ids=doc.get("target_ids") or [],
+        target_names=doc.get("target_names") or [],
         nickname=doc.get("nickname", ""),
         avatar_url=doc.get("avatar_url") or doc.get("avatar"),  # 兼容旧字段
         # Agent 分析结果
@@ -375,12 +379,33 @@ async def create_search_task(body: XhsSearchTaskCreate, background_tasks: Backgr
     project = await projects_dao.get_project(db, body.project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    target_id = str(body.target_id or "").strip()
+    target_name = str(body.target_name or "").strip()
+    body_target_id = target_id or None
+    if target_id:
+        from api.services.targets import require_project_target
+
+        try:
+            target_ref = await require_project_target(
+                db,
+                project_id=body.project_id,
+                target_id=target_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        target_name = target_ref["target_name"]
+    elif target_name:
+        # 兼容旧调用方：没有稳定 target_id 时不把自由文本当成项目目标。
+        target_name = ""
     
     # 创建任务
     task_doc = await xhs_dao.create_search_task(
         db,
         project_id=body.project_id,
         keyword=body.keyword,
+        target_id=body_target_id,
+        target_name=target_name or None,
         max_notes=body.max_notes,
         attention_threshold=body.attention_threshold,
     )
@@ -399,6 +424,8 @@ async def create_search_task(body: XhsSearchTaskCreate, background_tasks: Backgr
             task_id=task_id,
             project_id=body.project_id,
             keyword=body.keyword,
+            target_id=body_target_id or "",
+            target_name=target_name,
             max_notes=body.max_notes,
             attention_threshold=body.attention_threshold,
         )
