@@ -37,6 +37,24 @@ InfoRole = Literal[
 ]
 
 
+PartyRole = Literal[
+    "purchaser",
+    "agency",
+    "supplier",
+    "publisher",
+    "other",
+    "unknown",
+]
+
+
+TargetRelation = Literal[
+    "confirmed",
+    "related",
+    "not_target",
+    "uncertain",
+]
+
+
 class WebTaggingFinding(BaseModel):
     type: FindingType
     scope: InfoScope
@@ -50,6 +68,10 @@ class WebTaggingFinding(BaseModel):
     evidence: str
     attention_score: int = Field(ge=0, le=100)
     attention_reason: str
+    party_name: str | None = None
+    party_role: PartyRole = "unknown"
+    target_relation: TargetRelation = "uncertain"
+    target_relation_reason: str = ""
 
 
 class WebTaggingIntro(BaseModel):

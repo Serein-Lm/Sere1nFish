@@ -177,6 +177,16 @@ class InfoFinding(BaseModel):
     evidence: str = Field(description="页面证据（原文片段 + 定位信息）")
     attention_score: int = Field(default=50, description="关注度 0-100")
     attention_reason: str = Field(default="", description="关注度理由")
+    party_name: str | None = Field(default=None, description="该信息明确归属的单位名称")
+    party_role: str = Field(
+        default="unknown",
+        description="归属单位在公告中的角色: purchaser/agency/supplier/publisher/other/unknown",
+    )
+    target_relation: str = Field(
+        default="uncertain",
+        description="归属单位与查询目标的关系: confirmed/related/not_target/uncertain",
+    )
+    target_relation_reason: str = Field(default="", description="目标关系的原文判定依据")
 
 
 class UrlScanResult(BaseModel):

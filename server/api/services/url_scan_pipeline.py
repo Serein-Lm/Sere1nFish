@@ -557,6 +557,10 @@ class UrlScanPipeline:
                     "evidence": f.get("evidence", ""),
                     "attention_score": f.get("attention_score", 50),
                     "attention_reason": f.get("attention_reason", ""),
+                    "party_name": f.get("party_name"),
+                    "party_role": f.get("party_role", "unknown"),
+                    "target_relation": f.get("target_relation", "uncertain"),
+                    "target_relation_reason": f.get("target_relation_reason", ""),
                     "screenshot_object_id": data.get("screenshot_object_id", ""),
                     "screenshot_url": data.get("screenshot_url", ""),
                 }

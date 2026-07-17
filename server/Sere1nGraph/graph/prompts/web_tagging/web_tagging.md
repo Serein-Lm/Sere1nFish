@@ -23,8 +23,18 @@
 - 每个 finding 必须包含触达场景、页面/证据位置、关键原文片段和关注度理由。
 - 同一联系方式重复出现时只保留一条。普通平台客服、无主体归属的热线和第三方服务入口不输出。
 - `has_findings` 必须与 `findings` 是否为空严格一致。
-- `entity_name` 优先使用页面、公告采购人/招标人、Footer、备案或上游证据中的法定/官方名称；无法确认时使用站点名称或域名运营方，并在 summary 中说明。
+- `entity_name` 表示当前页面或公告的主要责任主体，不得因为上游传入了查询目标，就把查询目标自动写成页面主体。无法确认时使用站点名称或域名运营方，并在 summary 中说明。
 - 所有可读文本字段使用中文。
+
+# 主体角色与信息归属
+
+- 上游证据可能同时给出“本次查询目标主体”、采购方/招标人、代理机构、供应商/投标人/中标方和公告发布平台。必须把这些主体分别核验，不能混为一方。
+- 查询命中、标题出现名称或供应商标注“被提及”，都不等于查询目标就是采购方。只有名称、可靠别名或正文明确表述匹配时，才能确认目标角色。
+- 每条 finding 必须标明信息实际归属单位及其公告角色：`party_name`、`party_role`、`target_relation`、`target_relation_reason`。
+- `party_role` 只能是 `purchaser`、`agency`、`supplier`、`publisher`、`other`、`unknown` 之一。
+- `target_relation` 只能是：`confirmed`（明确就是查询目标）、`related`（目标下属部门/关联公司，但不是同一法定主体）、`not_target`（明确属于其他参与方）、`uncertain`（证据不足）。
+- 采购人联系人归采购方，代理机构联系人归代理机构，投标/中标联系人归供应商。不得把代理机构、关联公司、平台客服的联系方式标成目标单位联系方式。
+- 招投标场景中，其他参与方的有效项目联系人可以保留，但必须如实标为 `related` 或 `not_target`；普通第三方平台客服仍应丢弃。
 
 # 识别范围
 
@@ -56,7 +66,11 @@
       "source_url": "输入的精确 URL",
       "evidence": "上游事实证据/公告正文“联系人：某某，电话：0551-00000000”，位于采购人信息段",
       "attention_score": 75,
-      "attention_reason": "属于可直接触达目标主体的公开业务联系方式"
+      "attention_reason": "属于可直接触达目标主体的公开业务联系方式",
+      "party_name": "某采购单位",
+      "party_role": "purchaser",
+      "target_relation": "confirmed",
+      "target_relation_reason": "公告采购人名称与本次查询目标主体一致"
     }
   ]
 }
@@ -65,4 +79,5 @@
 
 - 最终输出必须且只能是一个完整合法的 JSON 对象，以 `{` 开头、以 `}` 结尾。
 - 禁止输出 Markdown、代码块、思考过程、工具调用说明或 JSON 之外的文字。
+- 每条 finding 都必须输出完整的 `party_name`、`party_role`、`target_relation`、`target_relation_reason`；无法确定时使用 `null`、`unknown`、`uncertain` 并说明缺少什么证据，不得省略字段。
 - 没有可核验信息时输出 `has_findings=false`、`findings=[]`，并填写具体的 `no_findings_reason`。

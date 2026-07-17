@@ -95,6 +95,32 @@ def test_remote_filename_recovers_gb18030_header_bytes() -> None:
     assert filename == expected
 
 
+def test_scan_context_keeps_query_target_and_announcement_parties_distinct() -> None:
+    record = BiddingRecord(
+        record_id="bid_party_roles",
+        title="采购结果公告",
+        enterprise_identity="被提及",
+        purchaser="目标单位下属公司",
+        agency="采购代理有限公司",
+        winner="中标供应商有限公司",
+        detail_url="https://example.com/bids/roles",
+    )
+
+    context = BiddingPipeline._scan_context(
+        record,
+        {"_context_text": "采购人联系人张老师；代理机构联系人李老师"},
+        target_name="目标单位",
+    )
+
+    assert "本次查询目标主体：目标单位" in context
+    assert "供应商对查询目标的命中身份标注：被提及" in context
+    assert "公告采购方/招标人：目标单位下属公司" in context
+    assert "公告代理机构：采购代理有限公司" in context
+    assert "公告供应商/中标方：中标供应商有限公司" in context
+    assert "查询命中不代表目标主体就是采购方" in context
+    assert "代理机构、关联公司或第三方平台的联系人不得标成目标单位联系人" in context
+
+
 @pytest.mark.asyncio
 async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     monkeypatch: pytest.MonkeyPatch,
@@ -200,6 +226,8 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert scan_call["max_copywritings_per_url"] == 1
     assert scan_call["known_alive_urls"] == ["https://example.com/bids/one"]
     evidence = scan_call["source_context_by_url"]["https://example.com/bids/one"]
+    assert "本次查询目标主体：安徽广播电视台" in evidence
+    assert "公告采购方/招标人：安徽广播电视台" in evidence
     assert "演播室设备采购公告" in evidence
     assert "设备采购联系人：张老师" in evidence
     assert result["visual_analysis"]["findings_count"] == 2
