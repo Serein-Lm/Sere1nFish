@@ -98,6 +98,45 @@ class _Missing:
 _MISSING = _Missing()
 
 
+class _CookieUpsertCollection:
+    def __init__(self) -> None:
+        self.update: dict | None = None
+
+    async def find_one_and_update(self, query: dict, update: dict, **_kwargs):
+        overlapping_paths = set(update.get("$setOnInsert", {})) & set(update.get("$set", {}))
+        if overlapping_paths:
+            raise AssertionError(f"MongoDB 更新路径冲突: {sorted(overlapping_paths)}")
+        self.update = update
+        return {
+            **query,
+            **update.get("$setOnInsert", {}),
+            **update.get("$set", {}),
+        }
+
+
+class _CookieUpsertDB:
+    def __init__(self) -> None:
+        self.collection = _CookieUpsertCollection()
+
+    def __getitem__(self, _name: str):
+        return self.collection
+
+
+def test_xhs_cookie_upsert_has_no_conflicting_update_paths():
+    async def _run():
+        from api.dao import xhs as xhs_dao
+
+        db = _CookieUpsertDB()
+        doc = await xhs_dao.create_cookie(db, "account-b", "a1=value")
+
+        assert doc["account_name"] == "account-b"
+        assert doc["is_enabled"] is True
+        assert doc["consecutive_failures"] == 0
+        assert db.collection.update is not None
+
+    asyncio.run(_run())
+
+
 def test_xhs_account_cooldown_rejoins_after_expiry(monkeypatch):
     async def _run():
         from api.services import xhs_runtime

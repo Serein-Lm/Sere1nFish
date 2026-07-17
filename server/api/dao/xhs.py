@@ -49,7 +49,6 @@ async def create_cookie(
                 "lease_count": 0,
                 "success_count": 0,
                 "failure_count": 0,
-                "consecutive_failures": 0,
             },
             "$set": {
                 "cookie_string": cookie_string,
