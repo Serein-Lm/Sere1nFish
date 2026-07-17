@@ -115,6 +115,12 @@ curl -k https://127.0.0.1/health
 | 部署 | `docker-compose -f docker-compose.yml config` |
 | 运行时冒烟 | `curl -k https://127.0.0.1/health` |
 
+接入与运维教程：
+
+- [钉钉 Stream、Webhook、富卡片与多格式产物接入](./docs/DINGTALK_INTEGRATION_TUTORIAL.md)
+- [远程手机 EasyTier 接入](./docs/REMOTE_MOBILE_EASYTIER.md)
+- [运行与验收教程](./docs/RUNTIME_OPERATIONS_TUTORIAL.md)
+
 ---
 
 ## 📐 设计原则

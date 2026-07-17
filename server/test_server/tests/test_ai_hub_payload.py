@@ -38,6 +38,8 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
     assert "chrome-devtools" in payload["mcp_servers"]
     assert "generate_payload_word" in payload["tools"]
     assert "get_artifact_content" in payload["tools"]
+    content = next(item for item in catalog["agents"] if item["name"] == "content")
+    assert "generate_document_artifact" in content["tools"]
 
 
 def test_hub_prompts_are_repository_seeds() -> None:
@@ -131,6 +133,135 @@ def test_artifact_list_metadata_omits_large_content() -> None:
     assert "file_path" not in listed
     assert "content" not in listed["meta"]
     assert detailed["meta"]["content"] == "large body"
+
+
+def test_document_artifact_registry_generates_multiple_formats() -> None:
+    from api.services.artifact_files import generate_artifact, supported_formats
+
+    assert supported_formats() == ("word", "markdown", "text", "json", "csv")
+
+    markdown = generate_artifact(
+        title="测试报告",
+        content="# 结论\n正常",
+        output_format="markdown",
+    )
+    assert markdown["filename"].endswith(".md")
+    assert markdown["content_type"].startswith("text/markdown")
+    assert markdown["data"].decode("utf-8") == "# 结论\n正常"
+
+    markdown_alias = generate_artifact(
+        title="别名测试",
+        content="# 正常",
+        output_format=".md",
+    )
+    assert markdown_alias["kind"] == "markdown"
+    assert markdown_alias["filename"].endswith(".md")
+
+    json_artifact = generate_artifact(
+        title="结构化结果",
+        content='{"status":"ok"}',
+        output_format="json",
+    )
+    assert json_artifact["filename"].endswith(".json")
+    assert '"status": "ok"' in json_artifact["data"].decode("utf-8")
+
+    with pytest.raises(ValueError, match="JSON 正文格式错误"):
+        generate_artifact(title="错误", content="{bad", output_format="json")
+
+
+def test_artifact_download_content_type_is_format_aware() -> None:
+    from api.routers.artifacts import _artifact_content_type
+
+    assert _artifact_content_type({"filename": "report.docx"}).startswith(
+        "application/vnd.openxmlformats"
+    )
+    assert _artifact_content_type({"filename": "report.csv"}) == "text/csv"
+    assert (
+        _artifact_content_type(
+            {"filename": "report.bin", "content_type": "application/x-custom"}
+        )
+        == "application/x-custom"
+    )
+    assert (
+        _artifact_content_type(
+            {"filename": "report.json", "content_type": "text/plain\r\nX-Test: bad"}
+        )
+        == "application/json"
+    )
+
+
+def test_dingtalk_card_renders_progress_and_downloadable_artifacts() -> None:
+    from api.services.dingtalk_card import DingTalkCardRenderer, build_artifact_buttons
+
+    renderer = DingTalkCardRenderer()
+    renderer.consume({
+        "event": "start",
+        "path": "graph",
+        "data": {"type": "graph", "displayName": "AI 中枢"},
+    })
+    renderer.consume({
+        "event": "start",
+        "path": "graph.router.classify",
+        "data": {"type": "node", "displayName": "分析查询"},
+    })
+    renderer.consume({
+        "event": "end",
+        "path": "graph.router.classify",
+        "data": {"status": "success"},
+    })
+    renderer.consume({
+        "event": "start",
+        "path": "graph.router.content.tools.generate_document_artifact",
+        "data": {"type": "tool", "displayName": "生成文档产物"},
+    })
+    renderer.consume({
+        "event": "content",
+        "path": "graph.router.content",
+        "data": {"content": "正在整理可下载文档。"},
+    })
+
+    running = renderer.render_running()
+    assert "执行进度" in running
+    assert "生成文档产物" in running
+    assert "调用 1 个工具" in running
+
+    artifacts = [
+        {
+            "artifact_id": "art_word",
+            "kind": "word",
+            "title": "接入教程",
+            "filename": "接入教程.docx",
+            "size": 2048,
+            "download_url": "/api/v1/artifacts/art_word/download",
+        },
+        {
+            "artifact_id": "art_json",
+            "kind": "json",
+            "title": "配置示例",
+            "filename": "config.json",
+            "download_url": "/api/v1/artifacts/art_json/download",
+        },
+    ]
+    final = renderer.render_final(
+        "完成 [[artifact:art_word|接入教程]]\n下载链接：/api/v1/artifacts/art_word/download",
+        artifacts,
+        base_url="https://fish.example.com/",
+    )
+    assert "交付产物" in final
+    assert "Word" in final and "JSON" in final
+    assert "https://fish.example.com/phishing?ref_artifact=art_word" in final
+    assert "[[artifact:" not in final
+    assert "下载链接：/api/" not in final
+
+    buttons = build_artifact_buttons(
+        artifacts,
+        base_url="https://fish.example.com/",
+    )
+    assert [button["text"].split(" · ")[0] for button in buttons] == [
+        "打开/下载 Word",
+        "打开/下载 JSON",
+    ]
+    assert build_artifact_buttons(artifacts, base_url="javascript:alert(1)") == []
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,12 @@ import {
   MessageOutlined,
   DeleteOutlined,
   FileWordOutlined,
+  FileMarkdownOutlined,
+  FileExcelOutlined,
+  FilePdfOutlined,
+  FileUnknownOutlined,
+  AudioOutlined,
+  VideoCameraOutlined,
   DatabaseOutlined,
   ProjectOutlined,
   MenuFoldOutlined,
@@ -46,8 +52,11 @@ import {
   listArtifacts,
   getArtifact,
   getHubToolCatalog,
+  getArtifactPresentation,
+  formatArtifactSize,
   type EntityRef,
   type Artifact,
+  type ArtifactFormatKey,
   type HubToolCatalog,
   type ExecutionState,
   type StreamRequest,
@@ -69,6 +78,23 @@ const isNarrowViewport = () => typeof window !== 'undefined'
   && window.matchMedia('(max-width: 768px)').matches
 const AIHubInput = (props: React.ComponentProps<typeof Input.TextArea>) => (
   <Input.TextArea {...props} id="ai-hub-query" name="ai_hub_query" aria-label="AI 中枢问题" />
+)
+
+const ARTIFACT_FORMAT_ICONS: Record<ArtifactFormatKey, React.ReactNode> = {
+  word: <FileWordOutlined />,
+  markdown: <FileMarkdownOutlined />,
+  spreadsheet: <FileExcelOutlined />,
+  pdf: <FilePdfOutlined />,
+  data: <DatabaseOutlined />,
+  image: <FileImageOutlined />,
+  audio: <AudioOutlined />,
+  video: <VideoCameraOutlined />,
+  text: <FileTextOutlined />,
+  file: <FileUnknownOutlined />,
+}
+
+const artifactIcon = (artifact: Artifact) => (
+  ARTIFACT_FORMAT_ICONS[getArtifactPresentation(artifact).key]
 )
 
 interface Message {
@@ -364,10 +390,10 @@ const welcomePrompts: PromptsProps['items'] = [
     label: (
       <Space>
         <FileWordOutlined style={{ color: '#722ED1' }} />
-        <span>产物导出</span>
+        <span>多格式产物</span>
       </Space>
     ),
-    description: '一键导出 Word 报告 / 背景资料',
+    description: '导出 Word、Markdown、JSON、CSV 等产物',
     children: [
       {
         key: 'artifact-1',
@@ -375,7 +401,7 @@ const welcomePrompts: PromptsProps['items'] = [
       },
       {
         key: 'artifact-2',
-        description: '生成一份项目态势总结报告的 Word',
+        description: '把项目态势总结同时导出为 Word 和 JSON',
       },
       {
         key: 'artifact-3',
@@ -985,10 +1011,11 @@ export default function PhishingPlatform() {
             .filter(ref => !structuredArtifacts.some(item => item.artifact_id === ref.artifact_id))
             .map(ref => artifacts.find(item => item.artifact_id === ref.artifact_id) || ({
               artifact_id: ref.artifact_id,
-              kind: 'word',
+              kind: 'file',
               title: ref.title,
-              filename: `${ref.artifact_id}.docx`,
+              filename: ref.artifact_id,
               size: 0,
+              content_type: 'application/octet-stream',
               download_url: `/api/v1/artifacts/${ref.artifact_id}/download`,
             } as Artifact)),
           ...fallbackLinks
@@ -996,10 +1023,11 @@ export default function PhishingPlatform() {
               && !markerRefs.some(ref => ref.artifact_id === link.id))
             .map(link => ({
               artifact_id: link.id,
-              kind: 'word',
-              title: 'Word 文档',
-              filename: `${link.id}.docx`,
+              kind: 'file',
+              title: '文档产物',
+              filename: link.id,
               size: 0,
+              content_type: 'application/octet-stream',
               download_url: link.url,
             })),
         ]
@@ -1056,27 +1084,31 @@ export default function PhishingPlatform() {
               {/* 产物下载入口（Word 等） */}
               {messageArtifacts.length > 0 && (
                 <div className="message-artifact-list">
-                  {messageArtifacts.map(artifact => (
-                    <div key={artifact.artifact_id} className="message-artifact-item">
-                      <FileWordOutlined />
-                      <span className="message-artifact-title">{artifact.title}</span>
-                      <Tooltip title="在新问题中引用">
+                  {messageArtifacts.map(artifact => {
+                    const presentation = getArtifactPresentation(artifact)
+                    return (
+                      <div key={artifact.artifact_id} className="message-artifact-item">
+                        {artifactIcon(artifact)}
+                        <span className="message-artifact-title">{artifact.title}</span>
+                        <Tag color={presentation.color}>{presentation.label}</Tag>
+                        <Tooltip title="在新问题中引用">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<LinkOutlined />}
+                            onClick={() => handleReferenceArtifact(artifact)}
+                          />
+                        </Tooltip>
                         <Button
-                          type="text"
                           size="small"
-                          icon={<LinkOutlined />}
-                          onClick={() => handleReferenceArtifact(artifact)}
-                        />
-                      </Tooltip>
-                      <Button
-                        size="small"
-                        icon={<FileWordOutlined />}
-                        onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
-                      >
-                        下载
-                      </Button>
-                    </div>
-                  ))}
+                          icon={artifactIcon(artifact)}
+                          onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
+                        >
+                          下载
+                        </Button>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
 
@@ -1256,7 +1288,7 @@ export default function PhishingPlatform() {
                 variant="borderless"
                 icon="https://mdn.alipayobjects.com/huamei_iwk9zp/afts/img/A*s5sNRo5LjfQAAAAAAAAAAAAADgCCAQ/fmt.webp"
                 title="AI 中枢"
-                description="综合个人助手：实时查库、路由分发、生成建议与话术，并可一键导出 Word。输入需求即可，AI 会自动调用数据、人设、话术等专家并展示完整思维过程。"
+                description="综合个人助手：实时查库、路由分发、生成建议与话术，并可导出多格式产物。输入需求后，AI 会自动调用对应专家，并展示可审计的执行进度和阶段输出。"
                 className="scale-in"
                 extra={
                   <Space>
@@ -1375,7 +1407,7 @@ export default function PhishingPlatform() {
                 <Tag
                   key={`artifact:${artifact.artifact_id}`}
                   color="cyan"
-                  icon={<FileWordOutlined />}
+                  icon={artifactIcon(artifact)}
                   closable
                   onClose={() => setArtifactRefs(prev => prev.filter(
                     item => item.artifact_id !== artifact.artifact_id,
@@ -1557,40 +1589,43 @@ export default function PhishingPlatform() {
           <Empty description="暂无 AI 产物" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <div className="artifact-drawer-list">
-            {artifacts.map(artifact => (
-              <div className="artifact-drawer-item" key={artifact.artifact_id}>
-                <div className="artifact-file-icon"><FileWordOutlined /></div>
-                <div className="artifact-drawer-body">
-                  <div className="artifact-drawer-title">{artifact.title}</div>
-                  <Space className="artifact-drawer-description" size={6} wrap>
-                    <Tag color={artifact.kind === 'payload_word' ? 'blue' : 'default'}>
-                      {artifact.kind === 'payload_word' ? '载荷 Word' : 'Word'}
-                    </Tag>
-                    <span>{artifact.filename}</span>
-                    {artifact.meta?.sources?.length
-                      ? <span>{artifact.meta.sources.length} 个公网来源</span>
-                      : null}
-                    {artifact.meta?.channel === 'dingtalk_stream' ? <Tag color="cyan">钉钉</Tag> : null}
+            {artifacts.map(artifact => {
+              const presentation = getArtifactPresentation(artifact)
+              const size = formatArtifactSize(artifact.size)
+              return (
+                <div className="artifact-drawer-item" key={artifact.artifact_id}>
+                  <div className="artifact-file-icon">{artifactIcon(artifact)}</div>
+                  <div className="artifact-drawer-body">
+                    <div className="artifact-drawer-title">{artifact.title}</div>
+                    <Space className="artifact-drawer-description" size={6} wrap>
+                      <Tag color={presentation.color}>{presentation.label}</Tag>
+                      <span>{artifact.filename}</span>
+                      {size ? <span>{size}</span> : null}
+                      {artifact.meta?.sources?.length
+                        ? <span>{artifact.meta.sources.length} 个公网来源</span>
+                        : null}
+                      {artifact.meta?.channel === 'dingtalk_stream' ? <Tag color="cyan">钉钉</Tag> : null}
+                    </Space>
+                  </div>
+                  <Space size={4}>
+                    <Tooltip title="在新问题中引用" key="reference">
+                      <Button
+                        type="text"
+                        icon={<LinkOutlined />}
+                        onClick={() => handleReferenceArtifact(artifact)}
+                      />
+                    </Tooltip>
+                    <Tooltip title={`下载 ${presentation.label}`} key="download">
+                      <Button
+                        type="text"
+                        icon={artifactIcon(artifact)}
+                        onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
+                      />
+                    </Tooltip>
                   </Space>
                 </div>
-                <Space size={4}>
-                  <Tooltip title="在新问题中引用" key="reference">
-                    <Button
-                      type="text"
-                      icon={<LinkOutlined />}
-                      onClick={() => handleReferenceArtifact(artifact)}
-                    />
-                  </Tooltip>
-                  <Tooltip title="下载 Word" key="download">
-                    <Button
-                      type="text"
-                      icon={<FileWordOutlined />}
-                      onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
-                    />
-                  </Tooltip>
-                </Space>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </Drawer>

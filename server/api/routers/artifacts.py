@@ -1,11 +1,13 @@
 """
-产物（Word 文档等）下载路由 — 受登录鉴权。
+多格式 AI 产物下载路由 — 受登录鉴权。
 
-AI 中枢工具生成的 .docx 通过稳定 artifact_id 下载；文件路径来自元信息，
+AI 中枢工具生成的文件通过稳定 artifact_id 下载；文件路径来自元信息，
 校验落在产物目录内，避免路径穿越。
 """
 from __future__ import annotations
 
+import mimetypes
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -18,8 +20,10 @@ from api.db.mongodb import get_db
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
-_DOCX_MEDIA = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_CONTENT_TYPE_RE = re.compile(
+    r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+"
+    r"(?:\s*;\s*charset=[A-Za-z0-9._-]+)?$"
 )
 
 
@@ -37,6 +41,15 @@ def _public_meta(doc: dict, *, include_content: bool = False) -> dict:
         result["meta"] = dict(result["meta"])
         result["meta"].pop("content", None)
     return result
+
+
+def _artifact_content_type(doc: dict) -> str:
+    configured = str(doc.get("content_type") or "").strip()
+    if configured and _CONTENT_TYPE_RE.fullmatch(configured):
+        return configured
+    filename = str(doc.get("filename") or "")
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or (_DOCX_MEDIA if filename.lower().endswith(".docx") else "application/octet-stream")
 
 
 @router.get("")
@@ -88,11 +101,13 @@ async def download_artifact(
         raise HTTPException(status_code=404, detail="产物不存在")
     _check_owner(doc, current_user)
 
-    filename = doc.get("filename") or f"{artifact_id}.docx"
-    ascii_fallback = f"{artifact_id}.docx"
+    filename = str(doc.get("filename") or artifact_id)
+    suffix = re.sub(r"[^A-Za-z0-9.]", "", Path(filename).suffix)[:12]
+    ascii_fallback = f"{artifact_id}{suffix}"
+    content_type = _artifact_content_type(doc)
     disposition = (
         f"attachment; filename=\"{ascii_fallback}\"; "
-        f"filename*=UTF-8''{quote(filename)}"
+        f"filename*=UTF-8''{quote(filename, safe='')}"
     )
     storage_object_id = str(doc.get("storage_object_id") or "")
     if storage_object_id:
@@ -102,7 +117,7 @@ async def download_artifact(
             access = await (await get_object_storage()).read_access(
                 storage_object_id,
                 filename=filename,
-                content_type=_DOCX_MEDIA,
+                content_type=content_type,
             )
         except Exception as exc:
             raise HTTPException(status_code=404, detail="文件不存在") from exc
@@ -117,7 +132,7 @@ async def download_artifact(
         if access.path and access.path.is_file():
             return FileResponse(
                 access.path,
-                media_type=_DOCX_MEDIA,
+                media_type=content_type,
                 headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
             )
 
@@ -129,7 +144,7 @@ async def download_artifact(
         raise HTTPException(status_code=404, detail="文件不存在") from exc
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(file_path, media_type=_DOCX_MEDIA, headers={
+    return FileResponse(file_path, media_type=content_type, headers={
         "Content-Disposition": disposition,
         "Cache-Control": "private, max-age=300",
         "X-Content-Type-Options": "nosniff",

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { message } from 'antd'
 import { login } from '../../services/authService'
 import './Login.css'
@@ -14,6 +14,14 @@ interface InputActiveState {
   username: boolean
   password: boolean
   key: boolean
+}
+
+function loginReturnPath(state: unknown): string {
+  const from = (state as { from?: unknown } | null)?.from
+  if (typeof from !== 'string' || !from.startsWith('/') || from.startsWith('//')) {
+    return '/dashboard'
+  }
+  return from.startsWith('/login') ? '/dashboard' : from
 }
 
 // 粒子类
@@ -119,6 +127,7 @@ class Particle {
 
 export default function Login() {
   const navigate = useNavigate()
+  const location = useLocation()
   const [loginForm, setLoginForm] = useState<LoginForm>({ username: '', password: '', key: '' })
   const [loading, setLoading] = useState(false)
   const [isFormActive, setIsFormActive] = useState(false)
@@ -218,7 +227,7 @@ export default function Login() {
 
       localStorage.setItem('token', result.access_token)
       localStorage.setItem('userInfo', JSON.stringify({ username: loginForm.username }))
-      navigate('/dashboard')
+      navigate(loginReturnPath(location.state), { replace: true })
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : ''
       messageApi.error(errMsg || '登录失败，请检查用户名、密码或访问密钥')

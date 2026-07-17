@@ -56,6 +56,7 @@ async def create_artifact(
     file_path: str = "",
     storage_object_id: str = "",
     size: int = 0,
+    content_type: str = "application/octet-stream",
     owner: str = "",
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -69,6 +70,7 @@ async def create_artifact(
         "file_path": file_path,
         "storage_object_id": storage_object_id,
         "size": size,
+        "content_type": content_type or "application/octet-stream",
         "owner": owner,
         "meta": meta or {},
         "download_url": download_url(artifact_id),

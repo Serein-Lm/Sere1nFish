@@ -1,10 +1,10 @@
 """
-通用 Word 文档生成工具 — 供 AI 中枢 ReAct Agent 调用。
+通用文档产物工具 — 供 AI 中枢 ReAct Agent 调用。
 
 这是一个「通用工具」：不限定内容主体，Agent 可将任意整理好的内容（报告、话术包、
 人物背景、方案等）一键生成 .docx，并返回受登录鉴权的下载链接交给前端下载。
 
-文件生成收敛在 api.services.artifact_word，元信息登记收敛在 api.dao.artifacts，
+文件生成收敛在 api.services.artifact_files / artifact_word，元信息登记收敛在 api.dao.artifacts，
 本文件仅做同步 tool 封装（通过 _run_coro_sync 调用 async DAO）。
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _persist_artifact(
             kind=kind or result["kind"],
             filename=result["filename"],
             object_id=result["artifact_id"],
-            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            content_type=str(result.get("content_type") or "application/octet-stream"),
             owner=context.owner if context else "",
             project_id=str(artifact_meta.get("project_id") or ""),
             conversation_id=str(artifact_meta.get("conversation_id") or ""),
@@ -63,6 +63,7 @@ def _persist_artifact(
             filename=result["filename"],
             storage_object_id=stored["object_id"],
             size=result.get("size", 0),
+            content_type=str(result.get("content_type") or "application/octet-stream"),
             owner=context.owner if context else "",
             meta=artifact_meta,
         )
@@ -75,6 +76,7 @@ def _persist_artifact(
             "title": doc.get("title", ""),
             "filename": doc.get("filename", ""),
             "size": doc.get("size", 0),
+            "content_type": doc.get("content_type", "application/octet-stream"),
             "download_url": doc.get("download_url", ""),
         }
     )
@@ -83,11 +85,20 @@ def _persist_artifact(
 
 def _artifact_response(doc: dict[str, Any]) -> str:
     artifact_id = str(doc.get("artifact_id") or "")
-    title = str(doc.get("title") or "Word 文档")
-    filename = str(doc.get("filename") or f"{artifact_id}.docx")
+    title = str(doc.get("title") or "文档产物")
+    filename = str(doc.get("filename") or artifact_id)
+    kind = str(doc.get("kind") or "file")
+    format_label = {
+        "word": "Word",
+        "payload_word": "载荷 Word",
+        "markdown": "Markdown",
+        "text": "TXT",
+        "json": "JSON",
+        "csv": "CSV",
+    }.get(kind, "文件")
     url = str(doc.get("download_url") or f"/api/v1/artifacts/{artifact_id}/download")
     return (
-        f"已生成 Word 文档《{title}》。\n"
+        f"已生成 {format_label} 产物《{title}》。\n"
         f"文件名：{filename}\n"
         f"产物引用：[[artifact:{artifact_id}|{title}]]\n"
         f"下载链接：{url}"
@@ -150,6 +161,46 @@ def generate_word_document(title: str, content: str = "", sections: str = "") ->
     except Exception as exc:  # noqa: BLE001
         return f"Word 文档已生成但登记失败：{exc}"
 
+    return _artifact_response(doc)
+
+
+@tool(
+    "generate_document_artifact",
+    description=(
+        "把完整正文生成为可下载产物。output_format 支持 word、markdown、text、json、csv；"
+        "用户未指定格式时使用 word。JSON 必须是合法 JSON，CSV 正文应包含表头。"
+        "返回稳定的产物引用和受登录鉴权的下载入口。"
+    ),
+)
+def generate_document_artifact(
+    title: str,
+    content: str,
+    output_format: str = "word",
+) -> str:
+    """Generate and persist a document through the unified artifact interface."""
+    title = str(title or "").strip()
+    content = str(content or "")
+    format_name = str(output_format or "word").strip().lower()
+    if not title:
+        return "生成失败：title（文档标题）不能为空。"
+    if not content.strip():
+        return "生成失败：content（文档正文）不能为空。"
+
+    try:
+        from api.services.artifact_files import generate_artifact, normalize_artifact_format
+
+        format_name = normalize_artifact_format(format_name)
+        result = generate_artifact(
+            title=title,
+            content=content,
+            output_format=format_name,
+        )
+        doc = _persist_artifact(
+            result,
+            meta={"content": content[:200_000], "output_format": format_name},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"生成 {format_name} 产物失败：{exc}"
     return _artifact_response(doc)
 
 
@@ -335,5 +386,5 @@ def generate_persona_word(person_id: str) -> str:
 
 
 # 供 Agent 复用的产物工具集
-WORD_TOOLS = [generate_word_document, generate_persona_word]
+WORD_TOOLS = [generate_document_artifact, generate_word_document, generate_persona_word]
 PAYLOAD_WORD_TOOLS = [generate_payload_word]

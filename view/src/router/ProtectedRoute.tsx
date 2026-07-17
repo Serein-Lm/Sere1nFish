@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 import { Spin } from 'antd'
 import { checkAuth } from '../services/authService'
 
@@ -9,6 +9,7 @@ interface ProtectedRouteProps {
 
 export default function ProtectedRoute({ children }: ProtectedRouteProps) {
   const token = localStorage.getItem('token')
+  const location = useLocation()
 
   const [checking, setChecking] = useState(true)
   const [authed, setAuthed] = useState(false)
@@ -52,7 +53,8 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
   }
 
   if (!token || !authed) {
-    return <Navigate to="/login" replace />
+    const from = `${location.pathname}${location.search}${location.hash}`
+    return <Navigate to="/login" replace state={{ from }} />
   }
 
   return <>{children}</>

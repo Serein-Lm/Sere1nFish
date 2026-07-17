@@ -116,4 +116,5 @@ def generate_docx(
         "size": len(data),
         "title": title or "未命名文档",
         "kind": "word",
+        "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }

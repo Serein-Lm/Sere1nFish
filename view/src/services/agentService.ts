@@ -430,6 +430,7 @@ export interface Artifact {
   title: string
   filename: string
   size: number
+  content_type?: string
   download_url: string
   owner?: string
   meta?: {
@@ -441,6 +442,79 @@ export interface Artifact {
   }
   created_at?: string
   updated_at?: string
+}
+
+export type ArtifactFormatKey =
+  | 'word'
+  | 'markdown'
+  | 'spreadsheet'
+  | 'pdf'
+  | 'data'
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'text'
+  | 'file'
+
+export interface ArtifactPresentation {
+  key: ArtifactFormatKey
+  label: string
+  color: string
+}
+
+const ARTIFACT_KIND_PRESENTATION: Record<string, ArtifactPresentation> = {
+  word: { key: 'word', label: 'Word', color: 'blue' },
+  payload_word: { key: 'word', label: '载荷 Word', color: 'blue' },
+  persona_word: { key: 'word', label: '人物 Word', color: 'blue' },
+  markdown: { key: 'markdown', label: 'Markdown', color: 'purple' },
+  text: { key: 'text', label: 'TXT', color: 'default' },
+  json: { key: 'data', label: 'JSON', color: 'cyan' },
+  csv: { key: 'spreadsheet', label: 'CSV', color: 'green' },
+  excel: { key: 'spreadsheet', label: 'Excel', color: 'green' },
+  spreadsheet: { key: 'spreadsheet', label: 'Excel', color: 'green' },
+  pdf: { key: 'pdf', label: 'PDF', color: 'red' },
+  image: { key: 'image', label: '图片', color: 'magenta' },
+  audio: { key: 'audio', label: '音频', color: 'gold' },
+  video: { key: 'video', label: '视频', color: 'volcano' },
+}
+
+const ARTIFACT_SUFFIX_PRESENTATION: Record<string, ArtifactPresentation> = {
+  doc: ARTIFACT_KIND_PRESENTATION.word,
+  docx: ARTIFACT_KIND_PRESENTATION.word,
+  md: ARTIFACT_KIND_PRESENTATION.markdown,
+  txt: ARTIFACT_KIND_PRESENTATION.text,
+  json: ARTIFACT_KIND_PRESENTATION.json,
+  csv: ARTIFACT_KIND_PRESENTATION.csv,
+  xls: ARTIFACT_KIND_PRESENTATION.excel,
+  xlsx: ARTIFACT_KIND_PRESENTATION.excel,
+  pdf: ARTIFACT_KIND_PRESENTATION.pdf,
+  png: ARTIFACT_KIND_PRESENTATION.image,
+  jpg: ARTIFACT_KIND_PRESENTATION.image,
+  jpeg: ARTIFACT_KIND_PRESENTATION.image,
+  webp: ARTIFACT_KIND_PRESENTATION.image,
+  gif: ARTIFACT_KIND_PRESENTATION.image,
+  mp3: ARTIFACT_KIND_PRESENTATION.audio,
+  wav: ARTIFACT_KIND_PRESENTATION.audio,
+  m4a: ARTIFACT_KIND_PRESENTATION.audio,
+  mp4: ARTIFACT_KIND_PRESENTATION.video,
+  mov: ARTIFACT_KIND_PRESENTATION.video,
+}
+
+export function getArtifactPresentation(
+  artifact: Pick<Artifact, 'kind' | 'filename'>,
+): ArtifactPresentation {
+  const kind = String(artifact.kind || '').toLowerCase()
+  if (ARTIFACT_KIND_PRESENTATION[kind]) return ARTIFACT_KIND_PRESENTATION[kind]
+  const suffix = String(artifact.filename || '').split('.').pop()?.toLowerCase() || ''
+  return ARTIFACT_SUFFIX_PRESENTATION[suffix]
+    || { key: 'file', label: suffix ? suffix.toUpperCase() : '文件', color: 'default' }
+}
+
+export function formatArtifactSize(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return ''
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export interface HubToolCatalog {

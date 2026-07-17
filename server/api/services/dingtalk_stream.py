@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote_plus
 
+from api.services.dingtalk_card import DingTalkCardRenderer, build_artifact_buttons
 from core.background import spawn_background
 from core.logger import get_logger
 
@@ -168,6 +169,7 @@ class DingTalkStreamAdapter:
         from api.services.dingtalk_bridge import run_hub_query
         from crawler_tools.dingtalk_bot import reply_to_session_webhook
 
+        renderer = DingTalkCardRenderer()
         card = None
         card_streaming = bool(self.config.get("ai_card_streaming", True))
         if card_streaming:
@@ -183,35 +185,37 @@ class DingTalkStreamAdapter:
                 logger.warning(f"创建钉钉 AI Card 失败，回退 Markdown: {exc}")
                 card = None
 
-        live_text = ""
         last_sent_length = 0
         last_sent_at = 0.0
 
         async def _on_event(event: dict[str, Any]) -> None:
-            nonlocal card, live_text, last_sent_length, last_sent_at
-            if card is None or event.get("event") != "content":
-                return
-            content = str((event.get("data") or {}).get("content") or "")
-            if not content:
-                return
-            if ".synthesize" in str(event.get("path") or "") and live_text:
-                live_text = ""
+            nonlocal card, last_sent_length, last_sent_at
+            previous_live_length = renderer.live_length
+            renderer.consume(event)
+            if renderer.live_length < previous_live_length:
                 last_sent_length = 0
-            live_text += content
-            now = time.monotonic()
-            if (
-                len(live_text) - last_sent_length < _STREAM_MIN_DELTA
-                and now - last_sent_at < _STREAM_INTERVAL_SECONDS
-            ):
+            if card is None:
                 return
-            preview = live_text[-_MAX_CARD_CHARS:]
+
+            now = time.monotonic()
+            event_type = str(event.get("event") or "")
+            if event_type == "content":
+                if (
+                    renderer.live_length - last_sent_length < _STREAM_MIN_DELTA
+                    and now - last_sent_at < _STREAM_INTERVAL_SECONDS
+                ):
+                    return
+            elif event_type != "error" and now - last_sent_at < _STREAM_INTERVAL_SECONDS:
+                return
+
+            preview = renderer.render_running(max_chars=_MAX_CARD_CHARS)
             try:
                 await asyncio.to_thread(card.ai_streaming, preview, False)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"更新钉钉 AI Card 失败，后续回退 Markdown: {exc}")
                 card = None
                 return
-            last_sent_length = len(live_text)
+            last_sent_length = renderer.live_length
             last_sent_at = now
 
         sender_id = str(
@@ -239,19 +243,23 @@ class DingTalkStreamAdapter:
                 channel="dingtalk_stream",
                 on_event=_on_event,
             )
-            final_text = final_text or "（本次未生成文本内容）"
-            final_text = final_text[:_MAX_CARD_CHARS]
+            final_markdown = renderer.render_final(
+                final_text,
+                artifacts,
+                base_url=str(self.config.get("public_base_url") or ""),
+                max_chars=_MAX_CARD_CHARS,
+            )
             if card is not None:
                 buttons = self._artifact_buttons(artifacts)
                 try:
                     await asyncio.to_thread(
-                        lambda: card.ai_finish(markdown=final_text, button_list=buttons)
+                        lambda: card.ai_finish(markdown=final_markdown, button_list=buttons)
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"结束钉钉 AI Card 失败，回退 Markdown: {exc}")
-                    await _send_markdown("AI 中枢回复", final_text)
+                    await _send_markdown("AI 中枢回复", final_markdown)
             else:
-                await _send_markdown("AI 中枢回复", final_text)
+                await _send_markdown("AI 中枢回复", final_markdown)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"钉钉 Stream AI 中枢处理失败: {exc}")
             error_text = f"处理问题时发生错误：{exc}"[:1000]
@@ -268,18 +276,10 @@ class DingTalkStreamAdapter:
                     await _send_markdown("AI 中枢", error_text)
 
     def _artifact_buttons(self, artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        base_url = str(self.config.get("public_base_url") or "").rstrip("/")
-        if not base_url:
-            return []
-        return [
-            {
-                "text": f"在 AI 中枢打开 {str(item.get('title') or 'Word')[:18]}",
-                "url": f"{base_url}/phishing?ref_artifact={item.get('artifact_id')}",
-                "color": "blue",
-            }
-            for item in artifacts[:3]
-            if item.get("download_url")
-        ]
+        return build_artifact_buttons(
+            artifacts,
+            base_url=str(self.config.get("public_base_url") or ""),
+        )
 
 
 class DingTalkStreamManager:
