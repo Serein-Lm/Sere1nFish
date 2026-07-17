@@ -196,6 +196,8 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert stored_record["raw_content_object_id"] == "obj_raw"
     assert stored_record["provider_payload_object_id"] == "obj_provider"
     assert scan_call["source"] == "bidding"
+    assert scan_call["copywriting_score_threshold"] == 70
+    assert scan_call["max_copywritings_per_url"] == 1
     assert scan_call["known_alive_urls"] == ["https://example.com/bids/one"]
     evidence = scan_call["source_context_by_url"]["https://example.com/bids/one"]
     assert "演播室设备采购公告" in evidence

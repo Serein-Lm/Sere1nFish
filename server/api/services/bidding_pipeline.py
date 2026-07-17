@@ -589,6 +589,8 @@ class BiddingPipeline:
                 scan_concurrency=scan_concurrency,
                 copywriting_concurrency=copywriting_concurrency,
                 enable_copywriting=enable_copywriting,
+                copywriting_score_threshold=70,
+                max_copywritings_per_url=1,
             )
             scan_result.update(
                 status=url_result.get("status"),

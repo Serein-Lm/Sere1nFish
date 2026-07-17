@@ -65,7 +65,7 @@
 
 - `official`：官方公开渠道
 - `personal`：私人信息
-- `enterprise`：企业级渠道（含企业微信、第三方客服/工单/反馈渠道等）
+- `enterprise`：由目标主体直接运营的企业级渠道（如企业微信、官方工单）
 
 ### channel（触达渠道）
 
@@ -83,7 +83,7 @@
 建议集合（优先使用）：
 
 - 客服/工单/反馈（通常 type=customer_service）：
-  - `live_chat_third_party` / `live_chat_native` / `ticket_system` / `feedback_form` / `support_portal` / `hotline_400` / `hotline_landline` / `service_wechat`
+  - `live_chat_native` / `ticket_system` / `feedback_form` / `support_portal` / `hotline_400` / `hotline_landline` / `service_wechat`
 
 - HR（通常 type=hr_contact）：
   - `resume_email` / `resume_phone` / `job_portal` / `campus_recruit`
@@ -112,10 +112,10 @@
   - 有链接/可点击入口：`link`
   - 明显是表单入口：`form`
   - 不确定：`other`
-- `subtype`：优先使用 `support_portal` / `ticket_system` / `feedback_form` / `live_chat_native` / `live_chat_third_party`
+- `subtype`：优先使用 `support_portal` / `ticket_system` / `feedback_form` / `live_chat_native`
 - `label`：按钮/模块的可见文案（例如"联系我们""在线咨询""提交工单"）
 - `value`：
-  - 若能拿到 href/跳转链接：填写完整 URL（禁止相对路径）
+  - 若能拿到同站点 href/跳转链接：填写完整 URL（禁止相对路径）
   - 若是按钮但无可识别链接：可为 null
   - 若入口需要登录/不可访问：可为 null（但必须在 context/evidence 说明）
 
@@ -123,6 +123,7 @@
 
 - `context` 必须说明：入口出现在哪个页面/哪个区域、用户点击后预期进入什么（例如：进入联系表单/客服系统/第三方 IM）、以及为什么属于社工攻击面。
 - `evidence` 必须包含：可见文案 + 定位信息（例如：首页右下角悬浮按钮"联系我们"；页脚"联系我们"入口），避免只重复 value。
+- 搜索引擎、AI 对话、通用客服机器人、广告平台和其他第三方系统入口必须丢弃，即使它们由当前页面链接出去也不能输出。
 
 ## 4) 打分规则（基于钓鱼场景的细化评分体系）
 
@@ -160,7 +161,7 @@
 
 | 类型 | 分值范围 | 典型场景 |
 |------|----------|----------|
-| 在线客服（机器人客服/工单系统/反馈表单） | 45-60 | 通常先经过机器人过滤，触达真人概率较低，但仍可能转人工 |
+| 官方工单系统/反馈表单 | 45-60 | 由目标主体直接运营，但触达真人概率较低 |
 | 官方通用邮箱（如 info@company.com / contact@company.com） | 40-55 | 通常进入公共邮箱，被多人查看，钓鱼精准度低 |
 | 媒体/公关邮箱（如 pr@company.com / media@company.com） | 40-50 | 公关人员对外部邮件有一定警惕性，但可冒充记者/媒体 |
 | 销售热线（非400，如区号+座机直达销售部） | 45-58 | 可电话社工，但销售人员通常有一定防范意识 |
@@ -190,7 +191,7 @@
 - 明确标注为"仅限工作时间"/"仅限工作日"的官方渠道 → -5
 - 需要登录/注册后才能查看完整信息 → -10
 - 联系方式已做脱敏处理（如 138****1234）→ -10~15
-- 明确是第三方外包客服（如"本服务由XX客服提供"）→ -5
+- 明确是第三方外包客服或通用平台机器人 → 直接丢弃，不输出 finding
 
 ### 4.6) 常见误判纠正（必须遵守）
 

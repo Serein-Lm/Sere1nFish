@@ -9,8 +9,13 @@ from __future__ import annotations
 from typing import Any, Callable, AsyncGenerator
 import asyncio
 import uuid
+from urllib.parse import urlsplit
 
-from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    SummarizationMiddleware,
+    ToolCallLimitMiddleware,
+)
 from langchain.tools import tool, ToolRuntime
 from langchain_core.messages import SystemMessage
 
@@ -20,6 +25,46 @@ from .runtime import create_agent_node, create_llm, OutputMode
 from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids
 
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _build_same_site_navigation_guard(
+    allowed_url: str,
+) -> Callable[[str, tuple[Any, ...], dict[str, Any]], str | None] | None:
+    """限制浏览器 Agent 主动导航到目标站点之外。"""
+    allowed_host = (urlsplit(allowed_url).hostname or "").lower().rstrip(".")
+    if not allowed_host:
+        return None
+
+    def _guard(
+        tool_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> str | None:
+        if tool_name not in {"navigate_page", "new_page"}:
+            return None
+        candidate = kwargs.get("url")
+        if not candidate and args and isinstance(args[0], dict):
+            candidate = args[0].get("url")
+        candidate = str(candidate or "").strip()
+        if not candidate or candidate.startswith(("/", "about:blank")):
+            return None
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if not host:
+            return None
+        same_site = (
+            host == allowed_host
+            or host.endswith(f".{allowed_host}")
+            or allowed_host.endswith(f".{host}")
+        )
+        if same_site:
+            return None
+        return (
+            f"导航已阻止：{host} 不属于目标站点 {allowed_host}。"
+            "请停止外部检索，基于当前页面和上游事实证据输出 JSON。"
+        )
+
+    return _guard
 
 
 def _register_background_task(task: asyncio.Task[Any]) -> None:
@@ -67,6 +112,10 @@ async def create_web_tagging_agent(
     server_name: str = "chrome-devtools",
     output_mode: OutputMode = "silent",
     streaming: bool = True,
+    allowed_navigation_url: str = "",
+    timeout: int = 90,
+    mcp_tool_limit: int = 2,
+    max_attempts: int = 1,
 ) -> Callable:
     """官网社工打标 Agent（Web Tagging Agent）。"""
     return create_agent_node(
@@ -75,6 +124,11 @@ async def create_web_tagging_agent(
         mcp_server_name=server_name,
         output_mode=output_mode,
         streaming=streaming,
+        middleware=[ModelCallLimitMiddleware(run_limit=4, exit_behavior="end")],
+        timeout=timeout,
+        mcp_tool_limit=mcp_tool_limit,
+        max_attempts=max_attempts,
+        mcp_call_guard=_build_same_site_navigation_guard(allowed_navigation_url),
     )
 
 
@@ -356,10 +410,21 @@ async def create_copywriting_agent(
     return create_agent_node(
         app_config=app_config,
         system_prompt=load_prompt("copywriting/copywriting"),
-        builtin_tools=SKILL_TOOLS + PERSONA_TOOLS + WORD_TOOLS + CONTEXT_TOOLS + ANALYSIS_TOOLS,
-        middleware=None,
+        builtin_tools=(
+            SKILL_TOOLS
+            + PERSONA_TOOLS
+            + WORD_TOOLS
+            + CONTEXT_TOOLS
+            + ANALYSIS_TOOLS
+        ),
+        middleware=[
+            ToolCallLimitMiddleware(run_limit=1, exit_behavior="continue"),
+            ModelCallLimitMiddleware(run_limit=3, exit_behavior="end"),
+        ],
         mcp_server_name=None,
         output_mode=output_mode,
+        timeout=120,
+        max_attempts=1,
     )
 
 

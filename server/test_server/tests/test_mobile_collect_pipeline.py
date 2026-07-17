@@ -185,6 +185,29 @@ def test_pipeline_no_notify_when_notify_on_none(monkeypatch):
     assert ("release", "dk-devA") in _FakePool.events
 
 
+def test_pipeline_raises_when_every_keyword_enters_dlq(monkeypatch):
+    pl, _notifies = _patch_pipeline(monkeypatch, analyze_returns=[])
+    db = _FakeDB()
+
+    async def fail_collect(_self, _item, _ctx):
+        raise RuntimeError("navigation failed")
+
+    monkeypatch.setattr(pl._CollectStage, "handle", fail_collect)
+
+    async def scenario():
+        return await pl.run_collect_task(
+            db,
+            run_task_id="run-failed",
+            project_id="p1",
+            task_def=_task_def(keywords=["kw1", "kw2"]),
+        )
+
+    with pytest.raises(RuntimeError, match="手机采集全部失败"):
+        asyncio.new_event_loop().run_until_complete(scenario())
+    assert ("release", "dk-devA") in _FakePool.events
+    assert pl.is_running("run-failed") is False
+
+
 def test_request_stop_unknown_is_idempotent():
     from core.mobile.collect import pipeline as pl
 

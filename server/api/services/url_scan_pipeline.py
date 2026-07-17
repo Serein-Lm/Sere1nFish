@@ -72,13 +72,34 @@ URL_SCAN_FINDINGS = "url_scan_findings"
 URL_SCAN_COPYWRITINGS = "url_scan_copywritings"
 
 class _ScanFailureCollector(DeadLetter):
-    """把扫描最终失败的 URL 也补到 results 列表里, 与旧版 scan_urls 行为兼容."""
+    """按阶段收集最终失败项，避免话术失败污染 URL 扫描结果。"""
 
-    def __init__(self, results: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        results: list[dict[str, Any]],
+        copywriting_errors: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.results = results
+        self.copywriting_errors = copywriting_errors
 
     async def record(self, *, stage, item, error, pipeline_id="") -> None:
-        url_info = item.payload if isinstance(item.payload, dict) else {"url": str(item.payload)}
+        if stage == "copywriting":
+            if self.copywriting_errors is not None:
+                payload = item.payload if isinstance(item.payload, tuple) else ()
+                finding = payload[0] if payload and isinstance(payload[0], dict) else {}
+                self.copywriting_errors.append(
+                    {
+                        "finding_id": str(finding.get("finding_id") or ""),
+                        "url": str(finding.get("url") or ""),
+                        "error": str(error or "话术生成失败"),
+                    }
+                )
+            return
+        url_info = (
+            item.payload
+            if isinstance(item.payload, dict)
+            else {"url": str(item.payload)}
+        )
         self.results.append({
             "success": False,
             "url": url_info.get("url", ""),
@@ -95,7 +116,7 @@ class _UrlScanStage(Stage):
           若声明了 downstream='extract', 还会 emit 成功结果到下游.
     """
     name = "scan"
-    retry = RetryPolicy(max_attempts=3, base_delay=2.0, max_delay=15.0, jitter=True)
+    retry = RetryPolicy(max_attempts=2, base_delay=2.0, max_delay=8.0, jitter=True)
 
     def __init__(
         self,
@@ -168,7 +189,7 @@ class _CopywritingStage(Stage):
     输出: 写入 db.copywritings + ctx.state['copywriting_count'] 自增.
     """
     name = "copywriting"
-    retry = RetryPolicy(max_attempts=2, base_delay=2.0, jitter=True)
+    retry = RetryPolicy(max_attempts=1)
 
     def __init__(
         self,
@@ -217,12 +238,9 @@ class _CopywritingStage(Stage):
             task_id=self.task_id,
         )
         result = await copywriting_tool.generate(request)
-        docs = result.copywritings if result.ok else [{
-            "finding_id": fid,
-            "url": finding.get("url", ""),
-            "status": "error",
-            "error": result.meta.get("error", "Agent 输出解析失败"),
-        }]
+        if not result.ok:
+            raise RuntimeError(result.meta.get("error", "Agent 输出解析失败"))
+        docs = result.copywritings
         for generated in docs:
             cw = dict(generated)
             cw.setdefault("finding_id", fid)
@@ -644,6 +662,8 @@ class UrlScanPipeline:
         scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         enable_copywriting: bool = True,
+        copywriting_score_threshold: int = 60,
+        max_copywritings_per_url: int | None = None,
         known_alive_urls: list[str] | None = None,
         source: str = "web_tagging",
         source_context_by_url: dict[str, str] | None = None,
@@ -669,6 +689,7 @@ class UrlScanPipeline:
             "total_findings": 0,
             "total_copywritings": 0,
             "copywriting_enabled": enable_copywriting,
+            "copywriting_errors": [],
             "error": None,
         }
         obs_log(
@@ -762,7 +783,8 @@ class UrlScanPipeline:
 
             scan_results: list[dict[str, Any]] = []
             all_findings: list[dict[str, Any]] = []
-            dlq = _ScanFailureCollector(scan_results)
+            copywriting_errors: list[dict[str, Any]] = []
+            dlq = _ScanFailureCollector(scan_results, copywriting_errors)
             toolset = InfoCollectionToolFactory(db=self.db, app_config=self.app_config).create_url_toolset(
                 response_parser=self._parse_agent_response,
             )
@@ -794,8 +816,19 @@ class UrlScanPipeline:
                 ]
                 all_findings.extend(unified)
                 await findings_dao.insert_findings_batch(self.db, unified)
+                if not enable_copywriting:
+                    return
+                copywriting_candidates = sorted(
+                    unified,
+                    key=lambda value: int(value.get("attention_score") or 0),
+                    reverse=True,
+                )
+                if max_copywritings_per_url is not None:
+                    copywriting_candidates = copywriting_candidates[
+                        : max(0, int(max_copywritings_per_url))
+                    ]
                 emit = _emit_ref["emit"]
-                for finding in unified:
+                for finding in copywriting_candidates:
                     site_context = {
                         "url": finding["url"],
                         "domain": finding.get("domain", ""),
@@ -804,7 +837,11 @@ class UrlScanPipeline:
                         "summary": finding.get("summary"),
                         "source_context": normalized_context.get(finding["url"], ""),
                     }
-                    siblings = [f for f in url_findings if f["finding_id"] != finding["finding_id"]]
+                    siblings = [
+                        value
+                        for value in unified
+                        if value["finding_id"] != finding["finding_id"]
+                    ]
                     if emit:
                         await emit("copywriting", (finding, site_context, siblings))
                 logger.info(
@@ -826,7 +863,11 @@ class UrlScanPipeline:
                 project_id=project_id,
                 task_id=task_id,
                 pipeline_owner=self,
-                score_threshold=60 if enable_copywriting else 101,
+                score_threshold=(
+                    max(0, min(int(copywriting_score_threshold), 100))
+                    if enable_copywriting
+                    else 101
+                ),
                 source=source,
             )
 
@@ -877,8 +918,16 @@ class UrlScanPipeline:
             if scan_docs:
                 await self.db[URL_SCAN_RESULTS].insert_many(scan_docs)
 
+            if alive and task_result["scanned_urls"] == 0:
+                failures = [str(item.get("error") or "") for item in scan_results]
+                raise RuntimeError(
+                    "全部存活 URL 扫描失败"
+                    + (f": {failures[0]}" if failures else "")
+                )
+
             copywriting_count = pipe.state.get("copywriting_count", 0)
             task_result["total_copywritings"] = copywriting_count
+            task_result["copywriting_errors"] = copywriting_errors[:20]
             task_result["status"] = "completed"
             await self._update_task(task_id, task_result)
             logger.info(

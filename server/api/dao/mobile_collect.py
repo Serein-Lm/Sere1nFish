@@ -134,6 +134,15 @@ async def claim_task_run(
     )
 
 
+async def reset_interrupted_task_defs(db: AsyncIOMotorDatabase) -> int:
+    """释放因服务重启而遗留为 running 的任务定义。"""
+    result = await db[MOBILE_COLLECT_TASKS_COLLECTION].update_many(
+        {"status": "running"},
+        {"$set": {"status": "idle", "updated_at": _now()}},
+    )
+    return int(result.modified_count)
+
+
 async def delete_task_def(db: AsyncIOMotorDatabase, task_def_id: str) -> int:
     result = await db[MOBILE_COLLECT_TASKS_COLLECTION].delete_one(
         {"task_def_id": task_def_id}

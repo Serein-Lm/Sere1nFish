@@ -150,6 +150,42 @@ async def test_missing_provider_keys_are_reported(
 
 
 @pytest.mark.asyncio
+async def test_fofa_queries_are_paced_and_retry_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crawler_tools import fofa_tools
+
+    calls: list[str] = []
+
+    async def configured_key() -> str:
+        return "configured"
+
+    async def search_fofa(*, search_type: str, **_kwargs: Any) -> list[Any]:
+        calls.append(search_type)
+        if calls == ["domain"]:
+            raise RuntimeError("rate limited")
+        return []
+
+    monkeypatch.setattr(fofa_tools, "get_configured_api_key", configured_key)
+    monkeypatch.setattr(fofa_tools, "search_fofa", search_fofa)
+    result = await FofaAssetProvider(
+        query_interval_seconds=0,
+        retry_delay_seconds=0,
+        max_attempts=2,
+    ).search(
+        AssetIdentity(
+            input_name="Example",
+            normalized_name="Example Ltd",
+            root_domain="example.com",
+        ),
+        size=20,
+    )
+
+    assert calls == ["domain", "domain", "cert"]
+    assert result.errors == []
+
+
+@pytest.mark.asyncio
 async def test_asset_queries_accept_legacy_and_multi_target_fields() -> None:
     collection = _QueryCollection()
     db = _QueryDb(collection)

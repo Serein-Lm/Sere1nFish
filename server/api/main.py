@@ -245,6 +245,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"索引创建失败（不影响运行）: {e}")
     
+    # 启动时:终结上一进程无法恢复的后台任务与手机租约。
+    try:
+        from api.services.task_runtime_recovery import recover_interrupted_runtime
+
+        recovered = await recover_interrupted_runtime(get_db())
+        if any(recovered.values()):
+            logger.warning(
+                "已清理中断运行态: "
+                f"tasks={recovered['tasks']}, "
+                f"mobile_task_defs={recovered['mobile_task_defs']}, "
+                f"mobile_leases={recovered['mobile_leases']}"
+            )
+    except Exception as e:
+        logger.warning(f"中断任务运行态清理失败(不影响启动): {e}")
+
     # 启动时:恢复设备独占预约到内存资源池(系统1 持久化)
     try:
         db = get_db()

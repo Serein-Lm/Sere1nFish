@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field
 
-from api.auth import get_current_active_user
+from api.auth import User, get_current_active_user
 from api.db.mongodb import init_mongo, get_db
 from api.dao import projects as projects_dao
 from api.dao import findings as findings_dao
@@ -122,7 +122,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         xhs_search_concurrency=params.get("xhs_search_concurrency"),
     )
     pipeline = CompanyScanPipeline(db, runtime_config)
-    await pipeline.run_pipeline(
+    result = await pipeline.run_pipeline(
         task_id=task_id, project_id=project_id,
         company_name=params.get("company_name", ""),
         url_text=params.get("url_text", ""), urls=params.get("urls", []),
@@ -152,7 +152,10 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         control_lookup_concurrency=max(1, min(int(params.get("control_lookup_concurrency") or 4), 12)),
         control_icp_concurrency=max(1, min(int(params.get("control_icp_concurrency") or 6), 20)),
         control_scan_concurrency=max(1, min(int(params.get("control_scan_concurrency") or 1), 12)),
+        requested_by=str(params.get("_requested_by") or ""),
     )
+    if result.get("status") == "error":
+        raise RuntimeError(str(result.get("error") or "综合公司扫描失败"))
 
 async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
     from api.services.fofa_collect import run_fofa_collect
@@ -329,7 +332,12 @@ async def list_project_bidding_records(
 
 
 @router.post("/projects/{project_id}/tasks")
-async def create_task(project_id: str, req: TaskCreateRequest, background_tasks: BackgroundTasks):
+async def create_task(
+    project_id: str,
+    req: TaskCreateRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+):
     """下发任务（嵌套在项目下）"""
     dispatcher = TASK_DISPATCHERS.get(req.task_type)
     if not dispatcher:
@@ -354,11 +362,13 @@ async def create_task(project_id: str, req: TaskCreateRequest, background_tasks:
             raise HTTPException(400, str(exc)) from exc
 
     task_id = uuid.uuid4().hex[:12]
+    runtime_params = {**req.params, "_requested_by": current_user.username}
     task_doc = {
         "task_id": task_id,
         "project_id": project_id,
         "task_type": req.task_type,
         "params": req.params,
+        "requested_by": current_user.username,
         "status": "pending",
         "progress": {},
         "created_at": datetime.now(),
@@ -367,7 +377,7 @@ async def create_task(project_id: str, req: TaskCreateRequest, background_tasks:
     await db[TASKS_COLLECTION].insert_one(task_doc)
 
     spawn_background(
-        _execute_task(task_id, project_id, req.task_type, req.params),
+        _execute_task(task_id, project_id, req.task_type, runtime_params),
         name=f"task:{task_id}",
     )
 
@@ -381,6 +391,7 @@ async def create_task_with_file(
     file: UploadFile = File(...),
     task_type: str = Form(...),
     params_json: str = Form(default="{}"),
+    current_user: User = Depends(get_current_active_user),
 ):
     """带文件上传的任务下发"""
     import json
@@ -408,11 +419,13 @@ async def create_task_with_file(
         params[field_name] = file_text
 
     task_id = uuid.uuid4().hex[:12]
+    runtime_params = {**params, "_requested_by": current_user.username}
     task_doc = {
         "task_id": task_id,
         "project_id": project_id,
         "task_type": task_type,
         "params": params,
+        "requested_by": current_user.username,
         "status": "pending",
         "progress": {},
         "created_at": datetime.now(),
@@ -421,7 +434,7 @@ async def create_task_with_file(
     await db[TASKS_COLLECTION].insert_one(task_doc)
 
     spawn_background(
-        _execute_task(task_id, project_id, task_type, params),
+        _execute_task(task_id, project_id, task_type, runtime_params),
         name=f"task:{task_id}",
     )
 

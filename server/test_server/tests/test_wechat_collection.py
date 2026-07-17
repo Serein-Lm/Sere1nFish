@@ -115,6 +115,8 @@ async def test_mobile_collect_definition_claims_and_releases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services import mobile_collect_pipeline
+    from api.services import mobile_device_leases
+    from contextlib import asynccontextmanager
 
     events: list[tuple[str, str]] = []
 
@@ -132,10 +134,16 @@ async def test_mobile_collect_definition_claims_and_releases(
         assert kwargs["task_def"]["target_id"] == "target-1"
         return {"total": 0, "new": 0, "changed": 0}
 
+    @asynccontextmanager
+    async def lease(_db: Any, **kwargs: Any):
+        assert kwargs["requested_by"] == "admin"
+        yield "collect:run-1"
+
     monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "get_task_def", get_task)
     monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "claim_task_run", claim)
     monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "set_task_status", set_status)
     monkeypatch.setattr(mobile_collect_pipeline, "run_collect_task", run_collect)
+    monkeypatch.setattr(mobile_device_leases, "background_device_lease", lease)
 
     await mobile_collect_pipeline.run_mobile_collect_definition(
         object(),
@@ -143,6 +151,7 @@ async def test_mobile_collect_definition_claims_and_releases(
         project_id="project-1",
         task_def_id="wechat-a",
         runtime_overrides={"target_id": "target-1"},
+        requested_by="admin",
     )
 
     assert events == [("claim", "run-1"), ("status", "idle")]

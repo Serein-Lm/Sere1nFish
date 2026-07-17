@@ -578,7 +578,7 @@ async def screenshot_note_detail_stream(
     # Cookie
     cookies = []
     _cookie_str = cookie_string
-    if not _cookie_str and db:
+    if not _cookie_str and db is not None:
         try:
             from api.dao import xhs as xhs_dao
             active_cookie = await xhs_dao.get_active_cookie(db)

@@ -244,6 +244,38 @@ class DevicePool:
             self._reservations[device_key] = res
             return res
 
+    def acquire_for_task(
+        self,
+        device_key: str,
+        owner: str,
+        *,
+        initiated_by: str = "",
+        note: str = "",
+        device_id: str = "",
+    ) -> Reservation:
+        """原子申请后台任务租约。
+
+        未占用时直接申请；若设备由本次任务的发起用户占用，则把交互租约
+        原子转交给后台 owner。其他用户或其他后台任务的租约不会被抢占。
+        """
+        with self._lock:
+            existing = self._reservations.get(device_key)
+            allowed_owners = {owner}
+            if initiated_by:
+                allowed_owners.add(initiated_by)
+            if existing and existing.owner not in allowed_owners:
+                raise PoolError(
+                    f"设备 {device_id or device_key} 已被 {existing.owner} 占用"
+                )
+            res = Reservation(
+                device_key=device_key,
+                owner=owner,
+                note=note,
+                device_id=device_id,
+            )
+            self._reservations[device_key] = res
+            return res
+
     def release(self, device_key: str, owner: str, *, force: bool = False) -> bool:
         """释放占用(按稳定 key)。非本人且非 force 时抛 PoolError。"""
         with self._lock:

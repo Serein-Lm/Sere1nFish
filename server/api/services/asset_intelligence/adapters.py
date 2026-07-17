@@ -4,14 +4,54 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from typing import Any, Awaitable, Callable
 
 from crawler_tools import fofa_tools, hunter_tools
 
 from .contracts import AssetCandidate, AssetIdentity, ProviderSearchResult
 
 
+async def _run_paced_queries(
+    specs: list[tuple[str, str]],
+    search: Callable[[str, str], Awaitable[Any]],
+    *,
+    interval_seconds: float,
+    retry_delay_seconds: float,
+    max_attempts: int,
+) -> list[Any]:
+    """同一供应商内按节奏查询，供应商级并发由上层 service 保留。"""
+    responses: list[Any] = []
+    for index, (search_type, query) in enumerate(specs):
+        if index and interval_seconds > 0:
+            await asyncio.sleep(interval_seconds)
+        last_error: Exception | None = None
+        for attempt in range(max(1, max_attempts)):
+            try:
+                responses.append(await search(search_type, query))
+                last_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt + 1 < max_attempts and retry_delay_seconds > 0:
+                    await asyncio.sleep(retry_delay_seconds * (attempt + 1))
+        if last_error is not None:
+            responses.append(last_error)
+    return responses
+
+
 class FofaAssetProvider:
     name = "fofa"
+
+    def __init__(
+        self,
+        *,
+        query_interval_seconds: float = 2.0,
+        retry_delay_seconds: float = 4.0,
+        max_attempts: int = 2,
+    ) -> None:
+        self.query_interval_seconds = max(0.0, query_interval_seconds)
+        self.retry_delay_seconds = max(0.0, retry_delay_seconds)
+        self.max_attempts = max(1, max_attempts)
 
     async def search(self, identity: AssetIdentity, *, size: int) -> ProviderSearchResult:
         result = ProviderSearchResult(provider=self.name)
@@ -23,18 +63,18 @@ class FofaAssetProvider:
             result.errors.append("FOFA API Key 未配置")
             return result
         specs = [("domain", identity.root_domain), ("cert", identity.root_domain)]
-        responses = await asyncio.gather(
-            *[
-                fofa_tools.search_fofa(
-                    query=query,
-                    search_type=search_type,
-                    size=size,
-                    api_key=api_key,
-                    raise_on_error=True,
-                )
-                for search_type, query in specs
-            ],
-            return_exceptions=True,
+        responses = await _run_paced_queries(
+            specs,
+            lambda search_type, query: fofa_tools.search_fofa(
+                query=query,
+                search_type=search_type,
+                size=size,
+                api_key=api_key,
+                raise_on_error=True,
+            ),
+            interval_seconds=self.query_interval_seconds,
+            retry_delay_seconds=self.retry_delay_seconds,
+            max_attempts=self.max_attempts,
         )
         for (search_type, query), response in zip(specs, responses):
             query_label = f"fofa:{search_type}:{query}"
@@ -64,6 +104,17 @@ class FofaAssetProvider:
 class HunterAssetProvider:
     name = "hunter"
 
+    def __init__(
+        self,
+        *,
+        query_interval_seconds: float = 1.0,
+        retry_delay_seconds: float = 3.0,
+        max_attempts: int = 2,
+    ) -> None:
+        self.query_interval_seconds = max(0.0, query_interval_seconds)
+        self.retry_delay_seconds = max(0.0, retry_delay_seconds)
+        self.max_attempts = max(1, max_attempts)
+
     async def search(self, identity: AssetIdentity, *, size: int) -> ProviderSearchResult:
         result = ProviderSearchResult(provider=self.name)
         specs: list[tuple[str, str]] = []
@@ -78,18 +129,18 @@ class HunterAssetProvider:
         if not api_key:
             result.errors.append("Hunter API Key 未配置")
             return result
-        responses = await asyncio.gather(
-            *[
-                hunter_tools.search_hunter(
-                    query=query,
-                    search_type=search_type,
-                    size=size,
-                    api_key=api_key,
-                    raise_on_error=True,
-                )
-                for search_type, query in specs
-            ],
-            return_exceptions=True,
+        responses = await _run_paced_queries(
+            specs,
+            lambda search_type, query: hunter_tools.search_hunter(
+                query=query,
+                search_type=search_type,
+                size=size,
+                api_key=api_key,
+                raise_on_error=True,
+            ),
+            interval_seconds=self.query_interval_seconds,
+            retry_delay_seconds=self.retry_delay_seconds,
+            max_attempts=self.max_attempts,
         )
         for (search_type, query), response in zip(specs, responses):
             query_label = f"hunter:{search_type}:{query}"

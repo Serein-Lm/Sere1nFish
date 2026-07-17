@@ -71,6 +71,14 @@ async def delete_reservation(db: AsyncIOMotorDatabase, device_key: str) -> bool:
     return res.deleted_count > 0
 
 
+async def delete_background_reservations(db: AsyncIOMotorDatabase) -> int:
+    """清理无法跨进程存活的手机采集后台租约。"""
+    result = await db[DEVICE_RESERVATIONS_COLLECTION].delete_many(
+        {"owner": {"$regex": r"^collect:"}}
+    )
+    return int(result.deleted_count)
+
+
 async def list_reservations(db: AsyncIOMotorDatabase) -> list[dict[str, Any]]:
     cursor = db[DEVICE_RESERVATIONS_COLLECTION].find({}, {"_id": 0})
     return [doc async for doc in cursor]

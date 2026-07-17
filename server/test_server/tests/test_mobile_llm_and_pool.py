@@ -221,6 +221,35 @@ def test_unconnected_easytier_peer_requests_auto_connect(monkeypatch) -> None:
     assert pool.has_unconnected_easytier_peers() is False
 
 
+def test_background_task_can_take_over_initiators_device_lease() -> None:
+    import threading
+
+    import pytest
+
+    from core.mobile.pool import DevicePool, PoolError
+
+    pool = object.__new__(DevicePool)
+    pool._lock = threading.RLock()
+    pool._reservations = {}
+    pool.acquire("device-key", "admin", device_id="device-a")
+
+    reservation = pool.acquire_for_task(
+        "device-key",
+        "collect:run-1",
+        initiated_by="admin",
+        device_id="device-a",
+    )
+
+    assert reservation.owner == "collect:run-1"
+    with pytest.raises(PoolError, match="collect:run-1"):
+        pool.acquire_for_task(
+            "device-key",
+            "collect:run-2",
+            initiated_by="another-user",
+            device_id="device-a",
+        )
+
+
 def test_easytier_byte_counter_normalization() -> None:
     from core.mobile.easytier import _parse_byte_count
 

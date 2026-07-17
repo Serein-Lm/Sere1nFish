@@ -45,6 +45,9 @@ def _wrap_tools_with_error_handling(
     *,
     tool_timeout: int = DEFAULT_TOOL_TIMEOUT,
     max_calls: int = 0,
+    call_guard: Callable[
+        [str, tuple[Any, ...], dict[str, Any]], str | None
+    ] | None = None,
 ) -> list:
     """
     给每个工具包一层 try/except，异常时返回错误字符串而不是抛异常。
@@ -85,9 +88,13 @@ def _wrap_tools_with_error_handling(
                 if max_calls > 0 and _es["calls"] > max_calls:
                     message = (
                         f"MCP 工具调用预算已用完（最多 {max_calls} 次）。"
-                        "请停止调用 MCP，使用已获得的信息并调用内置交付工具完成任务。"
+                        "请停止调用 MCP，并使用已获得的信息直接输出最终结果。"
                     )
                     return (message, "") if _art else message
+                if call_guard:
+                    blocked = call_guard(_name, args, kwargs)
+                    if blocked:
+                        return (blocked, "") if _art else blocked
                 try:
                     call = _orig(*args, **kwargs)
                     result = (
@@ -136,9 +143,13 @@ def _wrap_tools_with_error_handling(
                 if max_calls > 0 and _es["calls"] > max_calls:
                     message = (
                         f"MCP 工具调用预算已用完（最多 {max_calls} 次）。"
-                        "请停止调用 MCP，使用已获得的信息并调用内置交付工具完成任务。"
+                        "请停止调用 MCP，并使用已获得的信息直接输出最终结果。"
                     )
                     return (message, "") if _art else message
+                if call_guard:
+                    blocked = call_guard(_name, args, kwargs)
+                    if blocked:
+                        return (blocked, "") if _art else blocked
                 try:
                     result = _orig(*args, **kwargs)
                     _es["consecutive"] = 0
@@ -227,6 +238,10 @@ def create_agent_node(
     streaming: bool = True,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     mcp_tool_limit: int = 0,
+    max_attempts: int = 3,
+    mcp_call_guard: Callable[
+        [str, tuple[Any, ...], dict[str, Any]], str | None
+    ] | None = None,
 ) -> Callable[[MessagesState], dict[str, Any] | AsyncGenerator[dict[str, Any], None]]:
     """
     创建 Agent 节点函数。
@@ -273,7 +288,9 @@ def create_agent_node(
                     async with client.session(mcp_server_name) as session:
                         mcp_tools = await load_mcp_tools(session)
                         mcp_tools = _wrap_tools_with_error_handling(
-                            mcp_tools, max_calls=mcp_tool_limit
+                            mcp_tools,
+                            max_calls=mcp_tool_limit,
+                            call_guard=mcp_call_guard,
                         )
                         all_tools.extend(mcp_tools)
                         agent = create_agent(
@@ -289,7 +306,9 @@ def create_agent_node(
                 else:
                     mcp_tools = await client.get_tools()
                     mcp_tools = _wrap_tools_with_error_handling(
-                        mcp_tools, max_calls=mcp_tool_limit
+                        mcp_tools,
+                        max_calls=mcp_tool_limit,
+                        call_guard=mcp_call_guard,
                     )
                     all_tools.extend(mcp_tools)
 
@@ -320,7 +339,7 @@ def create_agent_node(
     
     else:
         # Silent/Console 模式：返回异步函数（含统一重试）
-        MAX_RETRIES = 3
+        max_runtime_attempts = max(1, min(int(max_attempts or 1), 5))
 
         async def run_agent(state: MessagesState) -> dict[str, Any]:
 
@@ -349,14 +368,18 @@ def create_agent_node(
                         async with client.session(mcp_server_name) as session:
                             mcp_tools = await load_mcp_tools(session)
                             mcp_tools = _wrap_tools_with_error_handling(
-                                mcp_tools, max_calls=mcp_tool_limit
+                                mcp_tools,
+                                max_calls=mcp_tool_limit,
+                                call_guard=mcp_call_guard,
                             )
                             all_tools.extend(mcp_tools)
                             return await _execute(all_tools)
                     else:
                         mcp_tools = await client.get_tools()
                         mcp_tools = _wrap_tools_with_error_handling(
-                            mcp_tools, max_calls=mcp_tool_limit
+                            mcp_tools,
+                            max_calls=mcp_tool_limit,
+                            call_guard=mcp_call_guard,
                         )
                         all_tools.extend(mcp_tools)
 
@@ -364,7 +387,7 @@ def create_agent_node(
 
             # 统一重试循环
             last_error = None
-            for attempt in range(1, MAX_RETRIES + 1):
+            for attempt in range(1, max_runtime_attempts + 1):
                 try:
                     return await _single_attempt()
                 except (ExceptionGroup, BaseExceptionGroup) as eg:
@@ -385,29 +408,31 @@ def create_agent_node(
                     _flatten(eg)
                     last_error = "\n".join(sub_errors)
                     logger.warning(
-                        f"[runtime] 第 {attempt}/{MAX_RETRIES} 次执行失败 (TaskGroup):\n{last_error}"
+                        f"[runtime] 第 {attempt}/{max_runtime_attempts} 次执行失败 (TaskGroup):\n{last_error}"
                     )
                     # ToolException 等页面操作错误直接重试，不重启 Chrome
                     if needs_restart:
                         await _try_restart_chrome()
                 except asyncio.TimeoutError:
                     last_error = f"超时({timeout}s)"
-                    logger.warning(f"[runtime] 第 {attempt}/{MAX_RETRIES} 次执行超时")
+                    logger.warning(f"[runtime] 第 {attempt}/{max_runtime_attempts} 次执行超时")
                 except Exception as e:
                     last_error = str(e)
                     err_type = type(e).__name__
-                    logger.warning(f"[runtime] 第 {attempt}/{MAX_RETRIES} 次执行失败 ({err_type}): {last_error}")
+                    logger.warning(f"[runtime] 第 {attempt}/{max_runtime_attempts} 次执行失败 ({err_type}): {last_error}")
                     # 连接类异常或超时类异常，尝试重启 Chrome
                     if any(k in str(e) for k in ("BrokenResource", "Broken", "timed out", "Network.enable", "连续", "Could not connect", "403")):
                         await _try_restart_chrome()
 
-                if attempt < MAX_RETRIES:
+                if attempt < max_runtime_attempts:
                     wait = attempt * 2  # 递增等待
                     logger.info(f"[runtime] {wait}s 后重试...")
                     await asyncio.sleep(wait)
 
             # 所有重试都失败
-            raise RuntimeError(f"Agent 执行失败（重试 {MAX_RETRIES} 次）: {last_error}")
+            raise RuntimeError(
+                f"Agent 执行失败（重试 {max_runtime_attempts} 次）: {last_error}"
+            )
 
         async def _try_restart_chrome():
             """

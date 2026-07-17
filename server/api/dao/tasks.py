@@ -1,11 +1,31 @@
 """Project task read access used by API and AI data adapters."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.db.collections import TASKS_COLLECTION
+
+
+async def mark_interrupted_tasks(db: AsyncIOMotorDatabase) -> int:
+    """进程启动时终结无法跨进程恢复的任务实例。"""
+    now = datetime.now(timezone.utc)
+    reason = "服务进程已重启，上一进程中的后台任务已中断，请重新下发"
+    result = await db[TASKS_COLLECTION].update_many(
+        {"status": {"$in": ["pending", "running"]}},
+        {
+            "$set": {
+                "status": "error",
+                "error": reason,
+                "progress": {"stage": "error", "message": reason},
+                "updated_at": now,
+                "completed_at": now,
+            }
+        },
+    )
+    return int(result.modified_count)
 
 
 async def list_tasks(

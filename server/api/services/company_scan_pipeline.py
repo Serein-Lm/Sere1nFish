@@ -204,6 +204,7 @@ class CompanyScanPipeline:
         control_lookup_concurrency: int = 4,
         control_icp_concurrency: int = 6,
         control_scan_concurrency: int = 1,
+        requested_by: str = "",
     ) -> dict[str, Any]:
         """
         运行综合扫描流水线
@@ -483,6 +484,7 @@ class CompanyScanPipeline:
                         target_id=target_id,
                         target_name=normalized_name,
                         device_id=wechat_device_id,
+                        requested_by=requested_by,
                     ),
                 ))
 
@@ -775,6 +777,7 @@ class CompanyScanPipeline:
         target_id: str,
         target_name: str,
         device_id: str,
+        requested_by: str = "",
     ) -> dict[str, Any]:
         from api.services.wechat_collection import run_company_wechat_collection
 
@@ -785,6 +788,7 @@ class CompanyScanPipeline:
             target_id=target_id,
             target_name=target_name,
             device_id=device_id,
+            requested_by=requested_by,
         )
 
     async def _run_bidding_collection(

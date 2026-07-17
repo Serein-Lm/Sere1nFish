@@ -11,7 +11,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.auth import get_current_active_user
+from api.auth import User, get_current_active_user
 from api.db.mongodb import get_db
 from api.dao import mobile_collect as collect_dao
 from api.dao import schedules as schedules_dao
@@ -155,7 +155,10 @@ async def delete_task_def(task_def_id: str):
 # ── 启动 / 停止 ────────────────────────────────────────
 
 @router.post("/tasks/{task_def_id}/run")
-async def run_task(task_def_id: str):
+async def run_task(
+    task_def_id: str,
+    current_user: User = Depends(get_current_active_user),
+):
     """手动启动一次采集(创建统一任务并异步运行)。"""
     db = get_db()
     task_def = await collect_dao.get_task_def(db, task_def_id)
@@ -167,7 +170,10 @@ async def run_task(task_def_id: str):
     from api.routers.project_api import _execute_task, TASKS_COLLECTION
 
     project_id = task_def.get("project_id") or ""
-    params = {"task_def_id": task_def_id}
+    params = {
+        "task_def_id": task_def_id,
+        "_requested_by": current_user.username,
+    }
     task_id = uuid.uuid4().hex[:12]
     await db[TASKS_COLLECTION].insert_one(
         {
@@ -175,6 +181,7 @@ async def run_task(task_def_id: str):
             "project_id": project_id,
             "task_type": _TASK_TYPE,
             "params": params,
+            "requested_by": current_user.username,
             "status": "pending",
             "progress": {},
             "trigger": "manual",
@@ -210,7 +217,11 @@ class DryRunRequest(BaseModel):
 
 
 @router.post("/tasks/{task_def_id}/dry-run")
-async def dry_run_task(task_def_id: str, payload: DryRunRequest | None = None):
+async def dry_run_task(
+    task_def_id: str,
+    payload: DryRunRequest | None = None,
+    current_user: User = Depends(get_current_active_user),
+):
     """对已保存的采集任务定义执行一次试跑:导航+截屏+结构化,但不入库、不通知。"""
     from api.services.mobile_collect_pipeline import dry_run_collect
 
@@ -228,12 +239,17 @@ async def dry_run_task(task_def_id: str, payload: DryRunRequest | None = None):
         task_def.get("project_id") or "",
         task_def,
         preview_limit=limit,
+        requested_by=current_user.username,
     )
     return {"task_def_id": task_def_id, "run_task_id": run_task_id, **result}
 
 
 @router.post("/dry-run")
-async def dry_run_inline(payload: CollectTaskDef, preview_limit: int = 50):
+async def dry_run_inline(
+    payload: CollectTaskDef,
+    preview_limit: int = 50,
+    current_user: User = Depends(get_current_active_user),
+):
     """对未保存的采集配置执行一次试跑,用于评估预设/自定义配置的采集效果。"""
     from api.services.mobile_collect_pipeline import dry_run_collect
 
@@ -245,6 +261,7 @@ async def dry_run_inline(payload: CollectTaskDef, preview_limit: int = 50):
         task_def.get("project_id") or "",
         task_def,
         preview_limit=preview_limit,
+        requested_by=current_user.username,
     )
     return {"run_task_id": run_task_id, **result}
 

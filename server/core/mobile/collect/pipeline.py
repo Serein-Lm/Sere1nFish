@@ -1055,7 +1055,16 @@ async def run_collect_task(
                     "canonical_name": str(target_info.get("target_name") or ""),
                 }
             seeds.append(Item(payload={"keyword": keyword, "target": resolved_target}))
-        await pipe.run(seeds=seeds, entry="collect")
+        metrics = await pipe.run(seeds=seeds, entry="collect")
+        collect_metrics = metrics.get("collect")
+        collect_failed = int(getattr(collect_metrics, "failed", 0) or 0)
+        collect_received = int(getattr(collect_metrics, "received", 0) or 0)
+        collect_succeeded = int(getattr(collect_metrics, "succeeded", 0) or 0)
+        counters["failed"] = collect_failed
+        if collect_received and collect_succeeded == 0:
+            raise RuntimeError(
+                f"手机采集全部失败: {collect_failed}/{collect_received} 个关键词进入失败队列"
+            )
     finally:
         _running.pop(run_task_id, None)
         try:
