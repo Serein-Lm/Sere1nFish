@@ -59,7 +59,6 @@ import {
 import CopywritingRenderer from '../../components/CopywritingRenderer/CopywritingRenderer'
 import {
   listRecords as listCollectRecords,
-  listTaskDefs as listMobileCollectTaskDefs,
   type CollectRecord,
 } from '../../services/mobileCollectService'
 import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
@@ -1069,10 +1068,9 @@ export default function ProjectDetail() {
   const handleOpenTaskModal = async () => {
     setTaskDefaultsLoading(true)
     try {
-      const [configResult, poolResult, collectTasksResult] = await Promise.allSettled([
+      const [configResult, poolResult] = await Promise.allSettled([
         getConfigSection('collection_runtime'),
         getPool(),
-        projectId ? listMobileCollectTaskDefs(projectId) : Promise.resolve({ items: [], total: 0 }),
       ])
       if (configResult.status === 'fulfilled') {
         const { config } = configResult.value
@@ -1090,20 +1088,11 @@ export default function ProjectDetail() {
       }
 
       const poolDevices = poolResult.status === 'fulfilled' ? poolResult.value.devices : []
-      const collectTasks = collectTasksResult.status === 'fulfilled' ? collectTasksResult.value.items : []
-      const options = collectTasks
-        .filter((task) => task.app_name.toLowerCase().includes('微信') || task.app_name.toLowerCase().includes('wechat'))
-        .map((task) => {
-          const poolDevice = poolDevices.find((device) =>
-            device.device_key === task.device_id || device.device_id === task.device_id,
-          )
-          return {
-            deviceId: task.device_id,
-            model: poolDevice?.model || poolDevice?.meta?.display_name || task.device_id,
-            online: Boolean(poolDevice?.online),
-          }
-        })
-        .filter((option, index, all) => all.findIndex((item) => item.deviceId === option.deviceId) === index)
+      const options = poolDevices.map((device) => ({
+        deviceId: device.device_id,
+        model: device.meta?.display_name || device.model || device.device_id,
+        online: Boolean(device.online),
+      }))
       setWechatDeviceOptions(options)
     } finally {
       setTaskDefaultsLoading(false)
@@ -4337,10 +4326,12 @@ export default function ProjectDetail() {
                               name="wechat_device_id"
                               label="公众号执行手机"
                               rules={[{ required: true, message: '请选择执行公众号采集的手机' }]}
-                              extra="任务会通过 ADB 打开微信；手机用于搜索文章，原文与图片由 Chrome 继续读取。"
+                              extra="直接选择设备池中的在线手机；缺少项目微信采集定义时会自动创建。手机负责搜索文章，原文与图片由 Chrome 继续读取。"
                             >
                               <Select
-                                placeholder={wechatDeviceOptions.length ? '选择手机型号' : '当前项目没有可用的微信采集手机'}
+                                showSearch
+                                optionFilterProp="label"
+                                placeholder={wechatDeviceOptions.some((device) => device.online) ? '选择在线手机' : '设备池中暂无在线手机'}
                                 options={wechatDeviceOptions.map((device) => ({
                                   value: device.deviceId,
                                   label: `${device.model} · ${device.online ? '在线' : '离线'}`,

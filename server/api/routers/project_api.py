@@ -423,10 +423,10 @@ async def create_task(
             raise HTTPException(400, str(exc)) from exc
 
     if req.task_type == "company_scan" and req.params.get("enable_wechat", False):
-        from api.services.wechat_collection import resolve_wechat_task_definition
+        from api.services.wechat_collection import ensure_wechat_task_definition
 
         try:
-            await resolve_wechat_task_definition(
+            await ensure_wechat_task_definition(
                 db,
                 project_id=project_id,
                 device_id=str(req.params.get("wechat_device_id") or ""),
@@ -491,10 +491,10 @@ async def create_company_scan_batch(
         raise HTTPException(400, "批量公司扫描不能共用 URL 列表，请留空后由资产发现自动获取")
 
     if shared_params.get("enable_wechat", False):
-        from api.services.wechat_collection import resolve_wechat_task_definition
+        from api.services.wechat_collection import ensure_wechat_task_definition
 
         try:
-            await resolve_wechat_task_definition(
+            await ensure_wechat_task_definition(
                 db,
                 project_id=project_id,
                 device_id=str(shared_params.get("wechat_device_id") or ""),

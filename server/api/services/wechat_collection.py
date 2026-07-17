@@ -6,10 +6,85 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import mobile_collect as collect_dao
+from api.models.mobile_collect import CollectTaskDef
 from api.services.mobile_collect_pipeline import run_mobile_collect_definition
+from core.logger import get_logger
 
 
 WECHAT_SOURCE_LINK_STRATEGY = "wechat_copy_link"
+logger = get_logger("wechat_collection")
+
+
+def _is_wechat_task(task_def: dict[str, Any], *, device_id: str) -> bool:
+    app_name = str(task_def.get("app_name") or "").strip().lower()
+    return str(task_def.get("device_id") or "") == device_id and (
+        "微信" in app_name or "wechat" in app_name
+    )
+
+
+def _select_wechat_task(
+    candidates: list[dict[str, Any]],
+    *,
+    expected_target_id: str = "",
+) -> dict[str, Any]:
+    def rank(item: dict[str, Any]) -> tuple[int, int]:
+        configured_target_id = str(item.get("target_id") or "")
+        if expected_target_id and configured_target_id == expected_target_id:
+            target_rank = 0
+        elif not configured_target_id:
+            target_rank = 1
+        else:
+            target_rank = 2
+        strategy_rank = (
+            0
+            if str(item.get("source_link_strategy") or "")
+            == WECHAT_SOURCE_LINK_STRATEGY
+            else 1
+        )
+        return target_rank, strategy_rank
+
+    return min(candidates, key=rank)
+
+
+async def ensure_wechat_task_definition(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    device_id: str,
+) -> dict[str, Any]:
+    """Ensure comprehensive scans can use a selected pool device directly."""
+    normalized_device_id = str(device_id or "").strip()
+    if not normalized_device_id:
+        raise ValueError("启用公众号采集时必须选择执行手机")
+
+    task_defs = await collect_dao.list_task_defs(db, project_id=project_id)
+    reusable = [
+        item
+        for item in task_defs
+        if _is_wechat_task(item, device_id=normalized_device_id)
+        and not str(item.get("target_id") or "")
+    ]
+    if reusable:
+        return _select_wechat_task(reusable)
+
+    payload = CollectTaskDef(
+        name="综合扫描公众号采集",
+        project_id=project_id,
+        device_id=normalized_device_id,
+        app_name="微信",
+        keywords=[],
+        use_target_keyword_library=True,
+        deep_collect=True,
+        source_link_strategy=WECHAT_SOURCE_LINK_STRATEGY,
+    ).model_dump()
+    created = await collect_dao.create_task_def(db, payload)
+    logger.notice(
+        "自动创建综合扫描公众号采集定义 | project=%s device=%s def=%s",
+        project_id,
+        normalized_device_id,
+        created.get("task_def_id"),
+    )
+    return created
 
 
 async def resolve_wechat_task_definition(
@@ -26,25 +101,12 @@ async def resolve_wechat_task_definition(
         raise ValueError("启用公众号采集时必须选择执行手机")
 
     task_defs = await collect_dao.list_task_defs(db, project_id=project_id)
-    candidates = [
-        item
-        for item in task_defs
-        if str(item.get("device_id") or "") == device_id
-        and (
-            "微信" in str(item.get("app_name") or "").strip().lower()
-            or "wechat" in str(item.get("app_name") or "").strip().lower()
-        )
-    ]
+    candidates = [item for item in task_defs if _is_wechat_task(item, device_id=device_id)]
     if not candidates:
         raise ValueError("所选手机没有当前项目的微信采集配置")
-    task_def = next(
-        (
-            item
-            for item in candidates
-            if str(item.get("source_link_strategy") or "")
-            == WECHAT_SOURCE_LINK_STRATEGY
-        ),
-        candidates[0],
+    task_def = _select_wechat_task(
+        candidates,
+        expected_target_id=expected_target_id,
     )
     if task_def.get("status") == "running" and not allow_running:
         raise ValueError("公众号手机采集任务正在运行中")

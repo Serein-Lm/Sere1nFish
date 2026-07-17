@@ -7,6 +7,84 @@ import pytest
 
 
 @pytest.mark.asyncio
+async def test_ensure_wechat_configuration_creates_unbound_project_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import mobile_collect as collect_dao
+    from api.services.wechat_collection import (
+        WECHAT_SOURCE_LINK_STRATEGY,
+        ensure_wechat_task_definition,
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def list_defs(_db: Any, *, project_id: str, limit: int = 200):
+        assert project_id == "project-1"
+        return []
+
+    async def create_def(_db: Any, payload: dict[str, Any]):
+        captured.update(payload)
+        return {"task_def_id": "wechat-auto", **payload, "status": "idle"}
+
+    monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
+    monkeypatch.setattr(collect_dao, "create_task_def", create_def)
+
+    task_def = await ensure_wechat_task_definition(
+        object(),
+        project_id="project-1",
+        device_id="device-a",
+    )
+
+    assert task_def["task_def_id"] == "wechat-auto"
+    assert captured["project_id"] == "project-1"
+    assert captured["device_id"] == "device-a"
+    assert captured["app_name"] == "微信"
+    assert captured["target_id"] is None
+    assert captured["source_link_strategy"] == WECHAT_SOURCE_LINK_STRATEGY
+    assert captured["use_target_keyword_library"] is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_wechat_configuration_reuses_unbound_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import mobile_collect as collect_dao
+    from api.services.wechat_collection import ensure_wechat_task_definition
+
+    async def list_defs(_db: Any, **_kwargs: Any):
+        return [
+            {
+                "task_def_id": "bound-other-company",
+                "device_id": "device-a",
+                "app_name": "微信",
+                "target_id": "target-other",
+                "source_link_strategy": "wechat_copy_link",
+            },
+            {
+                "task_def_id": "shared-company-scan",
+                "device_id": "device-a",
+                "app_name": "微信",
+                "target_id": "",
+                "source_link_strategy": "wechat_copy_link",
+            },
+        ]
+
+    async def create_def(*_args: Any, **_kwargs: Any):
+        raise AssertionError("已有未绑定公司的定义时不应重复创建")
+
+    monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
+    monkeypatch.setattr(collect_dao, "create_task_def", create_def)
+
+    task_def = await ensure_wechat_task_definition(
+        object(),
+        project_id="project-1",
+        device_id="device-a",
+    )
+
+    assert task_def["task_def_id"] == "shared-company-scan"
+
+
+@pytest.mark.asyncio
 async def test_wechat_configuration_is_resolved_by_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -43,6 +121,44 @@ async def test_wechat_configuration_is_resolved_by_device(
     )
 
     assert task_def["task_def_id"] == "wechat-a"
+
+
+@pytest.mark.asyncio
+async def test_wechat_configuration_prefers_unbound_definition_over_other_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import mobile_collect as collect_dao
+    from api.services.wechat_collection import resolve_wechat_task_definition
+
+    async def list_defs(_db: Any, **_kwargs: Any):
+        return [
+            {
+                "task_def_id": "bound-other-company",
+                "device_id": "device-a",
+                "app_name": "微信",
+                "target_id": "target-other",
+                "source_link_strategy": "wechat_copy_link",
+                "status": "idle",
+            },
+            {
+                "task_def_id": "shared-company-scan",
+                "device_id": "device-a",
+                "app_name": "微信",
+                "target_id": "",
+                "source_link_strategy": "none",
+                "status": "idle",
+            },
+        ]
+
+    monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
+    task_def = await resolve_wechat_task_definition(
+        object(),
+        project_id="project-1",
+        device_id="device-a",
+        expected_target_id="target-current",
+    )
+
+    assert task_def["task_def_id"] == "shared-company-scan"
 
 
 @pytest.mark.asyncio
