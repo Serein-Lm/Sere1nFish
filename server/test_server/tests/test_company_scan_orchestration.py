@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from api.services.company_scan_pipeline import CompanyScanPipeline
+
+
+def test_subsidiary_xhs_is_disabled_by_default() -> None:
+    parameter = inspect.signature(CompanyScanPipeline.run_pipeline).parameters[
+        "enable_subsidiary_xhs"
+    ]
+
+    assert parameter.default is False
 
 
 class _TargetCollection:
@@ -311,3 +320,52 @@ async def test_wholly_owned_entity_runs_profile_copywriting_after_xhs(
     assert result["summary"]["completed"] == 1
     assert result["summary"]["profile_copywritings"] == 2
     assert captured[0]["summary"]["profile_copywritings"] == 2
+
+
+@pytest.mark.asyncio
+async def test_wholly_owned_entity_skips_xhs_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import notifications
+
+    pipeline = CompanyScanPipeline(object(), object())
+
+    async def unexpected_xhs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("子公司 XHS 默认关闭时不应执行搜索")
+
+    monkeypatch.setattr(pipeline, "_run_xhs_search", unexpected_xhs)
+    monkeypatch.setattr(
+        notifications,
+        "notify_target_collection_completed",
+        lambda **_kwargs: True,
+    )
+
+    result = await pipeline._scan_wholly_owned_entities(
+        task_id="task-1",
+        project_id="project-1",
+        entities=[{"name": "子公司", "target_id": "target-child"}],
+        enable_asset_discovery=False,
+        enable_url_scan=False,
+        enable_copywriting=True,
+        enable_xhs=False,
+        xhs_max_notes=20,
+        xhs_attention_threshold=60,
+        min_attention_score=40,
+        profile_copywriting_threshold=60,
+        fofa_size=200,
+        hunter_size=200,
+        asset_probe_concurrency=48,
+        incremental_scan=False,
+        url_probe_concurrency=64,
+        url_scan_concurrency=10,
+        copywriting_concurrency=6,
+        xhs_search_concurrency=1,
+        entity_concurrency=1,
+    )
+
+    assert result["summary"]["completed"] == 1
+    assert result["summary"]["xhs_notes"] == 0
+    assert result["entities"][0]["scan"]["xhs"] == {
+        "enabled": False,
+        "keywords_used": [],
+    }

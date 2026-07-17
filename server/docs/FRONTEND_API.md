@@ -114,7 +114,7 @@ Project (项目)
 
 | task_type | 说明 | 核心参数 |
 |-----------|------|---------|
-| `company_scan` | 综合扫描 | `company_name`, `urls`, `enable_url_scan`, `enable_xhs` |
+| `company_scan` | 综合扫描 | `company_name`, `urls`, `enable_url_scan`, `enable_xhs`, `enable_subsidiary_xhs`（默认 `false`） |
 | `url_scan` | URL 扫描 | `urls` / `url_text`, `min_attention_score` |
 | `xhs_search` | 小红书搜索 | `keyword`, `max_notes`, `attention_threshold` |
 | `douyin_search` | 抖音搜索 | `keyword`, `max_videos`, `publish_time` |

@@ -129,6 +129,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         enable_url_scan=params.get("enable_url_scan", True),
         enable_asset_discovery=params.get("enable_asset_discovery", True),
         enable_xhs=params.get("enable_xhs", True),
+        enable_subsidiary_xhs=params.get("enable_subsidiary_xhs", False),
         enable_wechat=params.get("enable_wechat", False),
         wechat_device_id=params.get("wechat_device_id", ""),
         enable_copywriting=params.get("enable_copywriting", True),

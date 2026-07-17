@@ -181,6 +181,7 @@ class CompanyScanPipeline:
         enable_url_scan: bool = True,
         enable_asset_discovery: bool = True,
         enable_xhs: bool = True,
+        enable_subsidiary_xhs: bool = False,
         enable_wechat: bool = False,
         wechat_device_id: str = "",
         enable_copywriting: bool = True,
@@ -213,6 +214,7 @@ class CompanyScanPipeline:
         """
         from core.observability import obs_log
 
+        subsidiary_xhs_enabled = bool(enable_xhs and enable_subsidiary_xhs)
         result = {
             "task_id": task_id,
             "company_name": company_name,
@@ -239,7 +241,13 @@ class CompanyScanPipeline:
                 "providers": {},
             },
             "url_scan": {"enabled": enable_url_scan, "findings_count": 0, "copywritings_count": 0},
-            "xhs": {"enabled": enable_xhs, "keywords_used": [], "notes_count": 0, "profiles_count": 0},
+            "xhs": {
+                "enabled": enable_xhs,
+                "subsidiaries_enabled": subsidiary_xhs_enabled,
+                "keywords_used": [],
+                "notes_count": 0,
+                "profiles_count": 0,
+            },
             "wechat": {
                 "enabled": enable_wechat,
                 "status": "pending" if enable_wechat else "disabled",
@@ -451,7 +459,7 @@ class CompanyScanPipeline:
 
             wholly_owned_entities = list(result["control_structure"].get("entities") or [])
             followups: list[tuple[str, Any]] = []
-            if wholly_owned_entities and (enable_asset_discovery or enable_xhs):
+            if wholly_owned_entities and (enable_asset_discovery or subsidiary_xhs_enabled):
                 followups.append((
                     "wholly_owned_entities",
                     self._scan_wholly_owned_entities(
@@ -461,7 +469,7 @@ class CompanyScanPipeline:
                         enable_asset_discovery=enable_asset_discovery,
                         enable_url_scan=enable_url_scan,
                         enable_copywriting=enable_copywriting,
-                        enable_xhs=enable_xhs,
+                        enable_xhs=subsidiary_xhs_enabled,
                         xhs_max_notes=xhs_max_notes,
                         xhs_attention_threshold=xhs_attention_threshold,
                         min_attention_score=min_attention_score,

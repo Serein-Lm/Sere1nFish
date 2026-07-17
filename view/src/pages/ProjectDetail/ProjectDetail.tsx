@@ -3575,6 +3575,7 @@ export default function ProjectDetail() {
                     params.enable_url_scan = values.enable_url_scan ?? true
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? true
+                    params.enable_subsidiary_xhs = Boolean(values.enable_xhs && values.enable_subsidiary_xhs)
                     params.enable_wechat = values.enable_wechat ?? false
                     if (values.enable_wechat) params.wechat_device_id = values.wechat_device_id
                     params.enable_copywriting = values.enable_copywriting ?? true
@@ -3660,7 +3661,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_subsidiary_xhs: false, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -3695,7 +3696,14 @@ export default function ProjectDetail() {
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_xhs" valuePropName="checked" noStyle>
-                              <Checkbox>小红书爬取</Checkbox>
+                              <Checkbox>小红书爬取（默认只采集根公司）</Checkbox>
+                            </Form.Item>
+                            <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
+                              {({ getFieldValue }) => (
+                                <Form.Item name="enable_subsidiary_xhs" valuePropName="checked" noStyle>
+                                  <Checkbox disabled={!getFieldValue('enable_xhs')}>额外采集第一层全资子公司的小红书（默认关闭）</Checkbox>
+                                </Form.Item>
+                              )}
                             </Form.Item>
                             <Form.Item name="enable_wechat" valuePropName="checked" noStyle>
                               <Checkbox>微信公众号采集（默认关闭）</Checkbox>
@@ -3750,7 +3758,7 @@ export default function ProjectDetail() {
                             <Form.Item
                               name="control_scan_concurrency"
                               label="子公司采集并发"
-                              tooltip="默认逐个处理，避免多个子公司同时占用小红书账号"
+                              tooltip="默认逐个处理子公司的资产发现与深扫；显式开启子公司小红书后同样受此限流"
                             >
                               <InputNumber min={1} max={12} style={{ width: '100%' }} />
                             </Form.Item>
