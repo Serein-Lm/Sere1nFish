@@ -10,6 +10,39 @@ from api.services.xhs_target_selection import (
     merge_xhs_target_selection_results,
     parse_manual_targets,
 )
+from Sere1nGraph.graph.prompts.loader import load_prompt
+
+
+def test_auto_selection_prompt_keeps_explicit_business_policy_overrides() -> None:
+    prompt = load_prompt("xhs_target_selection/xhs_target_selection")
+
+    assert "`安徽广播电视台` 必须采集" in prompt
+    assert "交易所必须采集" in prompt
+    assert "不得机械外推到名称为清算、结算、登记、支付" in prompt
+    assert "`江苏省广电有线信息网络股份有限公司` 必须跳过" in prompt
+    assert "`跨境银行间支付清算有限责任公司`和`农信银资金清算中心有限责任公司`必须采集" in prompt
+    assert "名称以“中国广电”开头" in prompt
+    assert "`爱上电视传媒（北京）有限公司`" in prompt
+    assert "`中央广播电视总台`" in prompt
+    assert "以下商业广电网络或传媒目标必须采集" in prompt
+    assert "不得把“中国广电省网”或江苏省广电的跳过规则泛化" in prompt
+    assert "省级广播电视台默认不采集" in prompt
+    assert "禁止用“疑似虚构”“名称错误”“可能不存在”" in prompt
+
+
+def test_auto_selection_rejects_name_authenticity_as_decision_reason() -> None:
+    import api.services.xhs_target_selection as selection_module
+
+    with pytest.raises(ValueError, match="名称真实性"):
+        selection_module._AiTargetDecision.model_validate(
+            {
+                "target_id": "target-1",
+                "target_category": "unknown",
+                "should_collect_xhs": False,
+                "reason": "名称疑似虚构，可能不存在。",
+                "confidence": 0.8,
+            }
+        )
 
 
 def test_parse_manual_targets_accepts_common_separators_and_deduplicates() -> None:

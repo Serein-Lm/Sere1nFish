@@ -46,6 +46,15 @@ _LEGAL_SUFFIXES = (
     "有限责任公司",
     "有限公司",
 )
+_PROHIBITED_EXISTENCE_REASON_MARKERS = (
+    "疑似虚构",
+    "名称错误",
+    "可能不存在",
+    "名称混淆",
+    "名称疑似",
+    "无法确认真实",
+    "无法确认为真实",
+)
 
 
 class XhsTargetCandidate(BaseModel):
@@ -73,6 +82,14 @@ class _AiTargetDecision(BaseModel):
         if 1 < numeric <= 100:
             return numeric / 100
         return numeric
+
+    @field_validator("reason")
+    @classmethod
+    def reject_existence_judgments(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if any(marker in text for marker in _PROHIBITED_EXISTENCE_REASON_MARKERS):
+            raise ValueError("reason 禁止以目标名称真实性作为采集判断依据")
+        return text
 
 
 class _AiTargetDecisionBatch(BaseModel):
