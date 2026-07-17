@@ -180,6 +180,7 @@ async def lifespan(app: FastAPI):
         # tasks
         await db["tasks"].create_index("task_id")
         await db["tasks"].create_index([("project_id", 1), ("task_type", 1)])
+        await db["tasks"].create_index([("project_id", 1), ("batch_id", 1)], sparse=True)
         # contact_profiles — 系统3 人物画像
         from api.dao import contact_profiles as contact_profiles_dao
         await contact_profiles_dao.ensure_indexes(db)

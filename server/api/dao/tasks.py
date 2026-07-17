@@ -9,6 +9,17 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.db.collections import TASKS_COLLECTION
 
 
+async def insert_tasks(
+    db: AsyncIOMotorDatabase,
+    documents: list[dict[str, Any]],
+) -> int:
+    """Insert project task documents as one atomic batch request."""
+    if not documents:
+        return 0
+    result = await db[TASKS_COLLECTION].insert_many(documents)
+    return len(result.inserted_ids)
+
+
 async def mark_interrupted_tasks(db: AsyncIOMotorDatabase) -> int:
     """进程启动时终结无法跨进程恢复的任务实例。"""
     now = datetime.now(timezone.utc)

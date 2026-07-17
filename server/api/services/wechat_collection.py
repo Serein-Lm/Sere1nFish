@@ -18,6 +18,7 @@ async def resolve_wechat_task_definition(
     project_id: str,
     device_id: str,
     expected_target_id: str = "",
+    allow_running: bool = False,
 ) -> dict[str, Any]:
     """按手机匹配当前项目的微信采集配置，具体链接策略不暴露给调用侧。"""
     device_id = str(device_id or "").strip()
@@ -45,7 +46,7 @@ async def resolve_wechat_task_definition(
         ),
         candidates[0],
     )
-    if task_def.get("status") == "running":
+    if task_def.get("status") == "running" and not allow_running:
         raise ValueError("公众号手机采集任务正在运行中")
 
     configured_target_id = str(task_def.get("target_id") or "")
@@ -70,6 +71,7 @@ async def run_company_wechat_collection(
         project_id=project_id,
         device_id=device_id,
         expected_target_id=target_id,
+        allow_running=True,
     )
     task_def_id = str(task_def.get("task_def_id") or "")
     run_task_id = f"{task_id}_wechat"

@@ -6,12 +6,24 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 from api.db.mongodb import get_db
 from api.dao import mobile_collect as collect_dao
 from core.logger import get_logger
 from core.mobile.collect import run_collect_task
 
 logger = get_logger("mobile_collect_service")
+
+_TASK_DEFINITION_QUEUE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _task_definition_queue_lock(task_def_id: str) -> asyncio.Lock:
+    lock = _TASK_DEFINITION_QUEUE_LOCKS.get(task_def_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _TASK_DEFINITION_QUEUE_LOCKS[task_def_id] = lock
+    return lock
 
 
 async def run_mobile_collect_definition(
@@ -26,6 +38,35 @@ async def run_mobile_collect_definition(
     """原子占用并执行一个数据库任务定义，允许编排层注入本轮目标上下文。"""
     if not task_def_id:
         raise ValueError("缺少 task_def_id")
+
+    queue_lock = _task_definition_queue_lock(task_def_id)
+    if queue_lock.locked():
+        logger.info(
+            "手机采集定义进入等待队列 def=%s run=%s",
+            task_def_id,
+            run_task_id,
+        )
+    async with queue_lock:
+        return await _run_mobile_collect_definition_claimed(
+            db,
+            run_task_id=run_task_id,
+            project_id=project_id,
+            task_def_id=task_def_id,
+            runtime_overrides=runtime_overrides,
+            requested_by=requested_by,
+        )
+
+
+async def _run_mobile_collect_definition_claimed(
+    db,
+    *,
+    run_task_id: str,
+    project_id: str,
+    task_def_id: str,
+    runtime_overrides: dict | None = None,
+    requested_by: str = "",
+) -> dict:
+    """Claim and run one definition after its in-process queue slot is acquired."""
 
     task_def = await collect_dao.get_task_def(db, task_def_id)
     if not task_def:

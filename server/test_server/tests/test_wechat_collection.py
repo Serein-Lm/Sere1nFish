@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -155,3 +156,120 @@ async def test_mobile_collect_definition_claims_and_releases(
     )
 
     assert events == [("claim", "run-1"), ("status", "idle")]
+
+
+@pytest.mark.asyncio
+async def test_mobile_collect_definition_waits_for_same_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import mobile_collect_pipeline
+    from api.services import mobile_device_leases
+    from contextlib import asynccontextmanager
+
+    active = 0
+    peak = 0
+    completed: list[str] = []
+    mobile_collect_pipeline._TASK_DEFINITION_QUEUE_LOCKS.clear()
+
+    async def get_task(_db: Any, task_def_id: str):
+        return {"task_def_id": task_def_id, "project_id": "project-1"}
+
+    async def claim(_db: Any, task_def_id: str, *, run_task_id: str):
+        return {
+            "task_def_id": task_def_id,
+            "project_id": "project-1",
+            "run_task_id": run_task_id,
+        }
+
+    async def set_status(*_args: Any, **_kwargs: Any):
+        return None
+
+    async def run_collect(_db: Any, **kwargs: Any):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        completed.append(kwargs["run_task_id"])
+        active -= 1
+        return {"total": 0, "new": 0, "changed": 0}
+
+    @asynccontextmanager
+    async def lease(*_args: Any, **_kwargs: Any):
+        yield "owner"
+
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "get_task_def", get_task)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "claim_task_run", claim)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "set_task_status", set_status)
+    monkeypatch.setattr(mobile_collect_pipeline, "run_collect_task", run_collect)
+    monkeypatch.setattr(mobile_device_leases, "background_device_lease", lease)
+
+    await asyncio.gather(
+        mobile_collect_pipeline.run_mobile_collect_definition(
+            object(),
+            run_task_id="run-1",
+            project_id="project-1",
+            task_def_id="wechat-a",
+        ),
+        mobile_collect_pipeline.run_mobile_collect_definition(
+            object(),
+            run_task_id="run-2",
+            project_id="project-1",
+            task_def_id="wechat-a",
+        ),
+    )
+
+    assert peak == 1
+    assert completed == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
+async def test_background_device_lease_queues_same_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import mobile_device_leases
+
+    active = 0
+    peak = 0
+    mobile_device_leases._DEVICE_QUEUE_LOCKS.clear()
+
+    class _Reservation:
+        device_key = "device-key"
+        owner = "owner"
+        note = "mobile_collect"
+        since = None
+
+    class _Pool:
+        def acquire_for_task(self, *_args: Any, **_kwargs: Any):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            return _Reservation()
+
+        def release(self, *_args: Any, **_kwargs: Any):
+            nonlocal active
+            active -= 1
+
+    pool = _Pool()
+
+    async def upsert(*_args: Any, **_kwargs: Any):
+        return None
+
+    async def delete(*_args: Any, **_kwargs: Any):
+        return None
+
+    monkeypatch.setattr(mobile_device_leases, "resolve_device_key", lambda _device_id: "device-key")
+    monkeypatch.setattr(mobile_device_leases.DevicePool, "get_instance", lambda: pool)
+    monkeypatch.setattr(mobile_device_leases.reservations_dao, "upsert_reservation", upsert)
+    monkeypatch.setattr(mobile_device_leases.reservations_dao, "delete_reservation", delete)
+
+    async def use_device(run_task_id: str) -> None:
+        async with mobile_device_leases.background_device_lease(
+            object(),
+            device_id="device-a",
+            run_task_id=run_task_id,
+        ):
+            await asyncio.sleep(0.01)
+
+    await asyncio.gather(use_device("run-1"), use_device("run-2"))
+
+    assert peak == 1

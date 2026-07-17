@@ -40,7 +40,7 @@ import { stringToColor } from '../../utils/colorUtils'
 import { mapWebTaggingEnum } from '../../utils/webTaggingMap'
 import { renderFindingValue } from '../../utils/findingValueRenderer'
 import ProfileDrawer from '../../components/ProfileDrawer'
-import { listTasks, createTask, getProjectStats, deleteTask, batchDeleteTasks, getFindingCopywriting, getFindingProfile } from '../../services/taskService'
+import { listTasks, createTask, createCompanyScanBatch, getProjectStats, deleteTask, batchDeleteTasks, getFindingCopywriting, getFindingProfile } from '../../services/taskService'
 import type { Task, TaskType, TaskStatus, FindingCopywriting, ProjectStatsResponse, FindingProfile } from '../../services/taskService'
 import {
   fetchMobileScreenshotBlob,
@@ -87,6 +87,7 @@ const TASK_TUNING_DEFAULTS = {
   url_scan_concurrency: 10,
   copywriting_concurrency: 6,
   xhs_search_concurrency: 1,
+  company_scan_concurrency: 2,
 }
 
 const TASK_TUNING_FORM_DEFAULTS = {
@@ -96,6 +97,22 @@ const TASK_TUNING_FORM_DEFAULTS = {
   url_scan_concurrency: TASK_TUNING_DEFAULTS.url_scan_concurrency,
   copywriting_concurrency: TASK_TUNING_DEFAULTS.copywriting_concurrency,
   xhs_search_concurrency: TASK_TUNING_DEFAULTS.xhs_search_concurrency,
+  company_scan_concurrency: TASK_TUNING_DEFAULTS.company_scan_concurrency,
+}
+
+const MAX_COMPANY_SCAN_BATCH_SIZE = 200
+
+function parseCompanyNames(value: unknown): string[] {
+  const seen = new Set<string>()
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((name) => name.trim())
+    .filter((name) => {
+      const identity = name.toLocaleLowerCase()
+      if (!name || seen.has(identity)) return false
+      seen.add(identity)
+      return true
+    })
 }
 
 function boundedTaskTuning(value: unknown, fallback: number, maximum: number): number {
@@ -1066,6 +1083,7 @@ export default function ProjectDetail() {
           url_scan_concurrency: boundedTaskTuning(config.url_scan_concurrency, TASK_TUNING_DEFAULTS.url_scan_concurrency, 16),
           copywriting_concurrency: boundedTaskTuning(config.copywriting_concurrency, TASK_TUNING_DEFAULTS.copywriting_concurrency, 12),
           xhs_search_concurrency: boundedTaskTuning(config.xhs_search_concurrency, TASK_TUNING_DEFAULTS.xhs_search_concurrency, 8),
+          company_scan_concurrency: boundedTaskTuning(config.company_scan_concurrency, TASK_TUNING_DEFAULTS.company_scan_concurrency, 3),
         })
       } else {
         setTaskTuningValues(TASK_TUNING_FORM_DEFAULTS)
@@ -3664,6 +3682,23 @@ export default function ProjectDetail() {
               },
             },
             {
+              title: '目标公司',
+              key: 'company_name',
+              width: 220,
+              render: (_: unknown, rec: Task) => {
+                const companyName = typeof rec.params?.company_name === 'string' ? rec.params.company_name : ''
+                if (!companyName) return <Text type="secondary">-</Text>
+                return (
+                  <Space size={4} wrap>
+                    <Text>{companyName}</Text>
+                    {rec.batch_total && rec.batch_total > 1 ? (
+                      <Tag>{rec.batch_index}/{rec.batch_total}</Tag>
+                    ) : null}
+                  </Space>
+                )
+              },
+            },
+            {
               title: '创建时间',
               dataIndex: 'created_at',
               key: 'created_at',
@@ -4053,15 +4088,16 @@ export default function ProjectDetail() {
                   setTaskSubmitting(true)
                   const taskType = values.task_type as TaskType
                   const params: Record<string, unknown> = {}
+                  let companyNames: string[] = []
                   if (taskType === 'company_scan') {
-                    params.company_name = values.company_name
+                    companyNames = parseCompanyNames(values.company_names)
                     if (values.urls) {
                       const urlList = values.urls.split('\n').map((u: string) => u.trim()).filter(Boolean)
                       if (urlList.length > 0) params.urls = urlList
                     }
                     params.enable_url_scan = values.enable_url_scan ?? true
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
-                    params.enable_xhs = values.enable_xhs ?? true
+                    params.enable_xhs = values.enable_xhs ?? false
                     params.enable_subsidiary_xhs = Boolean(values.enable_xhs && values.enable_subsidiary_xhs)
                     params.xhs_target_selection_mode = values.xhs_target_selection_mode ?? 'auto'
                     if (values.enable_xhs && values.xhs_target_selection_mode === 'manual') {
@@ -4090,6 +4126,9 @@ export default function ProjectDetail() {
                     if (values.control_lookup_concurrency) params.control_lookup_concurrency = values.control_lookup_concurrency
                     if (values.control_icp_concurrency) params.control_icp_concurrency = values.control_icp_concurrency
                     if (values.control_scan_concurrency) params.control_scan_concurrency = values.control_scan_concurrency
+                    if (companyNames.length > 1 && values.company_scan_concurrency) {
+                      params.company_scan_concurrency = values.company_scan_concurrency
+                    }
                   }
                   if (taskType === 'url_scan') {
                     if (values.urls) {
@@ -4133,6 +4172,19 @@ export default function ProjectDetail() {
                     params.enable_chrome_pmc = values.enable_chrome_pmc ?? false
                     params.dry_run = values.dry_run ?? false
                   }
+                  if (taskType === 'company_scan' && companyNames.length > 1) {
+                    const batch = await createCompanyScanBatch(projectId, {
+                      company_names: companyNames,
+                      params,
+                    })
+                    message.success(`已下发 ${batch.task_count} 个公司扫描任务，并发 ${batch.concurrency}`)
+                    setIsTaskModalOpen(false)
+                    taskForm.resetFields()
+                    setActiveTab('tasks')
+                    await fetchTasks(projectId)
+                    return
+                  }
+                  if (taskType === 'company_scan') params.company_name = companyNames[0]
                   const result = await createTask(projectId, { task_type: taskType, params })
                   message.success('任务已下发')
                   setIsTaskModalOpen(false)
@@ -4175,11 +4227,52 @@ export default function ProjectDetail() {
                     const taskType = getFieldValue('task_type')
                     if (taskType === 'company_scan') return (
                       <>
-                        <Form.Item name="company_name" label="公司名称" rules={[{ required: true, message: '请输入公司名称' }]}>
-                          <Input placeholder="如：字节跳动" />
+                        <Form.Item
+                          name="company_names"
+                          label="公司列表"
+                          validateTrigger="onBlur"
+                          rules={[{
+                            validator: async (_, value) => {
+                              const names = parseCompanyNames(value)
+                              if (!names.length) throw new Error('请输入至少一家公司')
+                              if (names.length > MAX_COMPANY_SCAN_BATCH_SIZE) {
+                                throw new Error(`一次最多下发 ${MAX_COMPANY_SCAN_BATCH_SIZE} 家公司`)
+                              }
+                            },
+                          }]}
+                          extra="每行一家公司；会按原顺序去重，每家公司建立独立任务和 Target 归档。"
+                        >
+                          <Input.TextArea
+                            autoSize={{ minRows: 5, maxRows: 12 }}
+                            placeholder={'如：\n安徽广播电视台\n鞍钢集团有限公司\n北京广播电视台'}
+                          />
                         </Form.Item>
-                        <Form.Item name="urls" label="URL 列表（可选）">
+                        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.company_names !== cur.company_names}>
+                          {({ getFieldValue }) => {
+                            const companyCount = parseCompanyNames(getFieldValue('company_names')).length
+                            return companyCount ? (
+                              <div style={{ marginTop: -16, marginBottom: 16 }}>
+                                <Text type="secondary">已识别 {companyCount} 家公司</Text>
+                              </div>
+                            ) : null
+                          }}
+                        </Form.Item>
+                        <Form.Item
+                          name="urls"
+                          label="URL 列表（仅单家公司可选）"
+                          dependencies={['company_names']}
+                          rules={[{
+                            validator: async (_, value) => {
+                              if (value && parseCompanyNames(taskForm.getFieldValue('company_names')).length > 1) {
+                                throw new Error('批量公司不能共用 URL，请留空后由 FOFA/Hunter 自动发现')
+                              }
+                            },
+                          }]}
+                        >
                           <Input.TextArea rows={3} placeholder="每行一个 URL；留空时由公司身份、FOFA 和 Hunter 自动发现" />
+                        </Form.Item>
+                        <Form.Item name="company_scan_concurrency" label="批量公司并发" tooltip="网站和 API 公司任务可并行；同一手机仍会自动排队逐个执行。">
+                          <InputNumber min={1} max={3} style={{ width: '100%' }} />
                         </Form.Item>
                         <Form.Item label="扫描模块">
                           <Space orientation="vertical">

@@ -16,12 +16,14 @@ DEFAULT_URL_PROBE_CONCURRENCY = 64
 DEFAULT_URL_SCAN_CONCURRENCY = 10
 DEFAULT_COPYWRITING_CONCURRENCY = 6
 DEFAULT_XHS_SEARCH_CONCURRENCY = 1
+DEFAULT_COMPANY_SCAN_CONCURRENCY = 2
 
 MAX_ASSET_PROBE_CONCURRENCY = 128
 MAX_URL_PROBE_CONCURRENCY = 128
 MAX_URL_SCAN_CONCURRENCY = 16
 MAX_COPYWRITING_CONCURRENCY = 12
 MAX_XHS_SEARCH_CONCURRENCY = 8
+MAX_COMPANY_SCAN_CONCURRENCY = 3
 
 
 def _bounded(value: Any, *, default: int, maximum: int) -> int:
@@ -41,6 +43,7 @@ class CollectionRuntimeTuning:
     url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY
     copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY
     xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY
+    company_scan_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None) -> "CollectionRuntimeTuning":
@@ -70,6 +73,11 @@ class CollectionRuntimeTuning:
                 data.get("xhs_search_concurrency"),
                 default=DEFAULT_XHS_SEARCH_CONCURRENCY,
                 maximum=MAX_XHS_SEARCH_CONCURRENCY,
+            ),
+            company_scan_concurrency=_bounded(
+                data.get("company_scan_concurrency"),
+                default=DEFAULT_COMPANY_SCAN_CONCURRENCY,
+                maximum=MAX_COMPANY_SCAN_CONCURRENCY,
             ),
         )
 

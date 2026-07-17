@@ -56,6 +56,9 @@ export interface Task {
   project_id: string
   task_type: TaskType
   params: Record<string, unknown>
+  batch_id?: string
+  batch_index?: number
+  batch_total?: number
   status: TaskStatus
   progress: TaskProgress
   result?: TaskResult
@@ -267,6 +270,25 @@ export async function createTask(
   body: { task_type: TaskType; params: Record<string, unknown> }
 ): Promise<{ task_id: string; task_type: string; status: string }> {
   return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export interface CompanyScanBatchResponse {
+  batch_id: string
+  task_type: 'company_scan'
+  task_count: number
+  task_ids: string[]
+  concurrency: number
+  status: string
+}
+
+export async function createCompanyScanBatch(
+  projectId: string,
+  body: { company_names: string[]; params: Record<string, unknown> },
+): Promise<CompanyScanBatchResponse> {
+  return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/tasks/company-scan-batch`, {
     method: 'POST',
     body: JSON.stringify(body),
   })

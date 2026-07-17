@@ -8,7 +8,8 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "url_probe_concurrency": 64,
         "url_scan_concurrency": 10,
         "copywriting_concurrency": 6,
-        "xhs_search_concurrency": 3,
+        "xhs_search_concurrency": 1,
+        "company_scan_concurrency": 2,
     }
 
     bounded = CollectionRuntimeTuning.from_config(
@@ -18,6 +19,7 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
             "url_scan_concurrency": 99,
             "copywriting_concurrency": "8",
             "xhs_search_concurrency": None,
+            "company_scan_concurrency": 99,
         }
     )
     assert bounded.as_dict() == {
@@ -25,7 +27,8 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "url_probe_concurrency": 1,
         "url_scan_concurrency": 16,
         "copywriting_concurrency": 8,
-        "xhs_search_concurrency": 3,
+        "xhs_search_concurrency": 1,
+        "company_scan_concurrency": 3,
     }
 
     overridden = defaults.with_overrides(
@@ -38,5 +41,6 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "url_probe_concurrency": 64,
         "url_scan_concurrency": 16,
         "copywriting_concurrency": 6,
-        "xhs_search_concurrency": 3,
+        "xhs_search_concurrency": 1,
+        "company_scan_concurrency": 2,
     }

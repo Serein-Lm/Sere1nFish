@@ -20,6 +20,7 @@ from api.auth import User, get_current_active_user
 from api.db.mongodb import init_mongo, get_db
 from api.dao import projects as projects_dao
 from api.dao import findings as findings_dao
+from api.dao import tasks as tasks_dao
 from api.schemas.pagination import (
     PageResponse,
     TaskListRequest,
@@ -331,6 +332,11 @@ class TaskCreateRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class CompanyScanBatchCreateRequest(BaseModel):
+    company_names: list[str] = Field(min_length=1, max_length=200)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.get("/projects/{project_id}/assets")
 async def list_project_assets(
     project_id: str,
@@ -449,6 +455,111 @@ async def create_task(
     )
 
     return {"task_id": task_id, "task_type": req.task_type, "status": "pending"}
+
+
+@router.post("/projects/{project_id}/tasks/company-scan-batch")
+async def create_company_scan_batch(
+    project_id: str,
+    req: CompanyScanBatchCreateRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create one independently traceable company-scan task per company."""
+    from api.services.info_collection.tuning import get_collection_runtime_tuning
+    from api.services.project_task_batch import (
+        MAX_COMPANY_SCAN_BATCH_SIZE,
+        ProjectTaskJob,
+        parse_company_names,
+        run_project_task_batch,
+    )
+
+    db = get_db()
+    if not await projects_dao.get_project(db, project_id):
+        raise HTTPException(404, "项目不存在")
+
+    company_names = parse_company_names(req.company_names)
+    if not company_names:
+        raise HTTPException(400, "公司列表不能为空")
+    if len(company_names) > MAX_COMPANY_SCAN_BATCH_SIZE:
+        raise HTTPException(400, f"一次最多下发 {MAX_COMPANY_SCAN_BATCH_SIZE} 家公司")
+
+    shared_params = dict(req.params)
+    shared_params.pop("company_name", None)
+    requested_concurrency = shared_params.pop("company_scan_concurrency", None)
+    if len(company_names) > 1 and (
+        shared_params.get("urls") or str(shared_params.get("url_text") or "").strip()
+    ):
+        raise HTTPException(400, "批量公司扫描不能共用 URL 列表，请留空后由资产发现自动获取")
+
+    if shared_params.get("enable_wechat", False):
+        from api.services.wechat_collection import resolve_wechat_task_definition
+
+        try:
+            await resolve_wechat_task_definition(
+                db,
+                project_id=project_id,
+                device_id=str(shared_params.get("wechat_device_id") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    tuning = (await get_collection_runtime_tuning()).with_overrides(
+        company_scan_concurrency=requested_concurrency,
+    )
+    concurrency = tuning.company_scan_concurrency
+
+    batch_id = uuid.uuid4().hex[:12]
+    now = datetime.now()
+    total = len(company_names)
+    documents: list[dict[str, Any]] = []
+    jobs: list[ProjectTaskJob] = []
+    for index, company_name in enumerate(company_names, start=1):
+        task_id = uuid.uuid4().hex[:12]
+        task_params = {**shared_params, "company_name": company_name}
+        documents.append(
+            {
+                "task_id": task_id,
+                "project_id": project_id,
+                "task_type": "company_scan",
+                "params": task_params,
+                "requested_by": current_user.username,
+                "batch_id": batch_id,
+                "batch_index": index,
+                "batch_total": total,
+                "status": "pending",
+                "progress": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        jobs.append(
+            ProjectTaskJob(
+                task_id=task_id,
+                project_id=project_id,
+                task_type="company_scan",
+                params={**task_params, "_requested_by": current_user.username},
+            )
+        )
+
+    await tasks_dao.insert_tasks(db, documents)
+    spawn_background(
+        run_project_task_batch(
+            batch_id=batch_id,
+            project_id=project_id,
+            jobs=jobs,
+            executor=_execute_task,
+            concurrency=concurrency,
+        ),
+        name=f"task-batch:{batch_id}",
+    )
+
+    return {
+        "batch_id": batch_id,
+        "task_type": "company_scan",
+        "task_count": total,
+        "task_ids": [job.task_id for job in jobs],
+        "concurrency": concurrency,
+        "status": "pending",
+    }
 
 
 @router.post("/projects/{project_id}/tasks/upload")
