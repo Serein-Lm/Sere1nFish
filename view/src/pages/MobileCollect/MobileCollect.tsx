@@ -165,6 +165,8 @@ export default function MobileCollect() {
       device_id: '',
       app_name: '',
       keywords: [],
+      use_target_keyword_library: true,
+      max_resolved_keywords: 60,
       swipe_times: 3,
       swipe_interval: 1.2,
       extract_fields: [],
@@ -192,6 +194,8 @@ export default function MobileCollect() {
       device_id: task.device_id,
       app_name: task.app_name,
       keywords: task.keywords || [],
+      use_target_keyword_library: task.use_target_keyword_library ?? true,
+      max_resolved_keywords: task.max_resolved_keywords ?? 60,
       swipe_times: task.swipe_times,
       swipe_interval: task.swipe_interval,
       extract_fields: task.extract_fields || [],
@@ -550,9 +554,22 @@ export default function MobileCollect() {
           <Form.Item name="target_type" hidden>
             <Input />
           </Form.Item>
-          <Form.Item name="keywords" label="搜索关键词" tooltip="留空则仅打开应用浏览(如养号)">
+          <Form.Item name="keywords" label="搜索关键词" tooltip="显式关键词优先；开启目标词库后会合并公司和控股单位的渠道词">
             <Select mode="tags" placeholder="输入关键词后回车，可多个" tokenSeparators={[',']} />
           </Form.Item>
+          <Space wrap size="large">
+            <Form.Item
+              name="use_target_keyword_library"
+              label="项目目标词库"
+              valuePropName="checked"
+              tooltip="从数据库 Skill、项目 Target 及第一层 100% 控股单位补全当前渠道搜索词"
+            >
+              <Switch />
+            </Form.Item>
+            <Form.Item name="max_resolved_keywords" label="词库合并上限">
+              <InputNumber min={1} max={200} />
+            </Form.Item>
+          </Space>
           <Space size="large">
             <Form.Item name="swipe_times" label="滑动次数" rules={[{ required: true }]}>
               <InputNumber min={0} max={50} />

@@ -32,6 +32,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await coll.create_index([("project_id", 1), ("normalized_name", 1)])
     await coll.create_index("root_domain")
     await coll.create_index("target_id", sparse=True)
+    await coll.create_index([("project_id", 1), ("relation.parent_target_id", 1)])
 
 
 async def upsert_company_meta(
@@ -46,6 +47,9 @@ async def upsert_company_meta(
     source: str = "",
     task_id: str = "",
     target_id: str = "",
+    icp_domains: list[str] | None = None,
+    relation: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """写入/更新一条公司元信息，返回最新文档。"""
     meta_id = company_meta_id(project_id, input_name)
@@ -64,6 +68,14 @@ async def upsert_company_meta(
     }
     if target_id:
         set_fields["target_id"] = target_id
+    if icp_domains is not None:
+        set_fields["icp_domains"] = list(
+            dict.fromkeys(str(domain).strip() for domain in icp_domains if str(domain).strip())
+        )
+    if relation is not None:
+        set_fields["relation"] = relation
+    if provenance is not None:
+        set_fields["provenance"] = provenance
     await db[COMPANY_META_COLLECTION].update_one(
         {"meta_id": meta_id},
         {"$set": set_fields, "$setOnInsert": {"created_at": now}},

@@ -22,6 +22,8 @@ export interface CollectTaskDef {
   device_id: string
   app_name: string
   keywords: string[]
+  use_target_keyword_library?: boolean
+  max_resolved_keywords?: number
   swipe_times: number
   swipe_interval: number
   extract_fields: ExtractField[]
@@ -51,6 +53,8 @@ export interface CollectTaskInput {
   device_id: string
   app_name: string
   keywords: string[]
+  use_target_keyword_library?: boolean
+  max_resolved_keywords?: number
   swipe_times: number
   swipe_interval: number
   extract_fields: ExtractField[]
@@ -120,6 +124,14 @@ export interface DryRunResult {
   changed: number
 }
 
+export interface ResolvedTaskKeywords {
+  channel: string
+  keywords: string[]
+  target_ids: string[]
+  sources: string[]
+  keyword_targets: Record<string, { target_id: string; target_name: string }>
+}
+
 export interface TriggerDef {
   type: 'interval' | 'cron'
   interval_seconds?: number | null
@@ -164,6 +176,12 @@ export function listTaskDefs(projectId?: string) {
 
 export function getTaskDef(taskDefId: string) {
   return apiFetch<CollectTaskDef>(`${BASE}/tasks/${encodeURIComponent(taskDefId)}`)
+}
+
+export function getResolvedTaskKeywords(taskDefId: string) {
+  return apiFetch<ResolvedTaskKeywords>(
+    `${BASE}/tasks/${encodeURIComponent(taskDefId)}/resolved-keywords`,
+  )
 }
 
 export function listSourceLinkStrategies() {

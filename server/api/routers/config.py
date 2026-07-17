@@ -522,7 +522,7 @@ async def set_tool_config(tool_name: str, body: ToolConfigUpdate, _: User = Depe
     """
     设置工具配置
     
-    支持的工具：tianyancha, hunter, bocha 等
+    支持的工具：tianyancha, hunter, fofa, bocha 等
     """
     db = get_db()
     await config_dao.set_tool_config(db, tool_name, body.api_key)

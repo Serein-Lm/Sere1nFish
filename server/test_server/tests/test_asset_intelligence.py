@@ -14,6 +14,11 @@ from api.services.asset_intelligence.contracts import (
     canonical_asset_url,
 )
 from api.services.asset_intelligence.service import AssetIntelligenceService
+from api.services.asset_intelligence.triage import (
+    AssetTriageBatch,
+    AssetTriageDecision,
+    AssetTriageService,
+)
 
 
 class _Provider:
@@ -192,6 +197,9 @@ async def test_discover_persists_once_and_returns_only_changed_alive_urls(
     async def upsert(_db: Any, **kwargs: Any) -> dict[str, Any]:
         assert len(kwargs["assets"]) == 1
         doc = kwargs["assets"][0]
+        assert "category" not in doc
+        assert "relevance_score" not in doc
+        assert "reason" not in doc
         asset_id = assets_dao.fofa_asset_id(
             kwargs["project_id"], doc["host"], doc["ip"], doc["port"]
         )
@@ -221,3 +229,165 @@ async def test_discover_persists_once_and_returns_only_changed_alive_urls(
     assert result["alive"] == 1
     assert result["scan_urls"] == ["https://example.com"]
     assert set(result["providers"]) == {"fofa", "hunter"}
+
+
+@pytest.mark.asyncio
+async def test_discover_discards_and_orders_assets_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import service as module
+
+    candidates = [
+        AssetCandidate(link="https://official.example.com", title="官网", sources=["fofa"]),
+        AssetCandidate(link="https://third-party.example.net", title="第三方", sources=["fofa"]),
+        AssetCandidate(link="https://oa.example.com", title="OA", sources=["fofa"]),
+    ]
+
+    class _ManyProvider:
+        name = "fofa"
+
+        async def search(
+            self,
+            _identity: AssetIdentity,
+            *,
+            size: int,
+        ) -> ProviderSearchResult:
+            assert size == 25
+            return ProviderSearchResult(provider=self.name, candidates=candidates)
+
+    class _Triage:
+        async def prioritize(self, values: list[AssetCandidate], **_kwargs: Any) -> list[AssetCandidate]:
+            assert values == candidates
+            return [values[2], values[0]]
+
+    persisted_urls: list[str] = []
+
+    async def upsert(_db: Any, **kwargs: Any) -> dict[str, Any]:
+        docs = kwargs["assets"]
+        persisted_urls.extend(str(doc["canonical_url"]) for doc in docs)
+        changed_ids = [
+            assets_dao.fofa_asset_id(
+                kwargs["project_id"],
+                str(doc["host"]),
+                str(doc["ip"]),
+                str(doc["port"]),
+            )
+            for doc in docs
+        ]
+        return {
+            "inserted": len(docs),
+            "updated": 0,
+            "unchanged": 0,
+            "total": len(docs),
+            "inserted_asset_ids": changed_ids,
+            "changed_asset_ids": changed_ids,
+        }
+
+    monkeypatch.setattr(module.AssetProviderFactory, "available", lambda: ("fofa",))
+    monkeypatch.setattr(module.AssetProviderFactory, "create", lambda _name: _ManyProvider())
+    monkeypatch.setattr(module.assets_dao, "upsert_assets_batch", upsert)
+
+    result = await AssetIntelligenceService(
+        object(),
+        probe=_Probe(),
+        triage=_Triage(),
+    ).discover(
+        identity=AssetIdentity("示例", "示例公司", "example.com"),
+        project_id="project-1",
+        task_id="task-1",
+        provider_sizes={"fofa": 25},
+    )
+
+    expected = ["https://oa.example.com", "https://official.example.com"]
+    assert persisted_urls == expected
+    assert result["alive_urls"] == expected
+    assert result["scan_urls"] == expected
+    assert result["discovered"] == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_triage_discards_third_party_and_prioritizes_business_system(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from Sere1nGraph.graph.agents import runtime as agent_runtime
+    from Sere1nGraph.graph.prompts import loader as prompt_loader
+
+    class _Structured:
+        async def ainvoke(self, _messages: Any) -> AssetTriageBatch:
+            return AssetTriageBatch(
+                items=[
+                    AssetTriageDecision(
+                        index=0,
+                        category="official_public_system",
+                        relevance_score=75,
+                    ),
+                    AssetTriageDecision(
+                        index=1,
+                        category="third_party_system",
+                        relevance_score=10,
+                    ),
+                    AssetTriageDecision(
+                        index=2,
+                        category="business_system",
+                        relevance_score=96,
+                    ),
+                ]
+            )
+
+    class _Llm:
+        def with_structured_output(self, _schema: Any) -> _Structured:
+            return _Structured()
+
+    monkeypatch.setattr(agent_runtime, "create_llm", lambda *_args, **_kwargs: _Llm())
+    monkeypatch.setattr(prompt_loader, "load_prompt", lambda _name: "asset triage")
+    candidates = [
+        AssetCandidate(link="https://www.example.com", title="示例公司官网"),
+        AssetCandidate(link="https://generic-saas.example.net", title="通用 SaaS 登录"),
+        AssetCandidate(link="https://srm.example.com", title="示例公司供应商门户"),
+    ]
+    result = await AssetTriageService(object()).prioritize(
+        candidates,
+        identity=AssetIdentity(
+            input_name="示例",
+            normalized_name="示例公司",
+            root_domain="example.com",
+        ),
+        project_id="project-1",
+        task_id="task-1",
+    )
+
+    assert [candidate.canonical_url for candidate in result] == [
+        "https://srm.example.com",
+        "https://www.example.com",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_triage_failure_keeps_assets_for_safe_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from Sere1nGraph.graph.agents import runtime as agent_runtime
+    from Sere1nGraph.graph.prompts import loader as prompt_loader
+
+    class _Structured:
+        async def ainvoke(self, _messages: Any) -> Any:
+            raise RuntimeError("model unavailable")
+
+    class _Llm:
+        def with_structured_output(self, _schema: Any) -> _Structured:
+            return _Structured()
+
+    monkeypatch.setattr(agent_runtime, "create_llm", lambda *_args, **_kwargs: _Llm())
+    monkeypatch.setattr(prompt_loader, "load_prompt", lambda _name: "asset triage")
+    candidates = [
+        AssetCandidate(link="https://a.example.com"),
+        AssetCandidate(link="https://b.example.com"),
+    ]
+    result = await AssetTriageService(object()).prioritize(
+        candidates,
+        identity=AssetIdentity("示例", "示例公司", "example.com"),
+        project_id="project-1",
+        task_id="task-1",
+    )
+
+    assert result == candidates

@@ -161,9 +161,16 @@ class _CollectStage(Stage):
             task_id=st["run_task_id"],
         )
 
-    async def _deep_dive(self, ctx, keyword: str, candidate: dict) -> None:
+    async def _deep_dive(
+        self,
+        ctx,
+        keyword: str,
+        candidate: dict,
+        collect_target: dict[str, Any] | None = None,
+    ) -> None:
         """点进一条详情 → 截图 → 综合结构化 → 返回。"""
         st = ctx.state
+        collect_target = collect_target or st.get("target")
         stop: asyncio.Event = st["stop_event"]
         device_id = st["device_id"]
         run_task_id = st["run_task_id"]
@@ -254,7 +261,7 @@ class _CollectStage(Stage):
                         st["db"],
                         url=source_url,
                         project_id=st["project_id"] or "",
-                        target=st.get("target"),
+                        target=collect_target,
                         task_def_id=st["task_def_id"],
                         run_task_id=run_task_id,
                         keyword=keyword,
@@ -285,8 +292,10 @@ class _CollectStage(Stage):
                                 "source_type": source_result.get("source_type") or "wechat_article",
                                 "source_document_id": source_result.get("document_id") or "",
                                 "source_document_version_id": source_result.get("version_id") or "",
-                                "target_id": source_result.get("target_id") or "",
-                                "target_name": source_result.get("target_name") or "",
+                                "target_id": source_result.get("target_id")
+                                or str((collect_target or {}).get("target_id") or ""),
+                                "target_name": source_result.get("target_name")
+                                or str((collect_target or {}).get("canonical_name") or ""),
                                 "contacts": source_result.get("contacts") or [],
                                 "keyword": keyword,
                                 "screenshot_id": shot_ids[0] if shot_ids else sid,
@@ -394,8 +403,8 @@ class _CollectStage(Stage):
                         or candidate.get("subject_match"),
                         "score_reason": rec.get("score_reason", ""),
                         "source_url": source_url or rec.get("source_url"),
-                        "target_id": str((st.get("target") or {}).get("target_id") or ""),
-                        "target_name": str((st.get("target") or {}).get("canonical_name") or ""),
+                        "target_id": str((collect_target or {}).get("target_id") or ""),
+                        "target_name": str((collect_target or {}).get("canonical_name") or ""),
                         "keyword": keyword,
                         "screenshot_id": shot_ids[0] if shot_ids else sid,
                         "screenshot_url": shot_urls[0] if shot_urls else url,
@@ -427,7 +436,9 @@ class _CollectStage(Stage):
         stop: asyncio.Event = st["stop_event"]
         if stop.is_set():
             return
-        keyword = str(item.payload or "")
+        seed = item.payload if isinstance(item.payload, dict) else {"keyword": item.payload}
+        keyword = str(seed.get("keyword") or "")
+        collect_target = seed.get("target") or st.get("target")
         device_id = st["device_id"]
         app_name = st["app_name"]
         project_id = st["project_id"]
@@ -499,6 +510,8 @@ class _CollectStage(Stage):
                             "subject_match": rec.get("subject_match"),
                             "score_reason": rec.get("score_reason", ""),
                             "source_url": rec.get("source_url"),
+                            "target_id": str((collect_target or {}).get("target_id") or ""),
+                            "target_name": str((collect_target or {}).get("canonical_name") or ""),
                             "keyword": keyword,
                             "screenshot_id": sid,
                             "screenshot_url": url,
@@ -540,7 +553,7 @@ class _CollectStage(Stage):
                     for cand in candidates[:detail_max_items]:
                         if stop.is_set():
                             break
-                        await self._deep_dive(ctx, keyword, cand)
+                        await self._deep_dive(ctx, keyword, cand, collect_target)
 
                 # 到底检测: 连续若干屏无新去重键 → 判定已滑到底, 提前停止
                 if new_this_screen == 0:
@@ -792,7 +805,7 @@ async def run_collect_task(
     stop_event = asyncio.Event()
     _running[run_task_id] = stop_event
 
-    keywords = list(task_def.get("keywords") or []) or [""]
+    explicit_keywords = list(task_def.get("keywords") or [])
     counters = {
         "total": 0,
         "new": 0,
@@ -836,6 +849,42 @@ async def run_collect_task(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[collect] Target 解析失败，继续执行未聚类采集: %s", exc)
 
+    keyword_resolution: dict[str, Any] = {
+        "channel": "",
+        "keywords": explicit_keywords,
+        "target_ids": [],
+        "sources": ["task_explicit"] if explicit_keywords else [],
+    }
+    if bool(task_def.get("use_target_keyword_library", True)) and project_id:
+        from api.services.search_terms import infer_collection_channel
+
+        channel = infer_collection_channel(
+            app_name=str(task_def.get("app_name") or ""),
+            source_link_strategy=str(task_def.get("source_link_strategy") or ""),
+        )
+        if channel:
+            try:
+                from api.services.search_terms import resolve_project_target_terms
+
+                resolved = await resolve_project_target_terms(
+                    db,
+                    project_id=project_id,
+                    target_id=str((target or {}).get("target_id") or task_def.get("target_id") or ""),
+                    target_name=str(
+                        (target or {}).get("canonical_name")
+                        or task_def.get("target_name")
+                        or ""
+                    ),
+                    channel=channel,
+                    explicit_keywords=explicit_keywords,
+                    include_direct_children=True,
+                    max_keywords=int(task_def.get("max_resolved_keywords") or 60),
+                )
+                keyword_resolution = resolved.as_dict()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[collect] 项目目标词解析失败，回退显式关键词: %s", exc)
+    keywords = list(keyword_resolution.get("keywords") or explicit_keywords) or [""]
+
     device_key = await asyncio.to_thread(resolve_device_key, device_id)
     pool = DevicePool.get_instance()
     try:
@@ -876,6 +925,8 @@ async def run_collect_task(
         "dry_run": dry_run,
         "preview": preview,
         "preview_limit": preview_limit,
+        "keywords_used": keywords,
+        "keyword_resolution": keyword_resolution,
     }
 
     pipe = Pipeline(state=state, pipeline_id=run_task_id[:8])
@@ -898,7 +949,19 @@ async def run_collect_task(
         },
     )
     try:
-        await pipe.run(seeds=[Item(payload=kw) for kw in keywords], entry="collect")
+        keyword_targets = keyword_resolution.get("keyword_targets") or {}
+        seeds = []
+        for keyword in keywords:
+            target_info = keyword_targets.get(keyword) if isinstance(keyword_targets, dict) else None
+            resolved_target = target
+            if isinstance(target_info, dict) and target_info.get("target_id"):
+                resolved_target = {
+                    "target_id": str(target_info.get("target_id") or ""),
+                    "target_type": "company",
+                    "canonical_name": str(target_info.get("target_name") or ""),
+                }
+            seeds.append(Item(payload={"keyword": keyword, "target": resolved_target}))
+        await pipe.run(seeds=seeds, entry="collect")
     finally:
         _running.pop(run_task_id, None)
         try:
@@ -921,4 +984,10 @@ async def run_collect_task(
             **counters,
         },
     )
-    return {"stopped": stop_event.is_set(), "preview": preview, **counters}
+    return {
+        "stopped": stop_event.is_set(),
+        "preview": preview,
+        "keywords_used": keywords,
+        "keyword_resolution": keyword_resolution,
+        **counters,
+    }

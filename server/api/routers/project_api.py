@@ -142,6 +142,11 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         url_scan_concurrency=tuning.url_scan_concurrency,
         copywriting_concurrency=tuning.copywriting_concurrency,
         xhs_search_concurrency=tuning.xhs_search_concurrency,
+        enable_control_structure=params.get("enable_control_structure", True),
+        control_max_entities=max(1, min(int(params.get("control_max_entities") or 100), 500)),
+        control_lookup_concurrency=max(1, min(int(params.get("control_lookup_concurrency") or 4), 12)),
+        control_icp_concurrency=max(1, min(int(params.get("control_icp_concurrency") or 6), 20)),
+        control_scan_concurrency=max(1, min(int(params.get("control_scan_concurrency") or 4), 12)),
     )
 
 async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):

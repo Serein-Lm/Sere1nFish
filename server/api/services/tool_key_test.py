@@ -32,38 +32,26 @@ async def _load_tool_api_key(tool_name: str) -> str:
 
 
 async def _validate_tianyancha(api_key: str) -> tuple[bool, str]:
-    """天眼查 ICP 备案接口最小查询校验。"""
-    if not api_key:
-        return False, "天眼查 API Key 未配置"
-    url = (
-        "http://open.api.tianyancha.com/services/open/ipr/icp/3.0"
-        "?keyword=腾讯&icpType=1&pageNum=1&pageSize=1"
+    """校验 ICP 与公司扫描必需的实际控制权接口 ID 747。"""
+    from crawler_tools.tianyancha_tools import (
+        TianyanchaApiError,
+        TianyanchaClient,
+        validate_key,
     )
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"Authorization": api_key},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    return False, f"天眼查接口 HTTP {resp.status}"
-                data = await resp.json()
-    except Exception as exc:  # noqa: BLE001
-        return False, f"天眼查接口请求异常: {exc}"
 
-    code = data.get("error_code")
-    if code is None:
-        code = data.get("code")
-    # error_code=0 正常；300000 系列多为无数据但 Key 有效
-    if code in (0, "0"):
-        return True, "天眼查 Key 有效"
-    reason = data.get("reason") or data.get("message") or data.get("msg") or "未知错误"
-    # 权限/账号类错误视为 Key 无效
-    if any(kw in str(reason) for kw in ("权限", "账号", "token", "Token", "认证", "无效")):
-        return False, f"Key 无效: {reason}"
-    # 其它（如无数据）仍表示 Key 可用
-    return True, f"天眼查 Key 有效（接口返回: {reason}）"
+    icp_ok, icp_message = await validate_key(api_key)
+    if not icp_ok:
+        return False, icp_message
+    try:
+        client = TianyanchaClient(api_key, timeout_seconds=15)
+        await client.list_direct_wholly_controlled(
+            "天津滨海国际机场",
+            max_entities=1,
+            page_concurrency=1,
+        )
+    except TianyanchaApiError as exc:
+        return False, f"ICP备案接口可用；实际控制权 ID 747 不可用({exc.code}): {exc.reason}"
+    return True, "天眼查 API Key 可用（ICP备案 + 实际控制权 ID 747）"
 
 
 async def _validate_bocha(api_key: str) -> tuple[bool, str]:

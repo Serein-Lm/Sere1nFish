@@ -27,6 +27,7 @@ CORE_SKILL_SLUGS = {
     "sms",
     "vendor",
     "wechat",
+    "wechat-keywords",
     "xhs-keywords",
 }
 
@@ -43,6 +44,7 @@ CORE_SKILLS_WITH_REFERENCES = {
 }
 
 CORE_PROMPT_SLUGS = {
+    "asset_triage/asset_triage",
     "bid_collect/bid_collect",
     "browser_chat/browser_chat",
     "copywriting/copywriting",

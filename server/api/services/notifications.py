@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from api.utils.config_crypto import is_sensitive_key
 from core.logger import get_logger
+from core.background import spawn_background
 
 
 NotificationLevel = Literal["debug", "info", "notice", "warning", "error", "critical"]
@@ -222,12 +223,29 @@ async def _send_dingtalk(
         from crawler_tools.dingtalk_bot import create_dingtalk_bot
 
         bot = await create_dingtalk_bot(bot_name)
+        resolved_bot_name = bot_name
+        if not bot and bot_name == DEFAULT_BOT_NAME:
+            from api.dao import config as config_dao
+            from api.db.mongodb import get_db
+
+            configs = await config_dao.list_dingtalk_configs(get_db())
+            for candidate_name, candidate_config in sorted(configs.items()):
+                if not (
+                    candidate_config.get("enabled", True)
+                    and candidate_config.get("access_token")
+                ):
+                    continue
+                bot = await create_dingtalk_bot(candidate_name)
+                if bot:
+                    resolved_bot_name = candidate_name
+                    break
         if not bot:
             return NotificationResult(
                 channel="dingtalk",
                 target=bot_name,
                 success=False,
                 message=f"钉钉机器人 {bot_name} 未配置或未启用",
+                skipped=True,
             )
         if msg_type == "text":
             result = await bot.send_text(text, at_mobiles=at_mobiles, at_all=at_all)
@@ -240,7 +258,7 @@ async def _send_dingtalk(
             )
         return NotificationResult(
             channel="dingtalk",
-            target=bot_name,
+            target=resolved_bot_name,
             success=result.success,
             message=result.message,
             errcode=result.errcode,
@@ -345,20 +363,54 @@ async def notify_event(
 def notify_event_background(**kwargs: Any) -> bool:
     """Fire-and-forget notification hook for async request/task contexts."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return False
 
-    task = loop.create_task(notify_event(**kwargs))
+    async def _dispatch() -> None:
+        result = await notify_event(**kwargs)
+        if not result.ok and not result.skipped:
+            logger.warning("通知发送失败: %s", result.to_dict())
 
-    def _done(done: asyncio.Task[NotificationDispatchResult]) -> None:
-        try:
-            result = done.result()
-            if not result.ok and not result.skipped:
-                logger.warning(f"通知发送失败: {result.to_dict()}")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"通知后台任务异常: {exc}")
-
-    task.add_done_callback(_done)
+    event = str(kwargs.get("event") or "event")
+    spawn_background(_dispatch(), name=f"notification:{event}")
     return True
 
+
+def notify_target_collection_completed(
+    *,
+    project_id: str,
+    task_id: str,
+    target_id: str,
+    target_name: str,
+    source: str,
+    summary: dict[str, Any] | None = None,
+    status: str = "completed",
+) -> bool:
+    """统一发送一次 Target 采集完成事件，具体通道由通知策略选择。"""
+    normalized_status = str(status or "completed")
+    status_text = {
+        "completed": "完成",
+        "partial": "部分完成",
+        "failed": "失败",
+    }.get(normalized_status, normalized_status)
+    target_label = target_name or target_id or "Target"
+    return notify_event_background(
+        event="target.collection.completed",
+        title=f"{target_label} 信息收集{status_text}",
+        content=(
+            "目标公司本轮信息收集已结束，可在项目中查看最终产物。"
+            if normalized_status == "completed"
+            else "目标公司本轮信息收集已结束，请结合通知摘要检查异常。"
+        ),
+        level="notice" if normalized_status == "completed" else "warning",
+        source=source,
+        project_id=project_id,
+        task_id=task_id,
+        context={
+            "target_id": target_id,
+            "target_name": target_name,
+            "status": normalized_status,
+            "summary": summary or {},
+        },
+    )

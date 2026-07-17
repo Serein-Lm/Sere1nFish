@@ -82,70 +82,27 @@ def _get_tool_api_key(tool_name: str) -> str:
 )
 def tianyancha_get_domain(company_name: str) -> str:
     """
-    使用配置中的天眼查 API Key 调用 ICP 备案接口：
-    http://open.api.tianyancha.com/services/open/ipr/icp/3.0?keyword=xxx&icpType=1&pageNum=1&pageSize=20
+    使用统一天眼查 adapter 调用 HTTPS ICP 备案接口。
     返回推测的官网域名。
 
     返回内容为**可直接给 BrowserAgent 使用**的一段简要说明，例如：
     - 成功：`公司 XXX 的官网域名为 example.com`
     - 失败：返回失败原因说明。
     """
-    api_key = _get_tool_api_key("tianyancha")
-
-    if not api_key:
-        return "天眼查 API Key 未在数据库 tools.tianyancha.api_key 中配置，无法调用天眼查接口。"
-
-    # 使用 ICP 备案 3.0 接口，GET 方式
-    # 为了与旧实现保持行为一致，这里直接在 URL 中拼接查询参数，
-    # 不再使用请求库的 params 参数。
-    url = (
-        "http://open.api.tianyancha.com/services/open/ipr/icp/3.0"
-        f"?keyword={company_name}&icpType=1&pageNum=1&pageSize=20"
-    )
-    headers = {
-        "Authorization": api_key,
-    }
-
     try:
-        resp = requests.get(url, headers=headers, timeout=10.0)
-        if resp.status_code != 200:
-            return f"调用天眼查 ICP 接口失败，HTTP 状态码：{resp.status_code}，响应：{resp.text}"
+        from crawler_tools.tianyancha_tools import TianyanchaClient
 
-        data = resp.json()
+        async def _lookup():
+            client = await TianyanchaClient.from_runtime_config()
+            return await client.get_icp_records(company_name)
+
+        records = _run_coro_sync(_lookup()) or []
     except Exception as e:
         return f"调用天眼查 ICP 接口时发生异常：{e}"
-    code = data.get("error_code")
-    if code is None:
-        code = data.get("code")
-    if code not in (0, "0", None):
-        msg = data.get("reason") or data.get("message") or data.get("msg") or str(data)
-        return f"天眼查 ICP 接口返回错误（code={code}）：{msg}"
-
-    result = data.get("result") or data.get("data") or {}
-    items = result.get("items") or result.get("list") or result.get("icpList") or []
-
-    website: str | None = None
-    if isinstance(items, list) and items:
-        # 取第一条备案记录作为“官网”候选
-        first = items[0]
-        if isinstance(first, dict):
-            # ICP 接口中常见字段：domain、domainName、siteUrl 等，这里做宽松兼容
-            website = (
-                first.get("domain")
-                or first.get("domainName")
-                or first.get("siteUrl")
-                or first.get("homeUrl")
-            )
-
-    if not website:
-        return (
-            f"天眼查 ICP 接口调用成功，但未在返回结果中找到公司“{company_name}”的域名/网站信息。"
-            f"原始返回：{data}"
-        )
-
-    website = str(website).strip()
-
-    return f"公司“{company_name}”的官网域名为：{website}"
+    if not records:
+        return f"天眼查 ICP 接口调用成功，但未找到公司“{company_name}”的备案域名。"
+    domains = list(dict.fromkeys(record.domain for record in records if record.domain))
+    return f"公司“{company_name}”的备案域名为：{', '.join(domains)}"
 
 
 @tool(

@@ -192,6 +192,11 @@ class CompanyScanPipeline:
         url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY,
+        enable_control_structure: bool = True,
+        control_max_entities: int = 100,
+        control_lookup_concurrency: int = 4,
+        control_icp_concurrency: int = 6,
+        control_scan_concurrency: int = 4,
     ) -> dict[str, Any]:
         """
         运行综合扫描流水线
@@ -209,6 +214,15 @@ class CompanyScanPipeline:
             "status": "running",
             "identity": {},
             "router_result": None,
+            "control_structure": {
+                "enabled": enable_control_structure,
+                "status": "pending" if enable_control_structure else "disabled",
+                "relation_type": "wholly_owned_controlled_entity",
+                "relation_depth": 1,
+                "ownership_percent": 100.0,
+                "entities": [],
+                "errors": [],
+            },
             "assets": {
                 "enabled": enable_asset_discovery,
                 "discovered": 0,
@@ -252,7 +266,11 @@ class CompanyScanPipeline:
                     timeout=COMPANY_NORMALIZE_TIMEOUT_SECONDS,
                 ),
                 asyncio.wait_for(
-                    self._run_company_router(company_name),
+                    self._run_company_router(
+                        company_name,
+                        project_id=project_id,
+                        task_id=task_id,
+                    ),
                     timeout=COMPANY_ROUTER_TIMEOUT_SECONDS,
                 ),
                 return_exceptions=True,
@@ -326,11 +344,40 @@ class CompanyScanPipeline:
                 "keywords": router_output.all_keywords,
             }
 
+            from api.dao import targets as targets_dao
+            from api.services.search_terms import build_target_channel_terms
+
+            channel_terms = build_target_channel_terms(
+                names=aliases,
+                routed_terms_by_channel=router_output.all_keywords if router_output.success else {},
+            )
+            await targets_dao.link_project_target(
+                self.db,
+                project_id=project_id,
+                target=target,
+                search_terms=aliases,
+                search_terms_by_channel=channel_terms,
+                task_def_id=task_id,
+            )
+
             if not router_output.success:
                 logger.warning(f"[company_scan] 公司路由失败: {router_output.error}，使用默认策略")
 
             # ── 阶段 2: 资产发现/URL 深扫与社媒采集并发执行 ──
             tasks: list[Any] = []
+            xhs_succeeded = False
+            if enable_control_structure:
+                tasks.append(
+                    self._run_control_structure(
+                        task_id=task_id,
+                        project_id=project_id,
+                        parent_target=target,
+                        company_name=normalized_name,
+                        max_entities=control_max_entities,
+                        page_concurrency=control_lookup_concurrency,
+                        icp_concurrency=control_icp_concurrency,
+                    )
+                )
             if enable_asset_discovery or (enable_url_scan and (url_text or urls)):
                 tasks.append(
                     self._run_asset_and_url_scan(
@@ -377,13 +424,52 @@ class CompanyScanPipeline:
                         if sub.get("kind") == "asset_url":
                             result["assets"].update(sub.get("assets") or {})
                             result["url_scan"].update(sub.get("url_scan") or {})
+                        elif sub.get("kind") == "control_structure":
+                            result["control_structure"].update(sub.get("result") or {})
                         elif "notes_count" in sub:
                             result["xhs"].update(sub)
+                            xhs_succeeded = True
                 if result["sub_errors"] and len(result["sub_errors"]) == len(tasks):
                     raise RuntimeError("所有公司扫描子流水线均失败: " + "; ".join(result["sub_errors"]))
 
+            controlled_entities = list(result["control_structure"].get("entities") or [])
+            if controlled_entities and (enable_asset_discovery or enable_xhs):
+                await self._update_progress(
+                    task_id,
+                    "controlled_entities",
+                    f"并发采集 {len(controlled_entities)} 个第一层全资控股单位...",
+                )
+                controlled_scans = await self._scan_controlled_entities(
+                    task_id=task_id,
+                    project_id=project_id,
+                    entities=controlled_entities,
+                    enable_asset_discovery=enable_asset_discovery,
+                    enable_url_scan=enable_url_scan,
+                    enable_copywriting=enable_copywriting,
+                    enable_xhs=enable_xhs,
+                    xhs_max_notes=xhs_max_notes,
+                    xhs_attention_threshold=xhs_attention_threshold,
+                    min_attention_score=min_attention_score,
+                    profile_copywriting_threshold=profile_copywriting_threshold,
+                    fofa_size=fofa_size,
+                    hunter_size=hunter_size,
+                    asset_probe_concurrency=asset_probe_concurrency,
+                    incremental_scan=incremental_scan,
+                    url_probe_concurrency=url_probe_concurrency,
+                    url_scan_concurrency=url_scan_concurrency,
+                    copywriting_concurrency=copywriting_concurrency,
+                    xhs_search_concurrency=xhs_search_concurrency,
+                    entity_concurrency=control_scan_concurrency,
+                )
+                result["control_structure"]["entities"] = controlled_scans["entities"]
+                result["control_structure"]["scan_summary"] = controlled_scans["summary"]
+                result["control_structure"]["errors"].extend(controlled_scans["errors"])
+                result["profile_copywritings"]["count"] = int(
+                    controlled_scans["summary"].get("profile_copywritings") or 0
+                )
+
             # ── 阶段 3: 画像→话术 ──
-            if enable_xhs and enable_copywriting:
+            if enable_xhs and enable_copywriting and xhs_succeeded:
                 logger.info(f"[company_scan] task={task_id} 阶段3: 画像话术生成")
                 await self._update_progress(task_id, "profile_copywriting", "为高分画像生成话术...")
 
@@ -392,7 +478,7 @@ class CompanyScanPipeline:
                     router_output, profile_copywriting_threshold,
                     target_id=target_id,
                 )
-                result["profile_copywritings"]["count"] = cw_count
+                result["profile_copywritings"]["count"] += cw_count
 
             # ── 保存综合结果 ──
             result["status"] = "completed"
@@ -408,14 +494,30 @@ class CompanyScanPipeline:
                 upsert=True,
             )
             if target_id:
-                from api.dao import targets as targets_dao
-
                 await targets_dao.touch_project_target_collection(
                     self.db,
                     project_id=project_id,
                     target_id=target_id,
                     run_task_id=task_id,
                 )
+            from api.services.notifications import notify_target_collection_completed
+
+            notify_target_collection_completed(
+                project_id=project_id,
+                task_id=task_id,
+                target_id=target_id,
+                target_name=normalized_name,
+                source="company_scan_pipeline",
+                summary={
+                    "assets_discovered": result["assets"].get("discovered", 0),
+                    "assets_alive": result["assets"].get("alive", 0),
+                    "url_findings": result["url_scan"].get("findings_count", 0),
+                    "xhs_notes": result["xhs"].get("notes_count", 0),
+                    "xhs_profiles": result["xhs"].get("profiles_count", 0),
+                    "profile_copywritings": result["profile_copywritings"].get("count", 0),
+                    "controlled_entities": len(controlled_entities),
+                },
+            )
             await self._update_progress(task_id, "completed", "综合公司扫描完成")
             obs_log(
                 "综合公司扫描流水线完成", task_id=task_id, project_id=project_id,
@@ -453,6 +555,20 @@ class CompanyScanPipeline:
                 source="company_scan_pipeline", level="error", event="pipeline_error",
                 data={"error": str(e)},
             )
+            from api.services.notifications import notify_target_collection_completed
+
+            failed_identity = result.get("identity") or {}
+            notify_target_collection_completed(
+                project_id=project_id,
+                task_id=task_id,
+                target_id=str(failed_identity.get("target_id") or ""),
+                target_name=str(
+                    failed_identity.get("normalized_name") or company_name
+                ),
+                source="company_scan_pipeline",
+                summary={"error": str(e)},
+                status="failed",
+            )
             raise
 
         return result
@@ -461,10 +577,240 @@ class CompanyScanPipeline:
     # 阶段 1: 公司路由
     # ══════════════════════════════════════
 
-    async def _run_company_router(self, company_name: str):
+    async def _run_company_router(
+        self,
+        company_name: str,
+        *,
+        project_id: str = "",
+        task_id: str = "",
+    ):
+        from core.observability import observation_context
         from Sere1nGraph.graph.company_router.router import CompanyRouter
+
         router = CompanyRouter(self.app_config)
-        return await router.route(company_name)
+        with observation_context(
+            project_id=project_id or None,
+            task_id=task_id or None,
+            phase="company_router",
+            agent="company_router",
+            task_type="company_scan",
+        ):
+            return await router.route(company_name)
+
+    async def _run_control_structure(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        parent_target: dict[str, Any],
+        company_name: str,
+        max_entities: int,
+        page_concurrency: int,
+        icp_concurrency: int,
+    ) -> dict[str, Any]:
+        from api.services.company_control import CompanyControlService
+
+        result = await CompanyControlService(self.db).discover_and_persist(
+            project_id=project_id,
+            task_id=task_id,
+            parent_target=parent_target,
+            company_name=company_name,
+            max_entities=max_entities,
+            page_concurrency=page_concurrency,
+            icp_concurrency=icp_concurrency,
+        )
+        return {"kind": "control_structure", "result": result}
+
+    async def _scan_controlled_entities(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        entities: list[dict[str, Any]],
+        enable_asset_discovery: bool,
+        enable_url_scan: bool,
+        enable_copywriting: bool,
+        enable_xhs: bool,
+        xhs_max_notes: int,
+        xhs_attention_threshold: int,
+        min_attention_score: int,
+        profile_copywriting_threshold: int,
+        fofa_size: int,
+        hunter_size: int,
+        asset_probe_concurrency: int,
+        incremental_scan: bool,
+        url_probe_concurrency: int,
+        url_scan_concurrency: int,
+        copywriting_concurrency: int,
+        xhs_search_concurrency: int,
+        entity_concurrency: int,
+    ) -> dict[str, Any]:
+        """按控股单位限流并发，单位内部继续并行资产与社媒流水线。"""
+        from api.services.search_terms import build_channel_terms
+
+        semaphore = asyncio.Semaphore(max(1, entity_concurrency))
+
+        async def _scan(index: int, entity: dict[str, Any]) -> dict[str, Any]:
+            async with semaphore:
+                name = str(entity.get("name") or "").strip()
+                target_id = str(entity.get("target_id") or "")
+                aliases = self._dedupe_text([name, *list(entity.get("aliases") or [])])
+                identity = {
+                    "input_name": name,
+                    "normalized_name": name,
+                    "root_domain": str(entity.get("root_domain") or ""),
+                    "aliases": aliases,
+                    "target_id": target_id,
+                }
+                subtasks: list[Any] = []
+                if enable_asset_discovery:
+                    subtasks.append(
+                        self._run_asset_and_url_scan(
+                            task_id=f"{task_id}_controlled_{index}",
+                            project_id=project_id,
+                            identity=identity,
+                            url_text="",
+                            urls=[],
+                            enable_asset_discovery=True,
+                            enable_url_scan=enable_url_scan,
+                            enable_copywriting=enable_copywriting,
+                            min_attention_score=min_attention_score,
+                            fofa_size=fofa_size,
+                            hunter_size=hunter_size,
+                            probe_concurrency=asset_probe_concurrency,
+                            incremental_scan=incremental_scan,
+                            url_probe_concurrency=url_probe_concurrency,
+                            url_scan_concurrency=url_scan_concurrency,
+                            copywriting_concurrency=copywriting_concurrency,
+                        )
+                    )
+                xhs_keywords: list[str] = []
+                if enable_xhs:
+                    xhs_keywords = build_channel_terms(
+                        channel="xhs",
+                        names=aliases,
+                        limit=20,
+                    )
+                    subtasks.append(
+                        self._run_xhs_search(
+                            f"{task_id}_controlled_{index}",
+                            project_id,
+                            xhs_keywords,
+                            xhs_max_notes,
+                            xhs_attention_threshold,
+                            target_id=target_id,
+                            target_name=name,
+                            search_concurrency=xhs_search_concurrency,
+                        )
+                    )
+                scan_result: dict[str, Any] = {
+                    "assets": {},
+                    "url_scan": {},
+                    "xhs": {"enabled": enable_xhs, "keywords_used": xhs_keywords},
+                    "profile_copywritings": {"count": 0},
+                    "errors": [],
+                }
+                xhs_succeeded = False
+                for sub in await asyncio.gather(*subtasks, return_exceptions=True):
+                    if isinstance(sub, Exception):
+                        scan_result["errors"].append(str(sub))
+                    elif sub.get("kind") == "asset_url":
+                        scan_result["assets"] = sub.get("assets") or {}
+                        scan_result["url_scan"] = sub.get("url_scan") or {}
+                    elif "notes_count" in sub:
+                        scan_result["xhs"].update(sub)
+                        xhs_succeeded = True
+                if enable_xhs and enable_copywriting and xhs_succeeded:
+                    from Sere1nGraph.graph.company_router.router import CompanyRouterResult
+
+                    try:
+                        scan_result["profile_copywritings"]["count"] = (
+                            await self._run_profile_copywriting(
+                                f"{task_id}_controlled_{index}",
+                                project_id,
+                                name,
+                                CompanyRouterResult(success=False),
+                                profile_copywriting_threshold,
+                                target_id=target_id,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        scan_result["errors"].append(f"画像话术生成失败: {exc}")
+                from api.services.notifications import notify_target_collection_completed
+
+                notify_target_collection_completed(
+                    project_id=project_id,
+                    task_id=f"{task_id}_controlled_{index}",
+                    target_id=target_id,
+                    target_name=name,
+                    source="company_scan_pipeline.controlled_entity",
+                    summary={
+                        "assets_discovered": scan_result["assets"].get("discovered", 0),
+                        "assets_alive": scan_result["assets"].get("alive", 0),
+                        "url_findings": scan_result["url_scan"].get("findings_count", 0),
+                        "xhs_notes": scan_result["xhs"].get("notes_count", 0),
+                        "xhs_profiles": scan_result["xhs"].get("profiles_count", 0),
+                        "profile_copywritings": scan_result["profile_copywritings"].get("count", 0),
+                        "errors": scan_result["errors"],
+                    },
+                    status="partial" if scan_result["errors"] else "completed",
+                )
+                return {**entity, "scan": scan_result}
+
+        scanned = await asyncio.gather(
+            *[_scan(index, entity) for index, entity in enumerate(entities)],
+            return_exceptions=True,
+        )
+        output_entities: list[dict[str, Any]] = []
+        errors: list[str] = []
+        summary = {
+            "entities": len(entities),
+            "completed": 0,
+            "assets_discovered": 0,
+            "assets_alive": 0,
+            "url_findings": 0,
+            "xhs_notes": 0,
+            "xhs_profiles": 0,
+            "profile_copywritings": 0,
+        }
+        for index, item in enumerate(scanned):
+            if isinstance(item, Exception):
+                entity = entities[index]
+                entity_name = str(entity.get("name") or index)
+                entity_task_id = f"{task_id}_controlled_{index}"
+                error_message = str(item)
+                errors.append(f"{entity_name}: {error_message}")
+                output_entities.append({**entity, "scan": {"errors": [error_message]}})
+
+                from api.services.notifications import notify_target_collection_completed
+
+                notify_target_collection_completed(
+                    project_id=project_id,
+                    task_id=entity_task_id,
+                    target_id=str(entity.get("target_id") or ""),
+                    target_name=entity_name,
+                    source="company_scan_pipeline.controlled_entity",
+                    summary={"error": error_message},
+                    status="failed",
+                )
+                continue
+            output_entities.append(item)
+            scan = item.get("scan") or {}
+            assets = scan.get("assets") or {}
+            url_scan = scan.get("url_scan") or {}
+            xhs = scan.get("xhs") or {}
+            profile_copywritings = scan.get("profile_copywritings") or {}
+            summary["completed"] += int(not scan.get("errors"))
+            summary["assets_discovered"] += int(assets.get("discovered") or 0)
+            summary["assets_alive"] += int(assets.get("alive") or 0)
+            summary["url_findings"] += int(url_scan.get("findings_count") or 0)
+            summary["xhs_notes"] += int(xhs.get("notes_count") or 0)
+            summary["xhs_profiles"] += int(xhs.get("profiles_count") or 0)
+            summary["profile_copywritings"] += int(profile_copywritings.get("count") or 0)
+            errors.extend(
+                f"{item.get('name')}: {message}" for message in scan.get("errors") or []
+            )
+        return {"entities": output_entities, "summary": summary, "errors": errors}
 
     # ══════════════════════════════════════
     # 阶段 2a: URL 扫描
@@ -505,7 +851,10 @@ class CompanyScanPipeline:
         }
         discovered_urls: list[str] = []
         if enable_asset_discovery:
-            asset_result = await AssetIntelligenceService(self.db).discover(
+            asset_result = await AssetIntelligenceService(
+                self.db,
+                app_config=self.app_config,
+            ).discover(
                 identity=AssetIdentity(
                     input_name=str(identity.get("input_name") or ""),
                     normalized_name=str(identity.get("normalized_name") or ""),

@@ -8,6 +8,7 @@ import {
   RobotOutlined, ToolOutlined, LineChartOutlined, SendOutlined,
   EyeOutlined, EyeInvisibleOutlined, CopyOutlined,
   LockOutlined, DingdingOutlined, CodeOutlined, SyncOutlined,
+  SearchOutlined, AimOutlined, GlobalOutlined, ApiOutlined,
 } from '@ant-design/icons'
 import {
   getAllConfig, setLLMConfig, deleteLLMConfig,
@@ -29,10 +30,10 @@ const { Title, Paragraph } = Typography
 
 // 预定义的工具列表
 const KNOWN_TOOLS = [
-  { name: 'tianyancha', label: '天眼查', icon: '🔍' },
-  { name: 'hunter', label: '奇安信 Hunter', icon: '🎯' },
-  { name: 'bocha', label: '博查', icon: '📊' },
-  { name: 'fofa', label: 'FOFA', icon: '🛰️' },
+  { name: 'tianyancha', label: '天眼查', icon: <SearchOutlined />, description: '企业主体、实际控制权与 ICP' },
+  { name: 'hunter', label: '奇安信 Hunter', icon: <AimOutlined />, description: '互联网资产发现' },
+  { name: 'fofa', label: 'FOFA', icon: <GlobalOutlined />, description: '互联网资产发现与指纹检索' },
+  { name: 'bocha', label: '博查', icon: <ApiOutlined />, description: '公网搜索' },
 ]
 
 const CONFIG_SECTIONS = [
@@ -203,6 +204,15 @@ export default function ConfigManagement() {
 
   const activeConfig = revealedConfig || config
   const activeTools = revealedTools || tools
+  const knownToolNames = new Set(KNOWN_TOOLS.map(tool => tool.name))
+  const displayedTools: ToolConfig[] = [
+    ...KNOWN_TOOLS.map(known => activeTools.find(tool => tool.tool_name === known.name) || {
+      tool_name: known.name,
+      api_key: '',
+      has_key: false,
+    }),
+    ...activeTools.filter(tool => !knownToolNames.has(tool.tool_name)),
+  ]
   const activeDingtalkBots = revealedDingtalkBots || dingtalkBots
   const configUnlocked = Boolean(revealedConfig)
 
@@ -634,7 +644,7 @@ export default function ConfigManagement() {
   // 获取工具显示信息
   const getToolInfo = (toolName: string) => {
     const known = KNOWN_TOOLS.find(t => t.name === toolName)
-    return known || { name: toolName, label: toolName, icon: '🔧' }
+    return known || { name: toolName, label: toolName, icon: <ToolOutlined />, description: '自定义工具' }
   }
 
   const asConfigSection = (value: unknown): ConfigSection => {
@@ -823,38 +833,50 @@ export default function ConfigManagement() {
               添加工具
             </Button>
           </div>
-          {activeTools.length > 0 ? (
+          {displayedTools.length > 0 ? (
             <div className="tool-list">
-              {activeTools.map(tool => {
+              {displayedTools.map(tool => {
                 const info = getToolInfo(tool.tool_name)
+                const configured = tool.has_key || Boolean(tool.api_key)
                 return (
                   <div key={tool.tool_name} className="tool-item">
                     <div className="tool-info">
                       <div className="tool-icon">{info.icon}</div>
                       <div>
-                        <div className="tool-name">{info.label}</div>
+                        <div className="tool-name">
+                          {info.label}
+                          <Tag color={configured ? 'success' : 'default'} style={{ marginLeft: 8 }}>
+                            {configured ? '已配置' : '未配置'}
+                          </Tag>
+                        </div>
                         <div className="tool-key">
-                          {maskValue(tool.api_key, visibleKeys[`tool_${tool.tool_name}`])}
+                          {configured
+                            ? maskValue(tool.api_key, visibleKeys[`tool_${tool.tool_name}`])
+                            : info.description}
                         </div>
                       </div>
                     </div>
                     <div className="tool-actions">
-                      {renderSecretActions(`tool_${tool.tool_name}`, tool.api_key)}
-                      <Tooltip title="测试有效性">
-                        <Button size="small" icon={<SendOutlined />}
-                          loading={testingTool === tool.tool_name}
-                          onClick={() => handleTestTool(tool.tool_name)} disabled={!isAdmin} />
-                      </Tooltip>
-                      <Tooltip title="编辑">
+                      {configured && renderSecretActions(`tool_${tool.tool_name}`, tool.api_key)}
+                      {configured && (
+                        <Tooltip title="测试有效性">
+                          <Button size="small" icon={<SendOutlined />}
+                            loading={testingTool === tool.tool_name}
+                            onClick={() => handleTestTool(tool.tool_name)} disabled={!isAdmin} />
+                        </Tooltip>
+                      )}
+                      <Tooltip title={configured ? '编辑' : '配置'}>
                         <Button size="small" icon={<EditOutlined />}
                           onClick={() => handleEditTool(tool.tool_name, tool.api_key)} disabled={!isAdmin} />
                       </Tooltip>
-                      <Popconfirm title={`确认删除 ${info.label} 配置？`}
-                        onConfirm={() => handleDeleteTool(tool.tool_name)} okText="删除" cancelText="取消">
-                        <Tooltip title="删除">
-                          <Button size="small" danger icon={<DeleteOutlined />} disabled={!isAdmin} />
-                        </Tooltip>
-                      </Popconfirm>
+                      {configured && (
+                        <Popconfirm title={`确认删除 ${info.label} 配置？`}
+                          onConfirm={() => handleDeleteTool(tool.tool_name)} okText="删除" cancelText="取消">
+                          <Tooltip title="删除">
+                            <Button size="small" danger icon={<DeleteOutlined />} disabled={!isAdmin} />
+                          </Tooltip>
+                        </Popconfirm>
+                      )}
                     </div>
                   </div>
                 )
@@ -1340,7 +1362,7 @@ export default function ConfigManagement() {
         <Form form={toolForm} layout="vertical">
           {!editingTool && (
             <Form.Item name="tool_name" label="工具名称" rules={[{ required: true, message: '请输入工具名称' }]}>
-              <Input placeholder="如 tianyancha, hunter, bocha" />
+              <Input placeholder="如 tianyancha, hunter, fofa, bocha" />
             </Form.Item>
           )}
           <Form.Item name="api_key" label="API Key" rules={[{ required: true, message: '请输入 API Key' }]}>

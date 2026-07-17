@@ -80,8 +80,14 @@ class CompanyRouter:
             # 使用结构化输出
             structured_llm = llm.with_structured_output(CompanyRouterOutput)
             
+            from api.services.search_terms import get_keyword_skill_context
+
+            keyword_context = get_keyword_skill_context(["xhs", "weixin"])
+            system_prompt = load_prompt("company_router/company_router")
+            if keyword_context:
+                system_prompt = f"{system_prompt}\n\n# 当前场景渐进加载的搜索 Skill\n\n{keyword_context}"
             result = await structured_llm.ainvoke([
-                SystemMessage(content=load_prompt("company_router/company_router")),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=f"请分析以下公司并生成搜索策略：\n\n{company_name}"),
             ])
             
@@ -126,6 +132,12 @@ class CompanyRouter:
             # 获取默认关键词
             default_keywords = self.keyword_library.get_keywords(industry, node_name)
             default_focus = self.keyword_library.get_focus_points(industry, node_name)
+            if node_name in {"xhs", "weixin"}:
+                from api.services.search_terms import get_keyword_templates
+
+                default_keywords = list(
+                    dict.fromkeys([*default_keywords, *get_keyword_templates(node_name)])
+                )
             
             # 合并关键词（去重）
             all_keywords = list(dict.fromkeys(node_config.keywords + default_keywords))
@@ -163,6 +175,10 @@ class CompanyRouter:
             # 特殊处理：bidding 根据行业决定是否启用
             if node_name == "bidding" and not node_config.enabled:
                 node_config.enabled = self.keyword_library.is_bidding_enabled(industry)
+
+            # 公众号是项目采集的基础词源；有词库时始终产出策略，执行仍由任务开关控制。
+            if node_name == "weixin" and node_config.keywords:
+                node_config.enabled = True
         
         return strategy
     

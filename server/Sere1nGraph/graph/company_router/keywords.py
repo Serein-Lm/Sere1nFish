@@ -105,6 +105,20 @@ class KeywordLibrary:
             "{company}招商",
         ],
     }
+
+    # ============ 微信公众号关键词模板（数据库 Skill 不可用时的兜底） ============
+
+    WEIXIN_KEYWORDS = {
+        industry: [
+            "{company} 招标",
+            "{company} 采购",
+            "{company} 招商",
+            "{company} 合作",
+            "{company} 联系方式",
+            "{company} 公众号",
+        ]
+        for industry in IndustryType
+    }
     
     # ============ 关注重点 ============
     
@@ -121,6 +135,11 @@ class KeywordLibrary:
         IndustryType.INTERNET: ["员工生活", "公司文化", "招聘信息"],
         IndustryType.FINANCE: ["员工日常", "工作环境"],
         IndustryType.AIRPORT: ["广告展示", "招商信息"],
+    }
+
+    WEIXIN_FOCUS = {
+        industry: ["原始文章链接", "联系方式上下文", "招投标", "招商合作", "关联单位"]
+        for industry in IndustryType
     }
     
     WEB_FOCUS = {
@@ -203,6 +222,7 @@ class KeywordLibrary:
             "xhs": self.XHS_KEYWORDS,
             "douyin": self.DOUYIN_KEYWORDS,
             "bidding": self.BIDDING_KEYWORDS,
+            "weixin": self.WEIXIN_KEYWORDS,
         }
         
         if node not in keyword_map:
@@ -220,6 +240,7 @@ class KeywordLibrary:
             "xhs": self.XHS_FOCUS,
             "douyin": self.DOUYIN_FOCUS,
             "web_tagging": self.WEB_FOCUS,
+            "weixin": self.WEIXIN_FOCUS,
         }
         
         if node not in focus_map:

@@ -14,14 +14,23 @@ from core.observability import obs_log
 from .adapters import HttpAssetProbe
 from .contracts import AssetCandidate, AssetIdentity, ProviderSearchResult
 from .factory import AssetProviderFactory
+from .triage import AssetTriageService
 
 logger = get_logger("asset_intelligence")
 
 
 class AssetIntelligenceService:
-    def __init__(self, db: AsyncIOMotorDatabase, *, probe: HttpAssetProbe | None = None) -> None:
+    def __init__(
+        self,
+        db: AsyncIOMotorDatabase,
+        *,
+        app_config: Any | None = None,
+        probe: HttpAssetProbe | None = None,
+        triage: AssetTriageService | None = None,
+    ) -> None:
         self.db = db
         self.probe = probe or HttpAssetProbe()
+        self.triage = triage or (AssetTriageService(app_config) if app_config else None)
 
     async def discover(
         self,
@@ -64,6 +73,33 @@ class AssetIntelligenceService:
                 candidate.is_alive = bool(probe.get("is_alive"))
                 if not candidate.title and probe.get("title"):
                     candidate.title = str(probe["title"])
+
+        alive_candidates = [candidate for candidate in merged if candidate.is_alive]
+        if alive_candidates and self.triage:
+            try:
+                prioritized_alive = await self.triage.prioritize(
+                    alive_candidates,
+                    identity=identity,
+                    project_id=project_id,
+                    task_id=task_id,
+                )
+                kept_alive_ids = {id(candidate) for candidate in prioritized_alive}
+                merged = [
+                    candidate
+                    for candidate in merged
+                    if not candidate.is_alive or id(candidate) in kept_alive_ids
+                ]
+                alive_rank = {
+                    id(candidate): index for index, candidate in enumerate(prioritized_alive)
+                }
+                merged.sort(
+                    key=lambda candidate: (
+                        0 if candidate.is_alive else 1,
+                        alive_rank.get(id(candidate), len(alive_rank)),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("存活资产 LLM 分诊不可用，保留原始资产顺序: %s", exc)
 
         docs = [item.as_dict(target_id=identity.target_id) for item in merged]
         persisted = await assets_dao.upsert_assets_batch(

@@ -79,6 +79,55 @@ async def get_task_def(task_def_id: str):
     return doc
 
 
+@router.get("/tasks/{task_def_id}/resolved-keywords")
+async def get_resolved_task_keywords(task_def_id: str):
+    """仅解析任务将使用的数据库词库与项目 Target 词，不启动手机。"""
+    from api.dao import targets as targets_dao
+    from api.services.search_terms import (
+        ResolvedSearchTerms,
+        infer_collection_channel,
+        resolve_project_target_terms,
+    )
+
+    db = get_db()
+    task_def = await collect_dao.get_task_def(db, task_def_id)
+    if not task_def:
+        raise HTTPException(404, "采集任务定义不存在")
+    explicit = list(task_def.get("keywords") or [])
+    channel = infer_collection_channel(
+        app_name=str(task_def.get("app_name") or ""),
+        source_link_strategy=str(task_def.get("source_link_strategy") or ""),
+    )
+    target_id = str(task_def.get("target_id") or "")
+    target_name = str(task_def.get("target_name") or "")
+    if not target_id and target_name:
+        target = await targets_dao.find_target(db, name=target_name)
+        target_id = str((target or {}).get("target_id") or "")
+    if not bool(task_def.get("use_target_keyword_library", True)) or not channel:
+        return ResolvedSearchTerms(
+            channel=channel,
+            keywords=explicit,
+            target_ids=[target_id] if target_id else [],
+            sources=["task_explicit"] if explicit else [],
+            keyword_targets={
+                keyword: {"target_id": target_id, "target_name": target_name}
+                for keyword in explicit
+            },
+        ).as_dict()
+    return (
+        await resolve_project_target_terms(
+            db,
+            project_id=str(task_def.get("project_id") or ""),
+            target_id=target_id,
+            target_name=target_name,
+            channel=channel,
+            explicit_keywords=explicit,
+            include_direct_children=True,
+            max_keywords=int(task_def.get("max_resolved_keywords") or 60),
+        )
+    ).as_dict()
+
+
 @router.patch("/tasks/{task_def_id}")
 async def update_task_def(task_def_id: str, payload: CollectTaskUpdate):
     db = get_db()

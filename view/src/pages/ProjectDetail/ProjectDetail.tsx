@@ -2815,12 +2815,12 @@ export default function ProjectDetail() {
           <Space>
             <Select
               value={wechatTargetId}
-              style={{ width: 220 }}
+              style={{ width: 360, maxWidth: '100%' }}
               options={[
                 { value: '', label: `全部 Target (${wechatTargets.length})` },
                 ...wechatTargets.map((target) => ({
                   value: target.target_id,
-                  label: `${target.target_name} (记录 ${target.record_count} · 原文 ${target.project_document_count} · 存活资产 ${target.alive_asset_count})`,
+                  label: `${target.relation_type === 'wholly_owned_controlled_entity' ? '[100% 控股] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count} · 存活资产 ${target.alive_asset_count})`,
                 })),
               ]}
               onChange={(value) => {
@@ -3675,6 +3675,7 @@ export default function ProjectDetail() {
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? true
                     params.enable_copywriting = values.enable_copywriting ?? true
+                    params.enable_control_structure = values.enable_control_structure ?? true
                     params.incremental_scan = values.asset_scan_mode === 'incremental'
                     if (values.xhs_max_notes) params.xhs_max_notes = values.xhs_max_notes
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
@@ -3685,6 +3686,10 @@ export default function ProjectDetail() {
                     if (values.url_scan_concurrency) params.url_scan_concurrency = values.url_scan_concurrency
                     if (values.copywriting_concurrency) params.copywriting_concurrency = values.copywriting_concurrency
                     if (values.xhs_search_concurrency) params.xhs_search_concurrency = values.xhs_search_concurrency
+                    if (values.control_max_entities) params.control_max_entities = values.control_max_entities
+                    if (values.control_lookup_concurrency) params.control_lookup_concurrency = values.control_lookup_concurrency
+                    if (values.control_icp_concurrency) params.control_icp_concurrency = values.control_icp_concurrency
+                    if (values.control_scan_concurrency) params.control_scan_concurrency = values.control_scan_concurrency
                   }
                   if (taskType === 'url_scan') {
                     if (values.urls) {
@@ -3752,7 +3757,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_copywriting: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 4, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -3780,6 +3785,9 @@ export default function ProjectDetail() {
                             <Form.Item name="enable_asset_discovery" valuePropName="checked" noStyle>
                               <Checkbox>公司标准化 + FOFA/Hunter 资产发现与存活去重</Checkbox>
                             </Form.Item>
+                            <Form.Item name="enable_control_structure" valuePropName="checked" noStyle>
+                              <Checkbox title="仅使用天眼查实际控制权 ID 747，未授权时明确标记不可用">天眼查控股结构：第一层 100% 控股单位 + ICP 域名</Checkbox>
+                            </Form.Item>
                             <Form.Item name="enable_url_scan" valuePropName="checked" noStyle>
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
                             </Form.Item>
@@ -3797,6 +3805,28 @@ export default function ProjectDetail() {
                             { label: '增量扫描', value: 'incremental' },
                           ]} />
                         </Form.Item>
+                        <Row gutter={16}>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="control_max_entities" label="控股单位上限">
+                              <InputNumber min={1} max={500} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="control_lookup_concurrency" label="控股查询并发">
+                              <InputNumber min={1} max={12} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="control_icp_concurrency" label="ICP 查询并发">
+                              <InputNumber min={1} max={20} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="control_scan_concurrency" label="控股采集并发">
+                              <InputNumber min={1} max={12} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
                         <Row gutter={16}>
                           <Col xs={24} sm={8}>
                             <Form.Item name="fofa_size" label="FOFA 单路条数">

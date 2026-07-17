@@ -20,6 +20,7 @@ async def test_asset_collect_uses_explicit_full_or_incremental_scan_mode(
 ) -> None:
     from api.dao import targets as targets_dao
     from api.services import company_normalize
+    from api.services import notifications
     from api.services.asset_intelligence import AssetIntelligenceService
     from api.services.url_scan_pipeline import UrlScanPipeline
 
@@ -56,6 +57,11 @@ async def test_asset_collect_uses_explicit_full_or_incremental_scan_mode(
     monkeypatch.setattr(AssetIntelligenceService, "discover", discover)
     monkeypatch.setattr(UrlScanPipeline, "run_pipeline", scan)
     monkeypatch.setattr(targets_dao, "touch_project_target_collection", touch)
+    monkeypatch.setattr(
+        notifications,
+        "notify_target_collection_completed",
+        lambda **_kwargs: True,
+    )
 
     result = await run_fofa_collect(
         object(),

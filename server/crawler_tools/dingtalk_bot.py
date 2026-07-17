@@ -78,12 +78,13 @@ class DingTalkBot:
     
     def _build_url(self) -> str:
         """构建请求 URL"""
+        base_url = f"https://oapi.dingtalk.com/robot/send?access_token={self.access_token}"
+        if not self.secret:
+            return base_url
         timestamp = str(round(time.time() * 1000))
         sign = self._sign(timestamp)
         return (
-            f"https://oapi.dingtalk.com/robot/send"
-            f"?access_token={self.access_token}"
-            f"&timestamp={timestamp}"
+            base_url + f"&timestamp={timestamp}"
             f"&sign={sign}"
         )
     
@@ -278,7 +279,7 @@ async def create_dingtalk_bot(bot_name: str = "default") -> DingTalkBot | None:
     if not config or not config.enabled:
         return None
     
-    if not config.access_token or not config.secret:
+    if not config.access_token:
         return None
     
     return DingTalkBot(

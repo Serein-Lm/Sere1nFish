@@ -51,6 +51,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await links.create_index([("project_id", 1), ("updated_at", -1)])
     await links.create_index([("target_id", 1), ("updated_at", -1)])
     await links.create_index("task_def_ids")
+    await links.create_index(
+        [("project_id", 1), ("parent_target_id", 1), ("relation_depth", 1)]
+    )
 
 
 async def get_target(
@@ -174,8 +177,10 @@ async def link_project_target(
     project_id: str,
     target: dict[str, Any],
     search_terms: list[str] | None = None,
+    search_terms_by_channel: dict[str, list[str]] | None = None,
     objectives: list[str] | None = None,
     task_def_id: str = "",
+    relation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not project_id:
         raise ValueError("project_id 不能为空")
@@ -207,6 +212,32 @@ async def link_project_target(
         additions["objectives"] = {"$each": goals}
     if task_def_id:
         additions["task_def_ids"] = task_def_id
+    for channel, channel_terms in (search_terms_by_channel or {}).items():
+        channel_key = re.sub(r"[^a-z0-9_]", "", str(channel).strip().lower())
+        values = [
+            str(term).strip()
+            for term in (channel_terms or [])
+            if str(term).strip()
+        ]
+        if channel_key and values:
+            additions[f"search_terms_by_channel.{channel_key}"] = {"$each": values}
+    if relation:
+        relation_doc = {
+            str(key): value
+            for key, value in relation.items()
+            if value is not None and str(key).strip()
+        }
+        update["$set"]["relation"] = relation_doc
+        for key in (
+            "parent_target_id",
+            "parent_target_name",
+            "relation_type",
+            "relation_depth",
+            "ownership_percent",
+            "relation_source",
+        ):
+            if key in relation_doc:
+                update["$set"][key] = relation_doc[key]
     if additions:
         update["$addToSet"] = additions
     doc = await db[PROJECT_TARGETS_COLLECTION].find_one_and_update(
@@ -217,6 +248,41 @@ async def link_project_target(
         projection={"_id": 0},
     )
     return doc or {}
+
+
+async def get_project_target(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+) -> dict[str, Any] | None:
+    if not project_id or not target_id:
+        return None
+    return await db[PROJECT_TARGETS_COLLECTION].find_one(
+        {"project_id": project_id, "target_id": target_id},
+        {"_id": 0},
+    )
+
+
+async def list_project_target_children(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    parent_target_id: str,
+    relation_depth: int = 1,
+) -> list[dict[str, Any]]:
+    if not project_id or not parent_target_id:
+        return []
+    cursor = db[PROJECT_TARGETS_COLLECTION].find(
+        {
+            "project_id": project_id,
+            "parent_target_id": parent_target_id,
+            "relation_depth": relation_depth,
+            "active": {"$ne": False},
+        },
+        {"_id": 0},
+    ).sort("target_name", 1)
+    return [doc async for doc in cursor]
 
 
 async def list_project_targets(

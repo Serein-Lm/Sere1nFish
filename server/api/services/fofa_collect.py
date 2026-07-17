@@ -91,7 +91,7 @@ async def run_fofa_collect(
             root_domain=identity.root_domain,
             target_id=identity.target_id,
         )
-        assets = await AssetIntelligenceService(db).discover(
+        assets = await AssetIntelligenceService(db, app_config=app_config).discover(
             identity=identity,
             project_id=project_id,
             task_id=task_id,
@@ -139,6 +139,22 @@ async def run_fofa_collect(
                 run_task_id=task_id,
             )
         summary["status"] = "completed"
+        from api.services.notifications import notify_target_collection_completed
+
+        notify_target_collection_completed(
+            project_id=project_id,
+            task_id=task_id,
+            target_id=identity.target_id,
+            target_name=identity.normalized_name,
+            source="asset_collect",
+            summary={
+                "asset_total": summary["asset_total"],
+                "alive_assets": summary["alive_assets"],
+                "scan_mode": summary["scan_mode"],
+                "scan_candidates": summary["scan_candidates"],
+                "scanned": summary["scanned"],
+            },
+        )
         obs_log(
             "多源资产采集完成",
             task_id=task_id,
@@ -167,6 +183,17 @@ async def run_fofa_collect(
             level="error",
             event="pipeline_error",
             data={"error": str(exc)},
+        )
+        from api.services.notifications import notify_target_collection_completed
+
+        notify_target_collection_completed(
+            project_id=project_id,
+            task_id=task_id,
+            target_id=str(summary.get("target_id") or ""),
+            target_name=str(summary.get("normalized_name") or company_name),
+            source="asset_collect",
+            summary={"error": str(exc)},
+            status="failed",
         )
         raise
     return summary

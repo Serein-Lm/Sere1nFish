@@ -36,6 +36,16 @@ class CollectTaskDef(BaseModel):
     device_id: str = Field(description="执行设备 device_id")
     app_name: str = Field(description="目标应用名,如 微信 / 小红书")
     keywords: list[str] = Field(default_factory=list, description="搜索关键词列表(逐个执行)")
+    use_target_keyword_library: bool = Field(
+        default=True,
+        description="合并项目 Target、第一层控股单位及数据库渠道 Skill 的搜索词",
+    )
+    max_resolved_keywords: int = Field(
+        default=60,
+        ge=1,
+        le=200,
+        description="从目标关系和数据库词库聚合后的最大关键词数",
+    )
     swipe_times: int = Field(default=3, ge=0, le=50, description="每个关键词的滑动次数")
     swipe_interval: float = Field(default=1.2, ge=0.2, le=10, description="滑动间隔秒")
     extract_fields: list[ExtractField] = Field(
@@ -87,6 +97,8 @@ class CollectTaskUpdate(BaseModel):
     device_id: str | None = None
     app_name: str | None = None
     keywords: list[str] | None = None
+    use_target_keyword_library: bool | None = None
+    max_resolved_keywords: int | None = Field(default=None, ge=1, le=200)
     swipe_times: int | None = Field(default=None, ge=0, le=50)
     swipe_interval: float | None = Field(default=None, ge=0.2, le=10)
     extract_fields: list[ExtractField] | None = None
