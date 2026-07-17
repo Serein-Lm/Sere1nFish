@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,6 +25,7 @@ TIANYANCHA_API_BASE = "https://open.api.tianyancha.com"
 OUTBOUND_INVESTMENT_PATH = "/services/open/ic/inverst/2.0"
 OUTBOUND_INVESTMENT_INTERFACE_ID = 823
 ICP_PATH = "/services/open/ipr/icp/3.0"
+BIDDING_PATH = "/services/open/m/bids/2.0"
 SUCCESS_CODE = 0
 NO_RESULT_CODE = 300000
 PERMISSION_DENIED_CODE = 300005
@@ -33,6 +37,7 @@ INACTIVE_REGISTRATION_MARKERS = (
     "歇业",
     "迁出",
 )
+CHINA_TIMEZONE = timezone(timedelta(hours=8))
 
 
 class TianyanchaApiError(RuntimeError):
@@ -97,6 +102,67 @@ class OutboundInvestmentResult:
     total_reported: int = 0
     pages_fetched: int = 0
     truncated: bool = False
+
+
+@dataclass(slots=True)
+class BiddingRecord:
+    """不暴露供应商字段命名的招投标记录。"""
+
+    record_id: str
+    provider_record_id: str = ""
+    provider_uuid: str = ""
+    title: str = ""
+    announcement_type: str = ""
+    stage: str = ""
+    published_on: str = ""
+    province: str = ""
+    purchaser: str = ""
+    agency: str = ""
+    amount: str = ""
+    winner: str = ""
+    enterprise_identity: str = ""
+    detail_url: str = ""
+    provider_url: str = ""
+    summary: str = ""
+    introduction: str = ""
+    content_html: str = ""
+    raw_payload: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def as_dict(self, *, include_content: bool = True) -> dict[str, Any]:
+        result = {
+            "record_id": self.record_id,
+            "provider": "tianyancha",
+            "provider_record_id": self.provider_record_id,
+            "provider_uuid": self.provider_uuid,
+            "title": self.title,
+            "announcement_type": self.announcement_type,
+            "stage": self.stage,
+            "published_on": self.published_on,
+            "province": self.province,
+            "purchaser": self.purchaser,
+            "agency": self.agency,
+            "amount": self.amount,
+            "winner": self.winner,
+            "enterprise_identity": self.enterprise_identity,
+            "detail_url": self.detail_url,
+            "provider_url": self.provider_url,
+            "summary": self.summary,
+            "introduction": self.introduction,
+        }
+        if include_content:
+            result["content_html"] = self.content_html
+        return result
+
+
+@dataclass(slots=True)
+class BiddingSearchResult:
+    records: list[BiddingRecord] = field(default_factory=list)
+    total_reported: int = 0
+    page_num: int = 1
+    page_size: int = 20
+    bid_type: str = "2"
+    publish_start: str = ""
+    publish_end: str = ""
 
 
 async def _load_config() -> dict[str, Any]:
@@ -241,6 +307,94 @@ def parse_icp_records(items: Any) -> list[IcpRecord]:
     return records
 
 
+def _published_on(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        timestamp = int(text)
+    except (TypeError, ValueError):
+        return text[:10] if len(text) >= 10 else text
+    if timestamp > 10_000_000_000:
+        timestamp /= 1000
+    try:
+        return datetime.fromtimestamp(timestamp, tz=CHINA_TIMEZONE).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return text
+
+
+def _provider_text(value: Any) -> str:
+    """收敛供应商的空数组字符串、数组和对象字段，不向领域层泄漏原始形态。"""
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        for key in ("name", "companyName", "title", "value"):
+            normalized = _provider_text(value.get(key))
+            if normalized:
+                return normalized
+        values = [_provider_text(item) for item in value.values()]
+        return "、".join(dict.fromkeys(item for item in values if item))
+    if isinstance(value, (list, tuple, set)):
+        values = [_provider_text(item) for item in value]
+        return "、".join(dict.fromkeys(item for item in values if item))
+
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none", "undefined"}:
+        return ""
+    if text.startswith(("[", "{")):
+        try:
+            decoded = json.loads(text)
+        except (TypeError, ValueError):
+            pass
+        else:
+            return _provider_text(decoded)
+    return text
+
+
+def _bidding_record_id(item: dict[str, Any]) -> str:
+    provider_key = str(item.get("uuid") or item.get("id") or "").strip()
+    if not provider_key:
+        provider_key = "|".join(
+            str(item.get(key) or "").strip()
+            for key in ("link", "title", "publishTime", "purchaser")
+        )
+    digest = hashlib.sha256(f"tianyancha:bidding:{provider_key}".encode("utf-8")).hexdigest()
+    return "bid_" + digest[:24]
+
+
+def parse_bidding_records(items: Any) -> list[BiddingRecord]:
+    """将天眼查招投标响应转换为稳定领域结构并按记录 ID 去重。"""
+    if not isinstance(items, list):
+        return []
+    records: dict[str, BiddingRecord] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        record_id = _bidding_record_id(item)
+        records[record_id] = BiddingRecord(
+            record_id=record_id,
+            provider_record_id=_provider_text(item.get("id")),
+            provider_uuid=_provider_text(item.get("uuid")),
+            title=_provider_text(item.get("title")),
+            announcement_type=_provider_text(item.get("type")),
+            stage=_provider_text(item.get("stage")),
+            published_on=_published_on(item.get("publishTime")),
+            province=_provider_text(item.get("province")),
+            purchaser=_provider_text(item.get("purchaser")),
+            agency=_provider_text(item.get("proxy")),
+            amount=_provider_text(item.get("bidAmount")),
+            winner=_provider_text(item.get("bidWinner")),
+            enterprise_identity=_provider_text(item.get("enterpriseIdentity")),
+            detail_url=_provider_text(item.get("link")),
+            provider_url=_provider_text(item.get("bidUrl")),
+            summary=_provider_text(item.get("abs")),
+            introduction=_provider_text(item.get("intro")),
+            content_html=str(item.get("content") or ""),
+            raw_payload=dict(item),
+        )
+    return list(records.values())
+
+
 class TianyanchaClient:
     """天眼查 HTTP 客户端；可注入 key/session，便于测试和复用连接。"""
 
@@ -379,6 +533,48 @@ class TianyanchaClient:
         )
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         return parse_icp_records(result.get("items") or [])
+
+    async def search_bids(
+        self,
+        company_name: str,
+        *,
+        bid_type: str = "2",
+        page_num: int = 1,
+        page_size: int = 20,
+        lookback_days: int = 180,
+        end_date: date | None = None,
+    ) -> BiddingSearchResult:
+        """按法定主体查询招投标公告，默认最近 180 天、最多 20 条。"""
+        keyword = str(company_name or "").strip()
+        if not keyword:
+            raise ValueError("公司法定名称不能为空")
+        safe_page = max(1, int(page_num))
+        safe_size = max(1, min(int(page_size), 20))
+        safe_days = max(1, min(int(lookback_days), 3650))
+        publish_end = end_date or datetime.now(CHINA_TIMEZONE).date()
+        publish_start = publish_end - timedelta(days=safe_days)
+        payload = await self._request(
+            BIDDING_PATH,
+            {
+                "keyword": keyword,
+                "type": str(bid_type or "2"),
+                "publishStartTime": publish_start.isoformat(),
+                "publishEndTime": publish_end.isoformat(),
+                "pageNum": safe_page,
+                "pageSize": safe_size,
+            },
+        )
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        return BiddingSearchResult(
+            records=parse_bidding_records(result.get("items") or []),
+            total_reported=int(result.get("total") or 0),
+            page_num=safe_page,
+            page_size=safe_size,
+            bid_type=str(bid_type or "2"),
+            publish_start=publish_start.isoformat(),
+            publish_end=publish_end.isoformat(),
+        )
+
 
 async def validate_key(api_key: str | None = None) -> tuple[bool, str]:
     """使用低成本 ICP 查询验证密钥，不输出或记录明文密钥。"""

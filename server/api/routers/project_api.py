@@ -130,6 +130,8 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         enable_asset_discovery=params.get("enable_asset_discovery", True),
         enable_xhs=params.get("enable_xhs", True),
         enable_subsidiary_xhs=params.get("enable_subsidiary_xhs", False),
+        enable_bidding=params.get("enable_bidding", True),
+        bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
         enable_wechat=params.get("enable_wechat", False),
         wechat_device_id=params.get("wechat_device_id", ""),
         enable_copywriting=params.get("enable_copywriting", True),
@@ -296,6 +298,34 @@ async def list_project_assets(
         target_id=target_id,
     )
     return {"items": items, "total": total}
+
+
+@router.get("/projects/{project_id}/bidding-records")
+async def list_project_bidding_records(
+    project_id: str,
+    target_id: str = "",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+):
+    """分页读取项目关联的招投标公告及 OSS 原文/附件引用。"""
+    from api.dao import bidding as bidding_dao
+
+    db = get_db()
+    if not await projects_dao.get_project(db, project_id):
+        raise HTTPException(404, "项目不存在")
+    items, total = await bidding_dao.query_records(
+        db,
+        project_id=project_id,
+        target_id=target_id,
+        limit=page_size,
+        skip=(page - 1) * page_size,
+    )
+    return PageResponse.build(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post("/projects/{project_id}/tasks")

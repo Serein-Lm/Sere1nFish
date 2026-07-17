@@ -114,6 +114,7 @@
 - 外部资产情报（FOFA/Hunter 等）经 `api.services.asset_intelligence` 统一协议、工厂和 Provider 接入，底层查询复用 `crawler_tools/*_tools.py`；API Key 走 `api.dao.config` 的 tools 分类加密存储。候选 URL 必须先跨来源规范化去重和并发存活探测，再按稳定 `asset_id` 增量 upsert 到 `fofa_assets`。普通任务默认深扫本轮发现的全部存活资产；只有用户显式选择增量扫描时，才仅深扫新增或发生实质变化且存活的资产。已在资产发现阶段完成探活的 URL 必须复用结果，不得在深扫入口重复探活。工具 Key 有效性探测统一走 `api.services.tool_key_test` 分派，各工具校验收敛在其 `validate_key`。
 - 信息采集并发预算统一由 MongoDB `collection_runtime` 配置段和 `api.services.info_collection.tuning` 加载、校验与限幅；任务参数只做单次覆盖。浏览器 worker 数必须小于 Chrome 池上限，为公司规范化、公众号和其他并行任务保留容量；小红书搜索并发必须同时受任务上限、关键词数和当前可用账号数约束。
 - 新增 MongoDB collection（如 `fofa_assets`、`company_meta`）先在 `api/db/collections.py` 声明常量，再在 `api.main` 生命周期或 DAO `ensure_indexes` 中幂等建索引。
+- 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`；记录累积 `target_ids/project_ids` 供公司与项目双向检索，重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。
 
 ## 前端关键设计规则
 

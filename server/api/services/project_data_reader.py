@@ -232,6 +232,17 @@ async def _scholar_articles(db, project_id, limit, _access):
     return ProjectDatasetResult(items, total)
 
 
+async def _bidding_records(db, project_id, limit, _access):
+    from api.dao import bidding
+
+    items, total = await bidding.query_records(
+        db,
+        project_id=project_id,
+        limit=limit,
+    )
+    return ProjectDatasetResult(items, total)
+
+
 async def _tasks(db, project_id, limit, _access):
     from api.dao import tasks
 
@@ -334,6 +345,12 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
             "来源原文",
             "永久保存的文章原文、图片分析和版本",
             _source_documents,
+        ),
+        ProjectDatasetAdapter(
+            "bidding_records",
+            "招投标公告",
+            "法定主体招投标正文、详情页、附件和视觉分析引用",
+            _bidding_records,
         ),
         ProjectDatasetAdapter(
             "targets", "Target", "项目关联公司、根域名和采集目标", _targets

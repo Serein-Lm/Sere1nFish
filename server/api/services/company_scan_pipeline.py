@@ -182,6 +182,8 @@ class CompanyScanPipeline:
         enable_asset_discovery: bool = True,
         enable_xhs: bool = True,
         enable_subsidiary_xhs: bool = False,
+        enable_bidding: bool = True,
+        bidding_page_size: int = 20,
         enable_wechat: bool = False,
         wechat_device_id: str = "",
         enable_copywriting: bool = True,
@@ -208,9 +210,9 @@ class CompanyScanPipeline:
 
         阶段:
         1. CompanyRouter 分析公司 → 生成搜索策略
-        2. 并行执行: URL扫描 + XHS搜索 + 全资子公司查询
-        3. 并行执行: 全资子公司采集 + 可选公众号手机采集
-        4. XHS画像 → 话术生成
+        2. 并行执行: URL扫描 + 招投标 + XHS搜索 + 公众号手机采集 + 全资子公司查询
+        3. 逐个采集全资子公司（子公司 XHS 默认关闭）
+        4. 根 Target 的 XHS画像 → 话术生成
         """
         from core.observability import obs_log
 
@@ -247,6 +249,16 @@ class CompanyScanPipeline:
                 "keywords_used": [],
                 "notes_count": 0,
                 "profiles_count": 0,
+            },
+            "bidding": {
+                "enabled": enable_bidding,
+                "status": "pending" if enable_bidding else "disabled",
+                "query_name": "",
+                "records_fetched": 0,
+                "total_reported": 0,
+                "attachments_archived": 0,
+                "findings_count": 0,
+                "copywritings_count": 0,
             },
             "wechat": {
                 "enabled": enable_wechat,
@@ -388,11 +400,12 @@ class CompanyScanPipeline:
             if not router_output.success:
                 logger.warning(f"[company_scan] 公司路由失败: {router_output.error}，使用默认策略")
 
-            # ── 阶段 2: 资产发现/URL 深扫与社媒采集并发执行 ──
-            tasks: list[Any] = []
+            # ── 阶段 2: 各根 Target 数据源并发执行 ──
+            primary_jobs: list[tuple[str, Any]] = []
             xhs_succeeded = False
             if enable_control_structure:
-                tasks.append(
+                primary_jobs.append((
+                    "control_structure",
                     self._run_wholly_owned_investments(
                         task_id=task_id,
                         project_id=project_id,
@@ -401,10 +414,11 @@ class CompanyScanPipeline:
                         max_entities=control_max_entities,
                         page_concurrency=control_lookup_concurrency,
                         icp_concurrency=control_icp_concurrency,
-                    )
-                )
+                    ),
+                ))
             if enable_asset_discovery or (enable_url_scan and (url_text or urls)):
-                tasks.append(
+                primary_jobs.append((
+                    "asset_url",
                     self._run_asset_and_url_scan(
                         task_id=task_id,
                         project_id=project_id,
@@ -422,39 +436,121 @@ class CompanyScanPipeline:
                         url_probe_concurrency=url_probe_concurrency,
                         url_scan_concurrency=url_scan_concurrency,
                         copywriting_concurrency=copywriting_concurrency,
-                    )
-                )
+                    ),
+                ))
 
             if enable_xhs:
                 xhs_keywords = self._get_xhs_keywords(aliases, router_output)
                 result["xhs"]["keywords_used"] = xhs_keywords
-                tasks.append(self._run_xhs_search(
-                    task_id, project_id, xhs_keywords,
-                    xhs_max_notes, xhs_attention_threshold,
-                    target_id=target_id,
-                    target_name=normalized_name,
-                    search_concurrency=xhs_search_concurrency,
+                primary_jobs.append((
+                    "xhs",
+                    self._run_xhs_search(
+                        task_id,
+                        project_id,
+                        xhs_keywords,
+                        xhs_max_notes,
+                        xhs_attention_threshold,
+                        target_id=target_id,
+                        target_name=normalized_name,
+                        search_concurrency=xhs_search_concurrency,
+                    ),
                 ))
 
-            if tasks:
-                logger.info(f"[company_scan] task={task_id} 阶段2: 并行执行 {len(tasks)} 条子流水线")
-                await self._update_progress(task_id, "scanning", f"并行执行 {len(tasks)} 条子流水线...")
-                sub_results = await asyncio.gather(*tasks, return_exceptions=True)
+            if enable_bidding:
+                result["bidding"]["query_name"] = normalized_name
+                primary_jobs.append((
+                    "bidding",
+                    self._run_bidding_collection(
+                        task_id=task_id,
+                        project_id=project_id,
+                        company_name=normalized_name,
+                        target_id=target_id,
+                        page_size=bidding_page_size,
+                        enable_visual_analysis=enable_url_scan,
+                        enable_copywriting=enable_copywriting,
+                        min_attention_score=min_attention_score,
+                        scan_concurrency=url_scan_concurrency,
+                        copywriting_concurrency=copywriting_concurrency,
+                    ),
+                ))
 
-                for i, sub in enumerate(sub_results):
+            if enable_wechat:
+                primary_jobs.append((
+                    "wechat",
+                    self._run_wechat_collection(
+                        task_id=task_id,
+                        project_id=project_id,
+                        target_id=target_id,
+                        target_name=normalized_name,
+                        device_id=wechat_device_id,
+                    ),
+                ))
+
+            if primary_jobs:
+                logger.info(
+                    "[company_scan] task=%s 阶段2: 并行执行 %s",
+                    task_id,
+                    ", ".join(kind for kind, _operation in primary_jobs),
+                )
+                await self._update_progress(
+                    task_id,
+                    "scanning",
+                    f"并行执行 {len(primary_jobs)} 条根 Target 数据源流水线...",
+                )
+                sub_results = await asyncio.gather(
+                    *(operation for _kind, operation in primary_jobs),
+                    return_exceptions=True,
+                )
+
+                failed_primary_jobs: set[str] = set()
+                for (kind, _operation), sub in zip(primary_jobs, sub_results):
                     if isinstance(sub, Exception):
-                        logger.error(f"[company_scan] 子流水线 {i} 失败: {sub}")
-                        result["sub_errors"].append(str(sub))
+                        failed_primary_jobs.add(kind)
+                        logger.error("[company_scan] %s 子流水线失败: %s", kind, sub)
+                        result["sub_errors"].append(f"{kind}: {sub}")
+                        if kind == "wechat":
+                            result["wechat"].update(status="error", error=str(sub))
                     elif isinstance(sub, dict):
-                        if sub.get("kind") == "asset_url":
+                        if kind == "asset_url":
                             result["assets"].update(sub.get("assets") or {})
                             result["url_scan"].update(sub.get("url_scan") or {})
-                        elif sub.get("kind") == "control_structure":
+                        elif kind == "control_structure":
                             result["control_structure"].update(sub.get("result") or {})
-                        elif "notes_count" in sub:
+                        elif kind == "bidding":
+                            visual = sub.get("visual_analysis") or {}
+                            bidding_failed = sub.get("status") == "error"
+                            bidding_partial = bool(
+                                visual.get("status") == "error"
+                                or sub.get("archive_error_count")
+                            )
+                            result["bidding"].update(
+                                sub,
+                                status=(
+                                    "error"
+                                    if bidding_failed
+                                    else "partial"
+                                    if bidding_partial
+                                    else "completed"
+                                ),
+                                findings_count=visual.get("findings_count", 0),
+                                copywritings_count=visual.get("copywritings_count", 0),
+                            )
+                            if bidding_failed and sub.get("error"):
+                                failed_primary_jobs.add(kind)
+                                result["sub_errors"].append(str(sub["error"]))
+                        elif kind == "xhs":
                             result["xhs"].update(sub)
                             xhs_succeeded = True
-                if result["sub_errors"] and len(result["sub_errors"]) == len(tasks):
+                        elif kind == "wechat":
+                            result["wechat"].update(sub)
+                            if sub.get("status") == "error":
+                                failed_primary_jobs.add(kind)
+                if result["wechat"].get("status") == "error":
+                    raise RuntimeError(
+                        "公众号采集失败: "
+                        + str(result["wechat"].get("error") or "未知错误")
+                    )
+                if len(failed_primary_jobs) == len(primary_jobs):
                     raise RuntimeError("所有公司扫描子流水线均失败: " + "; ".join(result["sub_errors"]))
 
             wholly_owned_entities = list(result["control_structure"].get("entities") or [])
@@ -485,23 +581,11 @@ class CompanyScanPipeline:
                         entity_concurrency=control_scan_concurrency,
                     ),
                 ))
-            if enable_wechat:
-                followups.append((
-                    "wechat",
-                    self._run_wechat_collection(
-                        task_id=task_id,
-                        project_id=project_id,
-                        target_id=target_id,
-                        target_name=normalized_name,
-                        device_id=wechat_device_id,
-                    ),
-                ))
-
             if followups:
                 await self._update_progress(
                     task_id,
                     "followup_collection",
-                    "并发采集全资子公司与公众号...",
+                    "采集全资子公司...",
                 )
                 followup_results = await asyncio.gather(
                     *(operation for _kind, operation in followups),
@@ -511,11 +595,7 @@ class CompanyScanPipeline:
                     if isinstance(outcome, Exception):
                         error_message = f"{kind}: {outcome}"
                         result["sub_errors"].append(error_message)
-                        if kind == "wechat":
-                            result["wechat"].update(status="error", error=str(outcome))
-                        else:
-                            raise outcome
-                        continue
+                        raise outcome
                     if kind == "wholly_owned_entities":
                         result["control_structure"]["entities"] = outcome["entities"]
                         result["control_structure"]["scan_summary"] = outcome["summary"]
@@ -523,12 +603,6 @@ class CompanyScanPipeline:
                         result["profile_copywritings"]["count"] = int(
                             outcome["summary"].get("profile_copywritings") or 0
                         )
-                    elif kind == "wechat":
-                        result["wechat"].update(outcome)
-                if result["wechat"].get("status") == "error":
-                    raise RuntimeError(
-                        "公众号采集失败: " + str(result["wechat"].get("error") or "未知错误")
-                    )
 
             # ── 阶段 3: 画像→话术 ──
             if enable_xhs and enable_copywriting and xhs_succeeded:
@@ -579,6 +653,9 @@ class CompanyScanPipeline:
                     "wechat_records": result["wechat"].get("total", 0),
                     "wechat_documents": result["wechat"].get("documents", 0),
                     "wechat_contacts": result["wechat"].get("contacts", 0),
+                    "bidding_records": result["bidding"].get("records_fetched", 0),
+                    "bidding_findings": result["bidding"].get("findings_count", 0),
+                    "bidding_copywritings": result["bidding"].get("copywritings_count", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                     "wholly_owned_entities": len(wholly_owned_entities),
                 },
@@ -595,6 +672,8 @@ class CompanyScanPipeline:
                     "xhs_profiles": result["xhs"].get("profiles_count", 0),
                     "wechat_records": result["wechat"].get("total", 0),
                     "wechat_documents": result["wechat"].get("documents", 0),
+                    "bidding_records": result["bidding"].get("records_fetched", 0),
+                    "bidding_findings": result["bidding"].get("findings_count", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                 },
             )
@@ -707,6 +786,51 @@ class CompanyScanPipeline:
             target_name=target_name,
             device_id=device_id,
         )
+
+    async def _run_bidding_collection(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        company_name: str,
+        target_id: str,
+        page_size: int,
+        enable_visual_analysis: bool,
+        enable_copywriting: bool,
+        min_attention_score: int,
+        scan_concurrency: int,
+        copywriting_concurrency: int,
+    ) -> dict[str, Any]:
+        from api.services.bidding_pipeline import BiddingPipeline
+
+        try:
+            return await BiddingPipeline(self.db, self.app_config).run_pipeline(
+                task_id=f"{task_id}_bidding",
+                project_id=project_id,
+                company_name=company_name,
+                target_id=target_id,
+                page_size=max(1, min(int(page_size), 20)),
+                enable_visual_analysis=enable_visual_analysis,
+                enable_copywriting=enable_copywriting,
+                min_attention_score=min_attention_score,
+                scan_concurrency=max(1, min(int(scan_concurrency), 3)),
+                copywriting_concurrency=max(1, min(int(copywriting_concurrency), 2)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[company_scan] 招投标子流水线失败: %s", exc)
+            return {
+                "kind": "bidding",
+                "enabled": True,
+                "status": "error",
+                "query_name": company_name,
+                "records_fetched": 0,
+                "error": str(exc),
+                "visual_analysis": {
+                    "status": "error",
+                    "findings_count": 0,
+                    "copywritings_count": 0,
+                },
+            }
 
     async def _scan_wholly_owned_entities(
         self,

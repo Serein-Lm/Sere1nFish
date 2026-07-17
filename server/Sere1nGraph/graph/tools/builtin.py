@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from pathlib import Path
 from typing import Any
 
-import requests
 from openai import OpenAI
 from langchain.tools import tool
 
@@ -58,20 +56,6 @@ def _run_coro_sync(coro):
     return result.get("value")
 
 
-def _get_tool_api_key(tool_name: str) -> str:
-    async def _load() -> str:
-        from api.dao import config as config_dao
-        from api.db.mongodb import get_db
-
-        config = await config_dao.get_tool_config(get_db(), tool_name)
-        return str(config.get("api_key") or "").strip()
-
-    try:
-        return _run_coro_sync(_load()) or ""
-    except Exception:
-        return ""
-
-
 @tool(
     "tianyancha_get_domain",
     description=(
@@ -106,50 +90,6 @@ def tianyancha_get_domain(company_name: str) -> str:
 
 
 @tool(
-    "tianyancha_get_bids_mock",
-    description=(
-        "【Mock版本】根据公司名称查询招投标信息（使用测试数据）。"
-        "默认查询最近半年的招标公告（type=2），返回详细的正文内容和链接。"
-        "适用于：测试招投标信息采集功能，不产生API费用。"
-    ),
-)
-def tianyancha_get_bids_mock(
-    company_name: str,
-    bid_type: str = "2",
-    page_num: int = 1,
-    page_size: int = 10,
-) -> str:
-    """
-    Mock版本：从本地文件读取测试数据。
-    
-    参数：
-    - company_name: 公司名称（必填，但mock版本会忽略）
-    - bid_type: 公告类型（默认 2）
-    - page_num: 页码（默认 1）
-    - page_size: 每页数量（默认 10）
-    
-    返回：测试数据中的招投标信息
-    """
-    from pathlib import Path
-
-    # 读取 mock 数据文件
-    mock_file = Path(__file__).parent / "mock" / "bidtest.txt"
-
-    try:
-        if not mock_file.exists():
-            return f"Mock数据文件不存在：{mock_file}"
-
-        with open(mock_file, "r", encoding="utf-8") as f:
-            mock_data = f.read()
-
-        # 在返回数据前添加说明
-        return f"【使用Mock数据 - 公司：{company_name}】\n\n{mock_data}"
-
-    except Exception as e:
-        return f"读取Mock数据失败：{e}"
-
-
-@tool(
     "tianyancha_get_bids",
     description=(
         "根据公司名称调用天眼查开放平台招投标接口（/services/open/m/bids/2.0，GET）"
@@ -161,7 +101,7 @@ def tianyancha_get_bids(
     company_name: str,
     bid_type: str = "2",
     page_num: int = 1,
-    page_size: int = 10,
+    page_size: int = 20,
 ) -> str:
     """
     调用天眼查招投标接口获取公司的招投标信息。
@@ -170,92 +110,54 @@ def tianyancha_get_bids(
     - company_name: 公司名称（必填）
     - bid_type: 公告类型（1=招标预告，2=招标公告，4=中标结果，默认 2）
     - page_num: 页码（默认 1）
-    - page_size: 每页数量（默认 10，最大 20）
+    - page_size: 每页数量（默认 20，最大 20）
     
     返回：结构化的招投标信息，包含正文内容和链接
     """
-    from datetime import datetime, timedelta
-
-    api_key = _get_tool_api_key("tianyancha")
-
-    if not api_key:
-        return "天眼查 API Key 未配置，无法调用招投标接口。"
-
-    # 自动计算时间范围：最近半年
-    end_time = datetime.now()
-    start_time = end_time - timedelta(days=180)
-    publish_start_time = start_time.strftime("%Y-%m-%d")
-    publish_end_time = end_time.strftime("%Y-%m-%d")
-
-    # 构建请求 URL
-    url = (
-        "http://open.api.tianyancha.com/services/open/m/bids/2.0"
-        f"?keyword={company_name}"
-        f"&type={bid_type}"
-        f"&publishStartTime={publish_start_time}"
-        f"&publishEndTime={publish_end_time}"
-        f"&pageNum={page_num}"
-        f"&pageSize={page_size}"
-    )
-    headers = {"Authorization": api_key}
-
     try:
-        resp = requests.get(url, headers=headers, timeout=15.0)
-        if resp.status_code != 200:
-            return f"调用天眼查招投标接口失败，HTTP 状态码：{resp.status_code}"
+        from crawler_tools.tianyancha_tools import TianyanchaClient
 
-        data = resp.json()
-    except Exception as e:
-        return f"调用天眼查招投标接口时发生异常：{e}"
+        async def _lookup():
+            client = await TianyanchaClient.from_runtime_config()
+            return await client.search_bids(
+                company_name,
+                bid_type=bid_type,
+                page_num=page_num,
+                page_size=page_size,
+            )
 
-    # 解析响应
-    error_code = data.get("error_code") or data.get("code")
-    if error_code not in (0, "0", None):
-        msg = data.get("reason") or data.get("message") or str(data)
-        return f"天眼查招投标接口返回错误（code={error_code}）：{msg}"
+        result = _run_coro_sync(_lookup())
+    except Exception as exc:
+        return f"调用天眼查招投标接口时发生异常：{exc}"
 
-    result = data.get("result") or data.get("data") or {}
-    items = result.get("items") or result.get("list") or []
-    total = result.get("total", 0)
-
-    if not items:
-        return f'未找到公司"{company_name}"的招投标信息（时间范围：{publish_start_time} 至 {publish_end_time}）。'
+    if not result.records:
+        return (
+            f'未找到公司“{company_name}”的招投标信息'
+            f'（时间范围：{result.publish_start} 至 {result.publish_end}）。'
+        )
 
     # 格式化输出（返回详细信息供 agent 处理）
     output_lines = [
-        f"找到 {total} 条招投标信息（显示前 {len(items)} 条）",
-        f"查询时间范围：{publish_start_time} 至 {publish_end_time}\n"
+        f"找到 {result.total_reported} 条招投标信息（显示前 {len(result.records)} 条）",
+        f"查询时间范围：{result.publish_start} 至 {result.publish_end}\n"
     ]
-    
-    for idx, item in enumerate(items, 1):
-        title = item.get("title", "无标题")
-        pub_time = item.get("publishTime", "未知时间")
-        bid_type_name = item.get("type", "未知类型")
-        stage = item.get("stage", "")
-        province = item.get("province", "")
-        purchaser = item.get("purchaser", "")
-        proxy = item.get("proxy", "")
-        link = item.get("link", "")
-        content = item.get("content", "")
-        
-        output_lines.append(f"【{idx}】{title}")
-        output_lines.append(f"  类型：{bid_type_name}")
-        output_lines.append(f"  发布时间：{pub_time}")
-        if stage:
-            output_lines.append(f"  进展阶段：{stage}")
-        if province:
-            output_lines.append(f"  省份地区：{province}")
-        if purchaser:
-            output_lines.append(f"  采购人：{purchaser}")
-        if proxy:
-            output_lines.append(f"  代理机构：{proxy}")
-        if link:
-            output_lines.append(f"  详情链接：{link}")
-        
-        # 返回完整正文内容（重要：供 agent 提取 PDF 链接和联系方式）
-        if content:
-            output_lines.append(f"  正文内容：\n{content}")
-        
+
+    for idx, record in enumerate(result.records, 1):
+        output_lines.append(f"【{idx}】{record.title or '无标题'}")
+        output_lines.append(f"  类型：{record.announcement_type or '未知类型'}")
+        output_lines.append(f"  发布时间：{record.published_on or '未知时间'}")
+        if record.stage:
+            output_lines.append(f"  进展阶段：{record.stage}")
+        if record.province:
+            output_lines.append(f"  省份地区：{record.province}")
+        if record.purchaser:
+            output_lines.append(f"  采购人：{record.purchaser}")
+        if record.agency:
+            output_lines.append(f"  代理机构：{record.agency}")
+        if record.detail_url:
+            output_lines.append(f"  详情链接：{record.detail_url}")
+        if record.content_html:
+            output_lines.append(f"  正文内容：\n{record.content_html}")
         output_lines.append("")
 
     return "\n".join(output_lines)

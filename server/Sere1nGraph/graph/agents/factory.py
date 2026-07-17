@@ -17,7 +17,7 @@ from langchain_core.messages import SystemMessage
 from ..config.models import AppConfig
 from ..prompts.loader import load_prompt
 from .runtime import create_agent_node, create_llm, OutputMode
-from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids, tianyancha_get_bids_mock
+from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids
 
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -110,7 +110,7 @@ async def create_bid_collect_agent(
     return create_agent_node(
         app_config=app_config,
         system_prompt=load_prompt("bid_collect/bid_collect"),
-        builtin_tools=[tianyancha_get_bids_mock],
+        builtin_tools=[tianyancha_get_bids],
         middleware=[
             SummarizationMiddleware(
                 model=create_llm(app_config),

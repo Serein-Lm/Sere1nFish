@@ -444,8 +444,13 @@ def test_url_scan_pipeline_streams_findings_to_copywriting(monkeypatch):
             task_id="task-1",
             project_id="project-1",
             url_content="example.com",
+            target_id="target-1",
             min_attention_score=40,
             known_alive_urls=["https://example.com"],
+            source="bidding",
+            source_context_by_url={
+                "https://example.com": "上游公告正文",
+            },
         )
 
         assert result["status"] == "completed"
@@ -456,9 +461,14 @@ def test_url_scan_pipeline_streams_findings_to_copywriting(monkeypatch):
         assert result["total_findings"] == 1
         assert result["total_copywritings"] == 1
         assert len(scan_requests) == 1
+        assert scan_requests[0].source == "bidding"
+        assert scan_requests[0].target_info["target_id"] == "target-1"
+        assert scan_requests[0].target_info["source_context"] == "上游公告正文"
         assert len(copywriting_requests) == 1
+        assert copywriting_requests[0].source == "bidding"
         assert copywriting_requests[0].target_id == "finding-1"
-        assert db["findings"].docs[0]["source"] == "web_tagging"
+        assert db["findings"].docs[0]["source"] == "bidding"
+        assert db["findings"].docs[0]["target_id"] == "target-1"
         assert db["url_scan_results"].docs[0]["url"] == "https://example.com"
         assert db["copywritings"].docs[0]["finding_id"] == "finding-1"
         assert probe_calls == []

@@ -46,5 +46,7 @@ class WebTaggingResultOut(BaseModel):
     project_id: str
     url: str
     task_id: str = ""
+    source: str = "web_tagging"
+    target_id: str = ""
     created_at: datetime
     data: dict[str, Any]

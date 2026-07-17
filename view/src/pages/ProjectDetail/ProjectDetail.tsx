@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
 import {
   getProject,
   listProjectWebTaggingRecords,
@@ -63,6 +63,7 @@ import {
 import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
 import {
   listProjectTargets,
+  openAuthenticatedArtifact,
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
 import {
@@ -70,6 +71,10 @@ import {
   type ScholarContact,
 } from '../../services/scholarContactService'
 import { getConfigSection } from '../../services/configService'
+import {
+  listProjectBiddingRecords,
+  type BiddingRecord,
+} from '../../services/biddingService'
 import './ProjectDetail.css'
 
 const { Title, Paragraph, Text } = Typography
@@ -96,7 +101,7 @@ function boundedTaskTuning(value: unknown, fallback: number, maximum: number): n
   return Number.isFinite(parsed) ? Math.max(1, Math.min(Math.trunc(parsed), maximum)) : fallback
 }
 
-type TabKey = 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'mobile' | 'scholars' | 'tasks' | 'stats'
+type TabKey = 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'bidding' | 'mobile' | 'scholars' | 'tasks' | 'stats'
 
 interface WechatDeviceOption {
   deviceId: string
@@ -136,6 +141,11 @@ const attackSurfaceTypeMap: Record<string, string> = {
   location_info: '位置信息',
   social_relation: '社交关系',
   other: '其他',
+}
+
+const webTaggingSourceMap: Record<string, string> = {
+  web_tagging: '网站',
+  bidding: '招投标',
 }
 
 function mapAttackSurfaceType(type: string): string {
@@ -266,6 +276,13 @@ const taggingColumns: ColumnsType<WebTaggingRecord> = [
     },
   },
   {
+    title: '来源',
+    dataIndex: 'source',
+    key: 'source',
+    width: 90,
+    render: (source: string) => <Tag>{webTaggingSourceMap[source] || source || '网站'}</Tag>,
+  },
+  {
     title: '创建时间',
     dataIndex: 'created_at',
     key: 'created_at',
@@ -371,6 +388,14 @@ const findingsColumns = (onViewCopywriting?: (finding: WebTaggingFinding) => voi
 function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggingRecord; onViewCopywriting?: (finding: WebTaggingFinding) => void }) {
   const findings = record.data?.findings ?? []
   const hasFindings = Boolean(record.data?.has_findings)
+  const openScreenshot = async () => {
+    if (!record.data?.screenshot_url) return
+    try {
+      await openAuthenticatedArtifact(record.data.screenshot_url)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '打开页面截图失败')
+    }
+  }
 
   return (
     <div className="expanded-record-content">
@@ -381,6 +406,20 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
           <Descriptions.Item label="域名">{record.data?.intro?.domain || '-'}</Descriptions.Item>
           <Descriptions.Item label="站点名称">{record.data?.intro?.site_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="主体名称">{record.data?.intro?.entity_name || '-'}</Descriptions.Item>
+          <Descriptions.Item label="页面截图">
+            <Button
+              type="text"
+              size="small"
+              icon={<PictureOutlined />}
+              disabled={!record.data?.screenshot_url}
+              onClick={(event) => {
+                event.stopPropagation()
+                void openScreenshot()
+              }}
+            >
+              查看
+            </Button>
+          </Descriptions.Item>
           <Descriptions.Item label="摘要" span={2}>{record.data?.intro?.summary || '-'}</Descriptions.Item>
         </Descriptions>
       </div>
@@ -553,13 +592,19 @@ export default function ProjectDetail() {
   const [wechatRecordsTotal, setWechatRecordsTotal] = useState(0)
   const [wechatLoading, setWechatLoading] = useState(false)
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
-  const [wechatTargets, setWechatTargets] = useState<ProjectTargetSummary[]>([])
+  const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
   const [wechatTargetId, setWechatTargetId] = useState('')
   const [scholarContacts, setScholarContacts] = useState<ScholarContact[]>([])
   const [scholarContactsTotal, setScholarContactsTotal] = useState(0)
   const [scholarLoading, setScholarLoading] = useState(false)
   const [scholarOnlyCorresponding, setScholarOnlyCorresponding] = useState(false)
   const [scholarOnlyVerified, setScholarOnlyVerified] = useState(false)
+  const [biddingRecords, setBiddingRecords] = useState<BiddingRecord[]>([])
+  const [biddingRecordsTotal, setBiddingRecordsTotal] = useState(0)
+  const [biddingLoading, setBiddingLoading] = useState(false)
+  const [biddingPage, setBiddingPage] = useState(1)
+  const [biddingPageSize, setBiddingPageSize] = useState(20)
+  const [biddingTargetId, setBiddingTargetId] = useState('')
 
   // 话术 Drawer 状态
   const [copywritingDrawerOpen, setCopywritingDrawerOpen] = useState(false)
@@ -596,7 +641,7 @@ export default function ProjectDetail() {
         }),
         listProjectTargets(pid),
       ])
-      setWechatTargets(targetResult.items)
+      setProjectTargets(targetResult.items)
       const sorted = [...res.items].sort((a, b) => {
         const ca = extractContactsFromFields((a.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
         const cb = extractContactsFromFields((b.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
@@ -636,6 +681,41 @@ export default function ProjectDetail() {
       setScholarLoading(false)
     }
   }
+
+  const fetchBiddingRecords = async (
+    pid: string,
+    page = 1,
+    pageSize = 20,
+    targetId = biddingTargetId,
+  ) => {
+    setBiddingLoading(true)
+    try {
+      const [result, targetResult] = await Promise.all([
+        listProjectBiddingRecords(pid, {
+          page,
+          page_size: pageSize,
+          target_id: targetId || undefined,
+        }),
+        listProjectTargets(pid),
+      ])
+      setProjectTargets(targetResult.items)
+      setBiddingRecords(result.items)
+      setBiddingRecordsTotal(result.total)
+      setBiddingPage(result.page)
+      setBiddingPageSize(result.page_size)
+    } catch (e) {
+      console.error('加载招投标公告失败:', e)
+      message.error(e instanceof Error ? e.message : '加载招投标公告失败')
+    } finally {
+      setBiddingLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'bidding' && projectId) {
+      fetchBiddingRecords(projectId)
+    }
+  }, [activeTab, projectId])
 
   // 加载任务列表
   const fetchTasks = async (pid: string, page = 1, pageSize = 10) => {
@@ -906,6 +986,11 @@ export default function ProjectDetail() {
           setDouyinSearchResults([])
           setDouyinTaggedResults([])
           setDouyinProfiles([])
+          setBiddingRecords([])
+          setBiddingRecordsTotal(0)
+          setBiddingPage(1)
+          setBiddingPageSize(20)
+          setBiddingTargetId('')
           setMobileProfiles([])
           setMobileScreenshots([])
           setMobileOperations([])
@@ -2806,8 +2891,8 @@ export default function ProjectDetail() {
               value={wechatTargetId}
               style={{ width: 360, maxWidth: '100%' }}
               options={[
-                { value: '', label: `全部 Target (${wechatTargets.length})` },
-                ...wechatTargets.map((target) => ({
+                { value: '', label: `全部 Target (${projectTargets.length})` },
+                ...projectTargets.map((target) => ({
                   value: target.target_id,
                   label: `${['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(target.relation_type || '') ? '[全资子公司] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count} · 存活资产 ${target.alive_asset_count})`,
                 })),
@@ -2990,8 +3075,164 @@ export default function ProjectDetail() {
     )
   }
 
+  const renderBiddingContent = () => {
+    const openArtifact = async (path?: string) => {
+      if (!path) return
+      try {
+        await openAuthenticatedArtifact(path)
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : '打开归档文件失败')
+      }
+    }
+    const columns: ColumnsType<BiddingRecord> = [
+      {
+        title: '公告',
+        dataIndex: 'title',
+        key: 'title',
+        ellipsis: true,
+        render: (title: string, record) => record.detail_url ? (
+          <a href={record.detail_url} target="_blank" rel="noreferrer" title={title}>{title || '未命名公告'}</a>
+        ) : (title || '未命名公告'),
+      },
+      {
+        title: '采购人',
+        dataIndex: 'purchaser',
+        key: 'purchaser',
+        width: 210,
+        ellipsis: true,
+        render: (value: string) => value || '-',
+      },
+      {
+        title: '阶段',
+        key: 'stage',
+        width: 120,
+        render: (_, record) => <Tag color="blue">{record.stage || record.announcement_type || '未标注'}</Tag>,
+      },
+      {
+        title: '发布时间',
+        dataIndex: 'published_on',
+        key: 'published_on',
+        width: 110,
+        render: (value: string) => value || '-',
+      },
+      {
+        title: '归档',
+        key: 'archive',
+        width: 120,
+        render: (_, record) => (
+          <Space size={4} wrap>
+            <Tag color={record.provider_payload_url ? 'green' : 'default'}>原始</Tag>
+            <Tag color={record.raw_content_url ? 'green' : 'default'}>正文</Tag>
+            <Tag color={(record.attachments || []).some((item) => item.status === 'ready') ? 'green' : 'default'}>
+              附件 {(record.attachments || []).filter((item) => item.status === 'ready').length}
+            </Tag>
+          </Space>
+        ),
+      },
+      {
+        title: '操作',
+        key: 'actions',
+        width: 150,
+        render: (_, record) => (
+          <Space size={2}>
+            <Tooltip title="查看供应商原始记录">
+              <Button type="text" size="small" icon={<FileSearchOutlined />} disabled={!record.provider_payload_url} onClick={() => openArtifact(record.provider_payload_url)} />
+            </Tooltip>
+            <Tooltip title="查看 API 原始正文">
+              <Button type="text" size="small" icon={<FileTextOutlined />} disabled={!record.raw_content_url} onClick={() => openArtifact(record.raw_content_url)} />
+            </Tooltip>
+            <Tooltip title="查看归档详情页">
+              <Button type="text" size="small" icon={<GlobalOutlined />} disabled={!record.detail_html_url} onClick={() => openArtifact(record.detail_html_url)} />
+            </Tooltip>
+            {record.provider_url && (
+              <Tooltip title="查看天眼查记录">
+                <Button type="text" size="small" icon={<LinkOutlined />} href={record.provider_url} target="_blank" />
+              </Tooltip>
+            )}
+          </Space>
+        ),
+      },
+    ]
+
+    return (
+      <div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8, flexWrap: 'wrap' }}>
+          <Text type="secondary">按公司 Target 永久归档，共 {biddingRecordsTotal} 条公告</Text>
+          <Space wrap>
+            <Select
+              value={biddingTargetId}
+              style={{ width: 320, maxWidth: '100%' }}
+              options={[
+                { value: '', label: `全部公司 (${projectTargets.length})` },
+                ...projectTargets.map((target) => ({
+                  value: target.target_id,
+                  label: target.target_name,
+                })),
+              ]}
+              onChange={(value) => {
+                setBiddingTargetId(value)
+                if (projectId) void fetchBiddingRecords(projectId, 1, biddingPageSize, value)
+              }}
+            />
+            <Button size="small" icon={<SyncOutlined />} loading={biddingLoading} onClick={() => { if (projectId) void fetchBiddingRecords(projectId, biddingPage, biddingPageSize, biddingTargetId) }}>刷新</Button>
+          </Space>
+        </div>
+        <Table<BiddingRecord>
+          rowKey="record_id"
+          size="small"
+          loading={biddingLoading}
+          columns={columns}
+          dataSource={biddingRecords}
+          locale={{ emptyText: <Empty description="暂无招投标公告" /> }}
+          scroll={{ x: 900 }}
+          expandable={{
+            expandedRowRender: (record) => (
+              <div style={{ display: 'grid', gap: 10 }}>
+                <Descriptions size="small" bordered column={{ xs: 1, sm: 2, lg: 3 }}>
+                  <Descriptions.Item label="查询主体">{(record.query_names || []).join('、') || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="代理机构">{record.agency || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="地区">{record.province || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="命中身份">{record.enterprise_identity || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="正文长度">{record.content_length || 0} 字</Descriptions.Item>
+                  <Descriptions.Item label="更新时间">{formatDate(record.updated_at)}</Descriptions.Item>
+                </Descriptions>
+                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }} ellipsis={{ rows: 8, expandable: true, symbol: '展开正文预览' }}>
+                  {record.content_preview || record.detail_text_preview || '暂无正文预览'}
+                </Typography.Paragraph>
+                {(record.attachments || []).length > 0 && (
+                  <Space wrap>
+                    {(record.attachments || []).map((attachment) => (
+                      <Button
+                        key={`${record.record_id}-${attachment.index}`}
+                        size="small"
+                        icon={<FileTextOutlined />}
+                        disabled={attachment.status !== 'ready' || !attachment.url}
+                        onClick={() => openArtifact(attachment.url)}
+                      >
+                        {attachment.filename || attachment.label || `附件 ${attachment.index + 1}`}
+                      </Button>
+                    ))}
+                  </Space>
+                )}
+              </div>
+            ),
+          }}
+          pagination={{
+            total: biddingRecordsTotal,
+            current: biddingPage,
+            pageSize: biddingPageSize,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50, 100],
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (page, pageSize) => { if (projectId) void fetchBiddingRecords(projectId, page, pageSize, biddingTargetId) },
+          }}
+        />
+      </div>
+    )
+  }
+
   // 数据源中文映射
-  const sourceNameMap: Record<string, string> = { web_tagging: '官网打标', xhs: '小红书', douyin: '抖音', mobile: '手机画像' }
+  const sourceNameMap: Record<string, string> = { web_tagging: '官网打标', bidding: '招投标', xhs: '小红书', douyin: '抖音', mobile: '手机画像' }
   // 渲染简易看板（基本信息下方）
   const renderMiniDashboard = () => {
     if (dashboardLoading) return <Skeleton active paragraph={{ rows: 1 }} />
@@ -3009,6 +3250,7 @@ export default function ProjectDetail() {
       douyin_profiles: 0,
       mobile_profiles: 0,
       mobile_profile_observations: 0,
+      bidding_records: 0,
     }
 
     return (
@@ -3021,6 +3263,7 @@ export default function ProjectDetail() {
           <Col xs={8} sm={6} md={4} lg={3}><Statistic title="笔记" value={c.xhs_notes} styles={{ content: { fontSize: 16 } }} /></Col>
           <Col xs={8} sm={6} md={4} lg={3}><Statistic title="画像" value={(c.xhs_profiles ?? 0) + (c.douyin_profiles ?? 0) + (c.mobile_profiles ?? 0)} styles={{ content: { fontSize: 16 } }} /></Col>
           <Col xs={8} sm={6} md={4} lg={3}><Statistic title="打标" value={c.web_tagging} styles={{ content: { fontSize: 16 } }} /></Col>
+          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="招投标" value={c.bidding_records ?? 0} styles={{ content: { fontSize: 16 } }} /></Col>
           <Col xs={8} sm={6} md={4} lg={3}>
             <Statistic title="数据源" valueRender={() => (
               <Space size={4}>
@@ -3077,6 +3320,17 @@ export default function ProjectDetail() {
         </Space>
       ),
       children: renderWechatContent(),
+    },
+    {
+      key: 'bidding' as TabKey,
+      label: (
+        <Space>
+          <FileSearchOutlined />
+          招投标
+          <Tag>{dashboardData?.data_counts?.bidding_records ?? biddingRecordsTotal}</Tag>
+        </Space>
+      ),
+      children: renderBiddingContent(),
     },
     {
       key: 'mobile' as TabKey,
@@ -3576,6 +3830,8 @@ export default function ProjectDetail() {
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? true
                     params.enable_subsidiary_xhs = Boolean(values.enable_xhs && values.enable_subsidiary_xhs)
+                    params.enable_bidding = values.enable_bidding ?? true
+                    if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
                     params.enable_wechat = values.enable_wechat ?? false
                     if (values.enable_wechat) params.wechat_device_id = values.wechat_device_id
                     params.enable_copywriting = values.enable_copywriting ?? true
@@ -3661,7 +3917,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_subsidiary_xhs: false, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: true, enable_subsidiary_xhs: false, enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -3697,6 +3953,9 @@ export default function ProjectDetail() {
                             </Form.Item>
                             <Form.Item name="enable_xhs" valuePropName="checked" noStyle>
                               <Checkbox>小红书爬取（默认只采集根公司）</Checkbox>
+                            </Form.Item>
+                            <Form.Item name="enable_bidding" valuePropName="checked" noStyle>
+                              <Checkbox>招投标采集（法定主体，默认 20 条）</Checkbox>
                             </Form.Item>
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (
@@ -3808,7 +4067,7 @@ export default function ProjectDetail() {
                           </Col>
                         </Row>
                         <Row gutter={16}>
-                          <Col xs={24} sm={12}>
+                          <Col xs={24} sm={8}>
                             <Form.Item
                               name="xhs_max_notes"
                               label="小红书最大入库笔记数"
@@ -3817,7 +4076,12 @@ export default function ProjectDetail() {
                               <InputNumber min={1} max={100} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
-                          <Col xs={24} sm={12}>
+                          <Col xs={24} sm={8}>
+                            <Form.Item name="bidding_page_size" label="招投标公告数">
+                              <InputNumber min={1} max={20} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={8}>
                             <Form.Item name="min_attention_score" label="最低关注度阈值">
                               <InputNumber min={0} max={100} style={{ width: '100%' }} />
                             </Form.Item>

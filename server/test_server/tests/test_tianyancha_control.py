@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import pytest
 
 from crawler_tools.tianyancha_tools import (
+    BIDDING_PATH,
     OUTBOUND_INVESTMENT_INTERFACE_ID,
     OUTBOUND_INVESTMENT_PATH,
     PERMISSION_DENIED_CODE,
     TianyanchaApiError,
     TianyanchaClient,
+    parse_bidding_records,
     parse_direct_wholly_owned_investments,
     parse_icp_records,
     parse_percent,
@@ -128,6 +131,89 @@ def test_icp_parser_uses_official_ym_and_website_fields() -> None:
     assert records[0].domain == "example.com"
     assert records[0].websites == ["example.com"]
     assert records[0].license_no == "京ICP备案号"
+
+
+def test_bidding_parser_maps_supplier_fields_and_builds_stable_id() -> None:
+    payload = {
+        "id": 123,
+        "uuid": "bid-uuid",
+        "title": "采购结果公告",
+        "type": "中标公告",
+        "stage": "结果",
+        "publishTime": "1784044800000",
+        "purchaser": "示例公司",
+        "proxy": "示例代理",
+        "link": "https://example.com/bids/123",
+        "bidList": [{"name": "供应商 A"}],
+        "content": "<p>公告正文</p>",
+    }
+
+    first = parse_bidding_records([payload])[0]
+    second = parse_bidding_records([dict(payload)])[0]
+
+    assert first.record_id == second.record_id
+    assert first.record_id.startswith("bid_")
+    assert first.provider_record_id == "123"
+    assert first.announcement_type == "中标公告"
+    assert first.agency == "示例代理"
+    assert first.published_on == "2026-07-15"
+    assert first.content_html == "<p>公告正文</p>"
+    assert first.raw_payload["bidList"] == [{"name": "供应商 A"}]
+
+
+def test_bidding_parser_normalizes_supplier_collection_fields() -> None:
+    record = parse_bidding_records(
+        [
+            {
+                "uuid": "collection-fields",
+                "proxy": "[[]]",
+                "purchaser": [{"name": "采购单位 A"}, {"name": "采购单位 B"}],
+                "bidWinner": '[{"name":"中标单位"}]',
+            }
+        ]
+    )[0]
+
+    assert record.agency == ""
+    assert record.purchaser == "采购单位 A、采购单位 B"
+    assert record.winner == "中标单位"
+
+
+@pytest.mark.asyncio
+async def test_bidding_query_uses_legal_name_date_window_and_supplier_limit() -> None:
+    captured: dict[str, Any] = {}
+
+    class _Client(TianyanchaClient):
+        def __init__(self) -> None:
+            super().__init__("test-key")
+
+        async def _request(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+            captured.update(endpoint=endpoint, params=params)
+            return {
+                "error_code": 0,
+                "result": {
+                    "total": 1,
+                    "items": [{"uuid": "one", "title": "公告"}],
+                },
+            }
+
+    result = await _Client().search_bids(
+        "安徽广播电视台",
+        page_size=100,
+        lookback_days=180,
+        end_date=date(2026, 7, 17),
+    )
+
+    assert captured["endpoint"] == BIDDING_PATH
+    assert captured["params"] == {
+        "keyword": "安徽广播电视台",
+        "type": "2",
+        "publishStartTime": "2026-01-18",
+        "publishEndTime": "2026-07-17",
+        "pageNum": 1,
+        "pageSize": 20,
+    }
+    assert result.total_reported == 1
+    assert result.page_size == 20
 
 
 def test_keyword_skill_ignores_standalone_company_placeholder(

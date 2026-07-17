@@ -24,6 +24,7 @@ from api.dao import contact_profiles as contact_profiles_dao
 from api.dao import findings as findings_dao
 from api.dao import fofa_assets as fofa_assets_dao
 from api.dao import persons as persons_dao
+from api.dao import bidding as bidding_dao
 from api.services import entity_ref
 
 # 聚合上限，避免单次解析拉取过多数据拖慢 AI/产物流程
@@ -31,6 +32,7 @@ _MAX_FINDINGS = 20
 _MAX_ASSETS = 200
 _MAX_CONTACT_PROFILES = 20
 _MAX_RELATED_PERSONS = 20
+_MAX_BIDDING_RECORDS = 50
 
 
 def _now_iso() -> str:
@@ -187,6 +189,13 @@ async def resolve_company_context(
             db, company=resolved_name, limit=_MAX_RELATED_PERSONS
         )
 
+    bidding_records = await bidding_dao.query_company_records(
+        db,
+        target_id=str((company or {}).get("target_id") or ""),
+        company_name=resolved_name,
+        limit=_MAX_BIDDING_RECORDS,
+    )
+
     related_refs = entity_ref.build_company_related_refs(
         company=company,
         assets=assets,
@@ -204,6 +213,8 @@ async def resolve_company_context(
         "assets_total": len(assets),
         "related_persons": related_persons,
         "related_persons_total": len(related_persons),
+        "bidding_records": bidding_records,
+        "bidding_records_total": len(bidding_records),
         "related_refs": related_refs,
         "generated_at": _now_iso(),
     }

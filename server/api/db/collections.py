@@ -90,6 +90,9 @@ FOFA_ASSETS_COLLECTION = "fofa_assets"
 SCHOLAR_ARTICLES_COLLECTION = "scholar_articles"
 SCHOLAR_CONTACTS_COLLECTION = "scholar_contacts"
 
+# 招投标公告。记录按供应商稳定 ID 全局去重，通过 project_ids/target_ids 复用。
+BIDDING_RECORDS_COLLECTION = "bidding_records"
+
 # 人设库 — 统一人物实体（跨平台/跨项目真源，稳定 person_id）
 PERSONS_COLLECTION = "persons"
 

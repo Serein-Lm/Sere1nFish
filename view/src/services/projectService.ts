@@ -62,6 +62,8 @@ export interface WebTaggingFinding {
   evidence: string
   attention_score: number
   attention_reason: string
+  screenshot_object_id?: string
+  screenshot_url?: string
 }
 
 export interface WebTaggingData {
@@ -69,6 +71,12 @@ export interface WebTaggingData {
   has_findings: boolean
   no_findings_reason: string | null
   findings: WebTaggingFinding[]
+  screenshot_object_id?: string
+  screenshot_url?: string
+  screenshot_captured_url?: string
+  screenshot_captured_at?: string
+  screenshot_width?: number
+  screenshot_height?: number
 }
 
 export interface WebTaggingRecord {
@@ -76,6 +84,8 @@ export interface WebTaggingRecord {
   project_id: string
   url: string
   task_id?: string
+  source: string
+  target_id?: string
   created_at: string
   data: WebTaggingData
 }
@@ -102,6 +112,7 @@ export interface DashboardData {
     douyin_profiles: number
     mobile_profiles: number
     mobile_profile_observations: number
+    bidding_records: number
     copywritings: number
   }
   top_findings: Array<{

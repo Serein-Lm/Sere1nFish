@@ -17,6 +17,13 @@ def test_subsidiary_xhs_is_disabled_by_default() -> None:
     assert parameter.default is False
 
 
+def test_bidding_collection_is_enabled_by_default() -> None:
+    parameters = inspect.signature(CompanyScanPipeline.run_pipeline).parameters
+
+    assert parameters["enable_bidding"].default is True
+    assert parameters["bidding_page_size"].default == 20
+
+
 class _TargetCollection:
     def __init__(self) -> None:
         self.existing = {

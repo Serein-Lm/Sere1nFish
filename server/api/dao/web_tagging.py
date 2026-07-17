@@ -20,6 +20,8 @@ async def insert_web_tagging_result(
     url: str,
     data: dict[str, Any],
     task_id: str = "",
+    source: str = "web_tagging",
+    target_id: str = "",
 ) -> dict[str, Any]:
     """
     存储 web tagging 扫描结果。
@@ -47,6 +49,8 @@ async def insert_web_tagging_result(
         "project_id": pid,
         "url": url,
         "task_id": task_id,
+        "source": source,
+        **({"target_id": target_id} if target_id else {}),
         "created_at": _now(),
         "data": data,
     }

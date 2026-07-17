@@ -49,6 +49,8 @@ def _tag_out(doc: dict) -> WebTaggingResultOut:
         project_id=str(doc.get("project_id")),
         url=doc.get("url"),
         task_id=doc.get("task_id", ""),
+        source=doc.get("source", "web_tagging"),
+        target_id=doc.get("target_id", ""),
         created_at=doc.get("created_at"),
         data=raw,
     )
@@ -134,6 +136,7 @@ async def delete_project(project_id: str):
     )
     from api.dao import contact_profiles as contact_profiles_dao
     from api.dao import mobile_artifacts as mobile_artifacts_dao
+    from api.dao import bidding as bidding_dao
 
     collections_to_clean = [
         TASKS_COLLECTION,
@@ -170,9 +173,10 @@ async def delete_project(project_id: str):
         r.deleted_count for r in results if not isinstance(r, BaseException)
     )
 
-    mobile_cleanup, contact_cleanup = await asyncio.gather(
+    mobile_cleanup, contact_cleanup, bidding_detached = await asyncio.gather(
         mobile_artifacts_dao.delete_project_artifacts(db, project_id),
         contact_profiles_dao.delete_project_references(db, project_id),
+        bidding_dao.detach_project(db, project_id),
     )
     total_deleted += (
         int(mobile_cleanup.get("screenshots_deleted") or 0)
@@ -195,6 +199,7 @@ async def delete_project(project_id: str):
         "deleted_records": total_deleted,
         "mobile_artifacts": mobile_cleanup,
         "contact_profiles": contact_cleanup,
+        "bidding_records_detached": bidding_detached,
     }
 
 

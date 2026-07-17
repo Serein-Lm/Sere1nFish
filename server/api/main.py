@@ -212,8 +212,10 @@ async def lifespan(app: FastAPI):
         # FOFA 资产 / 公司元信息索引
         from api.dao import fofa_assets as fofa_assets_dao
         from api.dao import company_meta as company_meta_dao
+        from api.dao import bidding as bidding_dao
         await fofa_assets_dao.ensure_indexes(db)
         await company_meta_dao.ensure_indexes(db)
+        await bidding_dao.ensure_indexes(db)
         from api.dao import targets as targets_dao
         from api.dao import source_documents as source_documents_dao
         await targets_dao.ensure_indexes(db)
