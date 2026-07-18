@@ -286,6 +286,7 @@ async def test_company_wechat_collection_injects_internal_defaults(
         target_id="target-1",
         target_name="目标公司",
         device_id="device-a",
+        collection_priority="low",
     )
 
     overrides = captured["runtime_overrides"]
@@ -298,6 +299,7 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["max_resolved_keywords"] == 12
     assert overrides["detail_max_items"] == 3
     assert overrides["target_id"] == "target-1"
+    assert captured["queue_priority"] == "low"
     assert result["documents"] == 2
     assert result["contacts"] == 4
 
@@ -430,6 +432,76 @@ async def test_mobile_collect_definition_waits_for_same_definition(
 
     assert peak == 1
     assert completed == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
+async def test_mobile_collect_definition_prioritizes_queued_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import mobile_collect_pipeline
+    from api.services import mobile_device_leases
+    from contextlib import asynccontextmanager
+
+    started = asyncio.Event()
+    release_running = asyncio.Event()
+    completed: list[str] = []
+    mobile_collect_pipeline._TASK_DEFINITION_QUEUE_LOCKS.clear()
+
+    async def get_task(_db: Any, task_def_id: str):
+        return {"task_def_id": task_def_id, "project_id": "project-1"}
+
+    async def claim(_db: Any, task_def_id: str, *, run_task_id: str):
+        return {
+            "task_def_id": task_def_id,
+            "project_id": "project-1",
+            "run_task_id": run_task_id,
+        }
+
+    async def set_status(*_args: Any, **_kwargs: Any):
+        return None
+
+    async def run_collect(_db: Any, **kwargs: Any):
+        run_task_id = kwargs["run_task_id"]
+        if run_task_id == "run-low-active":
+            started.set()
+            await release_running.wait()
+        completed.append(run_task_id)
+        return {"total": 0, "new": 0, "changed": 0}
+
+    @asynccontextmanager
+    async def lease(*_args: Any, **_kwargs: Any):
+        yield "owner"
+
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "get_task_def", get_task)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "claim_task_run", claim)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "set_task_status", set_status)
+    monkeypatch.setattr(mobile_collect_pipeline, "run_collect_task", run_collect)
+    monkeypatch.setattr(mobile_device_leases, "background_device_lease", lease)
+
+    async def run(run_task_id: str, priority: str):
+        return await mobile_collect_pipeline.run_mobile_collect_definition(
+            object(),
+            run_task_id=run_task_id,
+            project_id="project-1",
+            task_def_id="wechat-a",
+            queue_priority=priority,
+        )
+
+    active = asyncio.create_task(run("run-low-active", "low"))
+    await started.wait()
+    normal = asyncio.create_task(run("run-normal", "normal"))
+    low = asyncio.create_task(run("run-low", "low"))
+    high = asyncio.create_task(run("run-high", "high"))
+    await asyncio.sleep(0.01)
+    release_running.set()
+    await asyncio.gather(active, normal, low, high)
+
+    assert completed == [
+        "run-low-active",
+        "run-high",
+        "run-normal",
+        "run-low",
+    ]
 
 
 @pytest.mark.asyncio

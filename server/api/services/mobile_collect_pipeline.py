@@ -7,6 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import itertools
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from api.db.mongodb import get_db
 from api.dao import mobile_collect as collect_dao
@@ -15,15 +19,86 @@ from core.mobile.collect import run_collect_task
 
 logger = get_logger("mobile_collect_service")
 
-_TASK_DEFINITION_QUEUE_LOCKS: dict[str, asyncio.Lock] = {}
+_QUEUE_PRIORITY_ORDER = {
+    "high": 0,
+    "normal": 10,
+    "low": 20,
+    "skip": 30,
+}
 
 
-def _task_definition_queue_lock(task_def_id: str) -> asyncio.Lock:
+class _PriorityTaskDefinitionQueue:
+    """Serialize one task definition while prioritizing queued work."""
+
+    def __init__(self) -> None:
+        self._guard = asyncio.Lock()
+        self._active = False
+        self._sequence = itertools.count()
+        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+
+    def locked(self) -> bool:
+        return self._active
+
+    async def _acquire(self, priority: int) -> None:
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[None] | None = None
+        async with self._guard:
+            if not self._active:
+                self._active = True
+                return
+            waiter = loop.create_future()
+            heapq.heappush(
+                self._waiters,
+                (priority, next(self._sequence), waiter),
+            )
+
+        try:
+            await waiter
+        except BaseException:
+            granted = waiter.done() and not waiter.cancelled()
+            if not waiter.done():
+                waiter.cancel()
+            if granted:
+                await self._release()
+            raise
+
+    async def _release(self) -> None:
+        async with self._guard:
+            while self._waiters:
+                _priority, _sequence, waiter = heapq.heappop(self._waiters)
+                if waiter.done():
+                    continue
+                waiter.set_result(None)
+                return
+            self._active = False
+
+    @asynccontextmanager
+    async def slot(self, priority: int) -> AsyncIterator[None]:
+        await self._acquire(priority)
+        try:
+            yield
+        finally:
+            await self._release()
+
+
+_TASK_DEFINITION_QUEUE_LOCKS: dict[str, _PriorityTaskDefinitionQueue] = {}
+
+
+def _task_definition_queue_lock(
+    task_def_id: str,
+) -> _PriorityTaskDefinitionQueue:
     lock = _TASK_DEFINITION_QUEUE_LOCKS.get(task_def_id)
     if lock is None:
-        lock = asyncio.Lock()
+        lock = _PriorityTaskDefinitionQueue()
         _TASK_DEFINITION_QUEUE_LOCKS[task_def_id] = lock
     return lock
+
+
+def _queue_priority_value(priority: str) -> int:
+    return _QUEUE_PRIORITY_ORDER.get(
+        str(priority or "normal").strip().lower(),
+        _QUEUE_PRIORITY_ORDER["normal"],
+    )
 
 
 async def run_mobile_collect_definition(
@@ -34,19 +109,22 @@ async def run_mobile_collect_definition(
     task_def_id: str,
     runtime_overrides: dict | None = None,
     requested_by: str = "",
+    queue_priority: str = "normal",
 ) -> dict:
     """原子占用并执行一个数据库任务定义，允许编排层注入本轮目标上下文。"""
     if not task_def_id:
         raise ValueError("缺少 task_def_id")
 
     queue_lock = _task_definition_queue_lock(task_def_id)
+    priority_value = _queue_priority_value(queue_priority)
     if queue_lock.locked():
         logger.info(
-            "手机采集定义进入等待队列 def=%s run=%s",
+            "手机采集定义进入等待队列 def=%s run=%s priority=%s",
             task_def_id,
             run_task_id,
+            queue_priority,
         )
-    async with queue_lock:
+    async with queue_lock.slot(priority_value):
         return await _run_mobile_collect_definition_claimed(
             db,
             run_task_id=run_task_id,

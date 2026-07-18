@@ -669,6 +669,9 @@ class CompanyScanPipeline:
                         target_id=target_id,
                         target_name=normalized_name,
                         device_id=wechat_device_id,
+                        collection_priority=str(
+                            result["wechat"].get("priority") or "normal"
+                        ),
                         requested_by=requested_by,
                     ),
                 ))
@@ -1045,6 +1048,7 @@ class CompanyScanPipeline:
         target_id: str,
         target_name: str,
         device_id: str,
+        collection_priority: str = "normal",
         requested_by: str = "",
     ) -> dict[str, Any]:
         from api.services.wechat_collection import run_company_wechat_collection
@@ -1056,6 +1060,7 @@ class CompanyScanPipeline:
             target_id=target_id,
             target_name=target_name,
             device_id=device_id,
+            collection_priority=collection_priority,
             requested_by=requested_by,
         )
 

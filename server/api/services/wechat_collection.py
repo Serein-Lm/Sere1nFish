@@ -219,6 +219,7 @@ async def run_company_wechat_collection(
     target_id: str,
     target_name: str,
     device_id: str,
+    collection_priority: str = "normal",
     requested_by: str = "",
 ) -> dict[str, Any]:
     """用已配置手机发现文章链接，再复用 Chrome Provider 归档正文与图片。"""
@@ -245,6 +246,7 @@ async def run_company_wechat_collection(
             "direct_launch_app": True,
         },
         requested_by=requested_by,
+        queue_priority=collection_priority,
     )
     return {
         "kind": "wechat",
