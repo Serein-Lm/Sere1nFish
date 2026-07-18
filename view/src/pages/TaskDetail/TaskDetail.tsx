@@ -75,6 +75,13 @@ const WECHAT_CATEGORY_LABELS: Record<string, string> = {
   all: '全部目标',
 }
 
+const WECHAT_PRIORITY_LABELS: Record<string, { label: string; color: string }> = {
+  high: { label: '高', color: 'error' },
+  normal: { label: '普通', color: 'processing' },
+  low: { label: '低', color: 'default' },
+  skip: { label: '跳过', color: 'default' },
+}
+
 export default function TaskDetail() {
   const navigate = useNavigate()
   const { taskId, projectId: routeProjectId } = useParams<{ taskId: string; projectId?: string }>()
@@ -232,6 +239,14 @@ export default function TaskDetail() {
       render: (value: string) => <Tag>{WECHAT_CATEGORY_LABELS[value] || value}</Tag>,
     },
     {
+      title: '优先级', dataIndex: 'collection_priority', key: 'priority', width: 100,
+      render: (value: string | undefined, record) => {
+        const resolved = value || (record.should_collect_wechat ? 'normal' : 'skip')
+        const priority = WECHAT_PRIORITY_LABELS[resolved] || WECHAT_PRIORITY_LABELS.normal
+        return <Tag color={priority.color}>{priority.label}</Tag>
+      },
+    },
+    {
       title: '判定', dataIndex: 'should_collect_wechat', key: 'decision', width: 110,
       render: (value: boolean) => (
         <Tag color={value ? 'success' : 'default'}>{value ? '采集' : '跳过'}</Tag>
@@ -299,7 +314,7 @@ export default function TaskDetail() {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <Row gutter={[16, 16]}>
-          <Col xs={12} sm={6}><Statistic title="选择方式" value={wechatSelection.mode === 'auto' ? '成熟机构自动筛选' : '全部目标'} /></Col>
+          <Col xs={12} sm={6}><Statistic title="选择方式" value={wechatSelection.mode === 'auto' ? '机构优先自动分级' : '全部目标'} /></Col>
           <Col xs={12} sm={6}><Statistic title="纳入采集" value={wechatSelection.selected_count} /></Col>
           <Col xs={12} sm={6}><Statistic title="跳过目标" value={wechatSelection.skipped_count} /></Col>
           <Col xs={12} sm={6}><Statistic title="判定状态" valueRender={() => <Tag color={selectionStatus.color}>{selectionStatus.label}</Tag>} /></Col>
@@ -318,7 +333,7 @@ export default function TaskDetail() {
           columns={wechatSelectionColumns}
           pagination={false}
           size="small"
-          scroll={{ x: 960 }}
+          scroll={{ x: 1060 }}
           locale={{ emptyText: '暂无目标判定记录' }}
         />
       </div>
@@ -417,7 +432,7 @@ export default function TaskDetail() {
             )}
             {task.task_type === 'company_scan' && wechatSelection && (
               <Row gutter={16} style={{ marginTop: 12 }}>
-                <Col xs={12} sm={6}><Statistic title="公众号选择方式" value={wechatSelection.mode === 'auto' ? '成熟机构自动' : '全部目标'} /></Col>
+                <Col xs={12} sm={6}><Statistic title="公众号选择方式" value={wechatSelection.mode === 'auto' ? '机构优先分级' : '全部目标'} /></Col>
                 <Col xs={12} sm={6}><Statistic title="公众号纳入目标" value={wechatSelection.selected_count} /></Col>
                 <Col xs={12} sm={6}><Statistic title="公众号跳过目标" value={wechatSelection.skipped_count} /></Col>
               </Row>

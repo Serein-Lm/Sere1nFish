@@ -4264,7 +4264,7 @@ export default function ProjectDetail() {
                               )}
                             </Form.Item>
                             <Form.Item name="enable_wechat" valuePropName="checked" noStyle>
-                              <Checkbox>微信公众号采集（成熟机构优先，默认关闭）</Checkbox>
+                              <Checkbox>微信公众号采集（机构优先，互联网低优先级）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_scholar" valuePropName="checked" noStyle>
                               <Checkbox>学者联系采集（默认关闭）</Checkbox>
@@ -4304,7 +4304,7 @@ export default function ProjectDetail() {
                             <>
                               <Form.Item name="wechat_target_selection_mode" label="公众号目标选择">
                                 <Segmented block options={[
-                                  { label: '成熟机构自动筛选', value: 'auto' },
+                                  { label: '机构优先自动分级', value: 'auto' },
                                   { label: '全部目标', value: 'all' },
                                 ]} />
                               </Form.Item>

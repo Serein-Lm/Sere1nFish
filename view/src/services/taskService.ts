@@ -49,6 +49,7 @@ export interface WechatTargetDecision {
   target_name: string
   target_category: string
   should_collect_wechat: boolean
+  collection_priority?: 'high' | 'normal' | 'low' | 'skip'
   reason: string
   confidence: number
   source: 'ai' | 'all' | 'fallback'
@@ -74,6 +75,7 @@ export interface TaskResult {
   wechat?: {
     enabled?: boolean
     selected?: boolean
+    priority?: 'high' | 'normal' | 'low' | 'skip' | null
     selection?: WechatTargetSelectionResult
   }
   scholar?: {

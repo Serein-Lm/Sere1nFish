@@ -38,6 +38,7 @@ WechatAutoTargetCategory = Literal[
     "unknown",
 ]
 WechatTargetCategory = WechatAutoTargetCategory | Literal["all"]
+WechatCollectionPriority = Literal["high", "normal", "low", "skip"]
 
 _AUTO_BATCH_SIZE = 25
 _AUTO_BATCH_CONCURRENCY = 3
@@ -79,6 +80,15 @@ _TRADITIONAL_LARGE_INDUSTRIES = {
     "telecom",
     "media",
 }
+_HIGH_PRIORITY_CATEGORIES = {
+    "government_public_institution",
+    "traditional_state_owned_enterprise",
+    "exchange_financial_infrastructure",
+    "broadcast_news_media",
+    "education_research_healthcare",
+    "mature_financial_institution",
+    "traditional_large_enterprise",
+}
 
 
 def _explicit_institution_category(
@@ -117,6 +127,7 @@ class _AiTargetDecision(BaseModel):
     target_id: str = Field(min_length=1)
     target_category: WechatAutoTargetCategory
     should_collect_wechat: bool
+    collection_priority: WechatCollectionPriority = "normal"
     reason: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
 
@@ -152,6 +163,7 @@ class WechatTargetDecision(BaseModel):
     target_name: str
     target_category: WechatTargetCategory
     should_collect_wechat: bool
+    collection_priority: WechatCollectionPriority = "normal"
     reason: str
     confidence: float = Field(ge=0, le=1)
     source: Literal["ai", "all", "fallback"]
@@ -210,7 +222,7 @@ def _build_result(
 def _fallback_decision(
     candidate: WechatTargetCandidate,
 ) -> WechatTargetDecision:
-    """Keep obvious mature institutions running when the model is unavailable."""
+    """Keep institutions and lower-priority internet targets running."""
     context = candidate.context
     industry = str(context.get("industry") or "").strip().lower()
     scale = str(context.get("scale") or "").strip().lower()
@@ -220,10 +232,12 @@ def _fallback_decision(
     if explicit_category:
         category: WechatTargetCategory = explicit_category
         selected = True
+        priority: WechatCollectionPriority = "high"
         reason = "名称明确体现成熟公共机构或传统单位属性"
     elif any(marker in names for marker in _INSTITUTION_NAME_MARKERS):
         category = "government_public_institution"
         selected = True
+        priority = "high"
         reason = "名称明确体现成熟公共机构属性"
     elif industry in {"government", "education", "healthcare"}:
         category = (
@@ -232,6 +246,7 @@ def _fallback_decision(
             else "education_research_healthcare"
         )
         selected = True
+        priority = "high"
         reason = "公司路由画像表明其属于公共服务型成熟机构"
     elif scale == "large" and industry in _TRADITIONAL_LARGE_INDUSTRIES:
         category = (
@@ -240,10 +255,17 @@ def _fallback_decision(
             else "traditional_large_enterprise"
         )
         selected = True
+        priority = "high"
         reason = "公司路由画像表明其为大型传统行业单位"
+    elif industry == "internet":
+        category = "internet_consumer_brand"
+        selected = True
+        priority = "low"
+        reason = "互联网目标保留公众号采集，但手机执行优先级低于成熟机构"
     else:
         category = "unknown"
         selected = False
+        priority = "skip"
         reason = "现有画像不足以确认其属于成熟机构型公众号目标"
 
     return WechatTargetDecision(
@@ -251,6 +273,7 @@ def _fallback_decision(
         target_name=candidate.target_name,
         target_category=category,
         should_collect_wechat=selected,
+        collection_priority=priority,
         reason=reason,
         confidence=0.55 if selected else 0.25,
         source="fallback",
@@ -274,6 +297,7 @@ class AllWechatTargetSelectionStrategy:
                     target_name=candidate.target_name,
                     target_category="all",
                     should_collect_wechat=True,
+                    collection_priority="normal",
                     reason="用户明确选择公众号全部目标模式",
                     confidence=1,
                     source="all",
@@ -449,9 +473,49 @@ class AutomaticWechatTargetSelectionStrategy:
                     )
                     for target_id in expected_ids
                 }
+                internet_targets = {
+                    target_id: (
+                        normalized_categories[target_id]
+                        == "internet_consumer_brand"
+                        or str(
+                            candidate_by_id[target_id].context.get("industry")
+                            or ""
+                        ).strip().lower()
+                        == "internet"
+                    )
+                    for target_id in expected_ids
+                }
+                normalized_categories = {
+                    target_id: (
+                        "internet_consumer_brand"
+                        if internet_targets[target_id]
+                        and not explicit_categories[target_id]
+                        else normalized_categories[target_id]
+                    )
+                    for target_id in expected_ids
+                }
                 selected_by_policy = {
                     target_id: bool(explicit_categories[target_id])
+                    or internet_targets[target_id]
                     or by_id[target_id].should_collect_wechat
+                    for target_id in expected_ids
+                }
+                priorities_by_policy: dict[
+                    str, WechatCollectionPriority
+                ] = {
+                    target_id: (
+                        "skip"
+                        if not selected_by_policy[target_id]
+                        else "high"
+                        if explicit_categories[target_id]
+                        or normalized_categories[target_id]
+                        in _HIGH_PRIORITY_CATEGORIES
+                        else "low"
+                        if internet_targets[target_id]
+                        else by_id[target_id].collection_priority
+                        if by_id[target_id].collection_priority != "skip"
+                        else "normal"
+                    )
                     for target_id in expected_ids
                 }
                 return (
@@ -461,8 +525,12 @@ class AutomaticWechatTargetSelectionStrategy:
                             target_name=candidate_by_id[target_id].target_name,
                             target_category=normalized_categories[target_id],
                             should_collect_wechat=selected_by_policy[target_id],
+                            collection_priority=priorities_by_policy[target_id],
                             reason=(
-                                by_id[target_id].reason
+                                "互联网目标保留公众号采集，但手机执行优先级低于成熟机构"
+                                if internet_targets[target_id]
+                                and not explicit_categories[target_id]
+                                else by_id[target_id].reason
                                 if by_id[target_id].should_collect_wechat
                                 or not explicit_categories[target_id]
                                 else "名称明确命中成熟机构公众号采集规则"
@@ -470,6 +538,8 @@ class AutomaticWechatTargetSelectionStrategy:
                             confidence=(
                                 max(by_id[target_id].confidence, 0.9)
                                 if explicit_categories[target_id]
+                                else max(by_id[target_id].confidence, 0.7)
+                                if internet_targets[target_id]
                                 else by_id[target_id].confidence
                             ),
                             source="ai",

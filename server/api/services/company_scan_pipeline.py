@@ -289,6 +289,7 @@ class CompanyScanPipeline:
                 "enabled": enable_wechat,
                 "status": "pending" if enable_wechat else "disabled",
                 "selected": False,
+                "priority": None,
                 "device_id": wechat_device_id,
                 "task_def_id": "",
                 "total": 0,
@@ -533,13 +534,19 @@ class CompanyScanPipeline:
                     and wechat_decision.should_collect_wechat
                 )
                 result["wechat"]["selected"] = root_wechat_enabled
+                result["wechat"]["priority"] = (
+                    wechat_decision.collection_priority
+                    if wechat_decision
+                    else "skip"
+                )
                 if not root_wechat_enabled:
                     result["wechat"]["status"] = "skipped"
                 logger.info(
-                    "[company_scan] task=%s 公众号根目标选择 mode=%s selected=%s reason=%s",
+                    "[company_scan] task=%s 公众号根目标选择 mode=%s selected=%s priority=%s reason=%s",
                     task_id,
                     wechat_selection.mode,
                     root_wechat_enabled,
+                    result["wechat"]["priority"],
                     wechat_decision.reason if wechat_decision else "无判定结果",
                 )
 
@@ -898,6 +905,7 @@ class CompanyScanPipeline:
                     "wechat_documents": result["wechat"].get("documents", 0),
                     "wechat_contacts": result["wechat"].get("contacts", 0),
                     "wechat_target_selected": result["wechat"].get("selected", False),
+                    "wechat_target_priority": result["wechat"].get("priority"),
                     "bidding_records": result["bidding"].get("records_fetched", 0),
                     "bidding_findings": result["bidding"].get("findings_count", 0),
                     "bidding_copywritings": result["bidding"].get("copywritings_count", 0),
