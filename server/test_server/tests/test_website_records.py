@@ -36,20 +36,33 @@ class _Collection:
     def __init__(self, docs: list[dict[str, Any]]) -> None:
         self.docs = docs
 
-    async def count_documents(self, _query: dict[str, Any]) -> int:
-        return len(self.docs)
+    @staticmethod
+    def _matches(doc: dict[str, Any], query: dict[str, Any]) -> bool:
+        for key, expected in query.items():
+            if key == "$or":
+                if not any(_Collection._matches(doc, branch) for branch in expected):
+                    return False
+                continue
+            actual = doc.get(key)
+            if isinstance(expected, dict):
+                if "$in" in expected and actual not in expected["$in"]:
+                    return False
+                if "$exists" in expected and (key in doc) != bool(expected["$exists"]):
+                    return False
+                continue
+            if actual != expected and str(actual or "") != str(expected or ""):
+                return False
+        return True
+
+    async def count_documents(self, query: dict[str, Any]) -> int:
+        return sum(1 for doc in self.docs if self._matches(doc, query))
 
     def find(
         self,
         query: dict[str, Any],
         _projection: dict[str, Any] | None = None,
     ) -> _Cursor:
-        task_ids = set((query.get("task_id") or {}).get("$in") or [])
-        docs = [
-            doc
-            for doc in self.docs
-            if not task_ids or str(doc.get("task_id") or "") in task_ids
-        ]
+        docs = [doc for doc in self.docs if self._matches(doc, query)]
         return _Cursor(docs)
 
 
@@ -119,3 +132,153 @@ async def test_website_records_join_url_scan_findings_and_legacy(
     assert items[0]["data"]["intro"]["site_name"] == "示例站点"
     assert items[0]["data"]["has_findings"] is True
     assert items[0]["data"]["findings"][0]["finding_id"] == "finding-1"
+
+
+def _legacy_record(
+    record_id: ObjectId,
+    url: str,
+    score: int | None,
+    target_id: str,
+    created_at: Any,
+) -> dict[str, Any]:
+    findings = []
+    if score is not None:
+        findings = [{"finding_id": f"legacy-{score}", "attention_score": score}]
+    return {
+        "_id": record_id,
+        "project_id": ObjectId("6a5a1f59518d9e71e1887ab0"),
+        "url": url,
+        "target_id": target_id,
+        "source": "web_tagging",
+        "created_at": created_at,
+        "data": {"has_findings": bool(findings), "findings": findings},
+    }
+
+
+@pytest.mark.asyncio
+async def test_website_records_sort_sources_together_before_pagination_and_filter_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import website_records
+
+    project_id = "project-1"
+    scans = [
+        {
+            "_id": ObjectId(),
+            "project_id": project_id,
+            "task_id": "low-task",
+            "target_id": "target-a",
+            "source": "web_tagging",
+            "url": "https://low.example",
+            "success": True,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "_id": ObjectId(),
+            "project_id": project_id,
+            "task_id": "high-task",
+            "target_id": "target-a",
+            "source": "web_tagging",
+            "url": "https://high.example",
+            "success": True,
+            "created_at": "2026-01-02T00:00:00+00:00",
+        },
+        {
+            "_id": ObjectId(),
+            "project_id": project_id,
+            "task_id": "other-task",
+            "target_id": "target-b",
+            "source": "web_tagging",
+            "url": "https://other.example",
+            "success": True,
+            "created_at": "2026-01-03T00:00:00+00:00",
+        },
+    ]
+    findings = [
+        {
+            "project_id": project_id,
+            "source": "web_tagging",
+            "task_id": "low-task",
+            "source_url": "https://low.example",
+            "attention_score": 40,
+        },
+        {
+            "project_id": project_id,
+            "source": "web_tagging",
+            "task_id": "high-task",
+            "source_url": "https://high.example",
+            "attention_score": 95,
+        },
+        {
+            "project_id": project_id,
+            "source": "web_tagging",
+            "task_id": "other-task",
+            "source_url": "https://other.example",
+            "attention_score": 10,
+        },
+    ]
+    legacy = [
+        _legacy_record(
+            ObjectId(),
+            "https://legacy.example",
+            80,
+            "target-a",
+            "2026-01-04T00:00:00+00:00",
+        ),
+        _legacy_record(
+            ObjectId(),
+            "https://safe.example",
+            None,
+            "target-a",
+            "2026-01-05T00:00:00+00:00",
+        ),
+        _legacy_record(
+            ObjectId(),
+            "https://legacy-b.example",
+            5,
+            "target-b",
+            "2026-01-06T00:00:00+00:00",
+        ),
+    ]
+    db = _Db(scans, findings)
+    calls: list[str] = []
+
+    async def list_legacy(_db: Any, **kwargs: Any):
+        target_id = kwargs.get("target_id") or ""
+        calls.append(target_id)
+        selected = [item for item in legacy if not target_id or item.get("target_id") == target_id]
+        return selected[: kwargs.get("limit", len(selected))], len(selected)
+
+    monkeypatch.setattr(
+        website_records.web_tagging_dao,
+        "list_web_tagging_results",
+        list_legacy,
+    )
+
+    page, total = await website_records.list_website_records(
+        db,
+        project_id=project_id,
+        skip=1,
+        limit=2,
+    )
+
+    assert total == 6
+    assert [item["url"] for item in page] == [
+        "https://legacy.example",
+        "https://low.example",
+    ]
+
+    filtered, filtered_total = await website_records.list_website_records(
+        db,
+        project_id=project_id,
+        target_id="target-b",
+        limit=10,
+    )
+
+    assert filtered_total == 2
+    assert {item["target_id"] for item in filtered} == {"target-b"}
+    assert {item["url"] for item in filtered} == {
+        "https://other.example",
+        "https://legacy-b.example",
+    }
+    assert calls[-1] == "target-b"

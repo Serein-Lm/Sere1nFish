@@ -280,6 +280,7 @@ async def list_web_tagging(project_id: str, body: WebTaggingListRequest | None =
         limit=body.limit,
         skip=body.skip,
         source=body.source,
+        target_id=body.target_id or "",
     )
     return PageResponse.build(
         items=[_tag_out(d) for d in docs],
@@ -304,6 +305,7 @@ async def list_website_records(
         project_id=project_id,
         skip=body.skip,
         limit=body.limit,
+        target_id=body.target_id or "",
     )
     return PageResponse.build(
         items=[_tag_out(doc) for doc in docs],

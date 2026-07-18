@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, FilterOutlined } from '@ant-design/icons'
 import {
   getProject,
   createWebTagging,
@@ -509,6 +509,8 @@ export default function ProjectDetail() {
   const [taggingLoading, setTaggingLoading] = useState(false)
   const [taggingRecords, setTaggingRecords] = useState<WebTaggingRecord[]>([])
   const [taggingTotal, setTaggingTotal] = useState(0)
+  const [websitePage, setWebsitePage] = useState(1)
+  const [websitePageSize, setWebsitePageSize] = useState(10)
   const [error, setError] = useState<string | null>(null)
 
   // Tab 状态
@@ -610,6 +612,7 @@ export default function ProjectDetail() {
   const [wechatLoading, setWechatLoading] = useState(false)
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
   const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
+  const [websiteTargetId, setWebsiteTargetId] = useState('')
   const [wechatTargetId, setWechatTargetId] = useState('')
   const [scholarContacts, setScholarContacts] = useState<ScholarContact[]>([])
   const [scholarContactsTotal, setScholarContactsTotal] = useState(0)
@@ -630,15 +633,23 @@ export default function ProjectDetail() {
   const [currentFindingLabel, setCurrentFindingLabel] = useState('')
   const [currentFindingId, setCurrentFindingId] = useState('')
 
-  const fetchRecords = async (pid: string, page = 1, pageSize = 10) => {
+  const fetchRecords = async (
+    pid: string,
+    page = websitePage,
+    pageSize = websitePageSize,
+    targetId = websiteTargetId,
+  ) => {
     setTaggingLoading(true)
     try {
       const res = await listProjectWebsiteRecords(pid, {
         page,
         page_size: pageSize,
+        target_id: targetId || undefined,
       })
       setTaggingRecords(res.items)
       setTaggingTotal(res.total)
+      setWebsitePage(res.page)
+      setWebsitePageSize(res.page_size)
     } catch (e) {
       console.error(e)
     } finally {
@@ -979,11 +990,14 @@ export default function ProjectDetail() {
       setLoading(true)
       setError(null)
       setXhsTargetId('')
+      setWebsiteTargetId('')
+      setWebsitePage(1)
+      setWebsitePageSize(10)
       try {
         const data = await getProject(projectId)
         if (!cancelled) {
           setProject(data)
-          await Promise.all([fetchRecords(projectId), fetchProjectTargets(projectId)])
+          await Promise.all([fetchRecords(projectId, 1, 10, ''), fetchProjectTargets(projectId)])
           // 加载任务列表
           await fetchTasks(projectId)
           // 加载看板数据
@@ -1011,6 +1025,10 @@ export default function ProjectDetail() {
           setError(msg)
           setProject(null)
           setTaggingRecords([])
+          setTaggingTotal(0)
+          setWebsiteTargetId('')
+          setWebsitePage(1)
+          setWebsitePageSize(10)
           setProjectTargets([])
           setXhsNotes([])
           setXhsProfiles([])
@@ -1096,7 +1114,7 @@ export default function ProjectDetail() {
       
       setIsTaggingModalOpen(false)
       message.success('任务已提交')
-      await fetchRecords(projectId)
+      await fetchRecords(projectId, 1, websitePageSize, websiteTargetId)
     } catch (e) {
       const msg = e instanceof Error ? e.message : '提交失败'
       message.error(msg)
@@ -2332,6 +2350,33 @@ export default function ProjectDetail() {
         <div className="project-detail-section-title" style={{ marginTop: 0 }}>
           <Space><SearchOutlined /> 网站分析记录</Space>
         </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8, flexWrap: 'wrap' }}>
+          <Text type="secondary">按项目 Target 查看对应网站扫描结果</Text>
+          <Select
+            value={websiteTargetId}
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            prefix={<FilterOutlined />}
+            placeholder="按 Target 筛选"
+            style={{ width: 320, maxWidth: '100%' }}
+            options={[
+              { value: '', label: `全部 Target (${projectTargets.length})` },
+              ...projectTargets.map((target) => ({
+                value: target.target_id,
+                label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+              })),
+            ]}
+            onChange={(value) => {
+              const nextTargetId = value || ''
+              setWebsiteTargetId(nextTargetId)
+              setWebsitePage(1)
+              if (projectId) {
+                void fetchRecords(projectId, 1, websitePageSize, nextTargetId)
+              }
+            }}
+          />
+        </div>
         <div className="tagging-table-container">
           <Table
             className="tagging-table"
@@ -2340,11 +2385,16 @@ export default function ProjectDetail() {
             loading={taggingLoading}
             locale={{ emptyText: <Empty description="暂无网站分析记录" /> }}
             pagination={{
+              current: websitePage,
               total: taggingTotal,
-              pageSize: 10,
+              pageSize: websitePageSize,
               showSizeChanger: true,
               showTotal: (total) => `共 ${total} 条记录`,
-              onChange: (page, pageSize) => { if (projectId) fetchRecords(projectId, page, pageSize) },
+              onChange: (page, pageSize) => {
+                setWebsitePage(page)
+                setWebsitePageSize(pageSize)
+                if (projectId) fetchRecords(projectId, page, pageSize, websiteTargetId)
+              },
             }}
             expandable={{
               expandedRowRender: (rec) => <ExpandedRecordContent record={rec} onViewCopywriting={handleViewFindingCopywriting} />,

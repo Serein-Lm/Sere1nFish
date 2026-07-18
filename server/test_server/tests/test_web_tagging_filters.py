@@ -73,3 +73,18 @@ async def test_web_tagging_source_filter_can_select_other_sources() -> None:
 
     assert db.collection.count_query is not None
     assert db.collection.count_query["source"] == "bidding"
+
+
+@pytest.mark.asyncio
+async def test_web_tagging_can_filter_by_target_id() -> None:
+    db = _Db()
+
+    await web_tagging.list_web_tagging_results(
+        db,
+        project_id="6a5a1f59518d9e71e1887ab0",
+        source="web_tagging",
+        target_id=" target-1 ",
+    )
+
+    assert db.collection.count_query is not None
+    assert db.collection.count_query["target_id"] == "target-1"

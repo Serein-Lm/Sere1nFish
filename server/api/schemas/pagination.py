@@ -78,6 +78,7 @@ class WebTaggingListRequest(PageRequest):
     """Web Tagging 列表"""
     project_id: str = Field(description="项目 ID")
     source: str = Field(default="", description="数据源过滤")
+    target_id: str | None = Field(default=None, description="目标 ID 过滤")
 
 
 class XhsNotesListRequest(PageRequest):

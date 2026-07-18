@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any
 
 from bson import ObjectId
@@ -21,14 +22,56 @@ def _url_key(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
 
 
+_MIN_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
+    await db[URL_SCAN_RESULTS_COLLECTION].create_index(
+        [("project_id", 1), ("source", 1), ("target_id", 1)]
+    )
+
+
 def _created_at(doc: dict[str, Any]) -> datetime:
+    """Return a comparable, timezone-aware creation time for mixed legacy data."""
     value = doc.get("created_at")
     if isinstance(value, datetime):
-        return value
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
     object_id = doc.get("_id")
     if isinstance(object_id, ObjectId):
         return object_id.generation_time
-    return datetime.now(timezone.utc)
+    return _MIN_DATETIME
+
+
+def _score(value: Any) -> float:
+    try:
+        parsed = float(value or 0)
+        return parsed if isfinite(parsed) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _record_sort_key(record: dict[str, Any]) -> tuple[int, float, datetime, str]:
+    """Sort findings before safe/empty records, then by highest score and time."""
+    data = record.get("data") or {}
+    findings = data.get("findings") or []
+    scores = [
+        _score(item.get("attention_score"))
+        for item in findings
+        if isinstance(item, dict)
+    ]
+    has_findings = bool(findings)
+    return (
+        1 if has_findings else 0,
+        max(scores, default=0.0),
+        _created_at(record),
+        str(record.get("_id") or record.get("id") or ""),
+    )
 
 
 def _adapt_url_scan_record(
@@ -37,7 +80,7 @@ def _adapt_url_scan_record(
 ) -> dict[str, Any]:
     ordered_findings = sorted(
         findings,
-        key=lambda item: int(item.get("attention_score") or 0),
+        key=lambda item: _score(item.get("attention_score")),
         reverse=True,
     )
     lead = ordered_findings[0] if ordered_findings else {}
@@ -82,19 +125,14 @@ async def _list_url_scan_records(
     db: AsyncIOMotorDatabase,
     *,
     project_id: str,
-    skip: int,
-    limit: int,
+    target_id: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     query = {"project_id": project_id, "source": "web_tagging"}
+    if target_id:
+        query["target_id"] = target_id
     collection = db[URL_SCAN_RESULTS_COLLECTION]
     total = await collection.count_documents(query)
-    cursor = (
-        collection.find(query)
-        .sort("_id", -1)
-        .skip(max(0, skip))
-        .limit(max(1, limit))
-    )
-    scans = await cursor.to_list(max(1, limit))
+    scans = await collection.find(query).to_list(max(1, total))
     if not scans:
         return [], total
 
@@ -130,48 +168,34 @@ async def list_website_records(
     project_id: str,
     skip: int = 0,
     limit: int = 50,
+    target_id: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
-    """List current URL scans first, then legacy Web Tagging records."""
+    """List URL scans and legacy Web Tagging records in one sorted page.
+
+    The two sources live in different collections, so pagination must happen
+    after their records are adapted, merged, and globally sorted.
+    """
     bounded_limit = max(1, min(int(limit or 50), 200))
     bounded_skip = max(0, int(skip or 0))
+    selected_target_id = str(target_id or "").strip()
 
-    _, url_total = await _list_url_scan_records(
+    url_records, url_total = await _list_url_scan_records(
         db,
         project_id=project_id,
-        skip=0,
-        limit=1,
+        target_id=selected_target_id,
     )
-    _, legacy_total = await web_tagging_dao.list_web_tagging_results(
+    # Each source is score-sorted. Records below this source-local top K cannot
+    # enter the merged top K, so old records do not need to be fully loaded.
+    candidate_limit = bounded_skip + bounded_limit
+    legacy_records, legacy_total = await web_tagging_dao.list_web_tagging_results(
         db,
         project_id=project_id,
-        limit=1,
+        limit=candidate_limit,
         skip=0,
         source="web_tagging",
+        target_id=selected_target_id,
     )
 
-    items: list[dict[str, Any]] = []
-    remaining = bounded_limit
-    if bounded_skip < url_total:
-        current, _ = await _list_url_scan_records(
-            db,
-            project_id=project_id,
-            skip=bounded_skip,
-            limit=min(remaining, url_total - bounded_skip),
-        )
-        items.extend(current)
-        remaining -= len(current)
-        legacy_skip = 0
-    else:
-        legacy_skip = bounded_skip - url_total
-
-    if remaining > 0 and legacy_skip < legacy_total:
-        legacy, _ = await web_tagging_dao.list_web_tagging_results(
-            db,
-            project_id=project_id,
-            limit=remaining,
-            skip=legacy_skip,
-            source="web_tagging",
-        )
-        items.extend(legacy)
-
-    return items, url_total + legacy_total
+    records = [*url_records, *legacy_records]
+    records.sort(key=_record_sort_key, reverse=True)
+    return records[bounded_skip : bounded_skip + bounded_limit], url_total + legacy_total

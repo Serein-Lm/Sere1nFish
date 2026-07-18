@@ -14,6 +14,12 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
+    await db[WEB_TAGS_COLLECTION].create_index(
+        [("project_id", 1), ("source", 1), ("target_id", 1)]
+    )
+
+
 async def insert_web_tagging_result(
     db: AsyncIOMotorDatabase,
     project_id: str,
@@ -65,6 +71,7 @@ async def list_web_tagging_results(
     limit: int = 50,
     skip: int = 0,
     source: str = "",
+    target_id: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     """
     列出项目的 web tagging 结果，返回 (items, total)。
@@ -88,6 +95,9 @@ async def list_web_tagging_results(
         ]
     elif source:
         query["source"] = source
+    selected_target_id = str(target_id or "").strip()
+    if selected_target_id:
+        query["target_id"] = selected_target_id
 
     total = await db[WEB_TAGS_COLLECTION].count_documents(query)
 

@@ -288,7 +288,7 @@ export async function listProjectWebTaggingRecords(
 
 export async function listProjectWebsiteRecords(
   projectId: string,
-  params?: PaginatedRequest,
+  params?: PaginatedRequest & { target_id?: string },
 ): Promise<PaginatedResponse<WebTaggingRecord>> {
   return apiFetch<PaginatedResponse<WebTaggingRecord>>(
     `/v1/projects/${encodeURIComponent(projectId)}/website-records`,
@@ -298,6 +298,7 @@ export async function listProjectWebsiteRecords(
         project_id: projectId,
         page: params?.page ?? 1,
         page_size: params?.page_size ?? 50,
+        target_id: params?.target_id ?? '',
       }),
     },
   )
