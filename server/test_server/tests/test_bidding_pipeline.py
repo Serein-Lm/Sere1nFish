@@ -6,6 +6,7 @@ import pytest
 
 from api.dao.bidding import _merge_archive_evidence
 from api.services import bidding_pipeline as bidding_module
+from api.services.company_url import normalize_url
 from api.services.bidding_pipeline import (
     BiddingPipeline,
     _filename_from_response,
@@ -93,6 +94,12 @@ def test_remote_filename_recovers_gb18030_header_bytes() -> None:
     )
 
     assert filename == expected
+
+
+def test_url_normalization_rejects_relative_or_hostless_values() -> None:
+    assert normalize_url("/html/1336/content.html") == ""
+    assert normalize_url("https:///html/1336/content.html") == ""
+    assert normalize_url("example.com/bids/1") == "https://example.com/bids/1"
 
 
 def test_scan_context_keeps_query_target_and_announcement_parties_distinct() -> None:
@@ -232,6 +239,84 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert "设备采购联系人：张老师" in evidence
     assert result["visual_analysis"]["findings_count"] == 2
     assert result["visual_analysis"]["copywritings_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_falls_back_from_relative_detail_to_provider_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = BiddingRecord(
+        record_id="bid_relative",
+        title="采购公告",
+        detail_url="/html/1336/content.html",
+        provider_url="https://m.tianyancha.com/app/h5/bid/relative",
+        content_html="<p>公告正文</p>",
+    )
+
+    class _Client:
+        async def search_bids(self, *_args: Any, **_kwargs: Any) -> BiddingSearchResult:
+            return BiddingSearchResult(records=[record], total_reported=1)
+
+    async def _configured_client() -> _Client:
+        return _Client()
+
+    async def _archive_records(
+        _self: Any,
+        _records: list[BiddingRecord],
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "record_id": record.record_id,
+                "resolved_detail_url": record.provider_url,
+                "detail_html_object_id": "",
+                "archive_errors": ["供应商页面暂时不可读"],
+                "attachments": [],
+                "attachment_urls": [],
+                "_context_text": "公告正文",
+            }
+        ]
+
+    async def _upsert(_db: Any, **_kwargs: Any) -> dict[str, int]:
+        return {"inserted": 1, "updated": 0, "unchanged": 0, "total": 1}
+
+    scan_call: dict[str, Any] = {}
+
+    async def _run_visual(_self: Any, **kwargs: Any) -> dict[str, Any]:
+        scan_call.update(kwargs)
+        return {
+            "status": "completed",
+            "scanned_urls": 1,
+            "total_findings": 0,
+            "total_copywritings": 0,
+        }
+
+    monkeypatch.setattr(
+        bidding_module.TianyanchaClient,
+        "from_runtime_config",
+        _configured_client,
+    )
+    monkeypatch.setattr(
+        bidding_module.BiddingArchiveService,
+        "archive_records",
+        _archive_records,
+    )
+    monkeypatch.setattr(bidding_module.bidding_dao, "upsert_records_batch", _upsert)
+
+    from api.services.url_scan_pipeline import UrlScanPipeline
+
+    monkeypatch.setattr(UrlScanPipeline, "run_pipeline", _run_visual)
+
+    await BiddingPipeline(object(), object()).run_pipeline(
+        task_id="task-relative",
+        project_id="project-1",
+        target_id="target-1",
+        company_name="目标单位",
+    )
+
+    assert scan_call["url_content"] == record.provider_url
+    assert scan_call["known_alive_urls"] == []
+    assert "https:///html" not in scan_call["url_content"]
 
 
 @pytest.mark.asyncio

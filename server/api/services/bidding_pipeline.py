@@ -64,6 +64,13 @@ def _bounded(value: str, limit: int) -> str:
     return value if len(value) <= limit else value[:limit] + "\n[内容已截断]"
 
 
+def _first_absolute_http_url(*values: str) -> str:
+    for value in values:
+        if normalized := normalize_url(str(value or "")):
+            return normalized
+    return ""
+
+
 def _html_text_and_links(content: str | bytes, base_url: str) -> tuple[str, list[dict[str, str]]]:
     if not content:
         return "", []
@@ -87,6 +94,12 @@ def _html_text_and_links(content: str | bytes, base_url: str) -> tuple[str, list
         if not href or href.lower().startswith(("javascript:", "data:", "mailto:", "tel:")):
             continue
         absolute = urljoin(base_url, href)
+        try:
+            parsed = urlsplit(absolute)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            continue
         if absolute in seen:
             continue
         seen.add(absolute)
@@ -305,7 +318,15 @@ class BiddingArchiveService:
         project_id: str,
         target_id: str,
     ) -> dict[str, Any]:
-        api_text, api_links = _html_text_and_links(record.content_html, record.detail_url)
+        absolute_detail_url = _first_absolute_http_url(record.detail_url)
+        resolved_detail_url = _first_absolute_http_url(
+            absolute_detail_url,
+            record.provider_url,
+        )
+        api_text, api_links = _html_text_and_links(
+            record.content_html,
+            absolute_detail_url,
+        )
         result: dict[str, Any] = {
             "record_id": record.record_id,
             "content_text": api_text,
@@ -317,6 +338,7 @@ class BiddingArchiveService:
             "raw_content_url": "",
             "detail_html_object_id": "",
             "detail_html_url": "",
+            "resolved_detail_url": resolved_detail_url,
             "detail_text_preview": "",
             "attachment_urls": [],
             "attachments": [],
@@ -372,11 +394,11 @@ class BiddingArchiveService:
 
         detail_links: list[dict[str, str]] = []
         detail_text = ""
-        if record.detail_url:
+        if resolved_detail_url:
             try:
                 detail = await _fetch_resource(
                     session,
-                    record.detail_url,
+                    resolved_detail_url,
                     max_bytes=_MAX_HTML_BYTES,
                 )
                 detail_text, detail_links = _html_text_and_links(detail.data, detail.url)
@@ -395,6 +417,7 @@ class BiddingArchiveService:
                     detail_html_object_id=artifact["storage_object_id"],
                     detail_html_url=artifact["url"],
                     detail_text_preview=detail_text[:2000],
+                    resolved_detail_url=detail.url,
                 )
             except Exception as exc:  # noqa: BLE001
                 result["archive_errors"].append(f"详情页读取失败: {exc}")
@@ -552,13 +575,20 @@ class BiddingPipeline:
         persistence_records: list[dict[str, Any]] = []
         context_by_url: dict[str, str] = {}
         detail_urls: list[str] = []
+        known_alive_detail_urls: list[str] = []
         archive_errors: list[str] = []
         for record, archive in zip(search.records, archives):
             context = self._scan_context(record, archive, target_name=company_name)
-            normalized_detail = normalize_url(record.detail_url) if record.detail_url else None
-            if normalized_detail:
-                detail_urls.append(normalized_detail)
-                context_by_url[normalized_detail] = context
+            resolved_detail = _first_absolute_http_url(
+                str(archive.get("resolved_detail_url") or ""),
+                record.detail_url,
+                record.provider_url,
+            )
+            if resolved_detail:
+                detail_urls.append(resolved_detail)
+                context_by_url[resolved_detail] = context
+                if archive.get("detail_html_object_id"):
+                    known_alive_detail_urls.append(resolved_detail)
             archive_errors.extend(str(item) for item in archive.get("archive_errors") or [])
             public_archive = {
                 key: value
@@ -598,7 +628,7 @@ class BiddingPipeline:
                 target_id=target_id,
                 source="bidding",
                 source_context_by_url=context_by_url,
-                known_alive_urls=list(dict.fromkeys(detail_urls)),
+                known_alive_urls=list(dict.fromkeys(known_alive_detail_urls)),
                 min_attention_score=min_attention_score,
                 scan_concurrency=scan_concurrency,
                 copywriting_concurrency=copywriting_concurrency,

@@ -1,14 +1,30 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 
 def normalize_url(url: str) -> str:
     s = (url or "").strip()
     if not s:
         return s
-    if not re.match(r"^https?://", s, flags=re.IGNORECASE):
+    if s.startswith("//"):
+        s = "https:" + s
+    elif not re.match(r"^https?://", s, flags=re.IGNORECASE):
+        if "://" in s or s.startswith(("/", "./", "../")):
+            return ""
         s = "https://" + s
+    try:
+        parsed = urlsplit(s)
+        hostname = parsed.hostname
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or any(character.isspace() for character in parsed.netloc)
+    ):
+        return ""
     return s
 
 
