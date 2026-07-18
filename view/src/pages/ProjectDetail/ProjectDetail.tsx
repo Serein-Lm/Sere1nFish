@@ -11,9 +11,7 @@ import {
   updateProject,
   deleteProject,
   getProjectDashboard,
-  listProjectAssets,
   type Project,
-  type ProjectAsset,
   type WebTaggingRecord,
   type DashboardData,
 } from '../../services/projectService'
@@ -511,10 +509,6 @@ export default function ProjectDetail() {
   const [taggingLoading, setTaggingLoading] = useState(false)
   const [taggingRecords, setTaggingRecords] = useState<WebTaggingRecord[]>([])
   const [taggingTotal, setTaggingTotal] = useState(0)
-  const [assets, setAssets] = useState<ProjectAsset[]>([])
-  const [assetsTotal, setAssetsTotal] = useState(0)
-  const [assetsLoading, setAssetsLoading] = useState(false)
-  const [assetTargetId, setAssetTargetId] = useState('')
   const [error, setError] = useState<string | null>(null)
 
   // Tab 状态
@@ -653,21 +647,12 @@ export default function ProjectDetail() {
     }
   }
 
-  const fetchAssets = async (pid: string, targetId = assetTargetId) => {
-    setAssetsLoading(true)
+  const fetchProjectTargets = async (pid: string) => {
     try {
-      const [result, targetResult] = await Promise.all([
-        listProjectAssets(pid, { target_id: targetId || undefined, limit: 500 }),
-        listProjectTargets(pid),
-      ])
-      setAssets(result.items)
-      setAssetsTotal(result.total)
-      setProjectTargets(targetResult.items)
+      const result = await listProjectTargets(pid)
+      setProjectTargets(result.items)
     } catch (e) {
-      console.error('加载网站资产失败:', e)
-      message.error(e instanceof Error ? e.message : '加载网站资产失败')
-    } finally {
-      setAssetsLoading(false)
+      console.error('加载项目 Target 失败:', e)
     }
   }
 
@@ -999,7 +984,7 @@ export default function ProjectDetail() {
         const data = await getProject(projectId)
         if (!cancelled) {
           setProject(data)
-          await Promise.all([fetchRecords(projectId), fetchAssets(projectId)])
+          await Promise.all([fetchRecords(projectId), fetchProjectTargets(projectId)])
           // 加载任务列表
           await fetchTasks(projectId)
           // 加载看板数据
@@ -1027,9 +1012,7 @@ export default function ProjectDetail() {
           setError(msg)
           setProject(null)
           setTaggingRecords([])
-          setAssets([])
-          setAssetsTotal(0)
-          setAssetTargetId('')
+          setProjectTargets([])
           setXhsNotes([])
           setXhsProfiles([])
           setXhsTargetId('')
@@ -2345,104 +2328,9 @@ export default function ProjectDetail() {
 
   // Tab 内容渲染
   const renderWebsiteContent = () => {
-    const assetColumns: ColumnsType<ProjectAsset> = [
-      {
-        title: 'URL',
-        key: 'url',
-        width: 320,
-        render: (_, record) => {
-          const url = record.canonical_url || record.link || record.host || ''
-          return url ? (
-            <a href={url} target="_blank" rel="noreferrer" title={url}>{url}</a>
-          ) : <Text type="secondary">-</Text>
-        },
-      },
-      {
-        title: '标题',
-        key: 'title',
-        width: 220,
-        ellipsis: true,
-        render: (_, record) => record.title || record.probe?.title || '-',
-      },
-      {
-        title: 'IP / 端口',
-        key: 'endpoint',
-        width: 180,
-        render: (_, record) => (
-          <Text copyable={Boolean(record.ip)}>{record.ip ? `${record.ip}${record.port ? `:${record.port}` : ''}` : '-'}</Text>
-        ),
-      },
-      {
-        title: '存活',
-        key: 'alive',
-        width: 86,
-        render: (_, record) => record.is_alive === true
-          ? <Tag color="success">存活</Tag>
-          : record.is_alive === false
-            ? <Tag color="error">失活</Tag>
-            : <Tag>未知</Tag>,
-      },
-      {
-        title: 'HTTP',
-        key: 'http',
-        width: 86,
-        render: (_, record) => record.probe?.status_code ?? '-',
-      },
-      {
-        title: '来源',
-        key: 'sources',
-        width: 150,
-        render: (_, record) => (
-          <Space size={4} wrap>
-            {(record.sources || []).map((source) => <Tag key={source}>{source.toUpperCase()}</Tag>)}
-            {!record.sources?.length && <Text type="secondary">-</Text>}
-          </Space>
-        ),
-      },
-      {
-        title: '更新时间',
-        dataIndex: 'updated_at',
-        key: 'updated_at',
-        width: 180,
-        render: (value: string) => <Text type="secondary">{formatDate(value)}</Text>,
-      },
-    ]
-
     return (
       <>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-          <Space><GlobalOutlined /><Text strong>FOFA / Hunter 网站资产</Text><Tag>{assetsTotal}</Tag></Space>
-          <Space wrap>
-            <Select
-              value={assetTargetId}
-              style={{ width: 320, maxWidth: '100%' }}
-              options={[
-                { value: '', label: `全部公司 (${projectTargets.length})` },
-                ...projectTargets.map((target) => ({
-                  value: target.target_id,
-                  label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
-                })),
-              ]}
-              onChange={(value) => {
-                setAssetTargetId(value)
-                if (projectId) void fetchAssets(projectId, value)
-              }}
-            />
-            <Button size="small" icon={<SyncOutlined />} loading={assetsLoading} onClick={() => { if (projectId) void fetchAssets(projectId) }}>刷新</Button>
-          </Space>
-        </div>
-        <Table<ProjectAsset>
-          rowKey="asset_id"
-          size="small"
-          loading={assetsLoading}
-          columns={assetColumns}
-          dataSource={assets}
-          locale={{ emptyText: <Empty description="暂无 FOFA / Hunter 网站资产" /> }}
-          scroll={{ x: 1220 }}
-          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 个资产` }}
-        />
-
-        <div className="project-detail-section-title" style={{ marginTop: 24 }}>
+        <div className="project-detail-section-title" style={{ marginTop: 0 }}>
           <Space><SearchOutlined /> 网站分析记录</Space>
         </div>
         <div className="tagging-table-container">
@@ -3079,11 +2967,25 @@ export default function ProjectDetail() {
   }
 
   const renderWechatContent = () => {
+    const sourceUrlCount = wechatRecords.filter((record) => Boolean(record.source_url)).length
+    const archivedCount = wechatRecords.filter((record) => Boolean(record.source_document_id)).length
+    const versionedCount = wechatRecords.filter((record) => Boolean(record.source_document_version_id)).length
+    const browserScreenshotCount = wechatRecords.reduce(
+      (total, record) => total + (record.browser_screenshot_urls?.length || 0),
+      0,
+    )
+    const unarchivedCount = wechatRecords.filter(
+      (record) => Boolean(record.source_url) && !record.source_document_id,
+    ).length
+
     return (
       <div>
+        <div className="project-detail-section-title" style={{ marginTop: 0 }}>
+          <Space><FileTextOutlined /> 公众号文章与浏览器归档</Space>
+        </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
           <Text type="secondary">
-            手机负责发现文章，浏览器池永久保存全文、原图、截图和结构化版本；记录按 Target 聚类。
+            手机采集搜索结果；提取到公众号文章链接后，项目 Chrome 浏览器池读取并永久保存全文、原图、截图和结构化版本。
           </Text>
           <Space>
             <Select
@@ -3093,7 +2995,7 @@ export default function ProjectDetail() {
                 { value: '', label: `全部 Target (${projectTargets.length})` },
                 ...projectTargets.map((target) => ({
                   value: target.target_id,
-                  label: `${['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(target.relation_type || '') ? '[全资子公司] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count} · 存活资产 ${target.alive_asset_count})`,
+                  label: `${['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(target.relation_type || '') ? '[全资子公司] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
                 })),
               ]}
               onChange={(value) => {
@@ -3119,10 +3021,25 @@ export default function ProjectDetail() {
             </Button>
           </Space>
         </div>
+        <Row gutter={[16, 12]} className="wechat-archive-summary">
+          <Col xs={12} sm={6}><Statistic title="手机采集记录" value={wechatRecords.length} /></Col>
+          <Col xs={12} sm={6}><Statistic title="浏览器已归档" value={archivedCount} /></Col>
+          <Col xs={12} sm={6}><Statistic title="永久内容版本" value={versionedCount} /></Col>
+          <Col xs={12} sm={6}><Statistic title="浏览器全文截图" value={browserScreenshotCount} /></Col>
+          {wechatRecords.length > 0 && sourceUrlCount === 0 && (
+            <Col span={24}>
+              <Text type="warning">当前记录只有手机搜索页截图，尚未提取到公众号原文链接，浏览器池不会生成归档。</Text>
+            </Col>
+          )}
+          {unarchivedCount > 0 && (
+            <Col span={24}><Text type="warning">有 {unarchivedCount} 条原文链接尚未形成浏览器归档</Text></Col>
+          )}
+        </Row>
         <CollectRecordsView
           records={wechatRecords}
           loading={wechatLoading}
-          emptyText="暂无公众号采集记录，请在手机采集中创建任务并绑定本项目与 Target"
+          showBrowserArchive
+          emptyText="暂无公众号记录；综合扫描启用公众号后，手机发现与浏览器归档结果会显示在这里"
         />
       </div>
     )
@@ -3503,7 +3420,7 @@ export default function ProjectDetail() {
         <Space>
           <GlobalOutlined />
           网站
-          <Tag>{assetsTotal}</Tag>
+          <Tag>{taggingTotal}</Tag>
         </Space>
       ),
       children: renderWebsiteContent(),

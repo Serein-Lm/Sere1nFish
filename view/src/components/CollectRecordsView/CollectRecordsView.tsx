@@ -353,6 +353,8 @@ export interface CollectRecordsViewProps {
   pageSize?: number
   /** 额外展示「主体对应」列(默认展示) */
   showSubjectMatch?: boolean
+  /** 展示手机发现后的浏览器全文归档状态 */
+  showBrowserArchive?: boolean
 }
 
 /** 采集记录统一展示:紧凑列表(缩略图+标题+相关性+联系方式)+ 小眼睛预览详情(分层分级)。 */
@@ -362,6 +364,7 @@ export default function CollectRecordsView({
   emptyText,
   pageSize = 10,
   showSubjectMatch = true,
+  showBrowserArchive = false,
 }: CollectRecordsViewProps) {
   const [detail, setDetail] = useState<CollectRecord | null>(null)
 
@@ -415,6 +418,32 @@ export default function CollectRecordsView({
       ellipsis: true,
       render: (_, r) => r.target_name ? <Tag color="cyan">{r.target_name}</Tag> : <Text type="secondary">未关联</Text>,
     },
+    ...(showBrowserArchive
+      ? ([
+          {
+            title: '浏览器池归档',
+            key: 'browser_archive',
+            width: 142,
+            render: (_: unknown, r: CollectRecord) => {
+              const screenshotCount = r.browser_screenshot_urls?.length || 0
+              if (r.source_document_id) {
+                return (
+                  <Space orientation="vertical" size={2}>
+                    <Tag color="success" icon={<DatabaseOutlined />}>已归档</Tag>
+                    {r.source_document_version_id && (
+                      <Text type="secondary">版本 {r.source_document_version_id.slice(-8)}</Text>
+                    )}
+                    {screenshotCount > 0 && <Text type="secondary">全文截图 {screenshotCount}</Text>}
+                  </Space>
+                )
+              }
+              return r.source_url
+                ? <Tag color="warning">尚未归档</Tag>
+                : <Tag>无原文链接</Tag>
+            },
+          },
+        ] as ColumnsType<CollectRecord>)
+      : []),
     ...(showSubjectMatch
       ? ([
           {
@@ -438,8 +467,13 @@ export default function CollectRecordsView({
       key: 'action',
       width: 48,
       render: (_, r) => (
-        <Tooltip title="预览">
-          <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => setDetail(r)} />
+        <Tooltip title={r.source_document_id ? '查看浏览器全文归档' : '查看采集详情'}>
+          <Button
+            type="text"
+            size="small"
+            icon={r.source_document_id ? <DatabaseOutlined /> : <EyeOutlined />}
+            onClick={() => setDetail(r)}
+          />
         </Tooltip>
       ),
     },

@@ -79,6 +79,22 @@
   box-shadow: 0 0 8px var(--primary-glow);
 }
 
+.wechat-archive-summary {
+  margin-bottom: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.wechat-archive-summary .ant-statistic-title {
+  margin-bottom: 2px;
+  font-size: 12px;
+}
+
+.wechat-archive-summary .ant-statistic-content {
+  font-size: 20px;
+}
+
 /* Table Styles */
 .tagging-table-container {
   margin-top: 12px;
