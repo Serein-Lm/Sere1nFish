@@ -37,6 +37,10 @@ async def pool_config():
             "enabled": config.enabled,
             "image": config.image,
             "max_containers": config.max_containers,
+            "bulk_container_limit": config.bulk_container_limit,
+            "reserved_non_bulk_containers": (
+                config.normalized_reserved_non_bulk_containers
+            ),
             "idle_timeout": config.idle_timeout,
             "screen_width": config.screen_width,
             "screen_height": config.screen_height,

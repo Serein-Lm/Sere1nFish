@@ -417,6 +417,7 @@ chrome-browser/
     "enabled": false,
     "image": "chrome-browser:latest",
     "max_containers": 5,
+    "reserved_non_bulk_containers": 2,
     "idle_timeout": 300,
     "shm_size": "2g",
     "screen_width": 1920,

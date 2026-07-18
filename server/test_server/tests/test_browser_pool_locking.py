@@ -10,8 +10,7 @@ from browser_manager.provider import ChromeDockerConfig, ContainerInfo, DockerPr
 
 @pytest.mark.asyncio
 async def test_capacity_wait_does_not_block_release(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = object.__new__(DockerProvider)
-    provider.config = ChromeDockerConfig(max_containers=1)
+    provider = DockerProvider(ChromeDockerConfig(max_containers=1))
     provider._lock = asyncio.Lock()
     provider._pending_creates = 0
     provider.task_map = {"old-task": "container-1"}
@@ -51,8 +50,7 @@ async def test_capacity_wait_does_not_block_release(monkeypatch: pytest.MonkeyPa
 async def test_container_startup_does_not_block_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = object.__new__(DockerProvider)
-    provider.config = ChromeDockerConfig(max_containers=2)
+    provider = DockerProvider(ChromeDockerConfig(max_containers=2))
     provider._lock = asyncio.Lock()
     provider._pending_creates = 0
     provider.task_map = {"old-task": "container-1"}
@@ -106,10 +104,107 @@ async def test_container_startup_does_not_block_release(
 
 
 @pytest.mark.asyncio
+async def test_url_scan_capacity_leaves_room_for_wechat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(
+            max_containers=3,
+            reserved_non_bulk_containers=1,
+        )
+    )
+    provider.containers = {
+        f"container-{index}": ContainerInfo(
+            container_id=f"container-{index}",
+            container_name=f"chrome-{index}",
+            cdp_host="127.0.0.1",
+            cdp_port=9221 + index,
+            api_port=8249 + index,
+            vnc_port=5899 + index,
+            novnc_port=6079 + index,
+            status="idle",
+        )
+        for index in range(1, 4)
+    }
+
+    async def endpoint(info: ContainerInfo) -> str:
+        return f"ws://{info.cdp_host}:{info.api_port}/cdp-proxy"
+
+    monkeypatch.setattr(provider, "_get_ws_url", endpoint)
+
+    assert await provider.get_cdp_endpoint("url-1", purpose="url_scan")
+    assert await provider.get_cdp_endpoint("url-2", purpose="url_scan")
+
+    waiting_url = asyncio.create_task(
+        provider.get_cdp_endpoint("url-3", purpose="url_scan")
+    )
+    await asyncio.sleep(0.05)
+    assert not waiting_url.done()
+
+    assert await asyncio.wait_for(
+        provider.get_cdp_endpoint("wechat-1", purpose="wechat_article"),
+        timeout=0.2,
+    )
+
+    await provider.release_cdp_endpoint("wechat-1")
+    assert not waiting_url.done()
+    await provider.release_cdp_endpoint("url-1")
+    assert await asyncio.wait_for(waiting_url, timeout=0.2)
+
+    await provider.release_cdp_endpoint("url-2")
+    await provider.release_cdp_endpoint("url-3")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_url_scan_waiter_does_not_leak_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(
+            max_containers=2,
+            reserved_non_bulk_containers=1,
+        )
+    )
+    provider.containers = {
+        "container-1": ContainerInfo(
+            container_id="container-1",
+            container_name="chrome-1",
+            cdp_host="127.0.0.1",
+            cdp_port=9222,
+            api_port=8250,
+            vnc_port=5900,
+            novnc_port=6080,
+            status="idle",
+        )
+    }
+
+    async def endpoint(_info: ContainerInfo) -> str:
+        return "ws://127.0.0.1:8250/cdp-proxy"
+
+    monkeypatch.setattr(provider, "_get_ws_url", endpoint)
+
+    assert await provider.get_cdp_endpoint("url-1", purpose="url_scan")
+    cancelled = asyncio.create_task(
+        provider.get_cdp_endpoint("url-cancelled", purpose="url_scan")
+    )
+    await asyncio.sleep(0.05)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    await provider.release_cdp_endpoint("url-1")
+    assert await asyncio.wait_for(
+        provider.get_cdp_endpoint("url-2", purpose="url_scan"),
+        timeout=0.2,
+    )
+    await provider.release_cdp_endpoint("url-2")
+
+
+@pytest.mark.asyncio
 async def test_destroy_removes_stale_task_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = object.__new__(DockerProvider)
+    provider = DockerProvider(ChromeDockerConfig(max_containers=1))
     provider._lock = asyncio.Lock()
     provider.task_map = {"stale-task": "container-1"}
     provider.containers = {

@@ -25,6 +25,8 @@ from core.logger import get_logger
 
 logger = get_logger("browser_manager")
 
+_BULK_BROWSER_PURPOSES = frozenset({"url_scan"})
+
 
 # ── 数据结构 ──────────────────────────────────────────────
 
@@ -92,12 +94,30 @@ class ChromeDockerConfig:
     health_check_interval: int = 30  # 健康检查间隔（秒）
     # 预热池
     warm_pool_size: int = 1  # 预热池大小（启动时预创建的空闲容器数）
+    reserved_non_bulk_containers: int = 2  # 为公众号/学者等非批量任务保留容量
     # 容器热切换
     max_consecutive_errors: int = 3  # 连续错误超过此值触发容器热切换
 
     @classmethod
     def from_dict(cls, data: dict) -> "ChromeDockerConfig":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+    @property
+    def normalized_reserved_non_bulk_containers(self) -> int:
+        return max(
+            0,
+            min(
+                int(self.reserved_non_bulk_containers),
+                max(0, int(self.max_containers) - 1),
+            ),
+        )
+
+    @property
+    def bulk_container_limit(self) -> int:
+        return max(
+            1,
+            int(self.max_containers) - self.normalized_reserved_non_bulk_containers,
+        )
 
 
 # ── 抽象基类 ──────────────────────────────────────────────
@@ -185,8 +205,41 @@ class DockerProvider(BrowserProvider):
         self._docker_client = None
         self._port_counter = 0
         self._pending_creates = 0
+        self._bulk_slot_limit = config.bulk_container_limit
+        self._bulk_slots = asyncio.Semaphore(self._bulk_slot_limit)
+        self._bulk_slot_owners: set[str] = set()
         self._warm_pool_ready = asyncio.Event()  # 预热池就绪信号
         self._orphan_cleanup_done = False
+
+        logger.info(
+            "[DockerProvider] 工作负载配额 | max=%s bulk=%s reserved_non_bulk=%s",
+            config.max_containers,
+            self._bulk_slot_limit,
+            int(config.max_containers) - self._bulk_slot_limit,
+        )
+
+    async def _acquire_workload_slot(self, task_id: str, purpose: str) -> None:
+        """限制批量网站 worker 的全局占用，避免挤压公众号等并行链路。"""
+        if purpose not in _BULK_BROWSER_PURPOSES or task_id in self._bulk_slot_owners:
+            return
+        if self._bulk_slots.locked():
+            logger.info(
+                "[DockerProvider] 批量浏览器任务等待配额 | task=%s purpose=%s limit=%s",
+                task_id,
+                purpose,
+                self._bulk_slot_limit,
+            )
+        await self._bulk_slots.acquire()
+        if task_id in self._bulk_slot_owners:
+            self._bulk_slots.release()
+            return
+        self._bulk_slot_owners.add(task_id)
+
+    def _release_workload_slot(self, task_id: str | None) -> None:
+        if not task_id or task_id not in self._bulk_slot_owners:
+            return
+        self._bulk_slot_owners.remove(task_id)
+        self._bulk_slots.release()
 
     def _get_docker_client(self):
         """延迟初始化 docker client"""
@@ -295,6 +348,22 @@ class DockerProvider(BrowserProvider):
         task_id = task_id or str(uuid.uuid4())
         logger.info(f"[DockerProvider] 请求 CDP 端点 | task_id={task_id} purpose={purpose}")
 
+        await self._acquire_workload_slot(task_id, purpose)
+        try:
+            endpoint = await self._allocate_cdp_endpoint(task_id, purpose)
+        except BaseException:
+            self._release_workload_slot(task_id)
+            raise
+        if endpoint is None:
+            self._release_workload_slot(task_id)
+        return endpoint
+
+    async def _allocate_cdp_endpoint(
+        self,
+        task_id: str,
+        purpose: str,
+    ) -> Optional[str]:
+        """在工作负载配额通过后分配或创建容器。"""
         claimed: ContainerInfo | None = None
         wait_for_idle = False
         create_required = False
@@ -388,6 +457,7 @@ class DockerProvider(BrowserProvider):
         """释放任务占用的容器"""
         if not task_id or task_id not in self.task_map:
             logger.debug(f"[DockerProvider] 释放请求忽略 | task_id={task_id} (未找到)")
+            self._release_workload_slot(task_id)
             return
 
         async with self._lock:
@@ -401,6 +471,7 @@ class DockerProvider(BrowserProvider):
                     f"[DockerProvider] 释放容器 {info.container_name} | task={task_id} | "
                     f"状态→idle | 当前容器池: {len(self.containers)} 个"
                 )
+        self._release_workload_slot(task_id)
 
     async def shutdown(self):
         """销毁所有容器和后台任务"""
@@ -683,6 +754,7 @@ class DockerProvider(BrowserProvider):
             ]
             for task_id in stale_tasks:
                 self.task_map.pop(task_id, None)
+                self._release_workload_slot(task_id)
         if not info:
             return
 
