@@ -9,10 +9,50 @@ from api.dao import mobile_collect as collect_dao
 from api.models.mobile_collect import CollectTaskDef
 from api.services.mobile_collect_pipeline import run_mobile_collect_definition
 from core.logger import get_logger
+from core.mobile.collect.presets import get_preset_task
 
 
 WECHAT_SOURCE_LINK_STRATEGY = "wechat_copy_link"
+WECHAT_AUTO_TASK_NAME = "综合扫描公众号采集"
 logger = get_logger("wechat_collection")
+
+
+def _company_wechat_defaults() -> dict[str, Any]:
+    """Build the complete WeChat article profile used by company scans."""
+    task = get_preset_task("wechat_official")
+    task.update(
+        {
+            "name": WECHAT_AUTO_TASK_NAME,
+            "keywords": [],
+            "use_target_keyword_library": True,
+            "deep_collect": True,
+            "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
+        }
+    )
+    return task
+
+
+def _is_company_wechat_task(task_def: dict[str, Any], *, device_id: str) -> bool:
+    return _is_wechat_task(task_def, device_id=device_id) and (
+        str(task_def.get("name") or "") == WECHAT_AUTO_TASK_NAME
+        or str(task_def.get("source_link_strategy") or "")
+        == WECHAT_SOURCE_LINK_STRATEGY
+    )
+
+
+def _wechat_definition_patch(task_def: dict[str, Any]) -> dict[str, Any]:
+    """Repair only missing critical profile fields without replacing tuning."""
+    defaults = _company_wechat_defaults()
+    patch: dict[str, Any] = {}
+    for field in ("extract_fields", "dedup_key_fields"):
+        if not task_def.get(field):
+            patch[field] = defaults[field]
+    for field in ("search_hint", "source_link_strategy"):
+        if not str(task_def.get(field) or "").strip():
+            patch[field] = defaults[field]
+    if not task_def.get("deep_collect"):
+        patch["deep_collect"] = True
+    return patch
 
 
 def _is_wechat_task(task_def: dict[str, Any], *, device_id: str) -> bool:
@@ -61,21 +101,33 @@ async def ensure_wechat_task_definition(
     reusable = [
         item
         for item in task_defs
-        if _is_wechat_task(item, device_id=normalized_device_id)
+        if _is_company_wechat_task(item, device_id=normalized_device_id)
         and not str(item.get("target_id") or "")
     ]
     if reusable:
-        return _select_wechat_task(reusable)
+        selected = _select_wechat_task(reusable)
+        patch = _wechat_definition_patch(selected)
+        if patch:
+            repaired = await collect_dao.update_task_def(
+                db,
+                str(selected.get("task_def_id") or ""),
+                patch,
+            )
+            if repaired:
+                logger.notice(
+                    "自动修复综合扫描公众号采集定义 | project=%s device=%s def=%s fields=%s",
+                    project_id,
+                    normalized_device_id,
+                    selected.get("task_def_id"),
+                    sorted(patch),
+                )
+                return repaired
+        return selected
 
     payload = CollectTaskDef(
-        name="综合扫描公众号采集",
+        **_company_wechat_defaults(),
         project_id=project_id,
         device_id=normalized_device_id,
-        app_name="微信",
-        keywords=[],
-        use_target_keyword_library=True,
-        deep_collect=True,
-        source_link_strategy=WECHAT_SOURCE_LINK_STRATEGY,
     ).model_dump()
     created = await collect_dao.create_task_def(db, payload)
     logger.notice(
@@ -101,7 +153,11 @@ async def resolve_wechat_task_definition(
         raise ValueError("启用公众号采集时必须选择执行手机")
 
     task_defs = await collect_dao.list_task_defs(db, project_id=project_id)
-    candidates = [item for item in task_defs if _is_wechat_task(item, device_id=device_id)]
+    candidates = [
+        item
+        for item in task_defs
+        if _is_company_wechat_task(item, device_id=device_id)
+    ]
     if not candidates:
         raise ValueError("所选手机没有当前项目的微信采集配置")
     task_def = _select_wechat_task(
@@ -143,15 +199,12 @@ async def run_company_wechat_collection(
         project_id=project_id,
         task_def_id=task_def_id,
         runtime_overrides={
+            **_company_wechat_defaults(),
             "project_id": project_id,
             "target_id": target_id,
             "target_name": target_name,
             "target_type": "company",
-            "use_target_keyword_library": True,
-            "app_name": "微信",
             "direct_launch_app": True,
-            "deep_collect": True,
-            "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
         },
         requested_by=requested_by,
     )

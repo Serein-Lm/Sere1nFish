@@ -146,6 +146,7 @@ class AssetIntelligenceService:
             "scan_urls": list(dict.fromkeys(scan_urls)),
             "target_id": identity.target_id,
             "root_domain": identity.root_domain,
+            "root_domains": identity.domains,
         }
         obs_log(
             "外部资产发现完成",

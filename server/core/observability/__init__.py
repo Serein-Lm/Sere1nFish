@@ -16,6 +16,7 @@ from core.observability.logs import (
     obs_log,
 )
 from core.observability.context import observation_context
+from core.observability.usage import record_llm_usage
 
 __all__ = [
     "LEVELS",
@@ -24,4 +25,5 @@ __all__ = [
     "get_obs_logger",
     "obs_log",
     "observation_context",
+    "record_llm_usage",
 ]

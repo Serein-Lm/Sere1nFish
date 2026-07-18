@@ -142,3 +142,14 @@ def test_company_scan_batch_api_rejects_shared_urls(monkeypatch) -> None:
                 current_user=User(username="admin"),
             )
         )
+
+
+def test_company_scan_requires_direction_when_scholar_is_enabled() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    with pytest.raises(ValueError, match="研究方向"):
+        _validate_company_scan_params({"enable_scholar": True})
+
+    params = {"enable_scholar": True, "scholar_direction": "  金融科技  "}
+    _validate_company_scan_params(params)
+    assert params["scholar_direction"] == "金融科技"

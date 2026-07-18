@@ -895,6 +895,16 @@ async def run_collect_task(
     """
     task_def_id = task_def["task_def_id"]
     device_id = task_def["device_id"]
+    extract_fields = list(task_def.get("extract_fields") or [])
+    if (
+        bool(task_def.get("deep_collect"))
+        and str(task_def.get("source_link_strategy") or "none") != "none"
+        and not extract_fields
+    ):
+        raise ValueError(
+            "手机详情深采已启用，但 extract_fields 为空；"
+            "无法生成相关性、主体匹配和点击坐标"
+        )
     owner = f"collect:{run_task_id}"
     stop_event = asyncio.Event()
     _running[run_task_id] = stop_event
@@ -1000,7 +1010,7 @@ async def run_collect_task(
         "swipe_interval": task_def.get("swipe_interval", 1.2),
         "extract_fields": [
             f if isinstance(f, ExtractField) else ExtractField(**f)
-            for f in (task_def.get("extract_fields") or [])
+            for f in extract_fields
         ],
         "dedup_key_fields": task_def.get("dedup_key_fields") or [],
         "notify_on": task_def.get("notify_on", "new"),

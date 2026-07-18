@@ -42,6 +42,8 @@ async def test_ensure_wechat_configuration_creates_unbound_project_definition(
     assert captured["target_id"] is None
     assert captured["source_link_strategy"] == WECHAT_SOURCE_LINK_STRATEGY
     assert captured["use_target_keyword_library"] is True
+    assert captured["extract_fields"]
+    assert captured["dedup_key_fields"] == ["title", "account"]
 
 
 @pytest.mark.asyncio
@@ -62,6 +64,7 @@ async def test_ensure_wechat_configuration_reuses_unbound_definition(
             },
             {
                 "task_def_id": "shared-company-scan",
+                "name": "综合扫描公众号采集",
                 "device_id": "device-a",
                 "app_name": "微信",
                 "target_id": "",
@@ -72,8 +75,20 @@ async def test_ensure_wechat_configuration_reuses_unbound_definition(
     async def create_def(*_args: Any, **_kwargs: Any):
         raise AssertionError("已有未绑定公司的定义时不应重复创建")
 
+    async def update_def(_db: Any, task_def_id: str, patch: dict[str, Any]):
+        assert task_def_id == "shared-company-scan"
+        return {
+            "task_def_id": task_def_id,
+            "device_id": "device-a",
+            "app_name": "微信",
+            "target_id": "",
+            "source_link_strategy": "wechat_copy_link",
+            **patch,
+        }
+
     monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
     monkeypatch.setattr(collect_dao, "create_task_def", create_def)
+    monkeypatch.setattr(collect_dao, "update_task_def", update_def)
 
     task_def = await ensure_wechat_task_definition(
         object(),
@@ -82,6 +97,7 @@ async def test_ensure_wechat_configuration_reuses_unbound_definition(
     )
 
     assert task_def["task_def_id"] == "shared-company-scan"
+    assert task_def["extract_fields"]
 
 
 @pytest.mark.asyncio
@@ -142,6 +158,7 @@ async def test_wechat_configuration_prefers_unbound_definition_over_other_target
             },
             {
                 "task_def_id": "shared-company-scan",
+                "name": "综合扫描公众号采集",
                 "device_id": "device-a",
                 "app_name": "微信",
                 "target_id": "",
@@ -222,9 +239,30 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["app_name"] == "微信"
     assert overrides["direct_launch_app"] is True
     assert overrides["source_link_strategy"] == "wechat_copy_link"
+    assert overrides["extract_fields"]
+    assert overrides["dedup_key_fields"] == ["title", "account"]
     assert overrides["target_id"] == "target-1"
     assert result["documents"] == 2
     assert result["contacts"] == 4
+
+
+@pytest.mark.asyncio
+async def test_mobile_collect_rejects_link_deep_collect_without_extract_fields() -> None:
+    from core.mobile.collect.pipeline import run_collect_task
+
+    with pytest.raises(ValueError, match="extract_fields 为空"):
+        await run_collect_task(
+            object(),
+            run_task_id="scan-1-wechat",
+            project_id="project-1",
+            task_def={
+                "task_def_id": "wechat-a",
+                "device_id": "device-a",
+                "deep_collect": True,
+                "source_link_strategy": "wechat_copy_link",
+                "extract_fields": [],
+            },
+        )
 
 
 @pytest.mark.asyncio

@@ -182,7 +182,7 @@ class CompanyScanPipeline:
         urls: list[str] | None = None,
         enable_url_scan: bool = True,
         enable_asset_discovery: bool = True,
-        enable_xhs: bool = True,
+        enable_xhs: bool = False,
         enable_subsidiary_xhs: bool = False,
         xhs_target_selection_mode: str = "auto",
         xhs_manual_targets: list[str] | str | None = None,
@@ -190,6 +190,10 @@ class CompanyScanPipeline:
         bidding_page_size: int = 20,
         enable_wechat: bool = False,
         wechat_device_id: str = "",
+        enable_scholar: bool = False,
+        scholar_direction: str = "",
+        scholar_unit_en: str = "",
+        scholar_limit: int = 10,
         enable_copywriting: bool = True,
         xhs_max_notes: int = 100,
         xhs_attention_threshold: int = 60,
@@ -215,13 +219,15 @@ class CompanyScanPipeline:
 
         阶段:
         1. CompanyRouter 分析公司 → 生成搜索策略
-        2. 并行执行: URL扫描 + 招投标 + XHS搜索 + 公众号手机采集 + 全资子公司查询
+        2. 并行执行: URL扫描 + 招投标 + XHS搜索 + 公众号 + 学者联系 + 全资子公司查询
         3. 逐个采集全资子公司（子公司 XHS 默认关闭）
         4. 根 Target 的 XHS画像 → 话术生成
         """
         from core.observability import obs_log
         from api.services.xhs_target_selection import parse_manual_targets
 
+        if enable_scholar and not str(scholar_direction or "").strip():
+            raise ValueError("启用学者联系采集时必须填写研究方向")
         subsidiary_xhs_enabled = bool(enable_xhs and enable_subsidiary_xhs)
         manual_xhs_targets = parse_manual_targets(xhs_manual_targets)
         result = {
@@ -291,6 +297,15 @@ class CompanyScanPipeline:
                 "contacts": 0,
                 "documents": 0,
                 "keywords_used": [],
+            },
+            "scholar": {
+                "enabled": enable_scholar,
+                "status": "pending" if enable_scholar else "disabled",
+                "unit": "",
+                "direction": str(scholar_direction or "").strip(),
+                "articles_total": 0,
+                "contacts_total": 0,
+                "corresponding_count": 0,
             },
             "profile_copywritings": {"count": 0},
             "sub_errors": [],
@@ -363,16 +378,28 @@ class CompanyScanPipeline:
                     *list(getattr(router_profile, "colloquial_names", []) or []),
                     router_legal_name,
                 ]
-            )
+            )[:20]
             root_domain = str(company_meta.get("root_domain") or "").strip()
+            root_domains = self._dedupe_text(
+                [root_domain, *list(company_meta.get("icp_domains") or [])]
+            )[:6]
+            provenance = dict(company_meta.get("provenance") or {})
+            normalization_error = normalization_error or str(
+                provenance.get("browser_error") or ""
+            )
             target = await attach_normalized_company(
                 self.db,
                 project_id=project_id,
                 input_name=company_name,
                 normalized_name=normalized_name,
                 root_domain=root_domain,
+                root_domains=root_domains,
                 aliases=aliases,
                 task_id=task_id,
+                normalization_version=int(
+                    provenance.get("normalization_version") or 0
+                )
+                or None,
             )
             target_id = str(target.get("target_id") or "")
             company_meta = await company_meta_dao.upsert_company_meta(
@@ -386,11 +413,14 @@ class CompanyScanPipeline:
                 source=str(company_meta.get("source") or "company_scan"),
                 task_id=task_id,
                 target_id=target_id,
+                icp_domains=root_domains,
+                provenance=provenance or None,
             )
             result["identity"] = {
                 "input_name": company_name,
                 "normalized_name": normalized_name,
                 "root_domain": root_domain,
+                "root_domains": root_domains,
                 "aliases": aliases,
                 "target_id": target_id,
                 "normalization_error": normalization_error or None,
@@ -560,6 +590,19 @@ class CompanyScanPipeline:
                     ),
                 ))
 
+            if enable_scholar:
+                primary_jobs.append((
+                    "scholar",
+                    self._run_scholar_collection(
+                        task_id=task_id,
+                        project_id=project_id,
+                        unit=normalized_name,
+                        direction=scholar_direction,
+                        unit_en=scholar_unit_en,
+                        limit=scholar_limit,
+                    ),
+                ))
+
             if primary_jobs:
                 logger.info(
                     "[company_scan] task=%s 阶段2: 并行执行 %s",
@@ -584,6 +627,8 @@ class CompanyScanPipeline:
                         result["sub_errors"].append(f"{kind}: {sub}")
                         if kind == "wechat":
                             result["wechat"].update(status="error", error=str(sub))
+                        elif kind == "scholar":
+                            result["scholar"].update(status="error", error=str(sub))
                     elif isinstance(sub, dict):
                         if kind == "asset_url":
                             result["assets"].update(sub.get("assets") or {})
@@ -617,6 +662,10 @@ class CompanyScanPipeline:
                             xhs_succeeded = True
                         elif kind == "wechat":
                             result["wechat"].update(sub)
+                            if sub.get("status") == "error":
+                                failed_primary_jobs.add(kind)
+                        elif kind == "scholar":
+                            result["scholar"].update(sub)
                             if sub.get("status") == "error":
                                 failed_primary_jobs.add(kind)
                 if result["wechat"].get("status") == "error":
@@ -780,6 +829,8 @@ class CompanyScanPipeline:
                     "bidding_records": result["bidding"].get("records_fetched", 0),
                     "bidding_findings": result["bidding"].get("findings_count", 0),
                     "bidding_copywritings": result["bidding"].get("copywritings_count", 0),
+                    "scholar_articles": result["scholar"].get("articles_total", 0),
+                    "scholar_contacts": result["scholar"].get("contacts_total", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                     "wholly_owned_entities": len(wholly_owned_entities),
                     "xhs_targets_selected": result["xhs"]["selection"].get(
@@ -804,6 +855,8 @@ class CompanyScanPipeline:
                     "wechat_documents": result["wechat"].get("documents", 0),
                     "bidding_records": result["bidding"].get("records_fetched", 0),
                     "bidding_findings": result["bidding"].get("findings_count", 0),
+                    "scholar_articles": result["scholar"].get("articles_total", 0),
+                    "scholar_contacts": result["scholar"].get("contacts_total", 0),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                     "xhs_targets_selected": result["xhs"]["selection"].get(
                         "selected_count", 0
@@ -925,6 +978,30 @@ class CompanyScanPipeline:
             requested_by=requested_by,
         )
 
+    async def _run_scholar_collection(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        unit: str,
+        direction: str,
+        unit_en: str = "",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        from api.services.scholar_contact_pipeline import run_scholar_contact_collect
+
+        summary = await run_scholar_contact_collect(
+            self.db,
+            self.app_config,
+            task_id=task_id,
+            project_id=project_id,
+            unit=unit,
+            direction=str(direction or "").strip(),
+            unit_en=str(unit_en or "").strip(),
+            limit=max(1, min(int(limit or 10), 50)),
+        )
+        return {"kind": "scholar", **summary}
+
     async def _run_bidding_collection(
         self,
         *,
@@ -1004,11 +1081,14 @@ class CompanyScanPipeline:
             async with semaphore:
                 name = str(entity.get("name") or "").strip()
                 target_id = str(entity.get("target_id") or "")
-                aliases = self._dedupe_text([name, *list(entity.get("aliases") or [])])
+                aliases = self._dedupe_text(
+                    [name, *list(entity.get("aliases") or [])]
+                )[:20]
                 identity = {
                     "input_name": name,
                     "normalized_name": name,
                     "root_domain": str(entity.get("root_domain") or ""),
+                    "root_domains": list(entity.get("icp_domains") or []),
                     "aliases": aliases,
                     "target_id": target_id,
                 }
@@ -1224,6 +1304,7 @@ class CompanyScanPipeline:
                     root_domain=str(identity.get("root_domain") or ""),
                     target_id=str(identity.get("target_id") or ""),
                     aliases=list(identity.get("aliases") or []),
+                    root_domains=list(identity.get("root_domains") or []),
                 ),
                 project_id=project_id,
                 task_id=task_id,
@@ -1245,9 +1326,14 @@ class CompanyScanPipeline:
             "copywritings_count": 0,
         }
         if enable_url_scan:
-            root_domain = str(identity.get("root_domain") or "").strip()
-            root_url = normalize_url(root_domain) if root_domain else ""
-            merged_urls = self._dedupe_text([root_url, *urls, *discovered_urls])
+            root_domains = self._dedupe_text(
+                [
+                    str(identity.get("root_domain") or ""),
+                    *list(identity.get("root_domains") or []),
+                ]
+            )[:6]
+            root_urls = [normalize_url(domain) for domain in root_domains if domain]
+            merged_urls = self._dedupe_text([*root_urls, *urls, *discovered_urls])
             if merged_urls or url_text.strip():
                 url_result.update(
                     await self._run_url_scan(

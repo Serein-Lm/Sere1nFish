@@ -286,6 +286,23 @@ export async function listProjectWebTaggingRecords(
   )
 }
 
+export async function listProjectWebsiteRecords(
+  projectId: string,
+  params?: PaginatedRequest,
+): Promise<PaginatedResponse<WebTaggingRecord>> {
+  return apiFetch<PaginatedResponse<WebTaggingRecord>>(
+    `/v1/projects/${encodeURIComponent(projectId)}/website-records`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        page: params?.page ?? 1,
+        page_size: params?.page_size ?? 50,
+      }),
+    },
+  )
+}
+
 export async function listProjectAssets(
   projectId: string,
   params?: { target_id?: string; root_domain?: string; limit?: number },

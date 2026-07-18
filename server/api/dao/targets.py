@@ -44,6 +44,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await targets.create_index("target_id", unique=True)
     await targets.create_index([("target_type", 1), ("normalized_name", 1)])
     await targets.create_index("root_domain", sparse=True)
+    await targets.create_index("root_domains", sparse=True)
     await targets.create_index("aliases_normalized")
 
     links = db[PROJECT_TARGETS_COLLECTION]
@@ -75,7 +76,13 @@ async def find_target(
 ) -> dict[str, Any] | None:
     if root_domain:
         found = await db[TARGETS_COLLECTION].find_one(
-            {"target_type": target_type, "root_domain": root_domain.strip().lower()},
+            {
+                "target_type": target_type,
+                "$or": [
+                    {"root_domain": root_domain.strip().lower()},
+                    {"root_domains": root_domain.strip().lower()},
+                ],
+            },
             {"_id": 0},
         )
         if found:
@@ -101,8 +108,10 @@ async def upsert_target(
     name: str,
     target_type: str = "company",
     root_domain: str = "",
+    root_domains: list[str] | None = None,
     aliases: list[str] | None = None,
     source: str = "",
+    normalization_version: int | None = None,
 ) -> dict[str, Any]:
     """按根域名/规范名称复用 Target；不存在时创建稳定实体。"""
     display_name = str(name or "").strip()
@@ -154,6 +163,21 @@ async def upsert_target(
     }
     if root_domain:
         set_fields["root_domain"] = root_domain
+    if root_domains is not None or root_domain:
+        set_fields["root_domains"] = list(
+            dict.fromkeys(
+                str(value).strip().lower()
+                for value in [
+                    *((existing or {}).get("root_domains") or []),
+                    (existing or {}).get("root_domain") or "",
+                    root_domain,
+                    *(root_domains or []),
+                ]
+                if str(value).strip()
+            )
+        )[:12]
+    if normalization_version is not None:
+        set_fields["normalization_version"] = int(normalization_version)
     if source:
         set_fields["latest_source"] = source
     update: dict[str, Any] = {
@@ -197,6 +221,16 @@ async def link_project_target(
             "target_type": target.get("target_type") or "company",
             "target_name": target.get("canonical_name") or "",
             "root_domain": target.get("root_domain") or "",
+            "root_domains": list(
+                dict.fromkeys(
+                    value
+                    for value in [
+                        target.get("root_domain") or "",
+                        *list(target.get("root_domains") or []),
+                    ]
+                    if value
+                )
+            ),
             "active": True,
             "last_seen_at": now,
             "updated_at": now,

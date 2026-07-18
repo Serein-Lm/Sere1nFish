@@ -25,11 +25,62 @@ def test_xhs_target_selection_is_automatic_by_default() -> None:
     assert parameter.default == "auto"
 
 
+def test_xhs_collection_is_disabled_by_default() -> None:
+    parameter = inspect.signature(CompanyScanPipeline.run_pipeline).parameters[
+        "enable_xhs"
+    ]
+
+    assert parameter.default is False
+
+
 def test_bidding_collection_is_enabled_by_default() -> None:
     parameters = inspect.signature(CompanyScanPipeline.run_pipeline).parameters
 
     assert parameters["enable_bidding"].default is True
     assert parameters["bidding_page_size"].default == 20
+
+
+def test_scholar_collection_is_opt_in_and_has_direction_parameters() -> None:
+    parameters = inspect.signature(CompanyScanPipeline.run_pipeline).parameters
+
+    assert parameters["enable_scholar"].default is False
+    assert parameters["scholar_direction"].default == ""
+
+
+@pytest.mark.asyncio
+async def test_scholar_collection_uses_shared_pipeline_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import scholar_contact_pipeline
+
+    captured: dict[str, Any] = {}
+
+    async def collect(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "status": "completed",
+            "unit": kwargs["unit"],
+            "direction": kwargs["direction"],
+            "articles_total": 2,
+            "contacts_total": 1,
+            "corresponding_count": 1,
+        }
+
+    monkeypatch.setattr(scholar_contact_pipeline, "run_scholar_contact_collect", collect)
+    result = await CompanyScanPipeline(object(), object())._run_scholar_collection(
+        task_id="task-1",
+        project_id="project-1",
+        unit="安徽广播电视台",
+        direction="融媒体技术",
+        unit_en="Anhui Broadcasting",
+        limit=12,
+    )
+
+    assert result["kind"] == "scholar"
+    assert result["contacts_total"] == 1
+    assert captured["task_id"] == "task-1"
+    assert captured["unit_en"] == "Anhui Broadcasting"
+    assert captured["limit"] == 12
 
 
 class _TargetCollection:

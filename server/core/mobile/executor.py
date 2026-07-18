@@ -32,6 +32,7 @@ from core.mobile.command_executor import (
 from core.mobile.manager import MobileDeviceManager
 from core.mobile.screen_capture import wake_device
 from core.llm_params import disable_thinking_extra_body
+from core.mobile.llm_usage import instrument_agent
 
 # 正在运行的执行层 agent: task_id -> agent (供取消)
 _running: dict[str, Any] = {}
@@ -170,6 +171,8 @@ def build_executor_agent(
     max_steps: int | None = None,
     system_prompt: str | None = None,
     app_config: Any | None = None,
+    project_id: str = "",
+    task_id: str = "",
 ) -> Any:
     """构造一个 AutoGLM 执行层 agent(配置来自本项目)。"""
     model_config = _build_model_config(app_config)
@@ -183,12 +186,18 @@ def build_executor_agent(
     agent_config = AgentConfig(**kwargs)
 
     device = ADBDevice(adb_device_id)
-    return create_agent(
+    agent = create_agent(
         agent_type=agent_type,
         model_config=model_config,
         agent_config=agent_config,
         agent_specific_config={},
         device=device,
+    )
+    return instrument_agent(
+        agent,
+        model=model_config.model_name,
+        project_id=project_id,
+        task_id=task_id,
     )
 
 
@@ -268,7 +277,12 @@ async def run_task_stream(
 
     app_config = await get_runtime_app_config()
     agent = build_executor_agent(
-        device_id, agent_type=agent_type, max_steps=max_steps, app_config=app_config
+        device_id,
+        agent_type=agent_type,
+        max_steps=max_steps,
+        app_config=app_config,
+        project_id=str(project_id or ""),
+        task_id=task_id,
     )
     _running[task_id] = agent
     _running_owners[task_id] = owner

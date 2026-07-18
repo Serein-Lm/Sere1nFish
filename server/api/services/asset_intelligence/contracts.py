@@ -14,6 +14,17 @@ class AssetIdentity:
     root_domain: str
     target_id: str = ""
     aliases: list[str] = field(default_factory=list)
+    root_domains: list[str] = field(default_factory=list)
+
+    @property
+    def domains(self) -> list[str]:
+        return list(
+            dict.fromkeys(
+                value.strip().lower()
+                for value in [self.root_domain, *self.root_domains]
+                if isinstance(value, str) and value.strip()
+            )
+        )[:6]
 
 
 def canonical_asset_url(value: str, *, protocol: str = "", port: str = "") -> str:

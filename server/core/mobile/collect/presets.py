@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
@@ -92,3 +93,12 @@ PRESETS: list[dict[str, Any]] = [
         "suggested_trigger": {"type": "cron", "cron": "0 8 * * *"},
     },
 ]
+
+
+def get_preset_task(preset_id: str) -> dict[str, Any]:
+    """Return an isolated task configuration for one registered preset."""
+    normalized = str(preset_id or "").strip()
+    for preset in PRESETS:
+        if preset.get("preset_id") == normalized:
+            return deepcopy(dict(preset.get("task") or {}))
+    raise KeyError(f"未知手机采集预设: {normalized}")

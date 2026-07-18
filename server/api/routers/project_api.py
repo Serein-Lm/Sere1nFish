@@ -75,6 +75,19 @@ async def _normalize_xhs_target_params(
     params.update(target_ref)
 
 
+def _validate_company_scan_params(params: dict[str, Any]) -> None:
+    """Validate optional company-scan modules before creating task records."""
+    if not params.get("enable_scholar", False):
+        return
+    direction = str(params.get("scholar_direction") or "").strip()
+    if not direction:
+        raise ValueError("启用学者联系采集时必须填写研究方向")
+    params["scholar_direction"] = direction
+    unit_en = str(params.get("scholar_unit_en") or "").strip()
+    if unit_en:
+        params["scholar_unit_en"] = unit_en
+
+
 # ═══════════════════════════════════════════
 # Pipeline 分发器（原 tasks.py，已合并到此）
 # ═══════════════════════════════════════════
@@ -167,7 +180,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         url_text=params.get("url_text", ""), urls=params.get("urls", []),
         enable_url_scan=params.get("enable_url_scan", True),
         enable_asset_discovery=params.get("enable_asset_discovery", True),
-        enable_xhs=params.get("enable_xhs", True),
+        enable_xhs=params.get("enable_xhs", False),
         enable_subsidiary_xhs=params.get("enable_subsidiary_xhs", False),
         xhs_target_selection_mode=params.get("xhs_target_selection_mode", "auto"),
         xhs_manual_targets=params.get("xhs_manual_targets", []),
@@ -175,6 +188,10 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
         enable_wechat=params.get("enable_wechat", False),
         wechat_device_id=params.get("wechat_device_id", ""),
+        enable_scholar=params.get("enable_scholar", False),
+        scholar_direction=params.get("scholar_direction", ""),
+        scholar_unit_en=params.get("scholar_unit_en", ""),
+        scholar_limit=max(1, min(int(params.get("scholar_limit") or 10), 50)),
         enable_copywriting=params.get("enable_copywriting", True),
         xhs_max_notes=params.get("xhs_max_notes") or params.get("max_notes", 20),
         xhs_attention_threshold=params.get("xhs_attention_threshold") or params.get("attention_threshold", 60),
@@ -422,6 +439,12 @@ async def create_task(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    if req.task_type == "company_scan":
+        try:
+            _validate_company_scan_params(req.params)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     if req.task_type == "company_scan" and req.params.get("enable_wechat", False):
         from api.services.wechat_collection import ensure_wechat_task_definition
 
@@ -484,6 +507,10 @@ async def create_company_scan_batch(
 
     shared_params = dict(req.params)
     shared_params.pop("company_name", None)
+    try:
+        _validate_company_scan_params(shared_params)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     requested_concurrency = shared_params.pop("company_scan_concurrency", None)
     if len(company_names) > 1 and (
         shared_params.get("urls") or str(shared_params.get("url_text") or "").strip()
@@ -598,6 +625,12 @@ async def create_task_with_file(
                 project_id=project_id,
                 params=params,
             )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    if task_type == "company_scan":
+        try:
+            _validate_company_scan_params(params)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -917,6 +918,7 @@ class UrlScanPipeline:
                     "success": r.get("success", False),
                     "error": r.get("error"),
                     "has_findings": bool(r.get("data", {}).get("findings")),
+                    "created_at": datetime.now(),
                 }
                 for r in scan_results
             ]

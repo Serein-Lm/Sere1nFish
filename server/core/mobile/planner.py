@@ -396,7 +396,11 @@ async def run_planned_task(
     try:
         app_config = await get_runtime_app_config()
         agent = build_executor_agent(
-            device_id, max_steps=max_steps_per_subtask, app_config=app_config
+            device_id,
+            max_steps=max_steps_per_subtask,
+            app_config=app_config,
+            project_id=str(project_id or ""),
+            task_id=plan_id,
         )
     except Exception as exc:  # noqa: BLE001
         yield {"stage": "error", "data": {"message": f"执行层初始化失败: {exc}"}}

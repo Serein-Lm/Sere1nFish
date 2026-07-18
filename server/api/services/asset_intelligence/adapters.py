@@ -55,14 +55,16 @@ class FofaAssetProvider:
 
     async def search(self, identity: AssetIdentity, *, size: int) -> ProviderSearchResult:
         result = ProviderSearchResult(provider=self.name)
-        if not identity.root_domain:
+        domains = identity.domains
+        if not domains:
             result.errors.append("缺少根域名，FOFA 查询已跳过")
             return result
         api_key = await fofa_tools.get_configured_api_key()
         if not api_key:
             result.errors.append("FOFA API Key 未配置")
             return result
-        specs = [("domain", identity.root_domain), ("cert", identity.root_domain)]
+        specs = [("domain", domain) for domain in domains]
+        specs.append(("cert", domains[0]))
         responses = await _run_paced_queries(
             specs,
             lambda search_type, query: fofa_tools.search_fofa(
@@ -118,8 +120,8 @@ class HunterAssetProvider:
     async def search(self, identity: AssetIdentity, *, size: int) -> ProviderSearchResult:
         result = ProviderSearchResult(provider=self.name)
         specs: list[tuple[str, str]] = []
-        if identity.root_domain:
-            specs.append(("domain", identity.root_domain))
+        for domain in identity.domains:
+            specs.append(("domain", domain))
         if identity.normalized_name:
             specs.append(("icp", identity.normalized_name))
         if not specs:

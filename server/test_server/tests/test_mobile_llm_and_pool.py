@@ -40,6 +40,77 @@ def test_executor_model_config_disables_thinking() -> None:
     assert model_config.extra_body["vl_high_resolution_images"] is True
 
 
+def test_autoglm_completion_usage_is_recorded_with_mobile_context(monkeypatch) -> None:
+    from core.mobile import llm_usage
+
+    captured: list[dict] = []
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            assert kwargs["model"] == "qwen3.7-plus"
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=123, completion_tokens=17)
+            )
+
+    class FakeAgent:
+        openai_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions())
+        )
+
+    monkeypatch.setattr(
+        llm_usage,
+        "record_llm_usage",
+        lambda **kwargs: captured.append(kwargs) or True,
+    )
+
+    wrapped = llm_usage.instrument_agent(
+        FakeAgent(),
+        model="qwen3.7-plus",
+        project_id="project-1",
+        task_id="mobile-plan-1",
+    )
+
+    async def run() -> None:
+        response = await wrapped.openai_client.chat.completions.create(
+            model="qwen3.7-plus",
+            messages=[],
+        )
+        assert response.usage.prompt_tokens == 123
+
+    asyncio.run(run())
+
+    assert captured and captured[0]["input_tokens"] == 123
+    assert captured[0]["output_tokens"] == 17
+    assert captured[0]["model"] == "qwen3.7-plus"
+
+
+def test_token_tracker_public_usage_entrypoint_keeps_context() -> None:
+    from Sere1nGraph.graph.observability.tracker import TokenTracker
+
+    tracker = TokenTracker()
+    tracker.push_context(
+        project_id="project-1",
+        task_id="mobile-plan-1",
+        phase="mobile_executor",
+        agent="mobile_executor",
+        task_type="mobile",
+    )
+    try:
+        assert tracker.record_usage(
+            model="qwen3.7-plus",
+            input_tokens=10,
+            output_tokens=4,
+            run_id="run-1",
+        ) is True
+    finally:
+        tracker.pop_context()
+
+    stats = tracker.get_stats(task_id="mobile-plan-1", phase="mobile_executor")
+    assert stats["total_calls"] == 1
+    assert stats["total_input_tokens"] == 10
+    assert stats["total_output_tokens"] == 4
+
+
 def test_shared_llm_factory_preserves_vision_parameters(monkeypatch) -> None:
     from Sere1nGraph.graph.agents import runtime as agent_runtime
     from Sere1nGraph.graph import observability

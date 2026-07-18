@@ -137,8 +137,10 @@ async def attach_normalized_company(
     input_name: str,
     normalized_name: str,
     root_domain: str = "",
+    root_domains: list[str] | None = None,
     aliases: list[str] | None = None,
     task_id: str = "",
+    normalization_version: int | None = None,
 ) -> dict[str, Any]:
     """把 company_meta 的项目级规范化结果挂到全局 Target 聚类。"""
     target = await targets_dao.upsert_target(
@@ -146,8 +148,10 @@ async def attach_normalized_company(
         name=normalized_name or input_name,
         target_type="company",
         root_domain=root_domain,
+        root_domains=root_domains,
         aliases=[input_name, *(aliases or [])],
         source="company_normalize",
+        normalization_version=normalization_version,
     )
     if project_id:
         await targets_dao.link_project_target(

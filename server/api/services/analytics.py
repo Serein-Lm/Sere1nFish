@@ -44,9 +44,23 @@ async def resolve_project_dashboard(
     ]
     pid = {"project_id": project_id}
     try:
-        web_pid = {"project_id": {"$in": [project_id, ObjectId(project_id)]}}
+        web_pid = {
+            "project_id": {"$in": [project_id, ObjectId(project_id)]},
+            "$or": [
+                {"source": "web_tagging"},
+                {"source": {"$exists": False}},
+                {"source": None},
+            ],
+        }
     except Exception:
-        web_pid = pid
+        web_pid = {
+            **pid,
+            "$or": [
+                {"source": "web_tagging"},
+                {"source": {"$exists": False}},
+                {"source": None},
+            ],
+        }
 
     (
         findings_summary,
@@ -61,6 +75,7 @@ async def resolve_project_dashboard(
         c_mobile_profiles,
         c_mobile_profile_observations,
         c_bidding_records,
+        c_url_web,
         top_findings,
         safe_count,
     ) = await asyncio.gather(
@@ -84,6 +99,9 @@ async def resolve_project_dashboard(
         ),
         db[MOBILE_PROFILE_OBSERVATIONS_COLLECTION].count_documents(pid),
         db[BIDDING_RECORDS_COLLECTION].count_documents({"project_ids": project_id}),
+        db[URL_SCAN_RESULTS_COLLECTION].count_documents(
+            {"project_id": project_id, "source": "web_tagging"}
+        ),
         db[FINDINGS_COLLECTION].find(
             pid,
             {"_id": 0, "finding_id": 1, "source": 1, "type": 1, "label": 1, "value": 1, "attention_score": 1},
@@ -97,7 +115,7 @@ async def resolve_project_dashboard(
     data_counts = {
         "xhs_notes": c_xhs_notes,
         "xhs_profiles": c_xhs_profiles,
-        "web_tagging": c_web,
+        "web_tagging": c_web + c_url_web,
         "douyin_search": c_dy_search,
         "douyin_tagged": c_dy_tagged,
         "douyin_profiles": c_dy_profiles,

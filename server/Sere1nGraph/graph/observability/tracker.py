@@ -560,6 +560,45 @@ class TokenTracker:
             self._stats_cache.clear()
             self._pending.append(rec)
 
+    def record_usage(
+        self,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        duration_ms: float = 0.0,
+        run_id: str = "",
+    ) -> bool:
+        """Record usage from an OpenAI-compatible client outside LangChain.
+
+        Vendored/mobile clients cannot receive the LangChain callback, so they
+        use this public entry point while inheriting the current observation
+        context. Zero-usage responses are ignored to avoid phantom calls.
+        """
+        input_count = max(0, int(input_tokens or 0))
+        output_count = max(0, int(output_tokens or 0))
+        if input_count == 0 and output_count == 0:
+            return False
+        ctx = _current_context()
+        self._record(
+            UsageRecord(
+                model=str(model or "unknown"),
+                input_tokens=input_count,
+                output_tokens=output_count,
+                cost_yuan=calc_cost(str(model or "unknown"), input_count, output_count),
+                duration_ms=max(0.0, float(duration_ms or 0.0)),
+                timestamp=time.time(),
+                project_id=ctx.project_id,
+                task_id=ctx.task_id,
+                task_type=ctx.task_type,
+                turn_id=ctx.turn_id,
+                run_id=str(run_id or ""),
+                phase=ctx.phase,
+                agent=ctx.agent,
+            )
+        )
+        return True
+
     # ── 查询 ──
 
     def get_stats(

@@ -5,12 +5,12 @@ import type { ColumnsType } from 'antd/es/table'
 import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined } from '@ant-design/icons'
 import {
   getProject,
-  listProjectWebTaggingRecords,
   createWebTagging,
   createCompanyWebTagging,
   updateProject,
   deleteProject,
   getProjectDashboard,
+  listProjectWebsiteRecords,
   type Project,
   type WebTaggingRecord,
   type DashboardData,
@@ -633,10 +633,9 @@ export default function ProjectDetail() {
   const fetchRecords = async (pid: string, page = 1, pageSize = 10) => {
     setTaggingLoading(true)
     try {
-      const res = await listProjectWebTaggingRecords(pid, {
+      const res = await listProjectWebsiteRecords(pid, {
         page,
         page_size: pageSize,
-        source: 'web_tagging',
       })
       setTaggingRecords(res.items)
       setTaggingTotal(res.total)
@@ -4016,6 +4015,12 @@ export default function ProjectDetail() {
                     if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
                     params.enable_wechat = values.enable_wechat ?? false
                     if (values.enable_wechat) params.wechat_device_id = values.wechat_device_id
+                    params.enable_scholar = values.enable_scholar ?? false
+                    if (values.enable_scholar) {
+                      params.scholar_direction = String(values.scholar_direction || '').trim()
+                      if (values.scholar_unit_en) params.scholar_unit_en = String(values.scholar_unit_en).trim()
+                      if (values.scholar_limit) params.scholar_limit = values.scholar_limit
+                    }
                     params.enable_copywriting = values.enable_copywriting ?? true
                     params.enable_control_structure = values.enable_control_structure ?? true
                     params.incremental_scan = values.asset_scan_mode === 'incremental'
@@ -4116,7 +4121,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4207,6 +4212,9 @@ export default function ProjectDetail() {
                             <Form.Item name="enable_wechat" valuePropName="checked" noStyle>
                               <Checkbox>微信公众号采集（默认关闭）</Checkbox>
                             </Form.Item>
+                            <Form.Item name="enable_scholar" valuePropName="checked" noStyle>
+                              <Checkbox>学者联系采集（默认关闭）</Checkbox>
+                            </Form.Item>
                             <Form.Item name="enable_copywriting" valuePropName="checked" noStyle>
                               <Checkbox>话术生成</Checkbox>
                             </Form.Item>
@@ -4256,6 +4264,46 @@ export default function ProjectDetail() {
                                 }))}
                               />
                             </Form.Item>
+                          ) : null}
+                        </Form.Item>
+                        <Form.Item noStyle shouldUpdate={(prev, cur) => (
+                          prev.enable_scholar !== cur.enable_scholar
+                          || prev.company_names !== cur.company_names
+                        )}>
+                          {({ getFieldValue }) => getFieldValue('enable_scholar') ? (
+                            <>
+                              <Form.Item
+                                name="scholar_direction"
+                                label="学者研究方向"
+                                rules={[{ required: true, whitespace: true, message: '请输入研究方向' }]}
+                                extra="批量任务会对每家单位使用同一个研究方向；单位名称取公司规范化后的法定主体。"
+                              >
+                                <Input placeholder="如：broadcasting technology 或金融科技" />
+                              </Form.Item>
+                              <Row gutter={16}>
+                                <Col xs={24} sm={16}>
+                                  <Form.Item
+                                    name="scholar_unit_en"
+                                    label="单位英文名（仅单家公司可选）"
+                                    dependencies={['company_names']}
+                                    rules={[{
+                                      validator: async (_, value) => {
+                                        if (value && parseCompanyNames(taskForm.getFieldValue('company_names')).length > 1) {
+                                          throw new Error('批量公司不能共用单位英文名，请留空使用机构解析')
+                                        }
+                                      },
+                                    }]}
+                                  >
+                                    <Input placeholder="留空时自动使用规范化单位名" />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={8}>
+                                  <Form.Item name="scholar_limit" label="文章上限">
+                                    <InputNumber min={1} max={50} style={{ width: '100%' }} />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                            </>
                           ) : null}
                         </Form.Item>
                         <Form.Item name="asset_scan_mode" label="资产深扫范围">

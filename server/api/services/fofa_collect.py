@@ -85,6 +85,11 @@ async def run_fofa_collect(
             root_domain=str(meta.get("root_domain") or ""),
             target_id=str(meta.get("target_id") or ""),
             aliases=[str(item) for item in meta.get("aliases") or [] if str(item).strip()],
+            root_domains=[
+                str(item)
+                for item in meta.get("icp_domains") or []
+                if str(item).strip()
+            ],
         )
         summary.update(
             normalized_name=identity.normalized_name,

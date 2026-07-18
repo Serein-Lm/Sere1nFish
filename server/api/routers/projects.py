@@ -287,3 +287,27 @@ async def list_web_tagging(project_id: str, body: WebTaggingListRequest | None =
         page=body.page,
         page_size=body.page_size,
     )
+
+
+@router.post("/{project_id}/website-records")
+async def list_website_records(
+    project_id: str,
+    body: WebTaggingListRequest | None = None,
+):
+    """List company URL scans and legacy Web Tagging records in one shape."""
+    if body is None:
+        body = WebTaggingListRequest(project_id=project_id)
+    from api.services.website_records import list_website_records as list_records
+
+    docs, total = await list_records(
+        get_db(),
+        project_id=project_id,
+        skip=body.skip,
+        limit=body.limit,
+    )
+    return PageResponse.build(
+        items=[_tag_out(doc) for doc in docs],
+        total=total,
+        page=body.page,
+        page_size=body.page_size,
+    )
