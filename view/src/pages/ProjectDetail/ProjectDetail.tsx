@@ -4064,10 +4064,14 @@ export default function ProjectDetail() {
                     params.enable_bidding = values.enable_bidding ?? true
                     if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
                     params.enable_wechat = values.enable_wechat ?? false
-                    if (values.enable_wechat) params.wechat_device_id = values.wechat_device_id
+                    if (values.enable_wechat) {
+                      params.wechat_device_id = values.wechat_device_id
+                      params.wechat_target_selection_mode = values.wechat_target_selection_mode ?? 'auto'
+                    }
                     params.enable_scholar = values.enable_scholar ?? false
                     if (values.enable_scholar) {
-                      params.scholar_direction = String(values.scholar_direction || '').trim()
+                      const scholarDirection = String(values.scholar_direction || '').trim()
+                      if (scholarDirection) params.scholar_direction = scholarDirection
                       if (values.scholar_unit_en) params.scholar_unit_en = String(values.scholar_unit_en).trim()
                       if (values.scholar_limit) params.scholar_limit = values.scholar_limit
                     }
@@ -4171,7 +4175,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4260,7 +4264,7 @@ export default function ProjectDetail() {
                               )}
                             </Form.Item>
                             <Form.Item name="enable_wechat" valuePropName="checked" noStyle>
-                              <Checkbox>微信公众号采集（默认关闭）</Checkbox>
+                              <Checkbox>微信公众号采集（成熟机构优先，默认关闭）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_scholar" valuePropName="checked" noStyle>
                               <Checkbox>学者联系采集（默认关闭）</Checkbox>
@@ -4297,23 +4301,31 @@ export default function ProjectDetail() {
                         </Form.Item>
                         <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_wechat !== cur.enable_wechat}>
                           {({ getFieldValue }) => getFieldValue('enable_wechat') ? (
-                            <Form.Item
-                              name="wechat_device_id"
-                              label="公众号执行手机"
-                              rules={[{ required: true, message: '请选择执行公众号采集的手机' }]}
-                              extra="直接选择设备池中的在线手机；缺少项目微信采集定义时会自动创建。手机负责搜索文章，原文与图片由 Chrome 继续读取。"
-                            >
-                              <Select
-                                showSearch
-                                optionFilterProp="label"
-                                placeholder={wechatDeviceOptions.some((device) => device.online) ? '选择在线手机' : '设备池中暂无在线手机'}
-                                options={wechatDeviceOptions.map((device) => ({
-                                  value: device.deviceId,
-                                  label: `${device.model} · ${device.online ? '在线' : '离线'}`,
-                                  disabled: !device.online,
-                                }))}
-                              />
-                            </Form.Item>
+                            <>
+                              <Form.Item name="wechat_target_selection_mode" label="公众号目标选择">
+                                <Segmented block options={[
+                                  { label: '成熟机构自动筛选', value: 'auto' },
+                                  { label: '全部目标', value: 'all' },
+                                ]} />
+                              </Form.Item>
+                              <Form.Item
+                                name="wechat_device_id"
+                                label="公众号执行手机"
+                                rules={[{ required: true, message: '请选择执行公众号采集的手机' }]}
+                                extra="手机仅搜索筛选后的目标并复制文章链接，原文、图片与浏览器截图由 Chrome 归档。旧任务定义缺字段时会在运行前自动修复。"
+                              >
+                                <Select
+                                  showSearch
+                                  optionFilterProp="label"
+                                  placeholder={wechatDeviceOptions.some((device) => device.online) ? '选择在线手机' : '设备池中暂无在线手机'}
+                                  options={wechatDeviceOptions.map((device) => ({
+                                    value: device.deviceId,
+                                    label: `${device.model} · ${device.online ? '在线' : '离线'}`,
+                                    disabled: !device.online,
+                                  }))}
+                                />
+                              </Form.Item>
+                            </>
                           ) : null}
                         </Form.Item>
                         <Form.Item noStyle shouldUpdate={(prev, cur) => (
@@ -4324,11 +4336,10 @@ export default function ProjectDetail() {
                             <>
                               <Form.Item
                                 name="scholar_direction"
-                                label="学者研究方向"
-                                rules={[{ required: true, whitespace: true, message: '请输入研究方向' }]}
-                                extra="批量任务会对每家单位使用同一个研究方向；单位名称取公司规范化后的法定主体。"
+                                label="学者研究方向（可选）"
+                                extra="留空时按每家单位的公司路由画像自动生成；填写后批量任务会统一使用该方向。"
                               >
-                                <Input placeholder="如：broadcasting technology 或金融科技" />
+                                <Input placeholder="留空自动生成，如：broadcasting technology" />
                               </Form.Item>
                               <Row gutter={16}>
                                 <Col xs={24} sm={16}>

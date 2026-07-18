@@ -77,15 +77,28 @@ async def _normalize_xhs_target_params(
 
 def _validate_company_scan_params(params: dict[str, Any]) -> None:
     """Validate optional company-scan modules before creating task records."""
-    if not params.get("enable_scholar", False):
-        return
-    direction = str(params.get("scholar_direction") or "").strip()
-    if not direction:
-        raise ValueError("启用学者联系采集时必须填写研究方向")
-    params["scholar_direction"] = direction
-    unit_en = str(params.get("scholar_unit_en") or "").strip()
-    if unit_en:
-        params["scholar_unit_en"] = unit_en
+    if params.get("enable_wechat", False):
+        from api.services.wechat_target_selection import (
+            normalize_wechat_selection_mode,
+        )
+
+        params["wechat_target_selection_mode"] = (
+            normalize_wechat_selection_mode(
+                params.get("wechat_target_selection_mode", "auto")
+            )
+        )
+
+    if params.get("enable_scholar", False):
+        direction = str(params.get("scholar_direction") or "").strip()
+        if direction:
+            params["scholar_direction"] = direction
+        else:
+            params.pop("scholar_direction", None)
+        unit_en = str(params.get("scholar_unit_en") or "").strip()
+        if unit_en:
+            params["scholar_unit_en"] = unit_en
+        else:
+            params.pop("scholar_unit_en", None)
 
 
 # ═══════════════════════════════════════════
@@ -188,6 +201,9 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
         enable_wechat=params.get("enable_wechat", False),
         wechat_device_id=params.get("wechat_device_id", ""),
+        wechat_target_selection_mode=params.get(
+            "wechat_target_selection_mode", "auto"
+        ),
         enable_scholar=params.get("enable_scholar", False),
         scholar_direction=params.get("scholar_direction", ""),
         scholar_unit_en=params.get("scholar_unit_en", ""),

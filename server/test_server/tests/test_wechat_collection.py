@@ -6,6 +6,31 @@ from typing import Any
 import pytest
 
 
+def test_company_wechat_definition_enforces_phone_work_limits() -> None:
+    from api.services.wechat_collection import (
+        WECHAT_AUTO_TASK_NAME,
+        _wechat_definition_patch,
+    )
+
+    patch = _wechat_definition_patch(
+        {
+            "name": WECHAT_AUTO_TASK_NAME,
+            "extract_fields": [{"name": "title"}],
+            "dedup_key_fields": ["title"],
+            "search_hint": "微信公众号搜索",
+            "source_link_strategy": "wechat_copy_link",
+            "deep_collect": True,
+            "include_direct_children": True,
+            "max_resolved_keywords": 60,
+            "detail_max_items": 5,
+        }
+    )
+
+    assert patch["include_direct_children"] is False
+    assert patch["max_resolved_keywords"] == 12
+    assert patch["detail_max_items"] == 3
+
+
 @pytest.mark.asyncio
 async def test_ensure_wechat_configuration_creates_unbound_project_definition(
     monkeypatch: pytest.MonkeyPatch,
@@ -42,6 +67,8 @@ async def test_ensure_wechat_configuration_creates_unbound_project_definition(
     assert captured["target_id"] is None
     assert captured["source_link_strategy"] == WECHAT_SOURCE_LINK_STRATEGY
     assert captured["use_target_keyword_library"] is True
+    assert captured["include_direct_children"] is False
+    assert captured["max_resolved_keywords"] == 12
     assert captured["extract_fields"]
     assert captured["dedup_key_fields"] == ["title", "account"]
 
@@ -129,6 +156,20 @@ async def test_wechat_configuration_is_resolved_by_device(
         ]
 
     monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
+
+    async def update_def(_db: Any, task_def_id: str, patch: dict[str, Any]):
+        return {
+            "task_def_id": task_def_id,
+            "project_id": "project-1",
+            "device_id": "device-a",
+            "app_name": "微信",
+            "source_link_strategy": "wechat_copy_link",
+            "target_id": "target-1",
+            "status": "idle",
+            **patch,
+        }
+
+    monkeypatch.setattr(collect_dao, "update_task_def", update_def)
     task_def = await resolve_wechat_task_definition(
         object(),
         project_id="project-1",
@@ -168,6 +209,18 @@ async def test_wechat_configuration_prefers_unbound_definition_over_other_target
         ]
 
     monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
+
+    async def update_def(_db: Any, task_def_id: str, patch: dict[str, Any]):
+        return {
+            "task_def_id": task_def_id,
+            "device_id": "device-a",
+            "app_name": "微信",
+            "target_id": "",
+            "status": "idle",
+            **patch,
+        }
+
+    monkeypatch.setattr(collect_dao, "update_task_def", update_def)
     task_def = await resolve_wechat_task_definition(
         object(),
         project_id="project-1",
@@ -241,6 +294,9 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["source_link_strategy"] == "wechat_copy_link"
     assert overrides["extract_fields"]
     assert overrides["dedup_key_fields"] == ["title", "account"]
+    assert overrides["include_direct_children"] is False
+    assert overrides["max_resolved_keywords"] == 12
+    assert overrides["detail_max_items"] == 3
     assert overrides["target_id"] == "target-1"
     assert result["documents"] == 2
     assert result["contacts"] == 4

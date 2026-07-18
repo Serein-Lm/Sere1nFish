@@ -20,7 +20,7 @@ import {
 } from '../../services/taskService'
 import type {
   Task, FindingCopywriting, TaskStatsResponse, TaskProgress, UnifiedFinding,
-  XhsTargetDecision,
+  XhsTargetDecision, WechatTargetDecision,
 } from '../../services/taskService'
 import './TaskDetail.css'
 
@@ -58,6 +58,21 @@ const XHS_SELECTION_STATUS: Record<string, { label: string; color: string }> = {
   completed: { label: '判定完成', color: 'success' },
   fallback: { label: '保守降级', color: 'warning' },
   disabled: { label: '未启用', color: 'default' },
+}
+
+const WECHAT_CATEGORY_LABELS: Record<string, string> = {
+  government_public_institution: '党政/公共机构',
+  traditional_state_owned_enterprise: '传统国企',
+  exchange_financial_infrastructure: '交易所/金融基础设施',
+  broadcast_news_media: '广播电视/新闻媒体',
+  education_research_healthcare: '教育/科研/医疗',
+  mature_financial_institution: '成熟金融机构',
+  traditional_large_enterprise: '传统大型企业',
+  internet_consumer_brand: '互联网/消费品牌',
+  new_or_lightweight_company: '新设/轻量公司',
+  other: '其他',
+  unknown: '无法判断',
+  all: '全部目标',
 }
 
 export default function TaskDetail() {
@@ -131,6 +146,12 @@ export default function TaskDetail() {
   const xhsSelection = task?.task_type === 'company_scan'
     ? task.result?.xhs?.selection
     : undefined
+  const wechatSelection = task?.task_type === 'company_scan'
+    ? task.result?.wechat?.selection
+    : undefined
+  const scholarSummary = task?.task_type === 'company_scan'
+    ? task.result?.scholar
+    : undefined
 
   const SOURCE_ICONS: Record<string, string> = { web_tagging: '🌐', xhs: '📕', douyin: '🎵' }
 
@@ -194,6 +215,47 @@ export default function TaskDetail() {
     },
   ]
 
+  const wechatSelectionColumns: ColumnsType<WechatTargetDecision> = [
+    {
+      title: '目标', dataIndex: 'target_name', key: 'target_name', width: 220,
+      render: (value: string, record) => (
+        <Space orientation="vertical" size={0}>
+          <Text strong>{value}</Text>
+          <Text type="secondary" copyable={{ text: record.target_id }} style={{ fontSize: 11 }}>
+            {record.target_id}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '机构类型', dataIndex: 'target_category', key: 'target_category', width: 180,
+      render: (value: string) => <Tag>{WECHAT_CATEGORY_LABELS[value] || value}</Tag>,
+    },
+    {
+      title: '判定', dataIndex: 'should_collect_wechat', key: 'decision', width: 110,
+      render: (value: boolean) => (
+        <Tag color={value ? 'success' : 'default'}>{value ? '采集' : '跳过'}</Tag>
+      ),
+    },
+    {
+      title: '置信度', dataIndex: 'confidence', key: 'confidence', width: 140,
+      render: (value: number) => (
+        <Progress percent={Math.round((value || 0) * 100)} size="small" style={{ width: 100 }} />
+      ),
+    },
+    {
+      title: '依据', dataIndex: 'reason', key: 'reason', minWidth: 260,
+      render: (value: string, record) => (
+        <Space orientation="vertical" size={2}>
+          <Text>{value || '-'}</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {record.source === 'ai' ? 'AI 判定' : record.source === 'all' ? '全部目标' : '失败降级'}
+          </Text>
+        </Space>
+      ),
+    },
+  ]
+
   const renderXhsSelectionTab = () => {
     if (!xhsSelection) return <Empty description="任务完成后显示小红书目标判定结果" />
     const selectionStatus = XHS_SELECTION_STATUS[xhsSelection.status] || XHS_SELECTION_STATUS.pending
@@ -225,6 +287,38 @@ export default function TaskDetail() {
           pagination={false}
           size="small"
           scroll={{ x: 900 }}
+          locale={{ emptyText: '暂无目标判定记录' }}
+        />
+      </div>
+    )
+  }
+
+  const renderWechatSelectionTab = () => {
+    if (!wechatSelection) return <Empty description="任务完成后显示公众号目标判定结果" />
+    const selectionStatus = XHS_SELECTION_STATUS[wechatSelection.status] || XHS_SELECTION_STATUS.pending
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <Row gutter={[16, 16]}>
+          <Col xs={12} sm={6}><Statistic title="选择方式" value={wechatSelection.mode === 'auto' ? '成熟机构自动筛选' : '全部目标'} /></Col>
+          <Col xs={12} sm={6}><Statistic title="纳入采集" value={wechatSelection.selected_count} /></Col>
+          <Col xs={12} sm={6}><Statistic title="跳过目标" value={wechatSelection.skipped_count} /></Col>
+          <Col xs={12} sm={6}><Statistic title="判定状态" valueRender={() => <Tag color={selectionStatus.color}>{selectionStatus.label}</Tag>} /></Col>
+        </Row>
+        <Space wrap>
+          {wechatSelection.prompt_slug ? (
+            <Button type="link" size="small" icon={<FileTextOutlined />} onClick={() => navigate('/prompts')}>
+              在 Prompt 库查看 {wechatSelection.prompt_slug}
+            </Button>
+          ) : null}
+          {wechatSelection.error ? <Text type="danger">判定异常：{wechatSelection.error}</Text> : null}
+        </Space>
+        <Table
+          dataSource={wechatSelection.decisions}
+          rowKey="target_id"
+          columns={wechatSelectionColumns}
+          pagination={false}
+          size="small"
+          scroll={{ x: 960 }}
           locale={{ emptyText: '暂无目标判定记录' }}
         />
       </div>
@@ -321,6 +415,19 @@ export default function TaskDetail() {
                 <Col xs={12} sm={6}><Statistic title="XHS 跳过目标" value={xhsSelection.skipped_count} /></Col>
               </Row>
             )}
+            {task.task_type === 'company_scan' && wechatSelection && (
+              <Row gutter={16} style={{ marginTop: 12 }}>
+                <Col xs={12} sm={6}><Statistic title="公众号选择方式" value={wechatSelection.mode === 'auto' ? '成熟机构自动' : '全部目标'} /></Col>
+                <Col xs={12} sm={6}><Statistic title="公众号纳入目标" value={wechatSelection.selected_count} /></Col>
+                <Col xs={12} sm={6}><Statistic title="公众号跳过目标" value={wechatSelection.skipped_count} /></Col>
+              </Row>
+            )}
+            {task.task_type === 'company_scan' && scholarSummary?.direction && (
+              <Row gutter={16} style={{ marginTop: 12 }}>
+                <Col xs={24} sm={12}><Statistic title="学者研究方向" value={scholarSummary.direction} /></Col>
+                <Col xs={24} sm={12}><Statistic title="方向来源" value={scholarSummary.direction_source === 'manual' ? '手动填写' : scholarSummary.direction_source === 'company_router' ? '公司路由画像' : '行业默认'} /></Col>
+              </Row>
+            )}
             {task.error && <div style={{ marginTop: 12 }}><Text type="danger">错误：{task.error}</Text></div>}
           </Card>
 
@@ -331,6 +438,10 @@ export default function TaskDetail() {
                 key: 'xhs-selection',
                 label: <Space><FilterOutlined /> XHS 目标选择 <Tag>{xhsSelection?.decisions.length || 0}</Tag></Space>,
                 children: renderXhsSelectionTab(),
+              }, {
+                key: 'wechat-selection',
+                label: <Space><FilterOutlined /> 公众号目标选择 <Tag>{wechatSelection?.decisions.length || 0}</Tag></Space>,
+                children: renderWechatSelectionTab(),
               }] : []),
               {
                 key: 'findings',

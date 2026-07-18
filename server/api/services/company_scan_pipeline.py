@@ -190,6 +190,7 @@ class CompanyScanPipeline:
         bidding_page_size: int = 20,
         enable_wechat: bool = False,
         wechat_device_id: str = "",
+        wechat_target_selection_mode: str = "auto",
         enable_scholar: bool = False,
         scholar_direction: str = "",
         scholar_unit_en: str = "",
@@ -226,8 +227,6 @@ class CompanyScanPipeline:
         from core.observability import obs_log
         from api.services.xhs_target_selection import parse_manual_targets
 
-        if enable_scholar and not str(scholar_direction or "").strip():
-            raise ValueError("启用学者联系采集时必须填写研究方向")
         subsidiary_xhs_enabled = bool(enable_xhs and enable_subsidiary_xhs)
         manual_xhs_targets = parse_manual_targets(xhs_manual_targets)
         result = {
@@ -289,6 +288,7 @@ class CompanyScanPipeline:
             "wechat": {
                 "enabled": enable_wechat,
                 "status": "pending" if enable_wechat else "disabled",
+                "selected": False,
                 "device_id": wechat_device_id,
                 "task_def_id": "",
                 "total": 0,
@@ -297,12 +297,23 @@ class CompanyScanPipeline:
                 "contacts": 0,
                 "documents": 0,
                 "keywords_used": [],
+                "selection": {
+                    "mode": str(wechat_target_selection_mode or "auto"),
+                    "status": "pending" if enable_wechat else "disabled",
+                    "prompt_slug": None,
+                    "decisions": [],
+                    "selected_count": 0,
+                    "skipped_count": 0,
+                    "error": None,
+                },
             },
             "scholar": {
                 "enabled": enable_scholar,
                 "status": "pending" if enable_scholar else "disabled",
                 "unit": "",
                 "direction": str(scholar_direction or "").strip(),
+                "direction_source": "manual" if str(scholar_direction or "").strip() else "pending",
+                "direction_terms": [],
                 "articles_total": 0,
                 "contacts_total": 0,
                 "corresponding_count": 0,
@@ -431,6 +442,24 @@ class CompanyScanPipeline:
                 "keywords": router_output.all_keywords,
             }
 
+            def _profile_value(field: str, default: Any = None) -> Any:
+                value = (
+                    getattr(router_profile, field, default)
+                    if router_profile
+                    else default
+                )
+                return getattr(value, "value", value)
+
+            selection_context = {
+                "industry": _profile_value("industry", "other"),
+                "sub_industries": _profile_value("sub_industries", []),
+                "business_nature": _profile_value("business_nature", "mixed"),
+                "main_business": _profile_value("main_business", []),
+                "tags": _profile_value("tags", []),
+                "scale": _profile_value("scale", "unknown"),
+                "is_listed": bool(_profile_value("is_listed", False)),
+            }
+
             xhs_selector: Any = None
             xhs_selection_result: Any = None
             root_xhs_enabled = False
@@ -439,10 +468,6 @@ class CompanyScanPipeline:
                     XhsTargetCandidate,
                     XhsTargetSelectionService,
                 )
-
-                def _profile_value(field: str, default: Any = None) -> Any:
-                    value = getattr(router_profile, field, default) if router_profile else default
-                    return getattr(value, "value", value)
 
                 xhs_selector = XhsTargetSelectionService(
                     self.app_config,
@@ -456,15 +481,7 @@ class CompanyScanPipeline:
                             target_name=normalized_name,
                             aliases=aliases,
                             root_domain=root_domain,
-                            context={
-                                "industry": _profile_value("industry", "other"),
-                                "sub_industries": _profile_value("sub_industries", []),
-                                "business_nature": _profile_value("business_nature", "mixed"),
-                                "main_business": _profile_value("main_business", []),
-                                "tags": _profile_value("tags", []),
-                                "scale": _profile_value("scale", "unknown"),
-                                "is_listed": bool(_profile_value("is_listed", False)),
-                            },
+                            context=selection_context,
                         )
                     ],
                     project_id=project_id,
@@ -482,6 +499,65 @@ class CompanyScanPipeline:
                     xhs_selector.mode,
                     root_xhs_enabled,
                     root_decision.reason if root_decision else "无判定结果",
+                )
+
+            root_wechat_enabled = False
+            if enable_wechat:
+                from api.services.wechat_target_selection import (
+                    WechatTargetCandidate,
+                    WechatTargetSelectionService,
+                )
+
+                wechat_selection = await WechatTargetSelectionService(
+                    self.app_config,
+                    mode=wechat_target_selection_mode,
+                ).select(
+                    [
+                        WechatTargetCandidate(
+                            target_id=target_id,
+                            target_name=normalized_name,
+                            aliases=aliases,
+                            root_domain=root_domain,
+                            context=selection_context,
+                        )
+                    ],
+                    project_id=project_id,
+                    task_id=task_id,
+                )
+                result["wechat"]["selection"] = wechat_selection.model_dump(
+                    mode="json"
+                )
+                wechat_decision = next(iter(wechat_selection.decisions), None)
+                root_wechat_enabled = bool(
+                    wechat_decision
+                    and wechat_decision.should_collect_wechat
+                )
+                result["wechat"]["selected"] = root_wechat_enabled
+                if not root_wechat_enabled:
+                    result["wechat"]["status"] = "skipped"
+                logger.info(
+                    "[company_scan] task=%s 公众号根目标选择 mode=%s selected=%s reason=%s",
+                    task_id,
+                    wechat_selection.mode,
+                    root_wechat_enabled,
+                    wechat_decision.reason if wechat_decision else "无判定结果",
+                )
+
+            scholar_resolution: Any = None
+            if enable_scholar:
+                from api.services.scholar_direction import (
+                    resolve_scholar_direction,
+                )
+
+                scholar_resolution = resolve_scholar_direction(
+                    scholar_direction,
+                    router_output,
+                    names=aliases,
+                )
+                result["scholar"].update(
+                    direction=scholar_resolution.direction,
+                    direction_source=scholar_resolution.source,
+                    direction_terms=scholar_resolution.terms,
                 )
 
             from api.dao import targets as targets_dao
@@ -577,7 +653,7 @@ class CompanyScanPipeline:
                     ),
                 ))
 
-            if enable_wechat:
+            if root_wechat_enabled:
                 primary_jobs.append((
                     "wechat",
                     self._run_wechat_collection(
@@ -597,7 +673,8 @@ class CompanyScanPipeline:
                         task_id=task_id,
                         project_id=project_id,
                         unit=normalized_name,
-                        direction=scholar_direction,
+                        direction=scholar_resolution.direction,
+                        direction_source=scholar_resolution.source,
                         unit_en=scholar_unit_en,
                         limit=scholar_limit,
                     ),
@@ -614,10 +691,7 @@ class CompanyScanPipeline:
                     "scanning",
                     f"并行执行 {len(primary_jobs)} 条根 Target 数据源流水线...",
                 )
-                sub_results = await asyncio.gather(
-                    *(operation for _kind, operation in primary_jobs),
-                    return_exceptions=True,
-                )
+                sub_results = await self._gather_named_jobs(primary_jobs)
 
                 failed_primary_jobs: set[str] = set()
                 for (kind, _operation), sub in zip(primary_jobs, sub_results):
@@ -760,10 +834,7 @@ class CompanyScanPipeline:
                     "followup_collection",
                     "采集全资子公司...",
                 )
-                followup_results = await asyncio.gather(
-                    *(operation for _kind, operation in followups),
-                    return_exceptions=True,
-                )
+                followup_results = await self._gather_named_jobs(followups)
                 for (kind, _operation), outcome in zip(followups, followup_results):
                     if isinstance(outcome, Exception):
                         error_message = f"{kind}: {outcome}"
@@ -826,11 +897,13 @@ class CompanyScanPipeline:
                     "wechat_records": result["wechat"].get("total", 0),
                     "wechat_documents": result["wechat"].get("documents", 0),
                     "wechat_contacts": result["wechat"].get("contacts", 0),
+                    "wechat_target_selected": result["wechat"].get("selected", False),
                     "bidding_records": result["bidding"].get("records_fetched", 0),
                     "bidding_findings": result["bidding"].get("findings_count", 0),
                     "bidding_copywritings": result["bidding"].get("copywritings_count", 0),
                     "scholar_articles": result["scholar"].get("articles_total", 0),
                     "scholar_contacts": result["scholar"].get("contacts_total", 0),
+                    "scholar_direction_source": result["scholar"].get("direction_source", ""),
                     "profile_copywritings": result["profile_copywritings"].get("count", 0),
                     "wholly_owned_entities": len(wholly_owned_entities),
                     "xhs_targets_selected": result["xhs"]["selection"].get(
@@ -985,6 +1058,7 @@ class CompanyScanPipeline:
         project_id: str,
         unit: str,
         direction: str,
+        direction_source: str = "manual",
         unit_en: str = "",
         limit: int = 10,
     ) -> dict[str, Any]:
@@ -1000,7 +1074,11 @@ class CompanyScanPipeline:
             unit_en=str(unit_en or "").strip(),
             limit=max(1, min(int(limit or 10), 50)),
         )
-        return {"kind": "scholar", **summary}
+        return {
+            "kind": "scholar",
+            **summary,
+            "direction_source": direction_source,
+        }
 
     async def _run_bidding_collection(
         self,
@@ -1579,6 +1657,20 @@ class CompanyScanPipeline:
     # ══════════════════════════════════════
     # 辅助方法
     # ══════════════════════════════════════
+
+    @staticmethod
+    async def _gather_named_jobs(
+        jobs: list[tuple[str, Any]],
+    ) -> list[Any]:
+        """Run independent source pipelines concurrently with isolated failures."""
+        if not jobs:
+            return []
+        return list(
+            await asyncio.gather(
+                *(operation for _kind, operation in jobs),
+                return_exceptions=True,
+            )
+        )
 
     @staticmethod
     def _dedupe_text(values: list[str]) -> list[str]:

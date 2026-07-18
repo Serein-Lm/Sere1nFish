@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from types import SimpleNamespace
 from typing import Any
@@ -40,6 +41,36 @@ def test_bidding_collection_is_enabled_by_default() -> None:
     assert parameters["bidding_page_size"].default == 20
 
 
+def test_wechat_target_selection_is_automatic_by_default() -> None:
+    parameter = inspect.signature(CompanyScanPipeline.run_pipeline).parameters[
+        "wechat_target_selection_mode"
+    ]
+
+    assert parameter.default == "auto"
+
+
+def test_primary_source_jobs_are_gathered_concurrently() -> None:
+    active = 0
+    peak = 0
+
+    async def operation() -> str:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return "done"
+
+    result = asyncio.run(
+        CompanyScanPipeline._gather_named_jobs(
+            [("website", operation()), ("wechat", operation()), ("scholar", operation())]
+        )
+    )
+
+    assert result == ["done", "done", "done"]
+    assert peak == 3
+
+
 def test_scholar_collection_is_opt_in_and_has_direction_parameters() -> None:
     parameters = inspect.signature(CompanyScanPipeline.run_pipeline).parameters
 
@@ -78,6 +109,7 @@ async def test_scholar_collection_uses_shared_pipeline_adapter(
 
     assert result["kind"] == "scholar"
     assert result["contacts_total"] == 1
+    assert result["direction_source"] == "manual"
     assert captured["task_id"] == "task-1"
     assert captured["unit_en"] == "Anhui Broadcasting"
     assert captured["limit"] == 12

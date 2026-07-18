@@ -45,6 +45,10 @@ class CollectTaskDef(BaseModel):
         default=True,
         description="合并项目 Target、第一层全资子公司及数据库渠道 Skill 的搜索词",
     )
+    include_direct_children: bool = Field(
+        default=True,
+        description="从项目 Target 词库解析关键词时是否包含第一层全资子公司",
+    )
     max_resolved_keywords: int = Field(
         default=60,
         ge=1,
@@ -104,6 +108,7 @@ class CollectTaskUpdate(BaseModel):
     app_instance: AppInstance | None = None
     keywords: list[str] | None = None
     use_target_keyword_library: bool | None = None
+    include_direct_children: bool | None = None
     max_resolved_keywords: int | None = Field(default=None, ge=1, le=200)
     swipe_times: int | None = Field(default=None, ge=0, le=50)
     swipe_interval: float | None = Field(default=None, ge=0.2, le=10)

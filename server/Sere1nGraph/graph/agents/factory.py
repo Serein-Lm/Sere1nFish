@@ -25,6 +25,15 @@ from .runtime import create_agent_node, create_llm, OutputMode
 from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids
 
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT = 5
+WEB_TAGGING_RUNTIME_POLICY = (
+    "运行时浏览约束覆盖旧版提示词中的次数说明：浏览器工具最多调用 5 次；"
+    "允许同站 HTTP 转 HTTPS 重试一次；遇到登录弹窗不得登录，"
+    "只尝试关闭一次，弹窗再次出现时不得重复处理。联系入口是短文本菜单时，"
+    "按技术群、商务联系、咨询热线的顺序只 hover 最相关入口，并读取工具返回的"
+    "新快照中的电话、群号或二维码地址；一旦获得至少一个真实值，立即停止调用"
+    "浏览器并输出最终 JSON，不要继续探索其它入口或重复读取同一页面状态。"
+)
 
 
 def _build_same_site_navigation_guard(
@@ -114,17 +123,30 @@ async def create_web_tagging_agent(
     streaming: bool = True,
     allowed_navigation_url: str = "",
     timeout: int = 90,
-    mcp_tool_limit: int = 2,
+    mcp_tool_limit: int = DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT,
     max_attempts: int = 1,
 ) -> Callable:
     """官网社工打标 Agent（Web Tagging Agent）。"""
+    model_run_limit = (
+        max(6, min(12, int(mcp_tool_limit) + 4))
+        if int(mcp_tool_limit) > 0
+        else 10
+    )
     return create_agent_node(
         app_config=app_config,
-        system_prompt=load_prompt("web_tagging/web_tagging"),
+        system_prompt=(
+            f"{load_prompt('web_tagging/web_tagging')}\n\n"
+            f"# 运行时策略\n\n{WEB_TAGGING_RUNTIME_POLICY}"
+        ),
         mcp_server_name=server_name,
         output_mode=output_mode,
         streaming=streaming,
-        middleware=[ModelCallLimitMiddleware(run_limit=4, exit_behavior="end")],
+        middleware=[
+            ModelCallLimitMiddleware(
+                run_limit=model_run_limit,
+                exit_behavior="end",
+            )
+        ],
         timeout=timeout,
         mcp_tool_limit=mcp_tool_limit,
         max_attempts=max_attempts,

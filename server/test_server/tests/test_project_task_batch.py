@@ -144,12 +144,29 @@ def test_company_scan_batch_api_rejects_shared_urls(monkeypatch) -> None:
         )
 
 
-def test_company_scan_requires_direction_when_scholar_is_enabled() -> None:
+def test_company_scan_allows_automatic_scholar_direction() -> None:
     from api.routers.project_api import _validate_company_scan_params
 
-    with pytest.raises(ValueError, match="研究方向"):
-        _validate_company_scan_params({"enable_scholar": True})
+    params = {"enable_scholar": True}
+    _validate_company_scan_params(params)
+    assert "scholar_direction" not in params
 
     params = {"enable_scholar": True, "scholar_direction": "  金融科技  "}
     _validate_company_scan_params(params)
     assert params["scholar_direction"] == "金融科技"
+
+
+def test_company_scan_validates_wechat_target_selection_mode() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    params = {"enable_wechat": True}
+    _validate_company_scan_params(params)
+    assert params["wechat_target_selection_mode"] == "auto"
+
+    with pytest.raises(ValueError, match="auto 或 all"):
+        _validate_company_scan_params(
+            {
+                "enable_wechat": True,
+                "wechat_target_selection_mode": "manual",
+            }
+        )

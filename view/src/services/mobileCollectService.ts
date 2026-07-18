@@ -25,6 +25,7 @@ export interface CollectTaskDef {
   app_instance?: AppInstance
   keywords: string[]
   use_target_keyword_library?: boolean
+  include_direct_children?: boolean
   max_resolved_keywords?: number
   swipe_times: number
   swipe_interval: number
@@ -57,6 +58,7 @@ export interface CollectTaskInput {
   app_instance?: AppInstance
   keywords: string[]
   use_target_keyword_library?: boolean
+  include_direct_children?: boolean
   max_resolved_keywords?: number
   swipe_times: number
   swipe_interval: number

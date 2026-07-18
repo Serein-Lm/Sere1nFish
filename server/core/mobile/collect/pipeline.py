@@ -981,7 +981,9 @@ async def run_collect_task(
                     ),
                     channel=channel,
                     explicit_keywords=explicit_keywords,
-                    include_direct_children=True,
+                    include_direct_children=bool(
+                        task_def.get("include_direct_children", True)
+                    ),
                     max_keywords=int(task_def.get("max_resolved_keywords") or 60),
                 )
                 keyword_resolution = resolved.as_dict()

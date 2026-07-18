@@ -18,6 +18,8 @@ export interface TaskProgress {
 
 export type XhsTargetSelectionMode = 'auto' | 'manual'
 export type XhsTargetSelectionStatus = 'pending' | 'completed' | 'fallback' | 'disabled'
+export type WechatTargetSelectionMode = 'auto' | 'all'
+export type WechatTargetSelectionStatus = 'pending' | 'completed' | 'fallback' | 'disabled'
 
 export interface XhsTargetDecision {
   target_id: string
@@ -42,12 +44,43 @@ export interface XhsTargetSelectionResult {
   error?: string | null
 }
 
+export interface WechatTargetDecision {
+  target_id: string
+  target_name: string
+  target_category: string
+  should_collect_wechat: boolean
+  reason: string
+  confidence: number
+  source: 'ai' | 'all' | 'fallback'
+}
+
+export interface WechatTargetSelectionResult {
+  mode: WechatTargetSelectionMode
+  status: WechatTargetSelectionStatus
+  prompt_slug?: string | null
+  decisions: WechatTargetDecision[]
+  selected_count: number
+  skipped_count: number
+  error?: string | null
+}
+
 export interface TaskResult {
   [key: string]: unknown
   xhs?: {
     enabled?: boolean
     root_selected?: boolean
     selection?: XhsTargetSelectionResult
+  }
+  wechat?: {
+    enabled?: boolean
+    selected?: boolean
+    selection?: WechatTargetSelectionResult
+  }
+  scholar?: {
+    enabled?: boolean
+    direction?: string
+    direction_source?: string
+    direction_terms?: string[]
   }
 }
 

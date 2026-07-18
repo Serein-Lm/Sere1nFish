@@ -61,6 +61,7 @@ CORE_PROMPT_SLUGS = {
     "router/classify",
     "web_tagging/tagging_taxonomy",
     "web_tagging/web_tagging",
+    "wechat_target_selection/wechat_target_selection",
     "weixin_search/weixin_search",
     "xhs_collect/xhs_collect",
     "xhs_detail_tagging/xhs_detail_tagging",

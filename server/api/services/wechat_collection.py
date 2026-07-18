@@ -27,6 +27,9 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "use_target_keyword_library": True,
             "deep_collect": True,
             "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
+            "include_direct_children": False,
+            "max_resolved_keywords": 12,
+            "detail_max_items": 3,
         }
     )
     return task
@@ -41,7 +44,7 @@ def _is_company_wechat_task(task_def: dict[str, Any], *, device_id: str) -> bool
 
 
 def _wechat_definition_patch(task_def: dict[str, Any]) -> dict[str, Any]:
-    """Repair only missing critical profile fields without replacing tuning."""
+    """Repair link fields and keep system company scans within phone limits."""
     defaults = _company_wechat_defaults()
     patch: dict[str, Any] = {}
     for field in ("extract_fields", "dedup_key_fields"):
@@ -52,7 +55,47 @@ def _wechat_definition_patch(task_def: dict[str, Any]) -> dict[str, Any]:
             patch[field] = defaults[field]
     if not task_def.get("deep_collect"):
         patch["deep_collect"] = True
+    is_auto_definition = str(task_def.get("name") or "") == WECHAT_AUTO_TASK_NAME
+    if "include_direct_children" not in task_def or (
+        is_auto_definition and task_def.get("include_direct_children") is not False
+    ):
+        patch["include_direct_children"] = defaults["include_direct_children"]
+    if not task_def.get("max_resolved_keywords") or (
+        is_auto_definition
+        and int(task_def.get("max_resolved_keywords") or 0)
+        != defaults["max_resolved_keywords"]
+    ):
+        patch["max_resolved_keywords"] = defaults["max_resolved_keywords"]
+    if is_auto_definition and int(task_def.get("detail_max_items") or 0) != defaults[
+        "detail_max_items"
+    ]:
+        patch["detail_max_items"] = defaults["detail_max_items"]
     return patch
+
+
+async def _repair_wechat_task_definition(
+    db: AsyncIOMotorDatabase,
+    task_def: dict[str, Any],
+    *,
+    project_id: str,
+    device_id: str,
+) -> dict[str, Any]:
+    """Persist missing link-extraction fields before every execution path."""
+    patch = _wechat_definition_patch(task_def)
+    if not patch:
+        return task_def
+    task_def_id = str(task_def.get("task_def_id") or "")
+    repaired = await collect_dao.update_task_def(db, task_def_id, patch)
+    if not repaired:
+        raise ValueError(f"公众号采集任务定义不存在: {task_def_id}")
+    logger.notice(
+        "自动修复综合扫描公众号采集定义 | project=%s device=%s def=%s fields=%s",
+        project_id,
+        device_id,
+        task_def_id,
+        sorted(patch),
+    )
+    return repaired
 
 
 def _is_wechat_task(task_def: dict[str, Any], *, device_id: str) -> bool:
@@ -106,23 +149,12 @@ async def ensure_wechat_task_definition(
     ]
     if reusable:
         selected = _select_wechat_task(reusable)
-        patch = _wechat_definition_patch(selected)
-        if patch:
-            repaired = await collect_dao.update_task_def(
-                db,
-                str(selected.get("task_def_id") or ""),
-                patch,
-            )
-            if repaired:
-                logger.notice(
-                    "自动修复综合扫描公众号采集定义 | project=%s device=%s def=%s fields=%s",
-                    project_id,
-                    normalized_device_id,
-                    selected.get("task_def_id"),
-                    sorted(patch),
-                )
-                return repaired
-        return selected
+        return await _repair_wechat_task_definition(
+            db,
+            selected,
+            project_id=project_id,
+            device_id=normalized_device_id,
+        )
 
     payload = CollectTaskDef(
         **_company_wechat_defaults(),
@@ -163,6 +195,12 @@ async def resolve_wechat_task_definition(
     task_def = _select_wechat_task(
         candidates,
         expected_target_id=expected_target_id,
+    )
+    task_def = await _repair_wechat_task_definition(
+        db,
+        task_def,
+        project_id=project_id,
+        device_id=device_id,
     )
     if task_def.get("status") == "running" and not allow_running:
         raise ValueError("公众号手机采集任务正在运行中")
