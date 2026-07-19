@@ -3,12 +3,47 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import asdict
 from typing import Any, Awaitable, Callable
 
 from crawler_tools import fofa_tools, hunter_tools
 
 from .contracts import AssetCandidate, AssetIdentity, ProviderSearchResult
+
+
+class _AsyncRequestGate:
+    """Pace request starts across provider instances in one event loop."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleep
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._lock: asyncio.Lock | None = None
+        self._next_allowed_at = 0.0
+
+    async def wait(self, interval_seconds: float) -> None:
+        interval = max(0.0, float(interval_seconds))
+        if interval <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop or self._lock is None:
+            self._loop = loop
+            self._lock = asyncio.Lock()
+            self._next_allowed_at = 0.0
+        async with self._lock:
+            delay = max(0.0, self._next_allowed_at - self._clock())
+            if delay > 0:
+                await self._sleep(delay)
+            self._next_allowed_at = self._clock() + interval
+
+
+_FOFA_REQUEST_GATE = _AsyncRequestGate()
 
 
 async def _run_paced_queries(
@@ -65,16 +100,21 @@ class FofaAssetProvider:
             return result
         specs = [("domain", domain) for domain in domains]
         specs.append(("cert", domains[0]))
-        responses = await _run_paced_queries(
-            specs,
-            lambda search_type, query: fofa_tools.search_fofa(
+
+        async def _search(search_type: str, query: str) -> list[Any]:
+            await _FOFA_REQUEST_GATE.wait(self.query_interval_seconds)
+            return await fofa_tools.search_fofa(
                 query=query,
                 search_type=search_type,
                 size=size,
                 api_key=api_key,
                 raise_on_error=True,
-            ),
-            interval_seconds=self.query_interval_seconds,
+            )
+
+        responses = await _run_paced_queries(
+            specs,
+            _search,
+            interval_seconds=0,
             retry_delay_seconds=self.retry_delay_seconds,
             max_attempts=self.max_attempts,
         )

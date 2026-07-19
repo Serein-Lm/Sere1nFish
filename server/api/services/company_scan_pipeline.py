@@ -679,7 +679,16 @@ class CompanyScanPipeline:
             )
 
             if not router_output.success:
-                logger.warning(f"[company_scan] 公司路由失败: {router_output.error}，使用默认策略")
+                if resume_core_completed:
+                    logger.info(
+                        "[company_scan] task=%s 核心阶段已恢复，跳过重复公司路由",
+                        task_id,
+                    )
+                else:
+                    logger.warning(
+                        "[company_scan] 公司路由失败: %s，使用默认策略",
+                        router_output.error or "未返回错误详情",
+                    )
 
             # ── 阶段 2: 各根 Target 数据源并发执行 ──
             primary_jobs: list[tuple[str, Any]] = []

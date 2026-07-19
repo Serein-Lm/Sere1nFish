@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -248,6 +249,47 @@ async def test_fofa_searches_all_trusted_root_domains(
 
 
 @pytest.mark.asyncio
+async def test_fofa_provider_instances_share_one_request_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import adapters
+    from crawler_tools import fofa_tools
+
+    calls: list[float] = []
+
+    async def configured_key() -> str:
+        return "configured"
+
+    async def search_fofa(**_kwargs: Any) -> list[Any]:
+        calls.append(asyncio.get_running_loop().time())
+        return []
+
+    monkeypatch.setattr(fofa_tools, "get_configured_api_key", configured_key)
+    monkeypatch.setattr(fofa_tools, "search_fofa", search_fofa)
+    monkeypatch.setattr(adapters, "_FOFA_REQUEST_GATE", adapters._AsyncRequestGate())
+    identities = [
+        AssetIdentity("A", "A", "a.example.com"),
+        AssetIdentity("B", "B", "b.example.com"),
+    ]
+
+    await asyncio.gather(
+        *(
+            FofaAssetProvider(
+                query_interval_seconds=0.03,
+                retry_delay_seconds=0,
+            ).search(identity, size=10)
+            for identity in identities
+        )
+    )
+
+    assert len(calls) == 4
+    assert all(
+        later - earlier >= 0.02
+        for earlier, later in zip(calls, calls[1:], strict=False)
+    )
+
+
+@pytest.mark.asyncio
 async def test_asset_queries_accept_legacy_and_multi_target_fields() -> None:
     collection = _QueryCollection()
     db = _QueryDb(collection)
@@ -489,3 +531,61 @@ async def test_llm_triage_failure_keeps_assets_for_safe_fallback(
     )
 
     assert result == candidates
+
+
+@pytest.mark.asyncio
+async def test_llm_triage_splits_and_corrects_malformed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from Sere1nGraph.graph.agents import runtime as agent_runtime
+    from Sere1nGraph.graph.prompts import loader as prompt_loader
+
+    call_sizes: list[int] = []
+
+    class _Structured:
+        async def ainvoke(self, messages: Any) -> AssetTriageBatch:
+            payload = json.loads(messages[-1].content.splitlines()[-1])
+            assets = payload["assets"]
+            call_sizes.append(len(assets))
+            if len(assets) > 2:
+                raise ValueError("truncated json")
+            return AssetTriageBatch(
+                items=[
+                    AssetTriageDecision(
+                        index=item["index"],
+                        category=(
+                            "third_party_system"
+                            if item["index"] == 1
+                            else "business_system"
+                        ),
+                        relevance_score=90 - item["index"],
+                    )
+                    for item in assets
+                ]
+            )
+
+    class _Llm:
+        def with_structured_output(self, _schema: Any) -> _Structured:
+            return _Structured()
+
+    monkeypatch.setattr(agent_runtime, "create_llm", lambda *_args, **_kwargs: _Llm())
+    monkeypatch.setattr(prompt_loader, "load_prompt", lambda _name: "asset triage")
+    candidates = [
+        AssetCandidate(link=f"https://asset-{index}.example.com")
+        for index in range(4)
+    ]
+
+    result = await AssetTriageService(object()).prioritize(
+        candidates,
+        identity=AssetIdentity("示例", "示例公司", "example.com"),
+        project_id="project-1",
+        task_id="task-1",
+        batch_size=4,
+    )
+
+    assert call_sizes == [4, 2, 2]
+    assert [item.canonical_url for item in result] == [
+        "https://asset-0.example.com",
+        "https://asset-2.example.com",
+        "https://asset-3.example.com",
+    ]

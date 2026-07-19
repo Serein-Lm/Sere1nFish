@@ -208,3 +208,41 @@ async def _test_backpressure():
 
     assert len(pipe.state["done"]) == 50
     assert pipe.state["max_qsize"] <= 4
+
+
+@pytest.mark.asyncio
+async def test_pipeline_cancellation_is_not_logged_as_runtime_error(monkeypatch):
+    import core.stream.pipeline as pipeline_module
+
+    entered = asyncio.Event()
+    infos: list[str] = []
+    errors: list[str] = []
+
+    class _Blocking(Stage):
+        name = "blocking"
+        concurrency = 1
+
+        async def handle(self, _item, _ctx):
+            entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        pipeline_module.logger,
+        "info",
+        lambda message, *_args, **_kwargs: infos.append(str(message)),
+    )
+    monkeypatch.setattr(
+        pipeline_module.logger,
+        "error",
+        lambda message, *_args, **_kwargs: errors.append(str(message)),
+    )
+    pipe = Pipeline(pipeline_id="cancel-test")
+    pipe.add(_Blocking())
+    running = asyncio.create_task(pipe.run(seeds=[1], entry="blocking"))
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert any("pipeline 已取消" in message for message in infos)
+    assert errors == []

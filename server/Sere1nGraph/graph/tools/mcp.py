@@ -18,6 +18,9 @@ from typing import Any, Iterable
 from ..config.models import AppConfig, McpServerConfig
 
 
+CHROME_DEVTOOLS_MCP_COMMAND = "chrome-devtools-mcp"
+
+
 def get_mcp_servers(
     app_config: AppConfig,
     server_names: Iterable[str] | str | None = None,
@@ -52,7 +55,14 @@ def build_mcp_connections(
         }
     """
     servers = get_mcp_servers(app_config, server_names=server_names)
-    return {name: _build_connection_dict(cfg) for name, cfg in servers.items()}
+    return {
+        name: (
+            _build_chrome_connection_dict(cfg)
+            if name == "chrome-devtools" and cfg.transport == "stdio"
+            else _build_connection_dict(cfg)
+        )
+        for name, cfg in servers.items()
+    }
 
 
 def _build_connection_dict(cfg: McpServerConfig) -> dict[str, Any]:
@@ -76,6 +86,21 @@ def _build_connection_dict(cfg: McpServerConfig) -> dict[str, Any]:
     return result
 
 
+def _build_chrome_connection_dict(
+    cfg: McpServerConfig,
+) -> dict[str, Any]:
+    """Use the image-pinned executable instead of racing through shared npx."""
+    result = _build_connection_dict(cfg)
+    result["command"] = CHROME_DEVTOOLS_MCP_COMMAND
+    result["args"] = [
+        arg
+        for arg in list(cfg.args or [])
+        if arg not in {"-y", "--yes", "--"}
+        and not str(arg).startswith("chrome-devtools-mcp@")
+    ]
+    return result
+
+
 def build_chrome_mcp_connection(browser_url: str) -> dict[str, dict[str, Any]]:
     """
     构建连接到指定 Docker Chrome 容器的 MCP 配置。
@@ -92,10 +117,8 @@ def build_chrome_mcp_connection(browser_url: str) -> dict[str, dict[str, Any]]:
     return {
         "chrome-devtools": {
             "transport": "stdio",
-            "command": "npx",
+            "command": CHROME_DEVTOOLS_MCP_COMMAND,
             "args": [
-                "-y",
-                "chrome-devtools-mcp@latest",
                 f"--wsEndpoint={browser_url}",
             ],
         }

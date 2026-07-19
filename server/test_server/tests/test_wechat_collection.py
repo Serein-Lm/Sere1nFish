@@ -6,6 +6,20 @@ from typing import Any
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _mobile_device_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.services import mobile_collect_pipeline
+
+    async def ready(device_id: str, **_kwargs: Any) -> str:
+        return device_id or "device-a"
+
+    monkeypatch.setattr(
+        mobile_collect_pipeline,
+        "wait_for_mobile_device_ready",
+        ready,
+    )
+
+
 def test_company_wechat_definition_enforces_phone_work_limits() -> None:
     from api.services.wechat_collection import (
         WECHAT_AUTO_TASK_NAME,
@@ -129,6 +143,59 @@ async def test_ensure_wechat_configuration_reuses_unbound_definition(
 
     assert task_def["task_def_id"] == "shared-company-scan"
     assert task_def["extract_fields"]
+
+
+@pytest.mark.asyncio
+async def test_wechat_definition_concurrent_repair_updates_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import mobile_collect as collect_dao
+    from api.services import wechat_collection
+
+    wechat_collection._DEFINITION_LOCKS.clear()
+    state: dict[str, Any] = {
+        "task_def_id": "shared-company-scan",
+        "name": "综合扫描公众号采集",
+        "project_id": "project-1",
+        "device_id": "device-a",
+        "app_name": "微信",
+        "target_id": "",
+        "source_link_strategy": "wechat_copy_link",
+        "status": "idle",
+    }
+    updates = 0
+
+    async def list_defs(_db: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [dict(state)]
+
+    async def update_def(
+        _db: Any,
+        _task_def_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        nonlocal updates
+        updates += 1
+        await asyncio.sleep(0.01)
+        state.update(patch)
+        return dict(state)
+
+    monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
+    monkeypatch.setattr(collect_dao, "update_task_def", update_def)
+
+    results = await asyncio.gather(
+        *(
+            wechat_collection.resolve_wechat_task_definition(
+                object(),
+                project_id="project-1",
+                device_id="device-a",
+                allow_running=True,
+            )
+            for _ in range(8)
+        )
+    )
+
+    assert updates == 1
+    assert all(item["extract_fields"] for item in results)
 
 
 @pytest.mark.asyncio
@@ -374,6 +441,90 @@ async def test_mobile_collect_definition_claims_and_releases(
     )
 
     assert events == [("claim", "run-1"), ("status", "idle")]
+
+
+@pytest.mark.asyncio
+async def test_mobile_collect_does_not_claim_or_start_before_device_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import asynccontextmanager
+    from api.services import mobile_collect_pipeline
+    from api.services import mobile_device_leases
+
+    ready_waiting = asyncio.Event()
+    release_ready = asyncio.Event()
+    events: list[str] = []
+
+    async def get_task(_db: Any, task_def_id: str) -> dict[str, Any]:
+        return {
+            "task_def_id": task_def_id,
+            "project_id": "project-1",
+            "device_id": "stable-device-id",
+        }
+
+    async def wait_ready(device_id: str, **_kwargs: Any) -> str:
+        assert device_id == "stable-device-id"
+        events.append("waiting_device")
+        ready_waiting.set()
+        await release_ready.wait()
+        events.append("device_ready")
+        return "10.144.144.3:5555"
+
+    async def claim(
+        _db: Any,
+        task_def_id: str,
+        *,
+        run_task_id: str,
+    ) -> dict[str, Any]:
+        assert run_task_id == "run-ready"
+        events.append("claim")
+        return await get_task(_db, task_def_id)
+
+    async def set_status(*_args: Any, **_kwargs: Any) -> None:
+        events.append("idle")
+
+    async def on_started() -> None:
+        events.append("started")
+
+    @asynccontextmanager
+    async def lease(*_args: Any, **_kwargs: Any):
+        events.append("lease")
+        yield "owner"
+
+    async def run_collect(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        events.append("collect")
+        return {"total": 0, "new": 0, "changed": 0}
+
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "get_task_def", get_task)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "claim_task_run", claim)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "set_task_status", set_status)
+    monkeypatch.setattr(mobile_collect_pipeline, "wait_for_mobile_device_ready", wait_ready)
+    monkeypatch.setattr(mobile_collect_pipeline, "run_collect_task", run_collect)
+    monkeypatch.setattr(mobile_device_leases, "background_device_lease", lease)
+
+    task = asyncio.create_task(
+        mobile_collect_pipeline.run_mobile_collect_definition(
+            object(),
+            run_task_id="run-ready",
+            project_id="project-1",
+            task_def_id="wechat-a",
+            on_started=on_started,
+        )
+    )
+    await asyncio.wait_for(ready_waiting.wait(), timeout=0.2)
+    assert events == ["waiting_device"]
+    release_ready.set()
+    await asyncio.wait_for(task, timeout=0.5)
+
+    assert events == [
+        "waiting_device",
+        "device_ready",
+        "claim",
+        "started",
+        "lease",
+        "collect",
+        "idle",
+    ]
 
 
 @pytest.mark.asyncio

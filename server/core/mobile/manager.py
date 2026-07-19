@@ -76,6 +76,25 @@ class MobileDeviceManager:
         except Exception:
             return device_id
 
+    def resolve_ready_adb_device_id(self, device_id: str) -> str | None:
+        """Return an online ADB endpoint, refreshing the runtime cache once."""
+        managed = self._find_managed_device(
+            device_id,
+            refresh_if_missing=False,
+        )
+        if not managed or not managed.online:
+            self.refresh()
+            managed = self._find_managed_device(
+                device_id,
+                refresh_if_missing=False,
+            )
+        if not managed or not managed.online:
+            return None
+        try:
+            return managed.primary_device_id
+        except Exception:
+            return None
+
     def get_device(self, device_id: str) -> DeviceAdapter:
         managed = self._find_managed_device(device_id)
         if managed:

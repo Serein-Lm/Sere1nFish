@@ -131,6 +131,7 @@ services:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
     restart: unless-stopped
+    stop_grace_period: 120s
     working_dir: /app
     environment:
       <<: *backend-env
@@ -149,7 +150,11 @@ services:
     networks:
       - internal
     shm_size: "1g"
-    ulimits: *high-ulimits
+    ulimits:
+      <<: *high-ulimits
+      core:
+        soft: 0
+        hard: 0
     command: ["python", "run.py"]
 
   frontend:

@@ -28,7 +28,7 @@ from core.logger import get_logger
 logger = get_logger("browser_manager")
 
 _BULK_BROWSER_PURPOSES = frozenset({"url_scan"})
-MAX_CHROME_CONTAINERS = 64
+MAX_CHROME_CONTAINERS = 80
 
 
 # ── 数据结构 ──────────────────────────────────────────────
@@ -103,6 +103,8 @@ class ChromeDockerConfig:
     # 预热池
     warm_pool_size: int = 1  # 预热池大小（启动时预创建的空闲容器数）
     reserved_non_bulk_containers: int = 2  # 为公众号/学者等非批量任务保留容量
+    container_create_concurrency: int = 4  # Docker API 创建并发，避免启动风暴
+    container_health_concurrency: int = 12  # stats/CDP 健康检查并发
     # 容器热切换
     max_consecutive_errors: int = 3  # 连续错误超过此值触发容器热切换
     # 主机资源保护；只限制新建容器，不中断已有租约
@@ -146,6 +148,12 @@ class ChromeDockerConfig:
                 int(config.reserved_non_bulk_containers),
                 config.max_containers - 1,
             ),
+        )
+        config.container_create_concurrency = max(
+            1, min(int(config.container_create_concurrency), 16)
+        )
+        config.container_health_concurrency = max(
+            1, min(int(config.container_health_concurrency), 32)
         )
         config.host_memory_floor_mb = max(1024, int(config.host_memory_floor_mb))
         config.host_load_per_cpu_limit = max(
@@ -272,6 +280,12 @@ class DockerProvider(BrowserProvider):
         self._pending_creates = 0
         self._bulk_slot_limit = config.bulk_container_limit
         self._bulk_slots = ResizableLimiter(self._bulk_slot_limit)
+        self._create_slots = ResizableLimiter(
+            config.container_create_concurrency
+        )
+        self._health_slots = ResizableLimiter(
+            config.container_health_concurrency
+        )
         self._bulk_slot_owners: set[str] = set()
         self._recent_cdp_failures: deque[float] = deque()
         self._last_resource_guard: dict[str, Any] = {
@@ -280,12 +294,17 @@ class DockerProvider(BrowserProvider):
         }
         self._warm_pool_ready = asyncio.Event()  # 预热池就绪信号
         self._orphan_cleanup_done = False
+        self._closing = False
+        self._container_create_tasks: set[asyncio.Task[Any]] = set()
 
         logger.info(
-            "[DockerProvider] 工作负载配额 | max=%s bulk=%s reserved_non_bulk=%s",
+            "[DockerProvider] 工作负载配额 | max=%s bulk=%s "
+            "reserved_non_bulk=%s create=%s health=%s",
             config.max_containers,
             self._bulk_slot_limit,
             int(config.max_containers) - self._bulk_slot_limit,
+            config.container_create_concurrency,
+            config.container_health_concurrency,
         )
 
     @staticmethod
@@ -325,7 +344,7 @@ class DockerProvider(BrowserProvider):
         if self._docker_client is None:
             try:
                 import docker
-                self._docker_client = docker.from_env()
+                self._docker_client = docker.from_env(timeout=30)
             except ImportError:
                 raise RuntimeError(
                     "docker-py 未安装。请运行: pip install docker"
@@ -336,6 +355,7 @@ class DockerProvider(BrowserProvider):
 
     async def start(self) -> None:
         """服务启动时立即启动健康检查、回收器和预热池。"""
+        self._closing = False
         if not self._orphan_cleanup_done:
             try:
                 await asyncio.to_thread(self._cleanup_orphan_containers)
@@ -349,17 +369,21 @@ class DockerProvider(BrowserProvider):
         self.config = config
         self._bulk_slot_limit = config.bulk_container_limit
         self._bulk_slots.resize(self._bulk_slot_limit)
+        self._create_slots.resize(config.container_create_concurrency)
+        self._health_slots.resize(config.container_health_concurrency)
         self._warm_pool_ready.clear()
         self._ensure_background_tasks()
         logger.notice(
             "[DockerProvider] 运行时配置已更新 | max=%s->%s bulk=%s->%s "
-            "reserve=%s warm=%s",
+            "reserve=%s warm=%s create=%s health=%s",
             previous.max_containers,
             config.max_containers,
             previous.bulk_container_limit,
             config.bulk_container_limit,
             config.normalized_reserved_non_bulk_containers,
             config.warm_pool_size,
+            config.container_create_concurrency,
+            config.container_health_concurrency,
         )
         return self.capacity_status()
 
@@ -439,6 +463,12 @@ class DockerProvider(BrowserProvider):
                 self.config.normalized_reserved_non_bulk_containers
             ),
             "pending_creates": self._pending_creates,
+            "create_limit": self._create_slots.limit,
+            "create_in_use": self._create_slots.in_use,
+            "create_waiting": self._create_slots.waiting,
+            "health_limit": self._health_slots.limit,
+            "health_in_use": self._health_slots.in_use,
+            "health_waiting": self._health_slots.waiting,
             "resource_guard": dict(self._last_resource_guard),
         }
 
@@ -451,11 +481,15 @@ class DockerProvider(BrowserProvider):
         """
         try:
             client = self._get_docker_client()
-            # 查找所有 chrome- 前缀的容器（包括已停止的）
-            containers = client.containers.list(
-                all=True,
-                filters={"name": "chrome-"},
-            )
+            # 仅清理由本 Provider 命名且使用同一镜像的临时容器。
+            containers = [
+                container
+                for container in client.containers.list(
+                    all=True,
+                    filters={"ancestor": self.config.image},
+                )
+                if str(container.name or "").startswith("chrome-")
+            ]
             if not containers:
                 return
 
@@ -631,6 +665,9 @@ class DockerProvider(BrowserProvider):
             return None
         try:
             return await self._get_ws_url(claimed)
+        except asyncio.CancelledError:
+            await self.release_cdp_endpoint(task_id)
+            raise
         except Exception as exc:
             self._record_cdp_failure()
             claimed.cdp_healthy = False
@@ -665,15 +702,60 @@ class DockerProvider(BrowserProvider):
 
     async def shutdown(self):
         """销毁所有容器和后台任务"""
-        container_count = len(self.containers)
-        logger.info(f"[DockerProvider] 开始关闭，待销毁容器数: {container_count}")
+        self._closing = True
+        logger.info(
+            "[DockerProvider] 开始关闭 | tracked=%s pending_creates=%s",
+            len(self.containers),
+            self._pending_creates,
+        )
 
-        for task in (self._reaper_task, self._health_checker_task, self._warm_pool_task):
-            if task:
+        background_tasks = [
+            task
+            for task in (
+                self._reaper_task,
+                self._health_checker_task,
+                self._warm_pool_task,
+            )
+            if task is not None
+        ]
+        for task in background_tasks:
+            if not task.done():
                 task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._reaper_task = None
+        self._health_checker_task = None
+        self._warm_pool_task = None
 
-        for cid in list(self.containers.keys()):
-            await self._destroy_container(cid)
+        current = asyncio.current_task()
+        create_tasks = [
+            task
+            for task in tuple(self._container_create_tasks)
+            if task is not current and not task.done()
+        ]
+        for task in create_tasks:
+            if task.cancelling() == 0:
+                task.cancel()
+        if create_tasks:
+            await asyncio.gather(*create_tasks, return_exceptions=True)
+
+        destroy_limit = max(
+            2,
+            min(self.config.container_create_concurrency * 2, 16),
+        )
+        destroy_slots = asyncio.Semaphore(destroy_limit)
+
+        async def _destroy(container_id: str) -> None:
+            async with destroy_slots:
+                await self._destroy_container(container_id)
+
+        container_ids = list(self.containers.keys())
+        container_count = len(container_ids)
+        if container_ids:
+            await asyncio.gather(
+                *(_destroy(container_id) for container_id in container_ids),
+                return_exceptions=True,
+            )
 
         logger.info(f"[DockerProvider] 所有容器已销毁 (共 {container_count} 个)")
 
@@ -713,6 +795,26 @@ class DockerProvider(BrowserProvider):
         return {}
 
     async def _create_container(self) -> ContainerInfo:
+        """Create one container within the global Docker API budget."""
+        if self._closing:
+            raise RuntimeError("Chrome 容器池正在关闭")
+        task = asyncio.current_task()
+        if task is not None:
+            self._container_create_tasks.add(task)
+        acquired = False
+        try:
+            await self._create_slots.acquire()
+            acquired = True
+            if self._closing:
+                raise RuntimeError("Chrome 容器池正在关闭")
+            return await self._create_container_unlimited()
+        finally:
+            if acquired:
+                self._create_slots.release()
+            if task is not None:
+                self._container_create_tasks.discard(task)
+
+    async def _create_container_unlimited(self) -> ContainerInfo:
         """通过 docker-py 创建新容器"""
         client = self._get_docker_client()
         ports = self._allocate_ports()
@@ -768,6 +870,7 @@ class DockerProvider(BrowserProvider):
             "detach": True,
             "shm_size": self.config.shm_size,
             "environment": env,
+            "labels": {"sere1nfish.browser.managed": "true"},
         }
         if port_bindings:
             run_kwargs["ports"] = port_bindings
@@ -775,7 +878,28 @@ class DockerProvider(BrowserProvider):
             run_kwargs["network"] = self.config.network
 
         t_start = time.time()
-        container = await asyncio.to_thread(client.containers.run, **run_kwargs)
+        run_task = asyncio.create_task(
+            asyncio.to_thread(client.containers.run, **run_kwargs)
+        )
+        try:
+            container = await asyncio.shield(run_task)
+        except asyncio.CancelledError:
+            # Docker SDK calls cannot be cancelled once dispatched to a thread.
+            # Drain the call and remove any container it created before exiting.
+            try:
+                orphan = await asyncio.shield(run_task)
+            except Exception:
+                pass
+            else:
+                try:
+                    await asyncio.to_thread(orphan.remove, force=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[DockerProvider] 取消创建后清理容器失败 %s: %s",
+                        name,
+                        exc,
+                    )
+            raise
         t_created = time.time()
         logger.info(
             f"[DockerProvider] 容器 {name} 已创建 (id={container.id[:12]}) | "
@@ -813,7 +937,6 @@ class DockerProvider(BrowserProvider):
 
             def _remove() -> None:
                 container = client.containers.get(container_id)
-                container.stop(timeout=5)
                 container.remove(force=True)
 
             await asyncio.to_thread(_remove)
@@ -935,7 +1058,7 @@ class DockerProvider(BrowserProvider):
             if claimed is not None:
                 try:
                     return await self._get_ws_url(claimed)
-                except Exception:
+                except BaseException:
                     await self.release_cdp_endpoint(task_id)
                     raise
             await asyncio.sleep(1)
@@ -1015,6 +1138,8 @@ class DockerProvider(BrowserProvider):
 
     def _ensure_background_tasks(self):
         """确保所有后台任务都在运行"""
+        if self._closing:
+            return
         if self._reaper_task is None or self._reaper_task.done():
             self._reaper_task = asyncio.create_task(self._idle_reaper())
         if self._health_checker_task is None or self._health_checker_task.done():
@@ -1043,7 +1168,7 @@ class DockerProvider(BrowserProvider):
                 await asyncio.sleep(self.config.health_check_interval)
                 await asyncio.gather(
                     *(
-                        self._inspect_container_health(cid, info)
+                        self._inspect_container_health_guarded(cid, info)
                         for cid, info in list(self.containers.items())
                         if info.status != "stopping"
                     ),
@@ -1054,6 +1179,17 @@ class DockerProvider(BrowserProvider):
                 break
             except Exception as e:
                 logger.error(f"[DockerProvider] health_checker 异常: {e}")
+
+    async def _inspect_container_health_guarded(
+        self,
+        container_id: str,
+        info: ContainerInfo,
+    ) -> None:
+        await self._health_slots.acquire()
+        try:
+            await self._inspect_container_health(container_id, info)
+        finally:
+            self._health_slots.release()
 
     async def _inspect_container_health(
         self,
@@ -1344,7 +1480,16 @@ class DockerProvider(BrowserProvider):
                         - total_active
                         - self._pending_creates
                     )
-                    to_create = max(0, min(need, can_create))
+                    # Only enqueue one Docker creation wave. Business requests
+                    # arriving while the pool refills can join the next wave.
+                    to_create = max(
+                        0,
+                        min(
+                            need,
+                            can_create,
+                            self.config.container_create_concurrency,
+                        ),
+                    )
                     self._pending_creates += to_create
 
                 if to_create > 0:
@@ -1356,7 +1501,7 @@ class DockerProvider(BrowserProvider):
                         *(self._create_warm_container() for _ in range(to_create))
                     )
 
-                await asyncio.sleep(10)  # 每 10s 检查一次
+                await asyncio.sleep(1 if to_create > 0 else 10)
 
             except asyncio.CancelledError:
                 break
@@ -1465,7 +1610,12 @@ class DockerProvider(BrowserProvider):
 
         # 2. 异步销毁旧容器（不阻塞）
         if old_cid:
-            asyncio.create_task(self._destroy_container(old_cid))
+            from core.background import spawn_background
+
+            spawn_background(
+                self._destroy_container(old_cid),
+                name=f"chrome-destroy:{old_cid[:12]}",
+            )
 
         # 3. 获取新容器（走正常流程，会优先从预热池拿空闲容器）
         try:

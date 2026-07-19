@@ -1,6 +1,7 @@
 """综合扫描中的微信公众号采集适配层。"""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -16,6 +17,17 @@ from core.mobile.collect.presets import get_preset_task
 WECHAT_SOURCE_LINK_STRATEGY = "wechat_copy_link"
 WECHAT_AUTO_TASK_NAME = "综合扫描公众号采集"
 logger = get_logger("wechat_collection")
+_DEFINITION_LOCKS: dict[tuple[int, str, str], asyncio.Lock] = {}
+
+
+def _definition_lock(project_id: str, device_id: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = (id(loop), project_id, device_id)
+    lock = _DEFINITION_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _DEFINITION_LOCKS[key] = lock
+    return lock
 
 
 def _company_wechat_defaults() -> dict[str, Any]:
@@ -152,11 +164,27 @@ async def ensure_wechat_task_definition(
     if not normalized_device_id:
         raise ValueError("启用公众号采集时必须选择执行手机")
 
+    async with _definition_lock(project_id, normalized_device_id):
+        return await _ensure_wechat_task_definition(
+            db,
+            project_id=project_id,
+            device_id=normalized_device_id,
+        )
+
+
+async def _ensure_wechat_task_definition(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    device_id: str,
+) -> dict[str, Any]:
+    """Create or repair one definition while holding its project/device lock."""
+
     task_defs = await collect_dao.list_task_defs(db, project_id=project_id)
     reusable = [
         item
         for item in task_defs
-        if _is_company_wechat_task(item, device_id=normalized_device_id)
+        if _is_company_wechat_task(item, device_id=device_id)
         and not str(item.get("target_id") or "")
     ]
     if reusable:
@@ -165,19 +193,19 @@ async def ensure_wechat_task_definition(
             db,
             selected,
             project_id=project_id,
-            device_id=normalized_device_id,
+            device_id=device_id,
         )
 
     payload = CollectTaskDef(
         **_company_wechat_defaults(),
         project_id=project_id,
-        device_id=normalized_device_id,
+        device_id=device_id,
     ).model_dump()
     created = await collect_dao.create_task_def(db, payload)
     logger.notice(
         "自动创建综合扫描公众号采集定义 | project=%s device=%s def=%s",
         project_id,
-        normalized_device_id,
+        device_id,
         created.get("task_def_id"),
     )
     return created
@@ -195,6 +223,26 @@ async def resolve_wechat_task_definition(
     device_id = str(device_id or "").strip()
     if not device_id:
         raise ValueError("启用公众号采集时必须选择执行手机")
+
+    async with _definition_lock(project_id, device_id):
+        return await _resolve_wechat_task_definition(
+            db,
+            project_id=project_id,
+            device_id=device_id,
+            expected_target_id=expected_target_id,
+            allow_running=allow_running,
+        )
+
+
+async def _resolve_wechat_task_definition(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    device_id: str,
+    expected_target_id: str = "",
+    allow_running: bool = False,
+) -> dict[str, Any]:
+    """Resolve and repair one definition while holding its shared lock."""
 
     task_defs = await collect_dao.list_task_defs(db, project_id=project_id)
     candidates = [

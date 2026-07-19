@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 
 import pytest
@@ -303,8 +304,8 @@ def test_pool_config_hard_caps_chrome_and_applies_resource_guard(
             "host_memory_floor_mb": 8192,
         }
     )
-    assert config.max_containers == 64
-    assert config.warm_pool_size == 64
+    assert config.max_containers == 80
+    assert config.warm_pool_size == 80
 
     provider = DockerProvider(config)
     provider.containers = {
@@ -366,3 +367,177 @@ def test_pool_config_prefers_current_fields_over_legacy_aliases() -> None:
 
     assert config.host_memory_floor_mb == 10240
     assert config.host_load_per_cpu_limit == 1.25
+
+
+@pytest.mark.asyncio
+async def test_container_creation_uses_bounded_docker_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(
+            max_containers=10,
+            container_create_concurrency=2,
+        )
+    )
+    active = 0
+    peak = 0
+    sequence = 0
+
+    async def create_unlimited() -> ContainerInfo:
+        nonlocal active, peak, sequence
+        sequence += 1
+        current = sequence
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return ContainerInfo(
+            container_id=f"container-{current}",
+            container_name=f"chrome-{current}",
+            cdp_host="chrome",
+            cdp_port=9222,
+            api_port=8250,
+            vnc_port=5900,
+            novnc_port=6080,
+        )
+
+    monkeypatch.setattr(provider, "_create_container_unlimited", create_unlimited)
+    await asyncio.gather(*(provider._create_container() for _ in range(6)))
+
+    assert peak == 2
+    assert provider._create_slots.in_use == 0
+    assert provider._container_create_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_container_health_checks_use_bounded_docker_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(container_health_concurrency=2)
+    )
+    active = 0
+    peak = 0
+
+    async def inspect(_container_id: str, _info: ContainerInfo) -> None:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+
+    monkeypatch.setattr(provider, "_inspect_container_health", inspect)
+    infos = [
+        ContainerInfo(
+            container_id=f"container-{index}",
+            container_name=f"chrome-{index}",
+            cdp_host="chrome",
+            cdp_port=9222,
+            api_port=8250,
+            vnc_port=5900,
+            novnc_port=6080,
+        )
+        for index in range(6)
+    ]
+    await asyncio.gather(
+        *(
+            provider._inspect_container_health_guarded(
+                info.container_id,
+                info,
+            )
+            for info in infos
+        )
+    )
+
+    assert peak == 2
+    assert provider._health_slots.in_use == 0
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_cancelled_docker_run_and_removes_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(
+            network="sere1nfish_internal",
+            container_create_concurrency=1,
+        )
+    )
+    run_started = threading.Event()
+    release_run = threading.Event()
+    removed: list[bool] = []
+
+    class _Container:
+        id = "container-cancelled"
+
+        def remove(self, *, force: bool) -> None:
+            removed.append(force)
+
+    class _Containers:
+        def run(self, **_kwargs):
+            run_started.set()
+            assert release_run.wait(timeout=2)
+            return _Container()
+
+    class _Client:
+        containers = _Containers()
+
+    provider._docker_client = _Client()
+    monkeypatch.setattr(
+        provider,
+        "_allocate_ports",
+        lambda: {"cdp": 9222, "api": 8250, "vnc": 5900, "novnc": 6080},
+    )
+
+    creator = asyncio.create_task(provider._create_container())
+    assert await asyncio.to_thread(run_started.wait, 1)
+    shutdown = asyncio.create_task(provider.shutdown())
+    await asyncio.sleep(0)
+    release_run.set()
+    await asyncio.wait_for(shutdown, timeout=2)
+
+    with pytest.raises(asyncio.CancelledError):
+        await creator
+    assert removed == [True]
+    assert provider._create_slots.in_use == 0
+    assert provider._container_create_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cdp_resolution_releases_registered_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(max_containers=2, reserved_non_bulk_containers=1)
+    )
+    info = ContainerInfo(
+        container_id="container-1",
+        container_name="chrome-1",
+        cdp_host="chrome-1",
+        cdp_port=9222,
+        api_port=8250,
+        vnc_port=5900,
+        novnc_port=6080,
+        status="idle",
+    )
+    provider.containers = {info.container_id: info}
+    entered = asyncio.Event()
+
+    async def blocked_endpoint(_info: ContainerInfo) -> str:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(provider, "_get_ws_url", blocked_endpoint)
+    task = asyncio.create_task(
+        provider.get_cdp_endpoint("url-cancel", purpose="url_scan")
+    )
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert provider.task_map == {}
+    assert info.status == "idle"
+    assert info.task_id is None
+    assert provider._bulk_slots.in_use == 0

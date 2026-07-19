@@ -269,6 +269,10 @@ class Pipeline:
             )
             return {n: rt.metrics for n, rt in self._runtime.items()}
 
+        except asyncio.CancelledError:
+            logger.info(f"[{self.pipeline_id}] pipeline 已取消，正在回收 worker")
+            await self._cancel_all()
+            raise
         except BaseException as e:
             logger.error(f"[{self.pipeline_id}] ✗ pipeline 异常, 取消所有 worker: {e}")
             await self._cancel_all()

@@ -58,6 +58,12 @@ async def pool_config():
             "screen_width": config.screen_width,
             "screen_height": config.screen_height,
             "warm_pool_size": config.warm_pool_size,
+            "container_create_concurrency": (
+                config.container_create_concurrency
+            ),
+            "container_health_concurrency": (
+                config.container_health_concurrency
+            ),
             "host_memory_floor_mb": config.host_memory_floor_mb,
             "capacity": (
                 provider.capacity_status()

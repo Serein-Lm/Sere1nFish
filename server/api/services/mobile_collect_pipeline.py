@@ -26,6 +26,8 @@ _QUEUE_PRIORITY_ORDER = {
     "low": 20,
     "skip": 30,
 }
+_DEVICE_READY_TIMEOUT_SECONDS = 120.0
+_DEVICE_READY_POLL_SECONDS = 2.0
 
 
 class _PriorityTaskDefinitionQueue:
@@ -102,6 +104,38 @@ def _queue_priority_value(priority: str) -> int:
     )
 
 
+async def wait_for_mobile_device_ready(
+    device_id: str,
+    *,
+    timeout_seconds: float = _DEVICE_READY_TIMEOUT_SECONDS,
+    poll_seconds: float = _DEVICE_READY_POLL_SECONDS,
+) -> str:
+    """Wait for a stable device identity to resolve to an online ADB endpoint."""
+    normalized = str(device_id or "").strip()
+    if not normalized:
+        raise ValueError("手机采集任务缺少执行设备")
+
+    from core.mobile.manager import MobileDeviceManager
+
+    manager = MobileDeviceManager()
+    manager.start_polling()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.1, float(timeout_seconds))
+    while True:
+        endpoint = await asyncio.to_thread(
+            manager.resolve_ready_adb_device_id,
+            normalized,
+        )
+        if endpoint:
+            return endpoint
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"手机设备未就绪: {normalized}，等待 {timeout_seconds:.0f}s 后仍无在线 ADB 端点"
+            )
+        await asyncio.sleep(min(max(0.0, float(poll_seconds)), remaining))
+
+
 async def run_mobile_collect_definition(
     db,
     *,
@@ -127,8 +161,6 @@ async def run_mobile_collect_definition(
             queue_priority,
         )
     async with queue_lock.slot(priority_value):
-        if on_started is not None:
-            await on_started()
         return await _run_mobile_collect_definition_claimed(
             db,
             run_task_id=run_task_id,
@@ -136,6 +168,7 @@ async def run_mobile_collect_definition(
             task_def_id=task_def_id,
             runtime_overrides=runtime_overrides,
             requested_by=requested_by,
+            on_started=on_started,
         )
 
 
@@ -147,12 +180,24 @@ async def _run_mobile_collect_definition_claimed(
     task_def_id: str,
     runtime_overrides: dict | None = None,
     requested_by: str = "",
+    on_started: Callable[[], Awaitable[None]] | None = None,
 ) -> dict:
     """Claim and run one definition after its in-process queue slot is acquired."""
 
     task_def = await collect_dao.get_task_def(db, task_def_id)
     if not task_def:
         raise ValueError(f"采集任务定义不存在: {task_def_id}")
+
+    requested_task_def = {**task_def, **(runtime_overrides or {})}
+    device_id = str(requested_task_def.get("device_id") or "").strip()
+    ready_endpoint = await wait_for_mobile_device_ready(device_id)
+    logger.info(
+        "手机采集设备已就绪 | def=%s run=%s device=%s adb=%s",
+        task_def_id,
+        run_task_id,
+        device_id,
+        ready_endpoint,
+    )
 
     claimed = await collect_dao.claim_task_run(
         db,
@@ -165,6 +210,8 @@ async def _run_mobile_collect_definition_claimed(
     effective_task_def = {**claimed, **(runtime_overrides or {})}
     effective_task_def["task_def_id"] = task_def_id
     try:
+        if on_started is not None:
+            await on_started()
         from api.services.mobile_device_leases import background_device_lease
 
         async with background_device_lease(

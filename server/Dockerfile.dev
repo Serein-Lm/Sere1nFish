@@ -51,4 +51,11 @@ WORKDIR /app
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+# Pin the MCP executable in the image. Runtime workers must never race through
+# a shared npx installation cache when a large Chrome pool starts concurrently.
+ARG CHROME_DEVTOOLS_MCP_VERSION=1.6.0
+RUN npm install --global "chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION}" \
+    && chrome-devtools-mcp --version \
+    && npm cache clean --force
+
 CMD ["python", "run.py"]

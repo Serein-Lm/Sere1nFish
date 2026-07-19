@@ -25,9 +25,9 @@ from .runtime import create_agent_node, create_llm, OutputMode
 from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids
 
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
-DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT = 4
+DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT = 6
 WEB_TAGGING_RUNTIME_POLICY = (
-    "运行时浏览约束覆盖旧版提示词中的次数说明：浏览器工具最多调用 4 次；"
+    "运行时浏览约束覆盖旧版提示词中的次数说明：浏览器工具最多调用 6 次；"
     "允许同站 HTTP 转 HTTPS 重试一次；遇到登录弹窗不得登录，"
     "只尝试关闭一次，弹窗再次出现时不得重复处理。联系入口是短文本菜单时，"
     "按技术群、商务联系、咨询热线的顺序只 hover 最相关入口，并读取工具返回的"
