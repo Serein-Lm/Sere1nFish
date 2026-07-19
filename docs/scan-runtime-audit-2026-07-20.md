@@ -205,3 +205,5 @@
 - 恢复验证发现仅把 URL 记录标成 `retryable` 还不够：若父公司的 `asset_url` 或 `bidding` 模块检查点已完成，父流水线会跳过整个模块。现在恢复入口会查询两个确定性的 URL 子任务，只使仍含 retryable 行的模块检查点失效；其余模块、公司身份和成功 URL 继续复用。
 
 第三阶段恢复前基线：批次仍为 `4eafabcb1b2e`，5 条 completed 保持不变，105 条 pending 等待单次启动恢复；模块检查点已增长到 `asset_url=25`、`bidding=29`、`control_structure=35`、`scholar=35`、`wechat=2`。
+
+第三阶段恢复验证：后端健康启动后只领取 105 条未完成任务，5 条 completed 未重跑。恢复日志精确识别 5 个 `asset_url` 子任务，其中教育部学生服务与素质发展中心同时识别 1 个 `bidding` 视觉子任务；未误开其他模块。首轮实际重扫已把 retryable URL 从 161 降到 154。Chrome 预热池达到 20 个健康容器，随后按需扩到 27 个，未出现 `Created` 孤儿容器；观测点可用内存约 42 GiB、1 分钟 load 约 4.55、近期 CDP 失败为 0，未出现新的额度错误、Docker API 超时、BrowserRecovery 或错误堆栈。
