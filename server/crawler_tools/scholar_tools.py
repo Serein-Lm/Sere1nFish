@@ -132,6 +132,8 @@ class Article:
     direction: Optional[str] = None
     source_keys: list[str] = field(default_factory=list)
     landing_page: Optional[str] = None
+    unit_verified: bool = False
+    match_evidence: str = ""
 
 
 @dataclass
@@ -155,16 +157,86 @@ def _resolve_institution(unit: str) -> list[dict] | None:
     res = d.get("results", [])
     if not res:
         return None
-    return [
-        {
-            "id": i["id"].rsplit("/", 1)[-1],
-            "name": i["display_name"],
-            "country": i.get("country_code"),
-            "ror": i.get("ror"),
-            "works": i["works_count"],
-        }
-        for i in res
-    ]
+    candidates: list[dict[str, Any]] = []
+    for item in res:
+        names = [
+            item.get("display_name"),
+            *(item.get("display_name_alternatives") or []),
+            *(item.get("display_name_acronyms") or []),
+        ]
+        international = item.get("international") or {}
+        if isinstance(international, dict):
+            names.extend(international.values())
+        aliases = list(dict.fromkeys(str(name).strip() for name in names if str(name or "").strip()))
+        candidates.append({
+            "id": item["id"].rsplit("/", 1)[-1],
+            "name": item["display_name"],
+            "aliases": aliases,
+            "country": item.get("country_code"),
+            "ror": item.get("ror"),
+            "works": item.get("works_count", 0),
+        })
+    return candidates
+
+
+_ORG_CN_IDENTITY_NOISE = re.compile(
+    r"(?:股份有限责任公司|股份有限公司|有限责任公司|有限公司|集团)"
+)
+_ORG_EN_IDENTITY_NOISE = re.compile(
+    r"\b(?:the|company|corporation|corp|co|ltd|limited|inc)\b",
+    re.I,
+)
+
+
+def _organization_identity(value: str) -> str:
+    text = _ORG_CN_IDENTITY_NOISE.sub("", str(value or "").casefold())
+    text = _ORG_EN_IDENTITY_NOISE.sub("", text)
+    return re.sub(
+        r"[^a-z0-9\u3400-\u9fff]+",
+        "",
+        text,
+    )
+
+
+def _organization_full_identity(value: str) -> str:
+    return re.sub(
+        r"[^a-z0-9\u3400-\u9fff]+",
+        "",
+        str(value or "").casefold(),
+    )
+
+
+def _institution_matches(
+    unit: str,
+    candidate_name: str,
+    unit_en: str = "",
+) -> bool:
+    candidate_full = _organization_full_identity(candidate_name)
+    for expected_name in (unit, unit_en):
+        expected_full = _organization_full_identity(expected_name)
+        if expected_full and expected_full == candidate_full:
+            return True
+
+    candidate = _organization_identity(candidate_name)
+    if len(candidate) < 4:
+        return False
+    for expected_name in (unit, unit_en):
+        expected = _organization_identity(expected_name)
+        if len(expected) < 4:
+            continue
+        shorter, longer = sorted((expected, candidate), key=len)
+        if shorter in longer and len(shorter) / len(longer) >= 0.6:
+            return True
+    return False
+
+
+def _institution_candidate_matches(
+    unit: str,
+    candidate: dict[str, Any],
+    unit_en: str = "",
+) -> bool:
+    names = candidate.get("aliases") or [candidate.get("name", "")]
+    return any(_institution_matches(unit, str(name), unit_en) for name in names)
 
 
 def _orcid_public_email(orcid_url: str | None) -> list[str]:
@@ -187,11 +259,27 @@ def _orcid_public_email(orcid_url: str | None) -> list[str]:
 
 
 def _openalex_articles(unit: str, direction: str, limit: int,
+                       unit_en: str,
                        enrich_orcid_email: bool) -> dict:
     cands = _resolve_institution(unit)
     if not cands:
         return {"error": f"未解析到单位: {unit}", "articles": []}
-    inst = cands[0]
+    inst = next(
+        (
+            candidate
+            for candidate in cands
+            if _institution_candidate_matches(unit, candidate, unit_en)
+        ),
+        None,
+    )
+    if not inst:
+        return {
+            "error": f"OpenAlex 机构候选与目标单位不一致: {unit}",
+            "unit": None,
+            "institution_candidates": cands,
+            "institution_verified": False,
+            "articles": [],
+        }
     inst_id = inst["id"]
 
     q = urllib.parse.quote(direction)
@@ -227,6 +315,8 @@ def _openalex_articles(unit: str, direction: str, limit: int,
         })
     return {
         "unit": inst,
+        "institution_verified": True,
+        "match_evidence": f"OpenAlex institution={inst['name']}",
         "institution_candidates": cands,
         "direction": direction,
         "count": d.get("meta", {}).get("count"),
@@ -361,7 +451,13 @@ def discover(unit: str, direction: str, unit_en: str = "", limit: int = 10,
         unit_en : 英文机构名，用于 PubMed/EuropePMC/DOAJ 检索(默认回退 unit)。
         limit   : OpenAlex 返回文章数。
     """
-    api_results = _openalex_articles(unit, direction, limit, enrich_orcid_email)
+    api_results = _openalex_articles(
+        unit,
+        direction,
+        limit,
+        unit_en or "",
+        enrich_orcid_email,
+    )
 
     try:
         email_extraction = _extract_all(unit_en or unit, direction)
@@ -596,6 +692,8 @@ def normalize_bulk_batch(unit: str, articles: list[dict[str, Any]]):
             "year": str(a.get("year") or ""), "doi": a.get("doi"),
             "pmcid": a.get("pmcid"), "unit": unit, "direction": "",
             "source_keys": ["europepmc"], "landing_page": None,
+            "unit_verified": True,
+            "match_evidence": f"Europe PMC AFF={unit}",
         })
         pairs = _parse_corresp(corresp_blocks)
         bound = {normalize_email(e) for _, e in pairs}
@@ -638,7 +736,19 @@ def _openalex_bulk(unit: str, max_articles: int = 400, per_page: int = 200,
     cands = _resolve_institution(unit)
     if not cands:
         return {"error": f"未解析到单位: {unit}", "articles": []}
-    inst = cands[0]
+    inst = next(
+        (
+            candidate
+            for candidate in cands
+            if _institution_candidate_matches(unit, candidate)
+        ),
+        None,
+    )
+    if not inst:
+        return {
+            "error": f"OpenAlex 机构候选与目标单位不一致: {unit}",
+            "articles": [],
+        }
     inst_id = inst["id"]
     articles: list[dict[str, Any]] = []
     cursor = "*"
@@ -759,13 +869,25 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
     articles: dict[str, Article] = {}
     contacts: dict[tuple[str, str], Contact] = {}
 
-    def upsert_article(doi, pmcid, title, year=None, src=None, landing=None) -> str:
+    def upsert_article(
+        doi,
+        pmcid,
+        title,
+        year=None,
+        src=None,
+        landing=None,
+        *,
+        unit_verified=False,
+        match_evidence="",
+    ) -> str:
         aid = _article_id(doi, pmcid, title)
         a = articles.get(aid)
         if not a:
             a = Article(article_id=aid, title=title or "", year=year,
                         doi=(doi or None), pmcid=(pmcid or None),
-                        unit=unit, direction=direction, landing_page=landing)
+                        unit=unit, direction=direction, landing_page=landing,
+                        unit_verified=bool(unit_verified),
+                        match_evidence=str(match_evidence or ""))
             articles[aid] = a
         if src and src not in a.source_keys:
             a.source_keys.append(src)
@@ -773,6 +895,9 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
             a.year = year
         if landing and not a.landing_page:
             a.landing_page = landing
+        if unit_verified:
+            a.unit_verified = True
+            a.match_evidence = str(match_evidence or a.match_evidence)
         return aid
 
     def add_contact(email, aid, src, name=None, corr=False) -> None:
@@ -796,7 +921,9 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
     for a in api.get("articles", []):
         aid = upsert_article(a.get("doi"), None, a.get("title"),
                              str(a.get("year") or ""), src="openalex",
-                             landing=a.get("landing_page"))
+                             landing=a.get("landing_page"),
+                             unit_verified=api.get("institution_verified", False),
+                             match_evidence=api.get("match_evidence", ""))
         for c in a.get("corresponding", []):
             for em in c.get("public_emails", []) or []:
                 add_contact(em, aid, "orcid", c.get("name"), corr=True)
@@ -812,7 +939,9 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
     ep = ee.get("europepmc", {})
     for a in ep.get("articles", []):
         aid = upsert_article(a.get("doi"), a.get("pmcid"), a.get("title"),
-                             str(a.get("year") or ""), src="europepmc")
+                             str(a.get("year") or ""), src="europepmc",
+                             unit_verified=True,
+                             match_evidence=f"Europe PMC AFF={discover_output.get('unit_en') or unit}")
         pairs = _parse_corresp(a.get("corresp", []))
         bound = {normalize_email(e) for _, e in pairs}
         for name, em in pairs:

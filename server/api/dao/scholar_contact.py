@@ -72,6 +72,8 @@ async def upsert_articles_batch(
         if not article_id:
             continue
         doc_id = scholar_article_id(project_id, article_id)
+        unit_verified = bool(a.get("unit_verified", False))
+        match_evidence = str(a.get("match_evidence") or "")
         set_fields = {
             "doc_id": doc_id,
             "project_id": project_id,
@@ -87,9 +89,19 @@ async def upsert_articles_batch(
             "latest_task_id": task_id,
             "updated_at": now,
         }
+        if unit_verified:
+            set_fields["unit_verified"] = True
+            if match_evidence:
+                set_fields["match_evidence"] = match_evidence
+        set_on_insert: dict[str, Any] = {"created_at": now}
+        if not unit_verified:
+            set_on_insert.update(
+                unit_verified=False,
+                match_evidence=match_evidence,
+            )
         update: dict[str, Any] = {
             "$set": set_fields,
-            "$setOnInsert": {"created_at": now},
+            "$setOnInsert": set_on_insert,
         }
         if task_id:
             update["$addToSet"] = {"task_ids": task_id}
@@ -125,6 +137,8 @@ async def upsert_contacts_batch(
         if not email or not article_id:
             continue
         doc_id = scholar_contact_id(project_id, email, article_id)
+        unit_verified = bool(c.get("unit_verified", False))
+        evidence = str(c.get("evidence") or "")
         set_fields = {
             "doc_id": doc_id,
             "project_id": project_id,
@@ -132,18 +146,23 @@ async def upsert_contacts_batch(
             "article_id": article_id,
             "source_key": c.get("source_key", ""),
             "author_name": c.get("author_name"),
-            "is_corresponding": bool(c.get("is_corresponding")),
             "unit": c.get("unit") or unit,
             "direction": direction,
-            "unit_verified": bool(c.get("unit_verified", False)),
-            "evidence": c.get("evidence") or "",
             "email_kind": c.get("email_kind") or "",
             "latest_task_id": task_id,
             "updated_at": now,
         }
+        if unit_verified:
+            set_fields["unit_verified"] = True
+            if evidence:
+                set_fields["evidence"] = evidence
+        set_on_insert = {"created_at": now}
+        if not unit_verified:
+            set_on_insert.update(unit_verified=False, evidence=evidence)
         update: dict[str, Any] = {
             "$set": set_fields,
-            "$setOnInsert": {"created_at": now},
+            "$setOnInsert": set_on_insert,
+            "$max": {"is_corresponding": bool(c.get("is_corresponding"))},
         }
         if task_id:
             update["$addToSet"] = {"task_ids": task_id}
@@ -220,15 +239,23 @@ async def query_articles(
     project_id: str,
     *,
     unit: str = "",
+    only_verified: bool = False,
     limit: int = 20,
     skip: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
     query: dict[str, Any] = {"project_id": project_id}
     if unit:
         query["unit"] = unit
+    if only_verified:
+        query["unit_verified"] = True
     coll = db[SCHOLAR_ARTICLES_COLLECTION]
     total = await coll.count_documents(query)
-    cursor = coll.find(query, {"_id": 0}).sort("updated_at", -1).skip(skip).limit(limit)
+    cursor = (
+        coll.find(query, {"_id": 0})
+        .sort([("unit_verified", -1), ("updated_at", -1)])
+        .skip(skip)
+        .limit(limit)
+    )
     return [doc async for doc in cursor], total
 
 

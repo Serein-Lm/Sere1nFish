@@ -256,15 +256,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"索引创建失败（不影响运行）: {e}")
     
-    # 启动时:终结上一进程无法恢复的后台任务与手机租约。
+    # 启动时:释放上一进程租约，并重新认领持久化的未完成任务。
     try:
-        from api.services.task_runtime_recovery import recover_interrupted_runtime
+        from api.services.task_runtime_recovery import (
+            TaskRuntimeMonitor,
+            recover_interrupted_runtime,
+        )
 
         recovered = await recover_interrupted_runtime(get_db())
+        TaskRuntimeMonitor.get_instance().start()
         if any(recovered.values()):
             logger.warning(
-                "已清理中断运行态: "
+                "已恢复中断运行态: "
                 f"tasks={recovered['tasks']}, "
+                f"resumed={recovered['resumed_tasks']}, "
+                f"exhausted={recovered['exhausted_tasks']}, "
                 f"mobile_task_defs={recovered['mobile_task_defs']}, "
                 f"mobile_leases={recovered['mobile_leases']}"
             )
@@ -313,6 +319,15 @@ async def lifespan(app: FastAPI):
         logger.warning(f"钉钉 Stream Mode 启动失败(不影响运行): {e}")
 
     yield
+
+    # 关闭时：停止任务异常监控；执行中的持久任务会退回待恢复状态。
+    try:
+        from api.services.task_runtime_recovery import TaskRuntimeMonitor
+
+        await TaskRuntimeMonitor.get_instance().stop()
+        logger.info("任务运行时异常监控已停止")
+    except Exception as e:
+        logger.warning(f"任务运行时异常监控停止失败: {e}")
 
     # 关闭时：先断开钉钉长连接，停止接收新对话
     try:

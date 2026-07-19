@@ -12,9 +12,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from api.db.collections import TASKS_COLLECTION
 from api.db.mongodb import get_db
 from api.dao import schedules as schedules_dao
 from api.dao import mobile_collect as collect_dao
+from api.services.project_task_runtime import execute_project_task
 from core.background import spawn_background
 from core.logger import get_logger
 
@@ -96,8 +98,6 @@ class TaskScheduler:
             return
 
         # 通过统一任务入口创建并异步运行(等同手动启动)。
-        from api.routers.project_api import _execute_task, TASKS_COLLECTION
-
         project_id = task_def.get("project_id") or ""
         params = {"task_def_id": target_id, "scheduled_by": schedule["schedule_id"]}
         task_id = uuid.uuid4().hex[:12]
@@ -116,7 +116,7 @@ class TaskScheduler:
             }
         )
         spawn_background(
-            _execute_task(task_id, project_id, target_type, params),
+            execute_project_task(task_id, project_id, target_type, params),
             name=f"scheduled:{task_id}",
         )
         logger.notice(

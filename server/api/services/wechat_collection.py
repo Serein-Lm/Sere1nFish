@@ -1,6 +1,7 @@
 """综合扫描中的微信公众号采集适配层。"""
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -221,6 +222,7 @@ async def run_company_wechat_collection(
     device_id: str,
     collection_priority: str = "normal",
     requested_by: str = "",
+    on_started: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """用已配置手机发现文章链接，再复用 Chrome Provider 归档正文与图片。"""
     task_def = await resolve_wechat_task_definition(
@@ -247,6 +249,7 @@ async def run_company_wechat_collection(
         },
         requested_by=requested_by,
         queue_priority=collection_priority,
+        on_started=on_started,
     )
     return {
         "kind": "wechat",

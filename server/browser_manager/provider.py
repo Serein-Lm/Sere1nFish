@@ -49,6 +49,9 @@ class ContainerInfo:
     memory_usage_mb: float = 0.0
     unhealthy_reason: str = ""
     consecutive_errors: int = 0
+    cdp_healthy: bool = True
+    recovery_in_progress: bool = False
+    last_recovery_at: Optional[datetime] = None
 
     @property
     def cdp_url(self) -> str:
@@ -92,6 +95,8 @@ class ChromeDockerConfig:
     memory_unhealthy_mb: int = 1500  # 内存超过此值标记 unhealthy（MB）
     memory_restart_mb: int = 800  # 内存超过此值才重启 Chrome（动态策略）
     health_check_interval: int = 30  # 健康检查间隔（秒）
+    wechat_article_lease_timeout: int = 240  # 公众号单次浏览器租约上限（秒）
+    generic_busy_lease_timeout: int = 1800  # 其他浏览器租约异常告警/恢复上限
     # 预热池
     warm_pool_size: int = 1  # 预热池大小（启动时预创建的空闲容器数）
     reserved_non_bulk_containers: int = 2  # 为公众号/学者等非批量任务保留容量
@@ -155,6 +160,14 @@ class BrowserProvider(ABC):
         """上报容器错误（用于触发热切换判断）"""
         pass
 
+    async def recover_task_container(
+        self,
+        task_id: Optional[str] = None,
+        reason: str = "",
+    ) -> bool:
+        """Recover the browser currently leased by a task when supported."""
+        return False
+
     async def hot_swap_container(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
         """
         容器热切换：释放当前容器 → 从预热池或新建获取新容器。
@@ -216,6 +229,15 @@ class DockerProvider(BrowserProvider):
             config.max_containers,
             self._bulk_slot_limit,
             int(config.max_containers) - self._bulk_slot_limit,
+        )
+
+    @staticmethod
+    def _is_assignable(info: ContainerInfo) -> bool:
+        return bool(
+            info.status == "idle"
+            and not info.unhealthy_reason
+            and info.cdp_healthy
+            and not info.recovery_in_progress
         )
 
     async def _acquire_workload_slot(self, task_id: str, purpose: str) -> None:
@@ -370,7 +392,7 @@ class DockerProvider(BrowserProvider):
         async with self._lock:
             # 1. 优先复用同 purpose 的空闲容器（跳过 unhealthy）
             for cid, info in self.containers.items():
-                if info.status == "idle" and info.unhealthy_reason == "" and getattr(info, 'purpose', 'general') == purpose:
+                if self._is_assignable(info) and getattr(info, 'purpose', 'general') == purpose:
                     info.status = "busy"
                     info.task_id = task_id
                     info.last_used_at = datetime.now()
@@ -384,7 +406,7 @@ class DockerProvider(BrowserProvider):
             # 2. 复用任意空闲容器（跳过 unhealthy）
             if claimed is None:
                 for cid, info in self.containers.items():
-                    if info.status == "idle" and info.unhealthy_reason == "":
+                    if self._is_assignable(info):
                         info.status = "busy"
                         info.task_id = task_id
                         info.purpose = purpose
@@ -400,7 +422,9 @@ class DockerProvider(BrowserProvider):
             if claimed is None:
                 active_count = sum(
                     1 for c in self.containers.values()
-                    if c.status in ("busy", "idle", "starting") and c.unhealthy_reason == ""
+                    if c.status in ("busy", "idle", "starting")
+                    and c.unhealthy_reason == ""
+                    and c.cdp_healthy
                 ) + self._pending_creates
                 logger.info(
                     f"[DockerProvider] 无空闲容器 | 活跃容器数={active_count}/{self.config.max_containers}"
@@ -449,7 +473,13 @@ class DockerProvider(BrowserProvider):
             return None
         try:
             return await self._get_ws_url(claimed)
-        except Exception:
+        except Exception as exc:
+            claimed.cdp_healthy = False
+            claimed.unhealthy_reason = f"CDP 端点获取失败: {exc}"[:300]
+            await self.recover_task_container(
+                task_id=task_id,
+                reason="Chrome CDP 端点连续获取失败",
+            )
             await self.release_cdp_endpoint(task_id)
             raise
 
@@ -467,6 +497,7 @@ class DockerProvider(BrowserProvider):
                 info.status = "idle"
                 info.task_id = None
                 info.last_used_at = datetime.now()
+                info.recovery_in_progress = False
                 logger.info(
                     f"[DockerProvider] 释放容器 {info.container_name} | task={task_id} | "
                     f"状态→idle | 当前容器池: {len(self.containers)} 个"
@@ -490,17 +521,25 @@ class DockerProvider(BrowserProvider):
     async def get_pool_status(self) -> list[dict]:
         """获取连接池状态（含内存信息）"""
         result = []
+        now = datetime.now()
         for info in self.containers.values():
             result.append({
                 "container_id": info.container_id[:12],
                 "container_name": info.container_name,
                 "status": info.status,
                 "task_id": info.task_id,
+                "purpose": info.purpose,
                 "cdp_url": info.cdp_url,
                 "novnc_url": info.novnc_url,
                 "memory_mb": round(info.memory_usage_mb, 1),
                 "unhealthy_reason": info.unhealthy_reason,
                 "consecutive_errors": info.consecutive_errors,
+                "cdp_healthy": info.cdp_healthy,
+                "busy_seconds": round(
+                    (now - info.last_used_at).total_seconds(),
+                    1,
+                ) if info.status == "busy" else 0,
+                "recovery_in_progress": info.recovery_in_progress,
                 "created_at": info.created_at.isoformat(),
                 "last_used_at": info.last_used_at.isoformat(),
             })
@@ -726,7 +765,7 @@ class DockerProvider(BrowserProvider):
             claimed: ContainerInfo | None = None
             async with self._lock:
                 for cid, info in self.containers.items():
-                    if info.status == "idle" and info.unhealthy_reason == "":
+                    if self._is_assignable(info):
                         info.status = "busy"
                         info.task_id = task_id
                         info.purpose = purpose
@@ -775,7 +814,7 @@ class DockerProvider(BrowserProvider):
                     # 统计当前空闲且健康的容器数
                     idle_healthy = [
                         cid for cid, info in self.containers.items()
-                        if info.status == "idle" and info.unhealthy_reason == ""
+                        if self._is_assignable(info)
                     ]
 
                     for cid, info in self.containers.items():
@@ -793,7 +832,11 @@ class DockerProvider(BrowserProvider):
                                     )
 
                         # unhealthy 且无任务的容器直接销毁
-                        if info.unhealthy_reason and info.status not in {"busy", "stopping"}:
+                        if (
+                            info.unhealthy_reason
+                            and not info.recovery_in_progress
+                            and info.status not in {"busy", "stopping"}
+                        ):
                             info.status = "stopping"
                             to_destroy.append(cid)
                             logger.info(
@@ -824,48 +867,248 @@ class DockerProvider(BrowserProvider):
 
     async def _health_checker(self):
         """
-        后台协程：每 N 秒检查每个容器的内存使用量（Docker stats API）。
-        内存超过阈值的容器标记为 unhealthy，不再分配新任务。
+        Check memory, control API/CDP health, and stale busy leases.
+
+        A busy container is never silently removed from task_map. Restarting its
+        Chrome process breaks the blocked CDP call so the caller can run cleanup,
+        release the lease, and retry on another healthy container.
         """
         logger.info(
             f"[DockerProvider] 健康监控已启动 | "
             f"间隔={self.config.health_check_interval}s | "
-            f"unhealthy 阈值={self.config.memory_unhealthy_mb}MB"
+            f"unhealthy 阈值={self.config.memory_unhealthy_mb}MB | "
+            f"公众号租约上限={self.config.wechat_article_lease_timeout}s"
         )
         while True:
             try:
                 await asyncio.sleep(self.config.health_check_interval)
-
-                for cid, info in list(self.containers.items()):
-                    if info.status == "stopping":
-                        continue
-                    try:
-                        mem_mb = await self._query_container_memory(cid)
-                        info.memory_usage_mb = mem_mb
-
-                        if mem_mb > self.config.memory_unhealthy_mb:
-                            if not info.unhealthy_reason:
-                                info.unhealthy_reason = f"内存 {mem_mb:.0f}MB > {self.config.memory_unhealthy_mb}MB"
-                                logger.warning(
-                                    f"[HealthCheck] 容器 {info.container_name} 标记 unhealthy: "
-                                    f"{info.unhealthy_reason} | status={info.status}"
-                                )
-                        else:
-                            # 内存恢复正常（比如 Chrome 重启后），清除 unhealthy 标记
-                            if info.unhealthy_reason and "内存" in info.unhealthy_reason:
-                                logger.info(
-                                    f"[HealthCheck] 容器 {info.container_name} 内存恢复正常 "
-                                    f"({mem_mb:.0f}MB)，清除 unhealthy 标记"
-                                )
-                                info.unhealthy_reason = ""
-
-                    except Exception as e:
-                        logger.debug(f"[HealthCheck] 查询容器 {info.container_name} 内存失败: {e}")
+                await asyncio.gather(
+                    *(
+                        self._inspect_container_health(cid, info)
+                        for cid, info in list(self.containers.items())
+                        if info.status != "stopping"
+                    ),
+                    return_exceptions=True,
+                )
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"[DockerProvider] health_checker 异常: {e}")
+
+    async def _inspect_container_health(
+        self,
+        container_id: str,
+        info: ContainerInfo,
+    ) -> None:
+        try:
+            memory_result, health_result = await asyncio.gather(
+                self._query_container_memory(container_id),
+                self._query_cdp_health(info),
+                return_exceptions=True,
+            )
+            if not isinstance(memory_result, BaseException):
+                info.memory_usage_mb = float(memory_result)
+            cdp_healthy = (
+                bool(health_result[0])
+                if isinstance(health_result, tuple)
+                else False
+            )
+            health_error = (
+                str(health_result[1])
+                if isinstance(health_result, tuple)
+                else str(health_result)
+            )
+            info.cdp_healthy = cdp_healthy
+
+            if info.memory_usage_mb > self.config.memory_unhealthy_mb:
+                info.unhealthy_reason = (
+                    f"内存 {info.memory_usage_mb:.0f}MB > "
+                    f"{self.config.memory_unhealthy_mb}MB"
+                )
+            elif info.unhealthy_reason.startswith("内存 "):
+                info.unhealthy_reason = ""
+
+            busy_seconds = (
+                (datetime.now() - info.last_used_at).total_seconds()
+                if info.status == "busy"
+                else 0
+            )
+            lease_limit = (
+                self.config.wechat_article_lease_timeout
+                if info.purpose == "wechat_article"
+                else self.config.generic_busy_lease_timeout
+            )
+            stale_lease = info.status == "busy" and busy_seconds > max(60, lease_limit)
+            if stale_lease:
+                await self._restart_chrome_for_recovery(
+                    info,
+                    reason=(
+                        f"{info.purpose} 租约持续 {busy_seconds:.0f}s，"
+                        f"超过上限 {lease_limit}s"
+                    ),
+                )
+            elif not cdp_healthy:
+                await self._restart_chrome_for_recovery(
+                    info,
+                    reason=f"CDP 健康检查失败: {health_error}",
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[HealthCheck] 容器检查失败 container=%s error=%s",
+                info.container_name,
+                exc,
+            )
+
+    async def _query_cdp_health(self, info: ContainerInfo) -> tuple[bool, str]:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{info.api_url}/health",
+                    headers=self._auth_headers(),
+                    timeout=5,
+                )
+            payload = response.json() if response.content else {}
+            healthy = bool(
+                response.status_code == 200
+                and payload.get("chrome") is not False
+                and payload.get("cdp") is not False
+            )
+            return healthy, "" if healthy else f"HTTP {response.status_code} {payload}"
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+
+    async def _wait_cdp_recovered(
+        self,
+        info: ContainerInfo,
+        *,
+        timeout: float = 30.0,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            healthy, _error = await self._query_cdp_health(info)
+            if healthy:
+                return True
+            await asyncio.sleep(1)
+        return False
+
+    async def _restart_chrome_for_recovery(
+        self,
+        info: ContainerInfo,
+        *,
+        reason: str,
+    ) -> bool:
+        if info.recovery_in_progress:
+            return False
+        if info.last_recovery_at and (
+            datetime.now() - info.last_recovery_at
+        ).total_seconds() < max(30, self.config.health_check_interval):
+            return False
+
+        info.recovery_in_progress = True
+        info.last_recovery_at = datetime.now()
+        task_id = info.task_id or ""
+        logger.error(
+            "[BrowserRecovery] 重启异常 Chrome | container=%s task=%s purpose=%s reason=%s",
+            info.container_name,
+            task_id,
+            info.purpose,
+            reason,
+        )
+        recovered = False
+        try:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{info.api_url}/chrome/restart",
+                        headers=self._auth_headers(),
+                        timeout=20,
+                    )
+                if response.status_code == 200:
+                    recovered = await self._wait_cdp_recovered(info, timeout=20)
+            except Exception:
+                recovered = False
+
+            if not recovered:
+                client = self._get_docker_client()
+
+                def _restart_container() -> None:
+                    client.containers.get(info.container_id).restart(timeout=5)
+
+                await asyncio.to_thread(_restart_container)
+                recovered = await self._wait_cdp_recovered(info, timeout=30)
+
+            info.cdp_healthy = recovered
+            if recovered:
+                info.unhealthy_reason = ""
+                info.consecutive_errors = 0
+                info.last_used_at = datetime.now()
+            else:
+                info.unhealthy_reason = f"浏览器自动恢复失败: {reason}"[:300]
+
+            from api.services.notifications import notify_event_background
+
+            purpose_label = (
+                "公众号文章读取"
+                if info.purpose == "wechat_article"
+                else info.purpose or "浏览器任务"
+            )
+            reason_label = (
+                "浏览器租约超时"
+                if "租约持续" in reason
+                else "Chrome CDP 不可用"
+            )
+            notify_event_background(
+                event=(
+                    "browser.container.recovered"
+                    if recovered
+                    else "browser.container.recovery_failed"
+                ),
+                title=("浏览器异常已自动恢复" if recovered else "浏览器异常恢复失败"),
+                content=(
+                    "**结论**\n"
+                    f"- {'已自动恢复，任务将重试' if recovered else '自动恢复失败，需要检查'}\n\n"
+                    "**影响**\n"
+                    f"- 用途：{purpose_label}\n"
+                    f"- 原因：{reason_label}"
+                ),
+                level="warning" if recovered else "critical",
+                source="browser_manager",
+                task_id=task_id or None,
+                context={
+                    "container": info.container_name,
+                    "purpose": info.purpose,
+                    "recovered": recovered,
+                },
+            )
+            return recovered
+        except Exception as exc:  # noqa: BLE001
+            info.cdp_healthy = False
+            info.unhealthy_reason = f"浏览器自动恢复异常: {exc}"[:300]
+            logger.error(
+                "[BrowserRecovery] 恢复异常 container=%s error=%s",
+                info.container_name,
+                exc,
+            )
+            from api.services.notifications import notify_event_background
+
+            notify_event_background(
+                event="browser.container.recovery_failed",
+                title="浏览器异常恢复失败",
+                content=(
+                    "**结论**\n- 自动恢复失败，需要检查\n\n"
+                    f"**影响**\n- 用途：{info.purpose or '浏览器任务'}"
+                ),
+                level="critical",
+                source="browser_manager",
+                task_id=task_id or None,
+                context={"container": info.container_name, "purpose": info.purpose},
+            )
+            return False
+        finally:
+            info.recovery_in_progress = False
 
     async def _query_container_memory(self, container_id: str) -> float:
         """通过 Docker API 查询容器内存使用量（MB）"""
@@ -923,12 +1166,13 @@ class DockerProvider(BrowserProvider):
                 async with self._lock:
                     idle_healthy_count = sum(
                         1 for info in self.containers.values()
-                        if info.status == "idle" and info.unhealthy_reason == ""
+                        if self._is_assignable(info)
                     )
                     total_active = sum(
                         1 for info in self.containers.values()
                         if info.status in ("busy", "idle", "starting")
                         and info.unhealthy_reason == ""
+                        and info.cdp_healthy
                     )
                     need = self.config.warm_pool_size - idle_healthy_count
                     can_create = (
@@ -988,6 +1232,24 @@ class DockerProvider(BrowserProvider):
                 f"[DockerProvider] 容器 {info.container_name} 标记 unhealthy: "
                 f"{info.unhealthy_reason}"
             )
+
+    async def recover_task_container(
+        self,
+        task_id: Optional[str] = None,
+        reason: str = "",
+    ) -> bool:
+        if not task_id:
+            return False
+        container_id = self.task_map.get(task_id)
+        if not container_id:
+            return False
+        info = self.containers.get(container_id)
+        if not info:
+            return False
+        return await self._restart_chrome_for_recovery(
+            info,
+            reason=reason or "任务上报浏览器异常",
+        )
 
     async def reset_error_count(self, task_id: Optional[str] = None) -> None:
         """重置容器的连续错误计数（工具调用成功时调用）"""

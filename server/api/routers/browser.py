@@ -42,6 +42,9 @@ async def pool_config():
                 config.normalized_reserved_non_bulk_containers
             ),
             "idle_timeout": config.idle_timeout,
+            "health_check_interval": config.health_check_interval,
+            "wechat_article_lease_timeout": config.wechat_article_lease_timeout,
+            "generic_busy_lease_timeout": config.generic_busy_lease_timeout,
             "screen_width": config.screen_width,
             "screen_height": config.screen_height,
         }

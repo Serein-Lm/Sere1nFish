@@ -148,6 +148,7 @@ class ScholarArticleListRequest(PageRequest):
     """学者文章列表"""
     project_id: str = Field(description="项目 ID")
     unit: str = Field(default="", description="单位过滤")
+    only_verified: bool = Field(default=False, description="仅目标单位已验证文章")
 
 
 class StatsRecordsRequest(PageRequest):

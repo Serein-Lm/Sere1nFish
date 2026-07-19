@@ -44,6 +44,8 @@ export interface ScholarArticle {
   direction?: string | null
   source_keys: string[]
   landing_page?: string | null
+  unit_verified?: boolean
+  match_evidence?: string
   created_at?: string
   updated_at?: string
 }
@@ -75,7 +77,7 @@ export async function listScholarContacts(
 /** 分页查询已收集文章 */
 export async function listScholarArticles(
   projectId: string,
-  params?: { page?: number; page_size?: number; unit?: string }
+  params?: { page?: number; page_size?: number; unit?: string; only_verified?: boolean }
 ): Promise<PaginatedResponse<ScholarArticle>> {
   return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/scholar-articles`, {
     method: 'POST',
@@ -84,6 +86,7 @@ export async function listScholarArticles(
       page: params?.page ?? 1,
       page_size: params?.page_size ?? 20,
       unit: params?.unit ?? '',
+      only_verified: params?.only_verified ?? false,
     }),
   })
 }

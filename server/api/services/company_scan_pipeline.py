@@ -24,6 +24,7 @@ from core.stream import Stage, Item, RetryPolicy
 from api.services.info_collection.tuning import (
     DEFAULT_ASSET_PROBE_CONCURRENCY,
     DEFAULT_COPYWRITING_CONCURRENCY,
+    DEFAULT_COMPANY_SCAN_CONCURRENCY,
     DEFAULT_URL_PROBE_CONCURRENCY,
     DEFAULT_URL_SCAN_CONCURRENCY,
     DEFAULT_XHS_SEARCH_CONCURRENCY,
@@ -178,6 +179,7 @@ class CompanyScanPipeline:
         task_id: str,
         project_id: str,
         company_name: str,
+        batch_id: str = "",
         url_text: str = "",
         urls: list[str] | None = None,
         enable_url_scan: bool = True,
@@ -213,6 +215,7 @@ class CompanyScanPipeline:
         control_lookup_concurrency: int = 4,
         control_icp_concurrency: int = 6,
         control_scan_concurrency: int = 1,
+        company_core_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY,
         requested_by: str = "",
     ) -> dict[str, Any]:
         """
@@ -225,6 +228,7 @@ class CompanyScanPipeline:
         4. 根 Target 的 XHS画像 → 话术生成
         """
         from core.observability import obs_log
+        from api.services.company_scan_runtime import get_company_scan_resource_pool
         from api.services.xhs_target_selection import parse_manual_targets
 
         subsidiary_xhs_enabled = bool(enable_xhs and enable_subsidiary_xhs)
@@ -316,6 +320,8 @@ class CompanyScanPipeline:
                 "direction_source": "manual" if str(scholar_direction or "").strip() else "pending",
                 "direction_terms": [],
                 "articles_total": 0,
+                "verified_articles_total": 0,
+                "unverified_articles_total": 0,
                 "contacts_total": 0,
                 "corresponding_count": 0,
             },
@@ -329,7 +335,18 @@ class CompanyScanPipeline:
             data={"company_name": company_name},
         )
 
+        core_lease = get_company_scan_resource_pool(
+            company_core_concurrency
+        ).lease(task_id=task_id)
+        mobile_task: asyncio.Task[list[Any]] | None = None
+        mobile_started = asyncio.Event()
         try:
+            await self._update_progress(
+                task_id,
+                "waiting_core",
+                "等待公司扫描网络与 AI 并发资源...",
+            )
+            await core_lease.acquire()
             # ── 阶段 1: 公司标准化与场景路由并发执行 ──
             logger.info(f"[company_scan] task={task_id} 阶段1: 识别公司 '{company_name}'")
             await self._update_progress(task_id, "routing", "识别法定主体、根域名和搜索别名...")
@@ -673,6 +690,7 @@ class CompanyScanPipeline:
                             result["wechat"].get("priority") or "normal"
                         ),
                         requested_by=requested_by,
+                        started_event=mobile_started,
                     ),
                 ))
 
@@ -701,7 +719,39 @@ class CompanyScanPipeline:
                     "scanning",
                     f"并行执行 {len(primary_jobs)} 条根 Target 数据源流水线...",
                 )
-                sub_results = await self._gather_named_jobs(primary_jobs)
+                mobile_jobs = [job for job in primary_jobs if job[0] == "wechat"]
+                core_jobs = [job for job in primary_jobs if job[0] != "wechat"]
+                mobile_task = (
+                    asyncio.create_task(
+                        self._gather_named_jobs(mobile_jobs),
+                        name=f"company-wechat:{task_id}",
+                    )
+                    if mobile_jobs
+                    else None
+                )
+                core_results = await self._gather_named_jobs(core_jobs)
+                mobile_results: list[Any] = []
+                if mobile_task is not None:
+                    core_lease.release()
+                    if not mobile_task.done():
+                        await self._update_progress(
+                            task_id,
+                            "mobile_scanning" if mobile_started.is_set() else "waiting_mobile",
+                            (
+                                "公众号任务正在采集..."
+                                if mobile_started.is_set()
+                                else "网络与 API 扫描已让出并发资源，公众号任务进入手机队列..."
+                            ),
+                        )
+                    mobile_results = await mobile_task
+                    await self._update_progress(
+                        task_id,
+                        "waiting_core",
+                        "公众号采集结束，等待资源汇总扫描结果...",
+                    )
+                    await core_lease.acquire()
+                primary_jobs = [*core_jobs, *mobile_jobs]
+                sub_results = [*core_results, *mobile_results]
 
                 failed_primary_jobs: set[str] = set()
                 for (kind, _operation), sub in zip(primary_jobs, sub_results):
@@ -890,41 +940,43 @@ class CompanyScanPipeline:
                     target_id=target_id,
                     run_task_id=task_id,
                 )
-            from api.services.notifications import notify_target_collection_completed
+            if not batch_id:
+                from api.services.notifications import notify_target_collection_completed
 
-            notify_target_collection_completed(
-                project_id=project_id,
-                task_id=task_id,
-                target_id=target_id,
-                target_name=normalized_name,
-                source="company_scan_pipeline",
-                summary={
-                    "assets_discovered": result["assets"].get("discovered", 0),
-                    "assets_alive": result["assets"].get("alive", 0),
-                    "url_findings": result["url_scan"].get("findings_count", 0),
-                    "xhs_notes": result["xhs"].get("notes_count", 0),
-                    "xhs_profiles": result["xhs"].get("profiles_count", 0),
-                    "wechat_records": result["wechat"].get("total", 0),
-                    "wechat_documents": result["wechat"].get("documents", 0),
-                    "wechat_contacts": result["wechat"].get("contacts", 0),
-                    "wechat_target_selected": result["wechat"].get("selected", False),
-                    "wechat_target_priority": result["wechat"].get("priority"),
-                    "bidding_records": result["bidding"].get("records_fetched", 0),
-                    "bidding_findings": result["bidding"].get("findings_count", 0),
-                    "bidding_copywritings": result["bidding"].get("copywritings_count", 0),
-                    "scholar_articles": result["scholar"].get("articles_total", 0),
-                    "scholar_contacts": result["scholar"].get("contacts_total", 0),
-                    "scholar_direction_source": result["scholar"].get("direction_source", ""),
-                    "profile_copywritings": result["profile_copywritings"].get("count", 0),
-                    "wholly_owned_entities": len(wholly_owned_entities),
-                    "xhs_targets_selected": result["xhs"]["selection"].get(
-                        "selected_count", 0
-                    ),
-                    "xhs_targets_skipped": result["xhs"]["selection"].get(
-                        "skipped_count", 0
-                    ),
-                },
-            )
+                enabled_modules = []
+                if enable_asset_discovery or enable_url_scan:
+                    enabled_modules.append("网站")
+                if enable_bidding:
+                    enabled_modules.append("招投标")
+                if enable_wechat:
+                    enabled_modules.append("公众号")
+                if enable_scholar:
+                    enabled_modules.append("学者")
+                if enable_xhs:
+                    enabled_modules.append("小红书")
+                notify_target_collection_completed(
+                    project_id=project_id,
+                    task_id=task_id,
+                    target_id=target_id,
+                    target_name=normalized_name,
+                    source="company_scan_pipeline",
+                    summary={
+                        "enabled_modules": enabled_modules,
+                        "assets_alive": result["assets"].get("alive", 0),
+                        "url_findings": result["url_scan"].get("findings_count", 0),
+                        "xhs_notes": result["xhs"].get("notes_count", 0),
+                        "xhs_profiles": result["xhs"].get("profiles_count", 0),
+                        "wechat_documents": result["wechat"].get("documents", 0),
+                        "wechat_contacts": result["wechat"].get("contacts", 0),
+                        "bidding_records": result["bidding"].get("records_fetched", 0),
+                        "bidding_findings": result["bidding"].get("findings_count", 0),
+                        "scholar_articles": result["scholar"].get("articles_total", 0),
+                        "scholar_verified_articles": result["scholar"].get(
+                            "verified_articles_total", 0
+                        ),
+                        "scholar_contacts": result["scholar"].get("contacts_total", 0),
+                    },
+                )
             await self._update_progress(task_id, "completed", "综合公司扫描完成")
             obs_log(
                 "综合公司扫描流水线完成", task_id=task_id, project_id=project_id,
@@ -974,21 +1026,28 @@ class CompanyScanPipeline:
                 source="company_scan_pipeline", level="error", event="pipeline_error",
                 data={"error": str(e)},
             )
-            from api.services.notifications import notify_target_collection_completed
+            if not batch_id:
+                from api.services.notifications import notify_target_collection_completed
 
-            failed_identity = result.get("identity") or {}
-            notify_target_collection_completed(
-                project_id=project_id,
-                task_id=task_id,
-                target_id=str(failed_identity.get("target_id") or ""),
-                target_name=str(
-                    failed_identity.get("normalized_name") or company_name
-                ),
-                source="company_scan_pipeline",
-                summary={"error": str(e)},
-                status="failed",
-            )
+                failed_identity = result.get("identity") or {}
+                notify_target_collection_completed(
+                    project_id=project_id,
+                    task_id=task_id,
+                    target_id=str(failed_identity.get("target_id") or ""),
+                    target_name=str(
+                        failed_identity.get("normalized_name") or company_name
+                    ),
+                    source="company_scan_pipeline",
+                    summary={"error": str(e)},
+                    status="failed",
+                )
             raise
+        finally:
+            core_lease.release()
+            if mobile_task is not None:
+                if not mobile_task.done():
+                    mobile_task.cancel()
+                await asyncio.gather(mobile_task, return_exceptions=True)
 
         return result
 
@@ -1050,8 +1109,18 @@ class CompanyScanPipeline:
         device_id: str,
         collection_priority: str = "normal",
         requested_by: str = "",
+        started_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         from api.services.wechat_collection import run_company_wechat_collection
+
+        async def _on_started() -> None:
+            if started_event is not None:
+                started_event.set()
+            await self._update_progress(
+                task_id,
+                "mobile_scanning",
+                "公众号任务已获得手机，正在采集...",
+            )
 
         return await run_company_wechat_collection(
             self.db,
@@ -1062,6 +1131,7 @@ class CompanyScanPipeline:
             device_id=device_id,
             collection_priority=collection_priority,
             requested_by=requested_by,
+            on_started=_on_started,
         )
 
     async def _run_scholar_collection(
@@ -1086,6 +1156,7 @@ class CompanyScanPipeline:
             direction=str(direction or "").strip(),
             unit_en=str(unit_en or "").strip(),
             limit=max(1, min(int(limit or 10), 50)),
+            notify_completion=False,
         )
         return {
             "kind": "scholar",
@@ -1270,25 +1341,6 @@ class CompanyScanPipeline:
                         )
                     except Exception as exc:  # noqa: BLE001
                         scan_result["errors"].append(f"画像话术生成失败: {exc}")
-                from api.services.notifications import notify_target_collection_completed
-
-                notify_target_collection_completed(
-                    project_id=project_id,
-                    task_id=f"{task_id}_wholly_owned_{index}",
-                    target_id=target_id,
-                    target_name=name,
-                    source="company_scan_pipeline.wholly_owned_entity",
-                    summary={
-                        "assets_discovered": scan_result["assets"].get("discovered", 0),
-                        "assets_alive": scan_result["assets"].get("alive", 0),
-                        "url_findings": scan_result["url_scan"].get("findings_count", 0),
-                        "xhs_notes": scan_result["xhs"].get("notes_count", 0),
-                        "xhs_profiles": scan_result["xhs"].get("profiles_count", 0),
-                        "profile_copywritings": scan_result["profile_copywritings"].get("count", 0),
-                        "errors": scan_result["errors"],
-                    },
-                    status="partial" if scan_result["errors"] else "completed",
-                )
                 return {**entity, "scan": scan_result}
 
         scanned = await asyncio.gather(
@@ -1311,22 +1363,9 @@ class CompanyScanPipeline:
             if isinstance(item, Exception):
                 entity = entities[index]
                 entity_name = str(entity.get("name") or index)
-                entity_task_id = f"{task_id}_wholly_owned_{index}"
                 error_message = str(item)
                 errors.append(f"{entity_name}: {error_message}")
                 output_entities.append({**entity, "scan": {"errors": [error_message]}})
-
-                from api.services.notifications import notify_target_collection_completed
-
-                notify_target_collection_completed(
-                    project_id=project_id,
-                    task_id=entity_task_id,
-                    target_id=str(entity.get("target_id") or ""),
-                    target_name=entity_name,
-                    source="company_scan_pipeline.wholly_owned_entity",
-                    summary={"error": error_message},
-                    status="failed",
-                )
                 continue
             output_entities.append(item)
             scan = item.get("scan") or {}

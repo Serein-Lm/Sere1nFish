@@ -89,6 +89,7 @@ async def run_scholar_contact_collect(
     dry_run: bool = False,
     bulk: bool = False,
     max_articles: int = 2000,
+    notify_completion: bool = True,
 ) -> dict[str, Any]:
     """
     按单位+方向收集学者学术联系，结构化入库。
@@ -107,6 +108,9 @@ async def run_scholar_contact_collect(
         "task_id": task_id, "project_id": project_id,
         "unit": unit, "direction": direction, "unit_en": unit_en or unit,
         "matched_institution": "", "articles_total": 0, "contacts_total": 0,
+        "institution_verified": False,
+        "verified_articles_total": 0,
+        "unverified_articles_total": 0,
         "articles_inserted": 0, "articles_updated": 0,
         "contacts_inserted": 0, "contacts_updated": 0,
         "corresponding_count": 0, "dry_run": dry_run,
@@ -145,6 +149,13 @@ async def run_scholar_contact_collect(
                 hit_total = page.get("hit_count")
                 art_docs, con_docs = scholar_tools.normalize_bulk_batch(unit, page["articles"])
                 summary["articles_total"] += len(art_docs)
+                verified_in_batch = sum(
+                    1 for article in art_docs if article.get("unit_verified")
+                )
+                summary["verified_articles_total"] += verified_in_batch
+                summary["unverified_articles_total"] += (
+                    len(art_docs) - verified_in_batch
+                )
                 summary["contacts_total"] += len(con_docs)
                 summary["corresponding_count"] += sum(
                     1 for c in con_docs if c.get("is_corresponding"))
@@ -184,6 +195,9 @@ async def run_scholar_contact_collect(
             api = discover_out.get("api_results", {}) or {}
             inst = api.get("unit") or {}
             summary["matched_institution"] = inst.get("name", "")
+            summary["institution_verified"] = bool(
+                api.get("institution_verified", False)
+            )
 
             # 归一化
             sources, articles, contacts = scholar_tools.normalize_to_docs(discover_out)
@@ -218,6 +232,12 @@ async def run_scholar_contact_collect(
                             contact_docs.append(c)
 
             summary["articles_total"] = len(article_docs)
+            summary["verified_articles_total"] = sum(
+                1 for article in article_docs if article.get("unit_verified")
+            )
+            summary["unverified_articles_total"] = (
+                summary["articles_total"] - summary["verified_articles_total"]
+            )
             summary["contacts_total"] = len(contact_docs)
             summary["corresponding_count"] = sum(
                 1 for c in contact_docs if c.get("is_corresponding"))
@@ -244,6 +264,7 @@ async def run_scholar_contact_collect(
             data={
                 "matched_institution": summary["matched_institution"],
                 "articles_total": summary["articles_total"],
+                "verified_articles_total": summary["verified_articles_total"],
                 "contacts_total": summary["contacts_total"],
                 "corresponding_count": summary["corresponding_count"],
                 "dry_run": dry_run,
@@ -254,7 +275,7 @@ async def run_scholar_contact_collect(
             f"articles={summary['articles_total']} contacts={summary['contacts_total']} "
             f"corr={summary['corresponding_count']} dry_run={dry_run}"
         )
-        if not dry_run:
+        if not dry_run and notify_completion:
             notify_event_background(
                 event="scholar_contact_done", level="info",
                 title="学者联系采集完成",

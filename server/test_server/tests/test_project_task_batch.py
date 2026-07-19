@@ -58,6 +58,43 @@ def test_project_task_batch_uses_bounded_concurrency(monkeypatch) -> None:
     assert sorted(completed) == [f"task-{index}" for index in range(5)]
 
 
+def test_project_task_batch_emits_one_aggregate_completion(monkeypatch) -> None:
+    import api.services.project_task_batch as batch_service
+
+    notifications: list[tuple[str, str]] = []
+
+    async def executor(_task_id, _project_id, _task_type, _params):
+        return None
+
+    async def notify(*, batch_id: str, project_id: str) -> None:
+        notifications.append((batch_id, project_id))
+
+    monkeypatch.setattr(batch_service, "obs_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(batch_service, "_notify_company_batch_completion", notify)
+    jobs = [
+        ProjectTaskJob(
+            task_id=f"task-{index}",
+            project_id="project-1",
+            task_type="company_scan",
+            params={"company_name": f"公司 {index}"},
+        )
+        for index in range(3)
+    ]
+
+    asyncio.run(
+        run_project_task_batch(
+            batch_id="batch-1",
+            project_id="project-1",
+            jobs=jobs,
+            executor=executor,
+            concurrency=2,
+            aggregate_notification=True,
+        )
+    )
+
+    assert notifications == [("batch-1", "project-1")]
+
+
 def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) -> None:
     from api.auth import User
     from api.routers import project_api
@@ -115,6 +152,7 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
         "鞍钢集团有限公司",
     ]
     assert all(doc["batch_id"] == response["batch_id"] for doc in captured_documents)
+    assert all(doc["batch_concurrency"] == 2 for doc in captured_documents)
     assert [doc["batch_index"] for doc in captured_documents] == [1, 2]
     assert all("company_scan_concurrency" not in doc["params"] for doc in captured_documents)
     assert captured_coroutines[0][1] == f"task-batch:{response['batch_id']}"

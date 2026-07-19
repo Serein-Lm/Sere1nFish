@@ -74,6 +74,48 @@ class ProjectTaskBatchStage(Stage):
         )
 
 
+async def _notify_company_batch_completion(
+    *,
+    batch_id: str,
+    project_id: str,
+) -> None:
+    from api.dao import tasks as tasks_dao
+    from api.db.mongodb import get_db
+    from api.services.notifications import notify_company_scan_batch_completed
+
+    db = get_db()
+    claim = await tasks_dao.claim_completed_batch_notification(db, batch_id=batch_id)
+    if not claim:
+        return
+    task_documents, owner_task_id, claim_token = claim
+    try:
+        dispatched = await notify_company_scan_batch_completed(
+            project_id=project_id,
+            batch_id=batch_id,
+            tasks=task_documents,
+        )
+        if dispatched.ok or dispatched.skipped:
+            await tasks_dao.complete_batch_notification_claim(
+                db,
+                owner_task_id=owner_task_id,
+                claim_token=claim_token,
+            )
+            return
+        await tasks_dao.release_batch_notification_claim(
+            db,
+            owner_task_id=owner_task_id,
+            claim_token=claim_token,
+        )
+        logger.warning("批次完成通知发送失败，已释放重试锁 | batch=%s", batch_id)
+    except Exception:
+        await tasks_dao.release_batch_notification_claim(
+            db,
+            owner_task_id=owner_task_id,
+            claim_token=claim_token,
+        )
+        logger.exception("批次完成通知异常，已释放重试锁 | batch=%s", batch_id)
+
+
 async def run_project_task_batch(
     *,
     batch_id: str,
@@ -81,12 +123,22 @@ async def run_project_task_batch(
     jobs: list[ProjectTaskJob],
     executor: TaskExecutor,
     concurrency: int,
+    dispatch_concurrency: int | None = None,
+    aggregate_notification: bool = False,
 ) -> None:
     """Execute a task batch with queue backpressure and bounded concurrency."""
     if not jobs:
         return
 
-    bounded_concurrency = max(1, min(int(concurrency or 1), len(jobs)))
+    core_concurrency = max(1, min(int(concurrency or 1), len(jobs)))
+    bounded_concurrency = max(
+        1,
+        min(
+            int(dispatch_concurrency or core_concurrency),
+            len(jobs),
+            MAX_COMPANY_SCAN_BATCH_SIZE,
+        ),
+    )
     obs_log(
         "批量项目任务启动",
         project_id=project_id,
@@ -97,14 +149,16 @@ async def run_project_task_batch(
             "batch_id": batch_id,
             "task_count": len(jobs),
             "concurrency": bounded_concurrency,
+            "core_concurrency": core_concurrency,
         },
     )
     logger.notice(
-        "批量项目任务启动 | batch=%s project=%s tasks=%s concurrency=%s",
+        "批量项目任务启动 | batch=%s project=%s tasks=%s dispatch=%s core=%s",
         batch_id,
         project_id,
         len(jobs),
         bounded_concurrency,
+        core_concurrency,
     )
 
     await run_stream_pipeline(
@@ -128,6 +182,12 @@ async def run_project_task_batch(
         state={"batch_id": batch_id, "project_id": project_id},
         pipeline_id=f"task-batch:{batch_id}",
     )
+
+    if aggregate_notification:
+        await _notify_company_batch_completion(
+            batch_id=batch_id,
+            project_id=project_id,
+        )
 
     obs_log(
         "批量项目任务结束",

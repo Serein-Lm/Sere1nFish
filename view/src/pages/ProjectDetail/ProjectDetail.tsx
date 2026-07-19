@@ -66,7 +66,9 @@ import {
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
 import {
+  listScholarArticles,
   listScholarContacts,
+  type ScholarArticle,
   type ScholarContact,
 } from '../../services/scholarContactService'
 import { getConfigSection } from '../../services/configService'
@@ -617,6 +619,10 @@ export default function ProjectDetail() {
   const [scholarContacts, setScholarContacts] = useState<ScholarContact[]>([])
   const [scholarContactsTotal, setScholarContactsTotal] = useState(0)
   const [scholarLoading, setScholarLoading] = useState(false)
+  const [scholarArticles, setScholarArticles] = useState<ScholarArticle[]>([])
+  const [scholarArticlesTotal, setScholarArticlesTotal] = useState(0)
+  const [scholarArticlesLoading, setScholarArticlesLoading] = useState(false)
+  const [scholarArticlesOnlyVerified, setScholarArticlesOnlyVerified] = useState(false)
   const [scholarOnlyCorresponding, setScholarOnlyCorresponding] = useState(false)
   const [scholarOnlyVerified, setScholarOnlyVerified] = useState(false)
   const [biddingRecords, setBiddingRecords] = useState<BiddingRecord[]>([])
@@ -719,6 +725,24 @@ export default function ProjectDetail() {
       console.error('加载学者学术联系失败:', e)
     } finally {
       setScholarLoading(false)
+    }
+  }
+
+  const fetchScholarArticles = async (pid: string, onlyVerified?: boolean) => {
+    const verified = onlyVerified ?? scholarArticlesOnlyVerified
+    setScholarArticlesLoading(true)
+    try {
+      const res = await listScholarArticles(pid, {
+        page: 1,
+        page_size: 200,
+        only_verified: verified,
+      })
+      setScholarArticles(res.items)
+      setScholarArticlesTotal(res.total)
+    } catch (e) {
+      console.error('加载学者文章候选失败:', e)
+    } finally {
+      setScholarArticlesLoading(false)
     }
   }
 
@@ -1010,6 +1034,7 @@ export default function ProjectDetail() {
           fetchWechatRecords(projectId)
           // 加载学者学术联系
           fetchScholarContacts(projectId)
+          fetchScholarArticles(projectId)
           // 加载小红书数据
           await Promise.all([fetchXhsNotes(projectId), fetchXhsProfiles(projectId)])
           // 加载抖音数据
@@ -3190,53 +3215,146 @@ export default function ProjectDetail() {
       },
     ]
 
+    const buildCandidateUrl = (article: ScholarArticle): string | null => {
+      if (article.doi) {
+        const doi = article.doi.trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
+        if (doi) return `https://doi.org/${encodeURI(doi)}`
+      }
+      if (article.pmcid) return `https://europepmc.org/article/PMC/${encodeURIComponent(article.pmcid.replace(/^PMC/i, ''))}`
+      return article.landing_page || null
+    }
+    const articleColumns: ColumnsType<ScholarArticle> = [
+      {
+        title: '对应度',
+        key: 'verified',
+        width: 100,
+        render: (_, article) => article.unit_verified ? (
+          <Tooltip title={article.match_evidence || '机构信息与目标单位匹配'}>
+            <Tag color="green">已验证</Tag>
+          </Tooltip>
+        ) : (
+          <Tooltip title={article.match_evidence || '数据源未提供足够的机构对应证据'}>
+            <Tag color="orange">待核验</Tag>
+          </Tooltip>
+        ),
+      },
+      {
+        title: '文章',
+        dataIndex: 'title',
+        key: 'title',
+        ellipsis: true,
+        render: (title: string, article) => {
+          const url = buildCandidateUrl(article)
+          return url ? (
+            <a href={url} target="_blank" rel="noreferrer" title={title}>{title || article.article_id}</a>
+          ) : (title || article.article_id)
+        },
+      },
+      { title: '单位', dataIndex: 'unit', key: 'unit', width: 220, ellipsis: true, render: (value) => value || '-' },
+      { title: '方向', dataIndex: 'direction', key: 'direction', width: 220, ellipsis: true, render: (value) => value || '-' },
+      { title: '年份', dataIndex: 'year', key: 'year', width: 80, render: (value) => value || '-' },
+      {
+        title: '来源',
+        dataIndex: 'source_keys',
+        key: 'source_keys',
+        width: 180,
+        render: (values: string[]) => <Space size={4} wrap>{(values || []).map((value) => <Tag key={value}>{value}</Tag>)}</Space>,
+      },
+    ]
+
     return (
-      <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-          <Text type="secondary">
-            学者学术联系来自「学者联系发现」任务(按单位+方向从公开学术源抽取文章绑定的通讯邮箱),仅用于一对一学术合作,不做整单位名单聚合。
-          </Text>
-          <Space>
-            <span>仅通讯作者</span>
-            <Checkbox
-              checked={scholarOnlyCorresponding}
-              onChange={(e) => {
-                setScholarOnlyCorresponding(e.target.checked)
-                if (projectId) fetchScholarContacts(projectId, e.target.checked, scholarOnlyVerified)
-              }}
-            />
-            <span>仅目标单位验证</span>
-            <Checkbox
-              checked={scholarOnlyVerified}
-              onChange={(e) => {
-                setScholarOnlyVerified(e.target.checked)
-                if (projectId) fetchScholarContacts(projectId, scholarOnlyCorresponding, e.target.checked)
-              }}
-            />
-            <Button
-              size="small"
-              icon={<SyncOutlined />}
-              loading={scholarLoading}
-              onClick={() => { if (projectId) fetchScholarContacts(projectId) }}
-            >
-              刷新
-            </Button>
-          </Space>
-        </div>
-        <Table<ScholarContact>
-          rowKey="doc_id"
-          size="small"
-          loading={scholarLoading}
-          columns={columns}
-          dataSource={scholarContacts}
-          locale={{
-            emptyText: (
-              <Empty description='暂无学者联系，请在「任务」中创建"学者联系发现"任务(填写单位+研究方向)' />
+      <Tabs
+        size="small"
+        items={[
+          {
+            key: 'articles',
+            label: `文章候选 (${scholarArticlesTotal})`,
+            children: (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                  <Space>
+                    <Checkbox
+                      checked={scholarArticlesOnlyVerified}
+                      onChange={(event) => {
+                        setScholarArticlesOnlyVerified(event.target.checked)
+                        if (projectId) fetchScholarArticles(projectId, event.target.checked)
+                      }}
+                    >
+                      仅目标单位已验证
+                    </Checkbox>
+                    <Button
+                      size="small"
+                      icon={<SyncOutlined />}
+                      loading={scholarArticlesLoading}
+                      onClick={() => { if (projectId) fetchScholarArticles(projectId) }}
+                    >
+                      刷新
+                    </Button>
+                  </Space>
+                </div>
+                <Table<ScholarArticle>
+                  rowKey="doc_id"
+                  size="small"
+                  loading={scholarArticlesLoading}
+                  columns={articleColumns}
+                  dataSource={scholarArticles}
+                  locale={{ emptyText: <Empty description="暂无学者文章候选" /> }}
+                  pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 篇` }}
+                  scroll={{ x: 980 }}
+                />
+              </div>
             ),
-          }}
-          pagination={{ pageSize: 15, showTotal: (t) => `共 ${t} 条` }}
-        />
-      </div>
+          },
+          {
+            key: 'contacts',
+            label: `联系方式 (${scholarContactsTotal})`,
+            children: (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                  <Space>
+                    <Checkbox
+                      checked={scholarOnlyCorresponding}
+                      onChange={(event) => {
+                        setScholarOnlyCorresponding(event.target.checked)
+                        if (projectId) fetchScholarContacts(projectId, event.target.checked, scholarOnlyVerified)
+                      }}
+                    >
+                      仅通讯作者
+                    </Checkbox>
+                    <Checkbox
+                      checked={scholarOnlyVerified}
+                      onChange={(event) => {
+                        setScholarOnlyVerified(event.target.checked)
+                        if (projectId) fetchScholarContacts(projectId, scholarOnlyCorresponding, event.target.checked)
+                      }}
+                    >
+                      仅目标单位已验证
+                    </Checkbox>
+                    <Button
+                      size="small"
+                      icon={<SyncOutlined />}
+                      loading={scholarLoading}
+                      onClick={() => { if (projectId) fetchScholarContacts(projectId) }}
+                    >
+                      刷新
+                    </Button>
+                  </Space>
+                </div>
+                <Table<ScholarContact>
+                  rowKey="doc_id"
+                  size="small"
+                  loading={scholarLoading}
+                  columns={columns}
+                  dataSource={scholarContacts}
+                  locale={{ emptyText: <Empty description={`已扫描 ${scholarArticlesTotal} 篇候选文章，暂无公开学术联系方式`} /> }}
+                  pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 条` }}
+                  scroll={{ x: 980 }}
+                />
+              </div>
+            ),
+          },
+        ]}
+      />
     )
   }
 
@@ -3533,7 +3651,7 @@ export default function ProjectDetail() {
         <Space>
           <TeamOutlined />
           学者联系
-          <Tag>{scholarContactsTotal}</Tag>
+          <Tag>{scholarArticlesTotal}篇 / {scholarContactsTotal}联系</Tag>
         </Space>
       ),
       children: renderScholarsContent(),

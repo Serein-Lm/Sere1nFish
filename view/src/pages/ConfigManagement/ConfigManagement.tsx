@@ -549,7 +549,7 @@ export default function ConfigManagement() {
     setEditingBot(null)
     dingtalkForm.resetFields()
     dingtalkForm.setFieldsValue({
-      stream_enabled: true,
+      stream_enabled: false,
       ai_card_streaming: true,
       reconnect_seconds: 5,
     })
@@ -1470,9 +1470,9 @@ export default function ConfigManagement() {
             ) : null}
           </Form.Item>
           <Divider titlePlacement="start" plain>主动通知 Webhook（可选）</Divider>
-          <Form.Item name="access_token" label="Access Token"
-            extra={editingBot ? '留空则不修改' : '自定义机器人 Webhook URL 中的 access_token 参数'}>
-            <Input.Password placeholder="输入 Access Token" />
+          <Form.Item name="access_token" label="Webhook URL / Access Token"
+            extra={editingBot ? '留空则不修改；可粘贴完整 Webhook URL' : '可粘贴完整 Webhook URL 或仅输入 access_token'}>
+            <Input.Password placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
           </Form.Item>
           <Form.Item name="secret" label="签名密钥 (Secret)"
             extra="安全设置中的加签密钥，以 SEC 开头">

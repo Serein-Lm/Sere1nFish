@@ -9,12 +9,10 @@ handling.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from api.utils.config_crypto import is_sensitive_key
 from core.logger import get_logger
 from core.background import spawn_background
 
@@ -54,16 +52,6 @@ class NotificationDispatchResult:
             "message": self.message,
             "results": [asdict(item) for item in self.results],
         }
-
-
-def _redact(value: Any, *, parent_key: str = "") -> Any:
-    if parent_key and is_sensitive_key(parent_key):
-        return "***"
-    if isinstance(value, dict):
-        return {str(key): _redact(child, parent_key=str(key)) for key, child in value.items()}
-    if isinstance(value, list):
-        return [_redact(item, parent_key=parent_key) for item in value]
-    return value
 
 
 def _clip(text: str, limit: int = 8000) -> str:
@@ -180,32 +168,12 @@ def format_notification_markdown(
     task_id: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> str:
-    """Build a consistent Markdown payload for all notification channels."""
-    lines = [
-        f"## {title}",
-        "",
-        f"- Event: `{event}`",
-        f"- Level: `{level}`",
-        f"- Time: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`",
-    ]
-    if source:
-        lines.append(f"- Source: `{source}`")
-    if project_id:
-        lines.append(f"- Project: `{project_id}`")
-    if task_id:
-        lines.append(f"- Task: `{task_id}`")
+    """Build concise human-facing Markdown; context stays internal for routing/logs."""
+    del event, level, source, project_id, task_id, context
+    lines = [f"## {title}"]
     if content:
         lines.extend(["", _clip(content)])
-    if context:
-        redacted = _redact(context)
-        lines.extend(
-            [
-                "",
-                "```json",
-                _clip(json.dumps(redacted, ensure_ascii=False, indent=2), 4000),
-                "```",
-            ]
-        )
+    lines.extend(["", f"> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
     return "\n".join(lines)
 
 
@@ -388,6 +356,7 @@ def notify_target_collection_completed(
     status: str = "completed",
 ) -> bool:
     """统一发送一次 Target 采集完成事件，具体通道由通知策略选择。"""
+    summary = dict(summary or {})
     normalized_status = str(status or "completed")
     status_text = {
         "completed": "完成",
@@ -395,14 +364,69 @@ def notify_target_collection_completed(
         "failed": "失败",
     }.get(normalized_status, normalized_status)
     target_label = target_name or target_id or "Target"
+    if normalized_status in {"completed", "partial"}:
+        lines = ["**结论**", f"- 扫描{status_text}"]
+        modules = [str(item) for item in summary.get("enabled_modules") or [] if item]
+        if modules:
+            lines.append(f"- 已执行：{'、'.join(modules)}")
+        metrics = [
+            ("存活网站资产", summary.get("assets_alive", 0)),
+            ("网站高价值发现", summary.get("url_findings", 0)),
+            ("招投标记录", summary.get("bidding_records", 0)),
+            ("招投标高价值发现", summary.get("bidding_findings", 0)),
+            ("公众号归档文章", summary.get("wechat_documents", 0)),
+            ("公众号联系方式", summary.get("wechat_contacts", 0)),
+            ("学者文章", summary.get("scholar_articles", 0)),
+            ("目标单位已验证学者文章", summary.get("scholar_verified_articles", 0)),
+            ("学者联系方式", summary.get("scholar_contacts", 0)),
+            ("小红书笔记", summary.get("xhs_notes", 0)),
+            ("小红书画像", summary.get("xhs_profiles", 0)),
+        ]
+        metric_lines = [
+            f"- {label}：{int(value or 0)}"
+            for label, value in metrics
+            if int(value or 0) > 0
+        ]
+        lines.extend(
+            ["", "**关键数据**", *(
+                metric_lines or ["- 本轮未发现可查看数据"]
+            )]
+        )
+        priorities: list[str] = []
+        if int(summary.get("url_findings") or 0):
+            priorities.append("网站")
+        elif int(summary.get("assets_alive") or 0):
+            priorities.append("网站资产")
+        if int(summary.get("bidding_findings") or 0) or int(
+            summary.get("bidding_records") or 0
+        ):
+            priorities.append("招投标")
+        if int(summary.get("wechat_contacts") or 0) or int(
+            summary.get("wechat_documents") or 0
+        ):
+            priorities.append("公众号")
+        if int(summary.get("scholar_contacts") or 0) or int(
+            summary.get("scholar_verified_articles") or 0
+        ):
+            priorities.append("学者")
+        if int(summary.get("xhs_profiles") or 0):
+            priorities.append("小红书")
+        lines.extend(
+            [
+                "",
+                "**重点**",
+                "- " + ("、".join(priorities) if priorities else "本轮暂无高价值结果"),
+            ]
+        )
+        content = "\n".join(lines)
+    else:
+        content = "**结论**\n- 扫描失败"
+        if summary.get("error"):
+            content += f"\n- 原因：{_clip(str(summary['error']), 300)}"
     return notify_event_background(
         event="target.collection.completed",
         title=f"{target_label} 信息收集{status_text}",
-        content=(
-            "目标公司本轮信息收集已结束，可在项目中查看最终产物。"
-            if normalized_status == "completed"
-            else "目标公司本轮信息收集已结束，请结合通知摘要检查异常。"
-        ),
+        content=content,
         level="notice" if normalized_status == "completed" else "warning",
         source=source,
         project_id=project_id,
@@ -411,6 +435,219 @@ def notify_target_collection_completed(
             "target_id": target_id,
             "target_name": target_name,
             "status": normalized_status,
-            "summary": summary or {},
+            "summary": summary,
         },
+    )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+_BATCH_METRIC_KEYS = (
+    "assets_alive",
+    "url_findings",
+    "bidding_records",
+    "bidding_findings",
+    "wechat_documents",
+    "wechat_contacts",
+    "scholar_articles",
+    "scholar_verified_articles",
+    "scholar_contacts",
+    "xhs_notes",
+    "xhs_profiles",
+)
+
+
+def _company_scan_task_summary(task: dict[str, Any]) -> dict[str, Any]:
+    result = _mapping(task.get("result"))
+    identity = _mapping(result.get("identity"))
+    params = _mapping(task.get("params"))
+    assets = _mapping(result.get("assets"))
+    url_scan = _mapping(result.get("url_scan"))
+    bidding = _mapping(result.get("bidding"))
+    wechat = _mapping(result.get("wechat"))
+    scholar = _mapping(result.get("scholar"))
+    xhs = _mapping(result.get("xhs"))
+    metrics = {
+        "assets_alive": _count(assets.get("alive")),
+        "url_findings": _count(url_scan.get("findings_count")),
+        "bidding_records": _count(bidding.get("records_fetched")),
+        "bidding_findings": _count(bidding.get("findings_count")),
+        "wechat_documents": _count(wechat.get("documents")),
+        "wechat_contacts": _count(wechat.get("contacts")),
+        "scholar_articles": _count(scholar.get("articles_total")),
+        "scholar_verified_articles": _count(scholar.get("verified_articles_total")),
+        "scholar_contacts": _count(scholar.get("contacts_total")),
+        "xhs_notes": _count(xhs.get("notes_count")),
+        "xhs_profiles": _count(xhs.get("profiles_count")),
+    }
+    company_name = str(
+        identity.get("normalized_name")
+        or result.get("company_name")
+        or params.get("company_name")
+        or task.get("task_id")
+        or "未知目标"
+    )
+    return {
+        "company_name": company_name,
+        "status": str(task.get("status") or "unknown"),
+        "error": str(task.get("error") or ""),
+        "metrics": metrics,
+        "params": params,
+        "batch_index": _count(task.get("batch_index")),
+    }
+
+
+def _enabled_batch_modules(items: list[dict[str, Any]]) -> list[str]:
+    enabled: list[str] = []
+    params_list = [_mapping(item.get("params")) for item in items]
+    if any(
+        params.get("enable_asset_discovery", True)
+        or params.get("enable_url_scan", True)
+        for params in params_list
+    ):
+        enabled.append("网站")
+    if any(params.get("enable_bidding", True) for params in params_list):
+        enabled.append("招投标")
+    if any(params.get("enable_wechat", False) for params in params_list):
+        enabled.append("公众号")
+    if any(params.get("enable_scholar", False) for params in params_list):
+        enabled.append("学者")
+    if any(params.get("enable_xhs", False) for params in params_list):
+        enabled.append("小红书")
+    return enabled
+
+
+def build_company_scan_batch_notification(
+    tasks: list[dict[str, Any]],
+) -> tuple[str, str, dict[str, Any]]:
+    """Build one compact completion notification for a multi-company batch."""
+    items = [_company_scan_task_summary(task) for task in tasks]
+    items.sort(key=lambda item: item["batch_index"])
+    completed = sum(item["status"] == "completed" for item in items)
+    failed_items = [item for item in items if item["status"] != "completed"]
+    totals = {key: 0 for key in _BATCH_METRIC_KEYS}
+    for item in items:
+        for key in totals:
+            totals[key] += item["metrics"][key]
+
+    lines = [
+        "**结论**",
+        f"- 共 {len(items)} 家：完成 {completed}，失败 {len(failed_items)}",
+    ]
+    enabled_modules = _enabled_batch_modules(items)
+    if enabled_modules:
+        lines.append(f"- 已执行：{'、'.join(enabled_modules)}")
+
+    lines.extend(["", "**关键数据**"])
+    if "网站" in enabled_modules:
+        lines.append(
+            f"- 网站：存活 {totals['assets_alive']}，高价值 {totals['url_findings']}"
+        )
+    if "招投标" in enabled_modules:
+        lines.append(
+            f"- 招投标：记录 {totals['bidding_records']}，高价值 {totals['bidding_findings']}"
+        )
+    if "公众号" in enabled_modules:
+        lines.append(
+            f"- 公众号：文章 {totals['wechat_documents']}，联系方式 {totals['wechat_contacts']}"
+        )
+    if "学者" in enabled_modules:
+        lines.append(
+            "- 学者：候选文章 "
+            f"{totals['scholar_articles']}，目标单位验证 {totals['scholar_verified_articles']}，"
+            f"联系方式 {totals['scholar_contacts']}"
+        )
+    if "小红书" in enabled_modules:
+        lines.append(
+            f"- 小红书：笔记 {totals['xhs_notes']}，画像 {totals['xhs_profiles']}"
+        )
+    if not enabled_modules:
+        lines.append("- 未识别到已执行模块")
+
+    ranked: list[tuple[int, int, str]] = []
+    for item in items:
+        metrics = item["metrics"]
+        score = (
+            metrics["url_findings"] * 8
+            + metrics["bidding_findings"] * 7
+            + metrics["wechat_contacts"] * 8
+            + metrics["scholar_contacts"] * 8
+            + metrics["xhs_profiles"] * 6
+            + metrics["wechat_documents"] * 3
+            + metrics["scholar_verified_articles"] * 3
+            + metrics["bidding_records"] * 2
+            + metrics["xhs_notes"]
+            + metrics["assets_alive"]
+        )
+        highlights: list[str] = []
+        if metrics["url_findings"]:
+            highlights.append(f"网站高价值 {metrics['url_findings']}")
+        elif metrics["assets_alive"]:
+            highlights.append(f"存活网站 {metrics['assets_alive']}")
+        if metrics["bidding_findings"]:
+            highlights.append(f"招投标高价值 {metrics['bidding_findings']}")
+        elif metrics["bidding_records"]:
+            highlights.append(f"招投标 {metrics['bidding_records']}")
+        if metrics["wechat_contacts"] or metrics["wechat_documents"]:
+            highlights.append(
+                f"公众号 {metrics['wechat_documents']}/{metrics['wechat_contacts']}"
+            )
+        if metrics["scholar_contacts"] or metrics["scholar_verified_articles"]:
+            highlights.append(
+                "学者验证/联系 "
+                f"{metrics['scholar_verified_articles']}/{metrics['scholar_contacts']}"
+            )
+        if metrics["xhs_profiles"] or metrics["xhs_notes"]:
+            highlights.append(f"小红书 {metrics['xhs_notes']}/{metrics['xhs_profiles']}")
+        if score > 0 and highlights:
+            ranked.append(
+                (score, -item["batch_index"], f"{item['company_name']}：{'、'.join(highlights)}")
+            )
+    ranked.sort(reverse=True)
+    lines.extend(["", "**优先查看**"])
+    if ranked:
+        lines.extend(f"- {entry}" for _, _, entry in ranked[:5])
+    else:
+        lines.append("- 本批次暂无高价值结果")
+
+    if failed_items:
+        failed_names = [item["company_name"] for item in failed_items]
+        visible = failed_names[:5]
+        suffix = f" 等 {len(failed_names)} 家" if len(failed_names) > 5 else ""
+        lines.extend(["", "**失败目标**", f"- {'、'.join(visible)}{suffix}"])
+
+    title = f"{len(items)} 家公司扫描结束"
+    context = {
+        "total": len(items),
+        "completed": completed,
+        "failed": len(failed_items),
+        "metrics": totals,
+    }
+    return title, "\n".join(lines), context
+
+
+async def notify_company_scan_batch_completed(
+    *,
+    project_id: str,
+    batch_id: str,
+    tasks: list[dict[str, Any]],
+) -> NotificationDispatchResult:
+    title, content, context = build_company_scan_batch_notification(tasks)
+    return await notify_event(
+        event="company_scan.batch.completed",
+        title=title,
+        content=content,
+        level="warning" if context["failed"] else "notice",
+        source="project_task_batch",
+        project_id=project_id,
+        context={"batch_id": batch_id, **context},
     )

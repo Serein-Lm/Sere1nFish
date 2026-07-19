@@ -130,9 +130,105 @@ def test_target_completion_notification_uses_unified_event(
     )
     assert captured["event"] == "target.collection.completed"
     assert captured["title"] == "示例公司 信息收集完成"
+    assert "存活网站资产：3" in captured["content"]
+    assert "**重点**" in captured["content"]
+    assert "- 网站资产" in captured["content"]
     assert captured["context"] == {
         "target_id": "target-1",
         "target_name": "示例公司",
         "status": "completed",
         "summary": {"assets_alive": 3},
     }
+
+
+def test_human_notification_markdown_hides_internal_context() -> None:
+    from api.services.notifications import format_notification_markdown
+
+    markdown = format_notification_markdown(
+        event="task.done",
+        title="扫描完成",
+        content="关键结果",
+        level="notice",
+        source="runtime",
+        project_id="project-1",
+        task_id="task-1",
+        context={"result": {"raw": "不应展示"}},
+    )
+
+    assert "扫描完成" in markdown
+    assert "关键结果" in markdown
+    assert "```json" not in markdown
+    assert "不应展示" not in markdown
+    assert "Event:" not in markdown
+    assert "project-1" not in markdown
+    assert "task-1" not in markdown
+
+
+@pytest.mark.asyncio
+async def test_multi_company_completion_sends_one_compact_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import notifications
+
+    captured: list[dict[str, Any]] = []
+
+    async def _notify(**kwargs: Any) -> notifications.NotificationDispatchResult:
+        captured.append(kwargs)
+        return notifications.NotificationDispatchResult(
+            event=str(kwargs["event"]),
+            ok=True,
+            results=[],
+        )
+
+    monkeypatch.setattr(notifications, "notify_event", _notify)
+    tasks = [
+        {
+            "task_id": "task-1",
+            "batch_index": 1,
+            "status": "completed",
+            "params": {
+                "company_name": "安徽广播电视台",
+                "enable_wechat": True,
+                "enable_scholar": True,
+            },
+            "result": {
+                "company_name": "安徽广播电视台",
+                "assets": {"alive": 12},
+                "url_scan": {"findings_count": 4},
+                "bidding": {"records_fetched": 3, "findings_count": 1},
+                "wechat": {"documents": 2, "contacts": 1},
+                "scholar": {
+                    "articles_total": 8,
+                    "verified_articles_total": 2,
+                    "contacts_total": 0,
+                },
+            },
+        },
+        {
+            "task_id": "task-2",
+            "batch_index": 2,
+            "status": "error",
+            "error": "超时",
+            "params": {
+                "company_name": "鞍钢集团有限公司",
+                "enable_wechat": True,
+                "enable_scholar": True,
+            },
+        },
+    ]
+
+    result = await notifications.notify_company_scan_batch_completed(
+        project_id="project-1",
+        batch_id="batch-1",
+        tasks=tasks,
+    )
+
+    assert result.ok is True
+    assert len(captured) == 1
+    assert captured[0]["title"] == "2 家公司扫描结束"
+    assert "共 2 家：完成 1，失败 1" in captured[0]["content"]
+    assert "学者：候选文章 8，目标单位验证 2，联系方式 0" in captured[0]["content"]
+    assert "安徽广播电视台" in captured[0]["content"]
+    assert "失败目标" in captured[0]["content"]
+    assert "鞍钢集团有限公司" in captured[0]["content"]
+    assert "```json" not in captured[0]["content"]

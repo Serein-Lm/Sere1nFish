@@ -10,6 +10,7 @@ import asyncio
 import heapq
 import itertools
 from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from typing import AsyncIterator
 
 from api.db.mongodb import get_db
@@ -110,6 +111,7 @@ async def run_mobile_collect_definition(
     runtime_overrides: dict | None = None,
     requested_by: str = "",
     queue_priority: str = "normal",
+    on_started: Callable[[], Awaitable[None]] | None = None,
 ) -> dict:
     """原子占用并执行一个数据库任务定义，允许编排层注入本轮目标上下文。"""
     if not task_def_id:
@@ -125,6 +127,8 @@ async def run_mobile_collect_definition(
             queue_priority,
         )
     async with queue_lock.slot(priority_value):
+        if on_started is not None:
+            await on_started()
         return await _run_mobile_collect_definition_claimed(
             db,
             run_task_id=run_task_id,

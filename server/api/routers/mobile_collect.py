@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.auth import User, get_current_active_user
+from api.db.collections import TASKS_COLLECTION
 from api.db.mongodb import get_db
 from api.dao import mobile_collect as collect_dao
 from api.dao import schedules as schedules_dao
@@ -22,6 +23,7 @@ from api.models.mobile_collect import (
     ScheduleCreate,
     ScheduleUpdate,
 )
+from api.services.project_task_runtime import execute_project_task
 from core.mobile.collect import request_stop
 from core.mobile.collect.presets import PRESETS
 from core.mobile.collect.source_links import list_source_link_strategies
@@ -167,8 +169,6 @@ async def run_task(
     if task_def.get("status") == "running":
         raise HTTPException(409, "该采集任务正在运行中")
 
-    from api.routers.project_api import _execute_task, TASKS_COLLECTION
-
     project_id = task_def.get("project_id") or ""
     params = {
         "task_def_id": task_def_id,
@@ -190,7 +190,7 @@ async def run_task(
         }
     )
     spawn_background(
-        _execute_task(task_id, project_id, _TASK_TYPE, params),
+        execute_project_task(task_id, project_id, _TASK_TYPE, params),
         name=f"mobile_collect:{task_id}",
     )
     return {"task_id": task_id, "task_def_id": task_def_id, "status": "pending"}

@@ -53,7 +53,12 @@ async def list_scholar_articles(
         body = ScholarArticleListRequest(project_id=project_id)
     db = get_db()
     items, total = await scholar_dao.query_articles(
-        db, project_id, unit=body.unit, limit=body.limit, skip=body.skip,
+        db,
+        project_id,
+        unit=body.unit,
+        only_verified=body.only_verified,
+        limit=body.limit,
+        skip=body.skip,
     )
     return PageResponse.build(
         items=items, total=total, page=body.page, page_size=body.page_size,

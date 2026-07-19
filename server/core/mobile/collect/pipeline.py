@@ -44,6 +44,7 @@ from api.services.source_documents import ingest_source_url
 logger = get_logger("mobile_collect")
 
 _OBS_SOURCE = "mobile_collect"
+_SOURCE_DOCUMENT_INGEST_TIMEOUT_SECONDS = 600
 
 # 运行中任务的停止信号: run_task_id -> Event
 _running: dict[str, asyncio.Event] = {}
@@ -308,22 +309,25 @@ class _CollectStage(Stage):
             # 截图与结构化，手机立即返回列表；失败才继续原有手机逐屏深采。
             if source_url and not stop.is_set():
                 try:
-                    source_result = await ingest_source_url(
-                        st["db"],
-                        url=source_url,
-                        project_id=st["project_id"] or "",
-                        target=collect_target,
-                        task_def_id=st["task_def_id"],
-                        run_task_id=run_task_id,
-                        keyword=keyword,
-                        extract_fields=st["extract_fields"],
-                        discovery_score=candidate.get("score"),
-                        discovery_subject_match=candidate.get("subject_match"),
-                        discovery_context={
-                            "candidate_fields": candidate.get("fields") or {},
-                            "tap": [tap_x, tap_y],
-                        },
-                        persist=not bool(st.get("dry_run")),
+                    source_result = await asyncio.wait_for(
+                        ingest_source_url(
+                            st["db"],
+                            url=source_url,
+                            project_id=st["project_id"] or "",
+                            target=collect_target,
+                            task_def_id=st["task_def_id"],
+                            run_task_id=run_task_id,
+                            keyword=keyword,
+                            extract_fields=st["extract_fields"],
+                            discovery_score=candidate.get("score"),
+                            discovery_subject_match=candidate.get("subject_match"),
+                            discovery_context={
+                                "candidate_fields": candidate.get("fields") or {},
+                                "tap": [tap_x, tap_y],
+                            },
+                            persist=not bool(st.get("dry_run")),
+                        ),
+                        timeout=_SOURCE_DOCUMENT_INGEST_TIMEOUT_SECONDS,
                     )
                     if source_result.get("ok"):
                         browser_ids = list(

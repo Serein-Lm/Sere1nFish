@@ -113,6 +113,7 @@ async def test_scholar_collection_uses_shared_pipeline_adapter(
     assert captured["task_id"] == "task-1"
     assert captured["unit_en"] == "Anhui Broadcasting"
     assert captured["limit"] == 12
+    assert captured["notify_completion"] is False
 
 
 class _TargetCollection:
@@ -322,7 +323,7 @@ async def test_asset_and_manual_urls_share_one_deep_scan(
 
 
 @pytest.mark.asyncio
-async def test_wholly_owned_entity_setup_failure_still_notifies_target(
+async def test_wholly_owned_entity_setup_failure_is_aggregated_without_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services import notifications
@@ -369,8 +370,7 @@ async def test_wholly_owned_entity_setup_failure_still_notifies_target(
 
     assert result["summary"]["completed"] == 0
     assert result["errors"] == ["子公司: setup failed"]
-    assert captured[0]["target_id"] == "target-child"
-    assert captured[0]["status"] == "failed"
+    assert captured == []
 
 
 @pytest.mark.asyncio
@@ -422,7 +422,7 @@ async def test_wholly_owned_entity_runs_profile_copywriting_after_xhs(
 
     assert result["summary"]["completed"] == 1
     assert result["summary"]["profile_copywritings"] == 2
-    assert captured[0]["summary"]["profile_copywritings"] == 2
+    assert captured == []
 
 
 @pytest.mark.asyncio

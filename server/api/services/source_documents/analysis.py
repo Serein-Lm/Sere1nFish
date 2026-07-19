@@ -21,8 +21,11 @@ from api.models.mobile_collect import ExtractField
 from api.services.runtime_config import get_runtime_app_config
 from core.mobile.collect.contacts import extract_contacts
 from core.observability import observation_context
-
 from .contracts import CapturedDocument, CapturedImage
+
+
+_STRUCTURE_TIMEOUT_SECONDS = 120
+_IMAGE_BATCH_TIMEOUT_SECONDS = 120
 
 
 _PY_TYPE = {
@@ -175,8 +178,9 @@ async def analyze_article_fields(
             agent="source_document",
             task_type="wechat_article",
         ):
-            result = await structured.ainvoke(
-                [SystemMessage(content=system), message]
+            result = await asyncio.wait_for(
+                structured.ainvoke([SystemMessage(content=system), message]),
+                timeout=_STRUCTURE_TIMEOUT_SECONDS,
             )
         parsed = result.model_dump() if hasattr(result, "model_dump") else dict(result)
         output_fields = {
@@ -253,7 +257,10 @@ async def _analyze_image_batch(
         agent="source_document",
         task_type="wechat_article",
     ):
-        result = await structured.ainvoke([HumanMessage(content=content)])
+        result = await asyncio.wait_for(
+            structured.ainvoke([HumanMessage(content=content)]),
+            timeout=_IMAGE_BATCH_TIMEOUT_SECONDS,
+        )
     items = getattr(result, "items", []) or []
     return [item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in items]
 

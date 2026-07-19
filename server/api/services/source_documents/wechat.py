@@ -37,6 +37,8 @@ _UA = (
 )
 _VIEWPORT = {"width": 1280, "height": 900}
 _MAX_SCREENSHOTS = 40
+_DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 180
+_CLEANUP_TIMEOUT_SECONDS = 5
 
 
 def _without_fragment(url: str) -> str:
@@ -55,8 +57,17 @@ def _image_dimensions(data: bytes) -> tuple[int, int]:
 class WechatArticleProvider:
     source_type = "wechat_article"
 
-    def __init__(self, *, max_attempts: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        max_attempts: int = 2,
+        attempt_timeout_seconds: int = _DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
+    ) -> None:
         self.max_attempts = max(1, min(max_attempts, 3))
+        self.attempt_timeout_seconds = max(
+            30,
+            min(int(attempt_timeout_seconds), 600),
+        )
         self._stealth_path = (
             Path(__file__).resolve().parents[3]
             / "MediaCrawler"
@@ -121,68 +132,114 @@ class WechatArticleProvider:
 
         context: BrowserContext | None = None
         browser: Browser | None = None
-        try:
-            async with async_playwright() as playwright:
-                browser = await playwright.chromium.connect_over_cdp(cdp_endpoint)
-                context = await browser.new_context(
-                    viewport=_VIEWPORT,
-                    user_agent=_UA,
-                    locale="zh-CN",
-                    timezone_id="Asia/Shanghai",
-                )
-                if self._stealth_path.is_file():
-                    await context.add_init_script(path=str(self._stealth_path))
-                page = await context.new_page()
-                response = await page.goto(
-                    canonical_url,
-                    wait_until="domcontentloaded",
-                    timeout=60_000,
-                )
-                await page.wait_for_timeout(2_000)
-                if (
-                    "wappoc_appmsgcaptcha" in page.url
-                    or await page.locator("text=当前环境异常").count()
-                ):
-                    raise SourceDocumentBlocked("微信要求完成环境验证")
-                if await page.locator("#js_content").count() == 0:
-                    raise SourceDocumentError("页面未找到公众号正文节点")
+        playwright = None
 
-                raw_html = await response.body() if response else b""
-                rendered_html = (await page.content()).encode("utf-8")
-                metadata = await self._extract_metadata(page)
-                screenshots = await self._capture_screenshots(page)
-                image_urls = metadata.pop("image_urls")
-                images, image_errors = await self._download_images(
-                    context, image_urls
+        async def _capture_connected() -> CapturedDocument:
+            nonlocal browser, context, playwright
+            playwright = await async_playwright().start()
+            browser = await playwright.chromium.connect_over_cdp(cdp_endpoint)
+            context = await browser.new_context(
+                viewport=_VIEWPORT,
+                user_agent=_UA,
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+            if self._stealth_path.is_file():
+                await context.add_init_script(path=str(self._stealth_path))
+            page = await context.new_page()
+            response = await page.goto(
+                canonical_url,
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            await page.wait_for_timeout(2_000)
+            if (
+                "wappoc_appmsgcaptcha" in page.url
+                or await page.locator("text=当前环境异常").count()
+            ):
+                raise SourceDocumentBlocked("微信要求完成环境验证")
+            if await page.locator("#js_content").count() == 0:
+                raise SourceDocumentError("页面未找到公众号正文节点")
+
+            raw_html = await response.body() if response else b""
+            rendered_html = (await page.content()).encode("utf-8")
+            metadata = await self._extract_metadata(page)
+            screenshots = await self._capture_screenshots(page)
+            image_urls = metadata.pop("image_urls")
+            images, image_errors = await self._download_images(
+                context, image_urls
+            )
+            return CapturedDocument(
+                source_type=self.source_type,
+                canonical_url=canonical_url,
+                requested_url=requested_url,
+                title=metadata.pop("title"),
+                account=metadata.pop("account"),
+                publish_time=metadata.pop("publish_time"),
+                text=metadata.pop("text"),
+                raw_html=raw_html,
+                rendered_html=rendered_html,
+                images=images,
+                screenshots=screenshots,
+                metadata={
+                    **metadata,
+                    "http_status": response.status if response else None,
+                    "final_url": page.url,
+                    "image_urls": image_urls,
+                    "image_download_errors": image_errors,
+                },
+            )
+
+        try:
+            return await asyncio.wait_for(
+                _capture_connected(),
+                timeout=self.attempt_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            reason = (
+                "公众号文章整次浏览器读取超时 "
+                f"({self.attempt_timeout_seconds}s): {canonical_url}"
+            )
+            await provider.recover_task_container(task_id=lease_id, reason=reason)
+            raise SourceDocumentError(reason) from exc
+        except SourceDocumentBlocked:
+            raise
+        except Exception as exc:
+            await provider.report_error(task_id=lease_id, error_msg=str(exc))
+            error_text = str(exc).lower()
+            if any(
+                marker in error_text
+                for marker in (
+                    "target page, context or browser has been closed",
+                    "targetclosederror",
+                    "cdp",
+                    "connection closed",
+                    "websocket",
                 )
-                return CapturedDocument(
-                    source_type=self.source_type,
-                    canonical_url=canonical_url,
-                    requested_url=requested_url,
-                    title=metadata.pop("title"),
-                    account=metadata.pop("account"),
-                    publish_time=metadata.pop("publish_time"),
-                    text=metadata.pop("text"),
-                    raw_html=raw_html,
-                    rendered_html=rendered_html,
-                    images=images,
-                    screenshots=screenshots,
-                    metadata={
-                        **metadata,
-                        "http_status": response.status if response else None,
-                        "final_url": page.url,
-                        "image_urls": image_urls,
-                        "image_download_errors": image_errors,
-                    },
+            ):
+                await provider.recover_task_container(
+                    task_id=lease_id,
+                    reason=f"公众号浏览器连接异常: {exc}",
                 )
+            raise
         finally:
             if context:
                 try:
-                    await context.close()
+                    await asyncio.wait_for(
+                        context.close(),
+                        timeout=_CLEANUP_TIMEOUT_SECONDS,
+                    )
                 except Exception:
                     pass
-            # async_playwright 退出时会断开 CDP transport；不要 browser.close()，
-            # 否则会终止池中的 Chrome 进程，导致下一任务无法复用。
+            if playwright:
+                try:
+                    await asyncio.wait_for(
+                        playwright.stop(),
+                        timeout=_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    pass
+            # 不要 browser.close()，否则会终止池中的 Chrome 进程。
             try:
                 await provider.release_cdp_endpoint(task_id=lease_id)
             except Exception:

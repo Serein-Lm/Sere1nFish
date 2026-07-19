@@ -697,21 +697,16 @@ async def set_dingtalk_config(bot_name: str, body: DingTalkConfigUpdate, _: User
     - enabled: 是否启用
     """
     db = get_db()
-    await config_dao.set_dingtalk_config(
-        db,
-        bot_name=bot_name,
-        access_token=body.access_token,
-        secret=body.secret,
-        keyword=body.keyword,
-        enabled=body.enabled,
-        outgoing_app_secret=body.outgoing_app_secret,
-        stream_enabled=body.stream_enabled,
-        client_id=body.client_id,
-        client_secret=body.client_secret,
-        ai_card_streaming=body.ai_card_streaming,
-        public_base_url=body.public_base_url,
-        reconnect_seconds=body.reconnect_seconds,
-    )
+    from api.services.dingtalk_configuration import update_dingtalk_bot
+
+    try:
+        await update_dingtalk_bot(
+            db,
+            bot_name=bot_name,
+            values=body.model_dump(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     from api.services.dingtalk_stream import DingTalkStreamManager
 
     manager = DingTalkStreamManager.get_instance()

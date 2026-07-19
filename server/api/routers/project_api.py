@@ -21,6 +21,10 @@ from api.db.mongodb import init_mongo, get_db
 from api.dao import projects as projects_dao
 from api.dao import findings as findings_dao
 from api.dao import tasks as tasks_dao
+from api.services.project_task_runtime import (
+    execute_project_task,
+    register_task_dispatchers,
+)
 from api.schemas.pagination import (
     PageResponse,
     TaskListRequest,
@@ -190,6 +194,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
     result = await pipeline.run_pipeline(
         task_id=task_id, project_id=project_id,
         company_name=params.get("company_name", ""),
+        batch_id=str(params.get("_batch_id") or ""),
         url_text=params.get("url_text", ""), urls=params.get("urls", []),
         enable_url_scan=params.get("enable_url_scan", True),
         enable_asset_discovery=params.get("enable_asset_discovery", True),
@@ -226,6 +231,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         control_lookup_concurrency=max(1, min(int(params.get("control_lookup_concurrency") or 4), 12)),
         control_icp_concurrency=max(1, min(int(params.get("control_icp_concurrency") or 6), 20)),
         control_scan_concurrency=max(1, min(int(params.get("control_scan_concurrency") or 1), 12)),
+        company_core_concurrency=tuning.company_scan_concurrency,
         requested_by=str(params.get("_requested_by") or ""),
     )
     if result.get("status") == "error":
@@ -290,70 +296,7 @@ TASK_DISPATCHERS: dict[str, Any] = {
     "scholar_contact": _dispatch_scholar_contact,
     "mobile_collect": _dispatch_mobile_collect,
 }
-
-async def _execute_task(task_id: str, project_id: str, task_type: str, params: dict):
-    """统一执行入口"""
-    import time as _time
-    from Sere1nGraph.graph.observability import get_global_tracker
-    from core.observability import obs_log
-
-    logger.notice(f"🚀 任务启动 | task={task_id} type={task_type} project={project_id}")
-    obs_log(
-        "任务启动", task_id=task_id, project_id=project_id, source="task_runner",
-        level="notice", event="task_start", data={"task_type": task_type},
-    )
-    db = get_db()
-    tracker = get_global_tracker()
-    tracker.push_context(project_id=project_id, task_id=task_id, turn_id=task_id, task_type=task_type)
-    t0 = _time.time()
-    try:
-        await db[TASKS_COLLECTION].update_one(
-            {"task_id": task_id},
-            {"$set": {"status": "running", "started_at": datetime.now(), "updated_at": datetime.now()}},
-        )
-        dispatcher = TASK_DISPATCHERS[task_type]
-        result = await dispatcher(task_id, project_id, params)
-        elapsed = _time.time() - t0
-        completed_at = datetime.now()
-        completed_fields = {
-            "status": "completed",
-            "elapsed_ms": round(elapsed * 1000),
-            "updated_at": completed_at,
-            "completed_at": completed_at,
-        }
-        if result is not None:
-            completed_fields["result"] = result
-        await db[TASKS_COLLECTION].update_one(
-            {"task_id": task_id},
-            {"$set": completed_fields},
-        )
-        obs_log(
-            f"任务完成 ({elapsed:.1f}s)", task_id=task_id, project_id=project_id,
-            source="task_runner", level="notice", event="task_done",
-            data={"task_type": task_type, "elapsed_ms": round(elapsed * 1000)},
-        )
-        logger.notice(f"✅ 任务完成 | task={task_id} ({elapsed:.1f}s)")
-    except Exception as e:
-        elapsed = _time.time() - t0
-        completed_at = datetime.now()
-        await db[TASKS_COLLECTION].update_one(
-            {"task_id": task_id},
-            {"$set": {
-                "status": "error",
-                "error": str(e),
-                "elapsed_ms": round(elapsed * 1000),
-                "updated_at": completed_at,
-                "completed_at": completed_at,
-            }},
-        )
-        obs_log(
-            f"任务失败: {e}", task_id=task_id, project_id=project_id,
-            source="task_runner", level="error", event="task_error",
-            data={"task_type": task_type, "error": str(e), "elapsed_ms": round(elapsed * 1000)},
-        )
-        logger.notice(f"❌ 任务失败 | task={task_id}: {e}")
-    finally:
-        tracker.pop_context()
+register_task_dispatchers(TASK_DISPATCHERS)
 
 
 # ═══════════════════════════════════════════
@@ -489,7 +432,7 @@ async def create_task(
     await db[TASKS_COLLECTION].insert_one(task_doc)
 
     spawn_background(
-        _execute_task(task_id, project_id, req.task_type, runtime_params),
+        execute_project_task(task_id, project_id, req.task_type, runtime_params),
         name=f"task:{task_id}",
     )
 
@@ -568,6 +511,7 @@ async def create_company_scan_batch(
                 "batch_id": batch_id,
                 "batch_index": index,
                 "batch_total": total,
+                "batch_concurrency": concurrency,
                 "status": "pending",
                 "progress": {},
                 "created_at": now,
@@ -579,7 +523,15 @@ async def create_company_scan_batch(
                 task_id=task_id,
                 project_id=project_id,
                 task_type="company_scan",
-                params={**task_params, "_requested_by": current_user.username},
+                params={
+                    **task_params,
+                    "_requested_by": current_user.username,
+                    **(
+                        {"_batch_id": batch_id, "_batch_total": total}
+                        if total > 1
+                        else {}
+                    ),
+                },
             )
         )
 
@@ -589,8 +541,10 @@ async def create_company_scan_batch(
             batch_id=batch_id,
             project_id=project_id,
             jobs=jobs,
-            executor=_execute_task,
+            executor=execute_project_task,
             concurrency=concurrency,
+            dispatch_concurrency=total,
+            aggregate_notification=total > 1,
         ),
         name=f"task-batch:{batch_id}",
     )
@@ -671,7 +625,7 @@ async def create_task_with_file(
     await db[TASKS_COLLECTION].insert_one(task_doc)
 
     spawn_background(
-        _execute_task(task_id, project_id, task_type, runtime_params),
+        execute_project_task(task_id, project_id, task_type, runtime_params),
         name=f"task:{task_id}",
     )
 

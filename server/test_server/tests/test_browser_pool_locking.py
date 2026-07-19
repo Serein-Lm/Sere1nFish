@@ -229,3 +229,40 @@ async def test_destroy_removes_stale_task_mapping(
 
     assert provider.containers == {}
     assert provider.task_map == {}
+
+
+@pytest.mark.asyncio
+async def test_cdp_endpoint_failure_recovers_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(ChromeDockerConfig(max_containers=1))
+    info = ContainerInfo(
+        container_id="container-1",
+        container_name="chrome-broken",
+        cdp_host="127.0.0.1",
+        cdp_port=9222,
+        api_port=8250,
+        vnc_port=5900,
+        novnc_port=6080,
+        status="idle",
+    )
+    provider.containers = {info.container_id: info}
+    events: list[str] = []
+
+    async def endpoint(_info: ContainerInfo) -> str:
+        raise RuntimeError("CDP unavailable")
+
+    async def recover(*, task_id: str | None, reason: str) -> bool:
+        events.append(f"recover:{task_id}:{reason}")
+        return False
+
+    monkeypatch.setattr(provider, "_get_ws_url", endpoint)
+    monkeypatch.setattr(provider, "recover_task_container", recover)
+
+    with pytest.raises(RuntimeError, match="CDP unavailable"):
+        await provider.get_cdp_endpoint("task-1", purpose="wechat_article")
+
+    assert events == ["recover:task-1:Chrome CDP 端点连续获取失败"]
+    assert provider.task_map == {}
+    assert info.status == "idle"
+    assert info.cdp_healthy is False
