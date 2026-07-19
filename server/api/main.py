@@ -152,8 +152,10 @@ async def lifespan(app: FastAPI):
         from api.services.website_records import (
             ensure_indexes as ensure_website_record_indexes,
         )
+        from api.dao.url_scan import ensure_indexes as ensure_url_scan_indexes
         await web_tagging_dao.ensure_indexes(db)
         await ensure_website_record_indexes(db)
+        await ensure_url_scan_indexes(db)
         # copywritings
         try:
             await db["copywritings"].create_index("finding_id")

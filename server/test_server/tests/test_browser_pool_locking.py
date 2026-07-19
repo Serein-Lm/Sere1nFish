@@ -266,3 +266,103 @@ async def test_cdp_endpoint_failure_recovers_before_release(
     assert provider.task_map == {}
     assert info.status == "idle"
     assert info.cdp_healthy is False
+
+
+@pytest.mark.asyncio
+async def test_pool_capacity_reconfigures_without_replacing_active_leases() -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(max_containers=3, reserved_non_bulk_containers=1)
+    )
+    provider._bulk_slot_owners.add("url-1")
+    await provider._bulk_slots.acquire()
+
+    status = await provider.reconfigure(
+        ChromeDockerConfig(
+            max_containers=6,
+            reserved_non_bulk_containers=2,
+            warm_pool_size=3,
+        )
+    )
+
+    assert provider.config.max_containers == 6
+    assert provider._bulk_slots.limit == 4
+    assert provider._bulk_slots.in_use == 1
+    assert status["configured_max_containers"] == 6
+    assert status["bulk_limit"] == 4
+    provider._release_workload_slot("url-1")
+
+
+def test_pool_config_hard_caps_chrome_and_applies_resource_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ChromeDockerConfig.from_dict(
+        {
+            "max_containers": 999,
+            "reserved_non_bulk_containers": 8,
+            "warm_pool_size": 99,
+            "host_memory_floor_mb": 8192,
+        }
+    )
+    assert config.max_containers == 64
+    assert config.warm_pool_size == 64
+
+    provider = DockerProvider(config)
+    provider.containers = {
+        "container-1": ContainerInfo(
+            container_id="container-1",
+            container_name="chrome-1",
+            cdp_host="127.0.0.1",
+            cdp_port=9222,
+            api_port=8250,
+            vnc_port=5900,
+            novnc_port=6080,
+            status="idle",
+        )
+    }
+    monkeypatch.setattr(
+        provider,
+        "_host_resource_snapshot",
+        lambda: {
+            "available_memory_mb": 4096,
+            "memory_floor_mb": 8192,
+            "cpu_count": 32,
+            "load_1m": 2.0,
+            "load_per_cpu": 0.063,
+            "load_per_cpu_limit": 1.5,
+        },
+    )
+
+    status = provider.capacity_status()
+
+    assert status["effective_max_containers"] == 1
+    assert status["resource_guard"]["restricted"] is True
+    assert "available_memory_below_floor" in status["resource_guard"]["reason"]
+
+
+def test_pool_config_accepts_legacy_resource_guard_fields() -> None:
+    config = ChromeDockerConfig.from_dict(
+        {
+            "min_available_memory_mb": 6144,
+            "max_host_load_ratio": 0.9,
+            "max_recoveries_per_minute": 15,
+        }
+    )
+
+    assert config.host_memory_floor_mb == 6144
+    assert config.host_load_per_cpu_limit == 0.9
+    assert config.recent_cdp_failure_limit == 15
+    assert config.recent_cdp_failure_window_seconds == 60
+
+
+def test_pool_config_prefers_current_fields_over_legacy_aliases() -> None:
+    config = ChromeDockerConfig.from_dict(
+        {
+            "min_available_memory_mb": 6144,
+            "host_memory_floor_mb": 10240,
+            "max_host_load_ratio": 0.9,
+            "host_load_per_cpu_limit": 1.25,
+        }
+    )
+
+    assert config.host_memory_floor_mb == 10240
+    assert config.host_load_per_cpu_limit == 1.25

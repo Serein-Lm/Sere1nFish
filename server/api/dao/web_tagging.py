@@ -14,6 +14,17 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _project_id_values(project_id: str) -> list[Any]:
+    values: list[Any] = [str(project_id)]
+    try:
+        object_id = ObjectId(project_id)
+    except Exception:
+        return values
+    if object_id not in values:
+        values.append(object_id)
+    return values
+
+
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await db[WEB_TAGS_COLLECTION].create_index(
         [("project_id", 1), ("source", 1), ("target_id", 1)]
@@ -35,10 +46,10 @@ async def insert_web_tagging_result(
     自动给 data.findings 中每个 finding 注入 finding_id（如果没有的话），
     同时注入 task_id 和 project_id，确保前端能通过 finding_id 关联话术。
     """
-    try:
-        pid = ObjectId(project_id)
-    except Exception:
+    values = _project_id_values(project_id)
+    if len(values) == 1:
         raise ValueError("project_id 非法")
+    pid = values[-1]
 
     # 给每个 finding 注入 finding_id / task_id / project_id
     for f in data.get("findings", []):
@@ -81,12 +92,8 @@ async def list_web_tagging_results(
     2. 有 findings 的按最高 attention_score 降序
     3. 无 findings 的按 created_at 降序
     """
-    try:
-        pid = ObjectId(project_id)
-    except Exception:
-        return [], 0
-
-    query: dict[str, Any] = {"project_id": pid}
+    project_values = _project_id_values(project_id)
+    query: dict[str, Any] = {"project_id": {"$in": project_values}}
     if source == "web_tagging":
         query["$or"] = [
             {"source": "web_tagging"},
@@ -129,10 +136,8 @@ async def list_web_tagging_results(
 
 
 async def delete_web_tagging_results_by_project_id(db: AsyncIOMotorDatabase, project_id: str) -> int:
-    try:
-        pid = ObjectId(project_id)
-    except Exception:
-        return 0
-
-    result = await db[WEB_TAGS_COLLECTION].delete_many({"project_id": pid})
+    project_values = _project_id_values(project_id)
+    result = await db[WEB_TAGS_COLLECTION].delete_many(
+        {"project_id": {"$in": project_values}}
+    )
     return int(result.deleted_count)

@@ -1,8 +1,99 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
+
+
+def test_notification_markdown_uses_beijing_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import notifications
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz: ZoneInfo | None = None) -> datetime:
+            assert tz == ZoneInfo("Asia/Shanghai")
+            return cls(2026, 7, 20, 18, 30, 0, tzinfo=tz)
+
+    monkeypatch.setattr(notifications, "datetime", FixedDateTime)
+
+    markdown = notifications.format_notification_markdown(
+        event="task.done",
+        title="扫描完成",
+    )
+
+    assert markdown.endswith("> 2026-07-20 18:30:00")
+
+
+@pytest.mark.asyncio
+async def test_alert_uses_beijing_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    from crawler_tools import dingtalk_bot
+
+    captured: dict[str, Any] = {}
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz: ZoneInfo | None = None) -> datetime:
+            assert tz == ZoneInfo("Asia/Shanghai")
+            return cls(2026, 7, 20, 19, 45, 0, tzinfo=tz)
+
+    async def send(**kwargs: Any) -> dingtalk_bot.SendResult:
+        captured.update(kwargs)
+        return dingtalk_bot.SendResult(success=True, message="ok")
+
+    monkeypatch.setattr(dingtalk_bot, "datetime", FixedDateTime)
+    monkeypatch.setattr(dingtalk_bot, "send_dingtalk_message", send)
+
+    await dingtalk_bot.send_alert("浏览器告警", "容量受限")
+
+    assert "**时间**: 2026-07-20 19:45:00" in captured["content"]
+
+
+@pytest.mark.asyncio
+async def test_notification_cooldown_suppresses_duplicate_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import notifications
+
+    sent: list[str] = []
+
+    async def config() -> dict[str, Any]:
+        return {}
+
+    async def send(**kwargs: Any) -> notifications.NotificationResult:
+        sent.append(kwargs["title"])
+        return notifications.NotificationResult(
+            channel="dingtalk",
+            target="default",
+            success=True,
+            message="ok",
+        )
+
+    notifications._notification_cooldowns.clear()
+    monkeypatch.setattr(notifications, "_load_notification_config", config)
+    monkeypatch.setattr(notifications, "_send_dingtalk", send)
+    monkeypatch.setattr(notifications.time, "monotonic", lambda: 1000.0)
+
+    first = await notifications.notify_event(
+        event="browser.container.recovered",
+        title="浏览器异常已恢复",
+        dedupe_key="url_scan",
+        cooldown_seconds=600,
+    )
+    second = await notifications.notify_event(
+        event="browser.container.recovered",
+        title="浏览器异常已恢复",
+        dedupe_key="url_scan",
+        cooldown_seconds=600,
+    )
+
+    assert first.ok is True
+    assert second.skipped is True
+    assert second.message == "notification cooldown active"
+    assert sent == ["浏览器异常已恢复"]
 
 
 def test_dingtalk_webhook_without_secret_uses_unsigned_url() -> None:

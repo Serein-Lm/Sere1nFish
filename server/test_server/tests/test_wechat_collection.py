@@ -27,8 +27,10 @@ def test_company_wechat_definition_enforces_phone_work_limits() -> None:
     )
 
     assert patch["include_direct_children"] is False
-    assert patch["max_resolved_keywords"] == 12
-    assert patch["detail_max_items"] == 3
+    assert patch["max_resolved_keywords"] == 6
+    assert patch["detail_max_items"] == 2
+    assert patch["swipe_times"] == 3
+    assert patch["max_runtime_seconds"] == 1800
     assert patch["notify_on"] == "none"
 
 
@@ -69,7 +71,7 @@ async def test_ensure_wechat_configuration_creates_unbound_project_definition(
     assert captured["source_link_strategy"] == WECHAT_SOURCE_LINK_STRATEGY
     assert captured["use_target_keyword_library"] is True
     assert captured["include_direct_children"] is False
-    assert captured["max_resolved_keywords"] == 12
+    assert captured["max_resolved_keywords"] == 6
     assert captured["extract_fields"]
     assert captured["dedup_key_fields"] == ["title", "account"]
     assert captured["notify_on"] == "none"
@@ -298,8 +300,10 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["extract_fields"]
     assert overrides["dedup_key_fields"] == ["title", "account"]
     assert overrides["include_direct_children"] is False
-    assert overrides["max_resolved_keywords"] == 12
-    assert overrides["detail_max_items"] == 3
+    assert overrides["max_resolved_keywords"] == 6
+    assert overrides["detail_max_items"] == 2
+    assert overrides["max_runtime_seconds"] == 1800
+    assert overrides["parent_task_id"] == "scan-1"
     assert overrides["target_id"] == "target-1"
     assert captured["queue_priority"] == "low"
     assert result["documents"] == 2

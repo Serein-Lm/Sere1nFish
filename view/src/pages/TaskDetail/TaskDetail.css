@@ -8,3 +8,32 @@
 .task-detail .ant-statistic-content-value {
   font-weight: 600;
 }
+
+.task-current-stage {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.task-source-progress-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0 20px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.task-source-progress-row {
+  min-width: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.task-source-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}

@@ -115,11 +115,19 @@ class AssetIntelligenceService:
         changed_ids = set(persisted.get("changed_asset_ids") or [])
         scan_urls: list[str] = []
         alive_urls: list[str] = []
+        probe_metadata_by_url: dict[str, dict[str, Any]] = {}
         for doc in docs:
             url = str(doc.get("canonical_url") or "")
             if not url or not doc.get("is_alive"):
                 continue
             alive_urls.append(url)
+            probe_metadata_by_url[url] = {
+                "url": url,
+                "title": str(doc.get("title") or ""),
+                "probe": dict(doc.get("probe") or {}),
+                "fingerprints": list(doc.get("fingerprints") or []),
+                "sources": list(doc.get("sources") or []),
+            }
             asset_id = assets_dao.fofa_asset_id(
                 project_id,
                 str(doc.get("host") or ""),
@@ -144,6 +152,7 @@ class AssetIntelligenceService:
             "alive": len(alive_urls),
             "alive_urls": list(dict.fromkeys(alive_urls)),
             "scan_urls": list(dict.fromkeys(scan_urls)),
+            "probe_metadata_by_url": probe_metadata_by_url,
             "target_id": identity.target_id,
             "root_domain": identity.root_domain,
             "root_domains": identity.domains,

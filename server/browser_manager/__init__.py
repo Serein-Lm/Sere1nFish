@@ -12,6 +12,7 @@ from .provider import (
     ChromeDockerConfig,
     ContainerInfo,
     configure_browser_provider,
+    reconfigure_browser_provider,
     get_browser_provider,
     shutdown_provider,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "ChromeDockerConfig",
     "ContainerInfo",
     "configure_browser_provider",
+    "reconfigure_browser_provider",
     "get_browser_provider",
     "shutdown_provider",
 ]

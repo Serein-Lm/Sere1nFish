@@ -510,6 +510,10 @@ async def set_config_section(
             set_easytier_runtime_config(doc.get("config", {}))
         except Exception:
             pass
+    elif category == "chrome_docker":
+        from browser_manager.provider import reconfigure_browser_provider
+
+        await reconfigure_browser_provider(doc.get("config", {}))
     return {
         "category": category,
         "config": mask_sensitive_config(doc.get("config", {})),

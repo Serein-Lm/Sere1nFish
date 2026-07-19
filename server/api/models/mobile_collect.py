@@ -81,6 +81,12 @@ class CollectTaskDef(BaseModel):
     detail_max_items: int = Field(
         default=5, ge=0, le=20, description="每个列表页最多点进几条做详情深采"
     )
+    detail_max_total_items: int = Field(
+        default=0,
+        ge=0,
+        le=200,
+        description="单次任务最多深采条数;0 表示仅受每关键词上限约束",
+    )
     detail_max_swipes: int = Field(
         default=12, ge=0, le=20, description="详情页最多滑动几屏以滑到底(视觉到底检测提前停止)"
     )
@@ -92,6 +98,12 @@ class CollectTaskDef(BaseModel):
     )
     min_score_to_persist: int = Field(
         default=0, ge=0, le=100, description="入库最低相关性分(0=全收)"
+    )
+    max_runtime_seconds: int = Field(
+        default=0,
+        ge=0,
+        le=14400,
+        description="单次运行总时限秒数;0 表示不限制",
     )
 
 
@@ -124,10 +136,12 @@ class CollectTaskUpdate(BaseModel):
         pattern=r"^[a-z][a-z0-9_]*$",
     )
     detail_max_items: int | None = Field(default=None, ge=0, le=20)
+    detail_max_total_items: int | None = Field(default=None, ge=0, le=200)
     detail_max_swipes: int | None = Field(default=None, ge=0, le=20)
     min_score_to_detail: int | None = Field(default=None, ge=0, le=100)
     min_subject_match: int | None = Field(default=None, ge=0, le=100)
     min_score_to_persist: int | None = Field(default=None, ge=0, le=100)
+    max_runtime_seconds: int | None = Field(default=None, ge=0, le=14400)
 
 
 class TriggerDef(BaseModel):

@@ -106,8 +106,16 @@ class Stage(ABC):
                 will_retry = (
                     attempt < policy.max_attempts and policy.retry_on(e)
                 )
+                project_id = str(ctx.state.get("project_id") or "")
+                task_id = str(
+                    ctx.state.get("task_id")
+                    or ctx.state.get("run_task_id")
+                    or ""
+                )
                 ctx.logger.warning(
-                    f"[{self.name}/w{ctx.worker_id}] handle 失败 "
+                    f"[{ctx.pipeline.pipeline_id}/{self.name}/w{ctx.worker_id}] "
+                    f"handle 失败 project={project_id or '-'} "
+                    f"task={task_id or '-'} "
                     f"item={item.item_id} attempt={attempt}/{policy.max_attempts} "
                     f"err={type(e).__name__}: {e} | retry={will_retry}"
                 )

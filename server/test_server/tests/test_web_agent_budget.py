@@ -10,9 +10,9 @@ from api.services.info_collection.url_tools import (
 )
 
 
-def test_web_agent_budget_defaults_to_five_and_is_bounded() -> None:
-    assert DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT == 5
-    assert _web_agent_tool_limit({}) == 5
+def test_web_agent_budget_defaults_to_four_and_is_bounded() -> None:
+    assert DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT == 4
+    assert _web_agent_tool_limit({}) == 4
     assert _web_agent_tool_limit({"mcp_tool_limit": 1}) == 3
     assert _web_agent_tool_limit({"mcp_tool_limit": 99}) == 8
 
@@ -34,12 +34,12 @@ def test_web_agent_message_allows_https_retry_and_login_modal_recovery() -> None
 def test_web_tagging_prompt_no_longer_limits_browsing_to_two_calls() -> None:
     prompt = load_prompt("web_tagging/web_tagging")
 
-    assert "最多调用 5 次浏览器工具" in prompt
+    assert "最多调用 4 次浏览器工具" in prompt
     assert "最多调用 2 次浏览器工具" not in prompt
 
 
 def test_web_agent_runtime_policy_overrides_stale_prompt_cache() -> None:
-    assert "最多调用 5 次" in WEB_TAGGING_RUNTIME_POLICY
+    assert "最多调用 4 次" in WEB_TAGGING_RUNTIME_POLICY
     assert "HTTP 转 HTTPS" in WEB_TAGGING_RUNTIME_POLICY
     assert "hover" in WEB_TAGGING_RUNTIME_POLICY
     assert "立即停止调用" in WEB_TAGGING_RUNTIME_POLICY

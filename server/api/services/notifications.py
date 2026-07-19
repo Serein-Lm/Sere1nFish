@@ -9,9 +9,11 @@ handling.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from core.logger import get_logger
 from core.background import spawn_background
@@ -24,6 +26,8 @@ DEFAULT_BOT_NAME = "default"
 SUPPORTED_CHANNELS = {"dingtalk"}
 
 logger = get_logger("api.services.notifications")
+BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_notification_cooldowns: dict[str, float] = {}
 
 
 @dataclass
@@ -173,7 +177,8 @@ def format_notification_markdown(
     lines = [f"## {title}"]
     if content:
         lines.extend(["", _clip(content)])
-    lines.extend(["", f"> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+    timestamp = datetime.now(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    lines.extend(["", f"> {timestamp}"])
     return "\n".join(lines)
 
 
@@ -256,6 +261,8 @@ async def notify_event(
     at_all: bool | None = None,
     msg_type: Literal["markdown", "text"] = "markdown",
     force: bool = False,
+    dedupe_key: str | None = None,
+    cooldown_seconds: float = 0,
 ) -> NotificationDispatchResult:
     """Dispatch one business notification through configured channels.
 
@@ -279,6 +286,25 @@ async def notify_event(
             message=skip_reason,
             results=[],
         )
+
+    configured_cooldown = policy.get("cooldown_seconds", cooldown_seconds)
+    try:
+        effective_cooldown = max(0.0, float(configured_cooldown or 0))
+    except (TypeError, ValueError):
+        effective_cooldown = max(0.0, float(cooldown_seconds or 0))
+    if effective_cooldown:
+        cooldown_key = f"{event}:{dedupe_key or 'default'}"
+        now = time.monotonic()
+        previous = _notification_cooldowns.get(cooldown_key, 0.0)
+        if now - previous < effective_cooldown:
+            return NotificationDispatchResult(
+                event=event,
+                ok=True,
+                skipped=True,
+                message="notification cooldown active",
+                results=[],
+            )
+        _notification_cooldowns[cooldown_key] = now
 
     resolved_channels = _resolve_channels(config, policy, channels)
     if not resolved_channels:

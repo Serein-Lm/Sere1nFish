@@ -502,6 +502,7 @@ class _CollectStage(Stage):
         run_task_id = st["run_task_id"]
         deep_collect = bool(st.get("deep_collect"))
         detail_max_items = int(st.get("detail_max_items", 5))
+        detail_max_total_items = int(st.get("detail_max_total_items", 0))
         min_score_to_detail = int(st.get("min_score_to_detail", 60))
         min_subject_match = int(st.get("min_subject_match", 70))
         no_new_stop_threshold = int(st.get("no_new_stop_threshold", 2))
@@ -559,7 +560,9 @@ class _CollectStage(Stage):
                 preplanned=direct_launch,
             )
             if not navigated:
-                return
+                if stop.is_set():
+                    return
+                raise RuntimeError(f"手机搜索导航未完成: {app_name} {keyword}".strip())
         except Exception as exc:  # noqa: BLE001
             if direct_launch:
                 st["direct_app_ready"] = False
@@ -580,6 +583,8 @@ class _CollectStage(Stage):
         shots = 0
         emitted = 0
         seen_keys: set[str] = set()
+        detailed_keys: set[str] = st.setdefault("detailed_record_keys", set())
+        details_attempted = 0
         no_new_streak = 0
         for i in range(swipe_times + 1):
             if stop.is_set():
@@ -636,7 +641,14 @@ class _CollectStage(Stage):
                 # 详情选采: 主体强对应 + 高分且有坐标的前 N 条点进深采(不什么都点)
                 if deep_collect and detail_max_items > 0 and not stop.is_set():
                     candidates = [
-                        r
+                        (
+                            collect_dao.stable_record_id(
+                                task_def_id,
+                                r["fields"],
+                                dedup_key_fields,
+                            ),
+                            r,
+                        )
                         for r in records
                         if (r.get("subject_match") or 0) >= min_subject_match
                         and (r.get("score") or 0) >= min_score_to_detail
@@ -644,12 +656,37 @@ class _CollectStage(Stage):
                         and isinstance(r.get("tap_y"), int)
                     ]
                     candidates.sort(
-                        key=lambda r: (r.get("subject_match") or 0, r.get("score") or 0),
+                        key=lambda item: (
+                            item[1].get("subject_match") or 0,
+                            item[1].get("score") or 0,
+                        ),
                         reverse=True,
                     )
-                    for cand in candidates[:detail_max_items]:
+                    remaining_details = max(0, detail_max_items - details_attempted)
+                    if detail_max_total_items > 0:
+                        remaining_details = min(
+                            remaining_details,
+                            max(
+                                0,
+                                detail_max_total_items
+                                - int(st.get("details_attempted") or 0),
+                            ),
+                        )
+                    for candidate_key, cand in (
+                        item
+                        for item in candidates
+                        if item[0] not in detailed_keys
+                    ):
+                        if remaining_details <= 0:
+                            break
                         if stop.is_set():
                             break
+                        detailed_keys.add(candidate_key)
+                        details_attempted += 1
+                        st["details_attempted"] = int(
+                            st.get("details_attempted") or 0
+                        ) + 1
+                        remaining_details -= 1
                         await self._deep_dive(ctx, keyword, cand, collect_target)
 
                 # 到底检测: 连续若干屏无新去重键 → 判定已滑到底, 提前停止
@@ -673,6 +710,24 @@ class _CollectStage(Stage):
                         },
                     )
                     break
+                parent_task_id = str(st.get("parent_task_id") or "")
+                if parent_task_id:
+                    from api.services.task_progress import update_source_progress
+
+                    await update_source_progress(
+                        st["db"],
+                        task_id=parent_task_id,
+                        source="wechat",
+                        total=int(st.get("keyword_total") or 0),
+                        processed=int(st.get("keywords_completed") or 0),
+                        status="running",
+                        message=f"公众号正在处理关键词 {keyword or '-'}，第 {i + 1} 屏",
+                        extra={
+                            "current_keyword": keyword,
+                            "screen": i + 1,
+                            "details_attempted": int(st.get("details_attempted") or 0),
+                        },
+                    )
             except Exception as exc:  # noqa: BLE001
                 ctx.logger.warning(f"[collect] 处理失败 kw={keyword!r} idx={i}: {exc}")
                 obs_log(
@@ -702,6 +757,27 @@ class _CollectStage(Stage):
             event="collect_captured",
             data={"keyword": keyword, "shots": shots, "emitted": emitted},
         )
+        st["keywords_completed"] = int(st.get("keywords_completed") or 0) + 1
+        parent_task_id = str(st.get("parent_task_id") or "")
+        if parent_task_id:
+            from api.services.task_progress import update_source_progress
+
+            completed = int(st["keywords_completed"])
+            total_keywords = int(st.get("keyword_total") or 0)
+            await update_source_progress(
+                st["db"],
+                task_id=parent_task_id,
+                source="wechat",
+                total=total_keywords,
+                processed=completed,
+                succeeded=completed,
+                status="completed" if completed >= total_keywords else "running",
+                message=f"公众号关键词已完成 {completed}/{total_keywords}",
+                extra={
+                    "current_keyword": keyword,
+                    "details_attempted": int(st.get("details_attempted") or 0),
+                },
+            )
 
 
 class _PersistStage(Stage):
@@ -1042,6 +1118,9 @@ async def run_collect_task(
         "direct_app_ready": False,
         "app_instance": str(task_def.get("app_instance") or "primary"),
         "detail_max_items": int(task_def.get("detail_max_items", 5) or 0),
+        "detail_max_total_items": int(
+            task_def.get("detail_max_total_items", 0) or 0
+        ),
         "detail_max_swipes": int(task_def.get("detail_max_swipes", 12) or 12),
         "min_score_to_detail": int(task_def.get("min_score_to_detail", 60) or 0),
         "notification_min_score": max(
@@ -1060,6 +1139,11 @@ async def run_collect_task(
         "preview_limit": preview_limit,
         "keywords_used": keywords,
         "keyword_resolution": keyword_resolution,
+        "parent_task_id": str(task_def.get("parent_task_id") or ""),
+        "keyword_total": len(keywords),
+        "keywords_completed": 0,
+        "details_attempted": 0,
+        "detailed_record_keys": set(),
     }
 
     pipe = Pipeline(state=state, pipeline_id=run_task_id[:8])
@@ -1081,6 +1165,7 @@ async def run_collect_task(
             "dry_run": dry_run,
         },
     )
+    timed_out = False
     try:
         keyword_targets = keyword_resolution.get("keyword_targets") or {}
         seeds = []
@@ -1094,7 +1179,37 @@ async def run_collect_task(
                     "canonical_name": str(target_info.get("target_name") or ""),
                 }
             seeds.append(Item(payload={"keyword": keyword, "target": resolved_target}))
-        metrics = await pipe.run(seeds=seeds, entry="collect")
+        runtime_limit = max(0, int(task_def.get("max_runtime_seconds") or 0))
+        try:
+            if runtime_limit:
+                metrics = await asyncio.wait_for(
+                    pipe.run(seeds=seeds, entry="collect"),
+                    timeout=runtime_limit,
+                )
+            else:
+                metrics = await pipe.run(seeds=seeds, entry="collect")
+        except asyncio.TimeoutError:
+            timed_out = True
+            stop_event.set()
+            metrics = {}
+            logger.warning(
+                "[collect] 运行达到总时限，保留部分结果 | run=%s timeout=%ss",
+                run_task_id,
+                runtime_limit,
+            )
+            parent_task_id = str(state.get("parent_task_id") or "")
+            if parent_task_id:
+                from api.services.task_progress import update_source_progress
+
+                await update_source_progress(
+                    db,
+                    task_id=parent_task_id,
+                    source="wechat",
+                    total=len(keywords),
+                    processed=int(state.get("keywords_completed") or 0),
+                    status="partial",
+                    message=f"公众号达到 {runtime_limit} 秒时限，已保留部分结果",
+                )
         collect_metrics = metrics.get("collect")
         collect_failed = int(getattr(collect_metrics, "failed", 0) or 0)
         collect_received = int(getattr(collect_metrics, "received", 0) or 0)
@@ -1123,11 +1238,13 @@ async def run_collect_task(
             "stopped": stop_event.is_set(),
             "dry_run": dry_run,
             "preview_count": len(preview),
+            "timed_out": timed_out,
             **counters,
         },
     )
     return {
         "stopped": stop_event.is_set(),
+        "timed_out": timed_out,
         "preview": preview,
         "keywords_used": keywords,
         "keyword_resolution": keyword_resolution,

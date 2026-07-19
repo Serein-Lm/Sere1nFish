@@ -76,6 +76,14 @@ class _FakeClipboard:
         return self.marker if self.value == "__marker__" else self.value
 
 
+class _FakeUiReader:
+    def __init__(self, *values: str) -> None:
+        self.values = list(values) or ["<hierarchy />"]
+
+    def dump(self, _adb_device_id: str) -> str:
+        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
+
+
 def test_wechat_copy_link_extractor_uses_adapter_and_validates_url(monkeypatch):
     from core.mobile.collect import source_links as links
 
@@ -87,6 +95,7 @@ def test_wechat_copy_link_extractor_uses_adapter_and_validates_url(monkeypatch):
     extractor = links.WechatCopyLinkExtractor(
         manager_factory=lambda: manager,
         clipboard=clipboard,
+        ui_reader=_FakeUiReader(),
         sleep=lambda _: None,
     )
     result = extractor.extract("stable-device")
@@ -110,12 +119,43 @@ def test_wechat_copy_link_extractor_rejects_stale_clipboard(monkeypatch):
     result = links.WechatCopyLinkExtractor(
         manager_factory=lambda: manager,
         clipboard=clipboard,
+        ui_reader=_FakeUiReader(),
         sleep=lambda _: None,
     ).extract("stable-device")
 
     assert result.ok is False
     assert result.url is None
     assert "未更新剪贴板" in (result.error or "")
+
+
+def test_wechat_copy_link_prefers_uiautomator_action_bounds(monkeypatch):
+    from core.mobile.collect import source_links as links
+
+    menu_xml = """<hierarchy><node text="" content-desc="更多" clickable="true"
+      bounds="[800,20][1000,120]" /></hierarchy>"""
+    copy_xml = """<hierarchy><node text="复制链接" content-desc="" clickable="true"
+      bounds="[650,600][990,800]" /></hierarchy>"""
+    device = _FakeDevice()
+    manager = _FakeManager(device)
+    monkeypatch.setattr(
+        links,
+        "resolve_tap",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("UI 文本存在时不应使用坐标回退")
+        ),
+    )
+
+    result = links.WechatCopyLinkExtractor(
+        manager_factory=lambda: manager,
+        clipboard=_FakeClipboard("https://mp.weixin.qq.com/s/ui-link"),
+        ui_reader=_FakeUiReader(menu_xml, copy_xml),
+        sleep=lambda _: None,
+    ).extract("stable-device")
+
+    assert result.ok is True
+    assert device.taps == [(900, 70), (820, 700)]
+    assert result.metadata["menu_locator"] == "uiautomator"
+    assert result.metadata["copy_locator"] == "uiautomator"
 
 
 def test_source_link_strategy_registry_exposes_wechat_adapter():

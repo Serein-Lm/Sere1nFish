@@ -135,6 +135,9 @@ class _FakeContext:
 
 class _FakeInsertResult:
     inserted_id = "inserted"
+    matched_count = 1
+    modified_count = 1
+    upserted_id = None
 
 
 class _FakeInsertManyResult:
@@ -177,6 +180,59 @@ class _FakeCollection:
                     }
                 return dict(doc)
         return None
+
+    @staticmethod
+    def _matches(doc, query):
+        for key, expected in query.items():
+            if key == "$or":
+                if not any(_FakeCollection._matches(doc, branch) for branch in expected):
+                    return False
+                continue
+            actual = doc.get(key)
+            if isinstance(expected, dict):
+                if "$in" in expected and actual not in expected["$in"]:
+                    return False
+                if "$exists" in expected and (key in doc) is not bool(expected["$exists"]):
+                    return False
+                continue
+            if actual != expected:
+                return False
+        return True
+
+    def find(self, query, projection=None):
+        docs = [dict(doc) for doc in self.docs if self._matches(doc, query)]
+        if projection:
+            docs = [
+                {
+                    key: doc.get(key)
+                    for key, enabled in projection.items()
+                    if enabled and key in doc
+                }
+                for doc in docs
+            ]
+
+        class _Cursor:
+            def __init__(self, values):
+                self.values = values
+                self.index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.index >= len(self.values):
+                    raise StopAsyncIteration
+                value = self.values[self.index]
+                self.index += 1
+                return value
+
+            async def to_list(self, _length=None):
+                return list(self.values)
+
+        return _Cursor(docs)
+
+    async def count_documents(self, query):
+        return sum(1 for doc in self.docs if self._matches(doc, query))
 
 
 class _FakeDB:
@@ -364,6 +420,149 @@ def test_url_scan_urls_runs_through_shared_stream_helper(monkeypatch):
             "https://a.example",
             "https://b.example",
         ]
+
+    asyncio.run(_run())
+
+
+def test_url_scan_timeout_is_terminal_without_second_agent_attempt():
+    async def _run():
+        class _TimeoutTool:
+            def __init__(self):
+                self.calls = 0
+
+            async def scan(self, _request):
+                self.calls += 1
+                raise TimeoutError("网页分析超过总时限")
+
+        tool = _TimeoutTool()
+        stage = _UrlScanStage(
+            concurrency=1,
+            project_id="project-1",
+            task_id="task-1",
+        )
+        ctx = _FakeContext({
+            "url_scan_tool": tool,
+            "scan_results": [],
+            "project_id": "project-1",
+            "task_id": "task-1",
+        })
+        item = type("Item", (), {
+            "payload": {"url": "https://slow.example"},
+            "meta": {},
+            "item_id": "timeout-1",
+            "attempt": 0,
+        })()
+
+        ok, error = await stage._process_with_retry(item, ctx)
+
+        assert ok is False
+        assert isinstance(error, TimeoutError)
+        assert tool.calls == 1
+
+    asyncio.run(_run())
+
+
+def test_url_scan_restart_skips_same_task_terminal_urls(monkeypatch):
+    async def _run():
+        tool = _FakeScanTool()
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": tool,
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        db = _FakeDB()
+        pipeline = UrlScanPipeline(db, object())
+        kwargs = {
+            "task_id": "resume-task",
+            "project_id": "project-1",
+            "url_content": "https://example.com",
+            "known_alive_urls": ["https://example.com"],
+            "enable_copywriting": False,
+        }
+
+        first = await pipeline.run_pipeline(**kwargs)
+        second = await pipeline.run_pipeline(**kwargs)
+
+        assert first["status"] == "completed"
+        assert second["status"] == "completed"
+        assert second["skipped_urls"] == 1
+        assert len(tool.requests) == 1
+
+    asyncio.run(_run())
+
+
+def test_url_scan_does_not_complete_when_terminal_persistence_is_missing(monkeypatch):
+    async def _run():
+        from api.dao import url_scan as url_scan_dao
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": _FakeScanTool(),
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        async def drop_terminal_result(*_args, **_kwargs):
+            return {}
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        monkeypatch.setattr(
+            url_scan_dao,
+            "upsert_terminal_result",
+            drop_terminal_result,
+        )
+
+        result = await UrlScanPipeline(_FakeDB(), object()).run_pipeline(
+            task_id="persistence-failure",
+            project_id="project-1",
+            url_content="https://example.com",
+            known_alive_urls=["https://example.com"],
+            enable_copywriting=False,
+        )
+
+        assert result["status"] == "error"
+        assert result["remaining_urls"] == 1
+        assert "终态持久化不完整" in result["error"]
+
+    asyncio.run(_run())
+
+
+def test_generic_http_error_page_bypasses_browser_agent():
+    async def _run():
+        from api.services.info_collection import ScanRequest
+        from api.services.info_collection.url_tools import UrlWebScanTool
+
+        result = await UrlWebScanTool(app_config=object(), db=_FakeDB()).scan(
+            ScanRequest(
+                source="web_tagging",
+                target="https://blocked.example",
+                project_id="project-1",
+                task_id="task-1",
+                target_info={
+                    "url": "https://blocked.example",
+                    "probe": {"status_code": 403, "title": "403 Forbidden"},
+                },
+            )
+        )
+
+        assert result.success is True
+        assert result.meta["short_circuited"] is True
+        assert result.data["findings"] == []
+        assert result.data["classification"] == "http_error"
 
     asyncio.run(_run())
 

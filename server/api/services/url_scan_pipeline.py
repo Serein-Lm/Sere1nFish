@@ -29,6 +29,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from api.services.company_url import normalize_url
+from api.db.collections import COPYWRITINGS_COLLECTION, FINDINGS_COLLECTION
 from api.services.info_collection.tuning import (
     DEFAULT_COPYWRITING_CONCURRENCY,
     DEFAULT_URL_PROBE_CONCURRENCY,
@@ -79,9 +80,11 @@ class _ScanFailureCollector(DeadLetter):
         self,
         results: list[dict[str, Any]],
         copywriting_errors: list[dict[str, Any]] | None = None,
+        on_result: Any = None,
     ) -> None:
         self.results = results
         self.copywriting_errors = copywriting_errors
+        self.on_result = on_result
 
     async def record(self, *, stage, item, error, pipeline_id="") -> None:
         if stage == "copywriting":
@@ -101,11 +104,27 @@ class _ScanFailureCollector(DeadLetter):
             if isinstance(item.payload, dict)
             else {"url": str(item.payload)}
         )
-        self.results.append({
+        result = {
             "success": False,
             "url": url_info.get("url", ""),
             "error": f"{type(error).__name__}: {error}" if error else "扫描失败（已重试）",
-        })
+        }
+        self.results.append(result)
+        if self.on_result:
+            try:
+                await self.on_result(result)
+            except Exception as callback_error:  # noqa: BLE001
+                logger.error(
+                    "URL 最终失败结果持久化回调异常 task=%s url=%s: %s",
+                    str(url_info.get("task_id") or ""),
+                    result["url"],
+                    callback_error,
+                )
+
+
+def _retry_url_scan_error(error: BaseException) -> bool:
+    """Analysis timeouts consume the entire budget and are terminal."""
+    return not isinstance(error, (TimeoutError, asyncio.TimeoutError))
 
 
 class _UrlScanStage(Stage):
@@ -117,7 +136,13 @@ class _UrlScanStage(Stage):
           若声明了 downstream='extract', 还会 emit 成功结果到下游.
     """
     name = "scan"
-    retry = RetryPolicy(max_attempts=2, base_delay=2.0, max_delay=8.0, jitter=True)
+    retry = RetryPolicy(
+        max_attempts=2,
+        base_delay=2.0,
+        max_delay=8.0,
+        jitter=True,
+        retry_on=_retry_url_scan_error,
+    )
 
     def __init__(
         self,
@@ -171,6 +196,7 @@ class _UrlScanStage(Stage):
             "success": True,
             "url": scan_result.target,
             "data": scan_result.data,
+            "meta": dict(scan_result.meta or {}),
         }
         ctx.state["scan_results"].append(legacy_result)
 
@@ -375,6 +401,8 @@ class UrlScanPipeline:
             state={
                 "scan_results": scan_results,
                 "db": self.db,
+                "project_id": project_id,
+                "task_id": task_id,
                 **toolset.state(),
             },
             dlq=dlq,
@@ -670,6 +698,8 @@ class UrlScanPipeline:
         copywriting_score_threshold: int = 60,
         max_copywritings_per_url: int | None = None,
         known_alive_urls: list[str] | None = None,
+        known_alive_metadata: dict[str, dict[str, Any]] | None = None,
+        parent_task_id: str = "",
         source: str = "web_tagging",
         source_context_by_url: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -691,6 +721,10 @@ class UrlScanPipeline:
             "probed_urls": 0,
             "reused_alive_urls": 0,
             "scanned_urls": 0,
+            "failed_urls": 0,
+            "skipped_urls": 0,
+            "remaining_urls": 0,
+            "short_circuited_urls": 0,
             "total_findings": 0,
             "total_copywritings": 0,
             "copywriting_enabled": enable_copywriting,
@@ -720,9 +754,15 @@ class UrlScanPipeline:
             await self._update_task(task_id, task_result)
             logger.info(f"[pipeline] task={task_id} 阶段2: 开始探活 ...")
 
+            normalized_known_metadata = {
+                normalized: dict(value)
+                for raw_url, value in (known_alive_metadata or {}).items()
+                if (normalized := normalize_url(str(raw_url)))
+                and isinstance(value, dict)
+            }
             known_alive_set = {
                 normalized
-                for value in known_alive_urls or []
+                for value in [*(known_alive_urls or []), *normalized_known_metadata]
                 if (normalized := normalize_url(str(value)))
             }
             reused_alive = [url for url in urls if url in known_alive_set]
@@ -750,7 +790,11 @@ class UrlScanPipeline:
                 if url not in known_alive_set and url not in probed_by_url:
                     continue
                 info = (
-                    {"url": url, "status_code": None, "preprobed": True}
+                    {
+                        **dict(normalized_known_metadata.get(url) or {}),
+                        "url": url,
+                        "preprobed": True,
+                    }
                     if url in known_alive_set
                     else dict(probed_by_url[url])
                 )
@@ -774,6 +818,37 @@ class UrlScanPipeline:
                 await self._update_task(task_id, task_result)
                 return task_result
 
+            from api.dao import url_scan as url_scan_dao
+            from api.services.task_progress import update_source_progress
+
+            alive_urls = [str(item.get("url") or "") for item in alive]
+            completed_before = await url_scan_dao.completed_urls(
+                self.db,
+                task_id=task_id,
+                urls=alive_urls,
+            )
+            pending_alive = [
+                item for item in alive if str(item.get("url") or "") not in completed_before
+            ]
+            task_result["skipped_urls"] = len(completed_before)
+            task_result["remaining_urls"] = len(pending_alive)
+            progress_task_id = str(parent_task_id or task_id)
+            progress_source = f"{source}_url_scan"
+            await update_source_progress(
+                self.db,
+                task_id=progress_task_id,
+                source=progress_source,
+                total=len(alive),
+                processed=len(completed_before),
+                skipped=len(completed_before),
+                status="running" if pending_alive else "completed",
+                message=(
+                    f"恢复扫描，复用 {len(completed_before)} 条已完成 URL"
+                    if completed_before
+                    else "URL 深度扫描开始"
+                ),
+            )
+
             # 3. Agent 扫描 + 4. 提取 findings + 5. 话术生成（流式并发）
             #
             # 架构: scan stage → copywriting stage (core.stream.Pipeline 编排)
@@ -789,7 +864,6 @@ class UrlScanPipeline:
             scan_results: list[dict[str, Any]] = []
             all_findings: list[dict[str, Any]] = []
             copywriting_errors: list[dict[str, Any]] = []
-            dlq = _ScanFailureCollector(scan_results, copywriting_errors)
             toolset = InfoCollectionToolFactory(
                 db=self.db,
                 app_config=self.app_config,
@@ -799,6 +873,62 @@ class UrlScanPipeline:
             # 用闭包是因为需要捕获 task_id / project_id / min_attention_score / pipeline 引用,
             # 这些不属于 stage 自身配置.
             _emit_ref: dict[str, Any] = {"emit": None}  # 由下面 wrapper 注入
+            progress_lock = asyncio.Lock()
+            progress_counts = {
+                "processed": len(completed_before),
+                "succeeded": 0,
+                "failed": 0,
+                "short_circuited": 0,
+            }
+
+            async def _persist_terminal(result: dict[str, Any]) -> None:
+                success = bool(result.get("success"))
+                data = result.get("data") or {}
+                meta = result.get("meta") or {}
+                await url_scan_dao.upsert_terminal_result(
+                    self.db,
+                    task_id=task_id,
+                    project_id=project_id,
+                    target_id=target_id,
+                    source=source,
+                    url=str(result.get("url") or ""),
+                    success=success,
+                    error=str(result.get("error") or ""),
+                    has_findings=bool(data.get("findings")),
+                    short_circuited=bool(meta.get("short_circuited")),
+                    classification=str(
+                        meta.get("classification") or data.get("classification") or ""
+                    ),
+                )
+                async with progress_lock:
+                    progress_counts["processed"] += 1
+                    progress_counts["succeeded" if success else "failed"] += 1
+                    if meta.get("short_circuited"):
+                        progress_counts["short_circuited"] += 1
+                    processed = progress_counts["processed"]
+                    remaining = max(0, len(alive) - processed)
+                    task_result["remaining_urls"] = remaining
+                    should_publish = processed == len(alive) or processed % 5 == 0
+                if should_publish:
+                    await update_source_progress(
+                        self.db,
+                        task_id=progress_task_id,
+                        source=progress_source,
+                        total=len(alive),
+                        processed=processed,
+                        succeeded=progress_counts["succeeded"],
+                        failed=progress_counts["failed"],
+                        skipped=len(completed_before),
+                        status="completed" if remaining == 0 else "running",
+                        message=f"URL 深扫已处理 {processed}/{len(alive)}",
+                        extra={"remaining": remaining},
+                    )
+
+            dlq = _ScanFailureCollector(
+                scan_results,
+                copywriting_errors,
+                on_result=_persist_terminal,
+            )
 
             async def _on_scan_result(result: dict):
                 if not result.get("success"):
@@ -808,8 +938,6 @@ class UrlScanPipeline:
                     f for f in url_findings
                     if f.get("attention_score", 0) >= min_attention_score
                 ]
-                if not url_findings:
-                    return
                 unified = [
                     {
                         **f,
@@ -820,39 +948,40 @@ class UrlScanPipeline:
                     }
                     for f in url_findings
                 ]
-                all_findings.extend(unified)
-                await findings_dao.insert_findings_batch(self.db, unified)
-                if not enable_copywriting:
-                    return
-                copywriting_candidates = sorted(
-                    unified,
-                    key=lambda value: int(value.get("attention_score") or 0),
-                    reverse=True,
-                )
-                if max_copywritings_per_url is not None:
-                    copywriting_candidates = copywriting_candidates[
-                        : max(0, int(max_copywritings_per_url))
-                    ]
-                emit = _emit_ref["emit"]
-                for finding in copywriting_candidates:
-                    site_context = {
-                        "url": finding["url"],
-                        "domain": finding.get("domain", ""),
-                        "site_name": finding.get("site_name"),
-                        "entity_name": finding.get("entity_name"),
-                        "summary": finding.get("summary"),
-                        "source_context": normalized_context.get(finding["url"], ""),
-                    }
-                    siblings = [
-                        value
-                        for value in unified
-                        if value["finding_id"] != finding["finding_id"]
-                    ]
-                    if emit:
-                        await emit("copywriting", (finding, site_context, siblings))
-                logger.info(
-                    f"[pipeline] URL {result['url']} → {len(url_findings)} findings 已推入话术队列"
-                )
+                if unified:
+                    all_findings.extend(unified)
+                    await findings_dao.insert_findings_batch(self.db, unified)
+                    if enable_copywriting:
+                        copywriting_candidates = sorted(
+                            unified,
+                            key=lambda value: int(value.get("attention_score") or 0),
+                            reverse=True,
+                        )
+                        if max_copywritings_per_url is not None:
+                            copywriting_candidates = copywriting_candidates[
+                                : max(0, int(max_copywritings_per_url))
+                            ]
+                        emit = _emit_ref["emit"]
+                        for finding in copywriting_candidates:
+                            site_context = {
+                                "url": finding["url"],
+                                "domain": finding.get("domain", ""),
+                                "site_name": finding.get("site_name"),
+                                "entity_name": finding.get("entity_name"),
+                                "summary": finding.get("summary"),
+                                "source_context": normalized_context.get(finding["url"], ""),
+                            }
+                            siblings = [
+                                value
+                                for value in unified
+                                if value["finding_id"] != finding["finding_id"]
+                            ]
+                            if emit:
+                                await emit("copywriting", (finding, site_context, siblings))
+                    logger.info(
+                        f"[pipeline] URL {result['url']} → {len(url_findings)} findings 已推入话术队列"
+                    )
+                await _persist_terminal(result)
 
             scan_stage = _UrlScanStage(
                 concurrency=max(1, min(int(scan_concurrency), MAX_URL_SCAN_CONCURRENCY)),
@@ -893,11 +1022,13 @@ class UrlScanPipeline:
                     stream_stage(scan_stage, downstream=["copywriting"]),
                     stream_stage(cw_stage),
                 ],
-                seeds=alive,
+                seeds=pending_alive,
                 entry="scan",
                 state={
                     "scan_results": scan_results,
                     "db": self.db,
+                    "project_id": project_id,
+                    "task_id": task_id,
                     **toolset.state(),
                     "copywriting_count": 0,
                 },
@@ -905,26 +1036,34 @@ class UrlScanPipeline:
                 on_pipeline_ready=_on_pipeline_ready,
             )
 
-            # 扫描结果摘要落库
-            task_result["scanned_urls"] = sum(1 for r in scan_results if r.get("success"))
-            task_result["total_findings"] = len(all_findings)
-            scan_docs = [
-                {
-                    "task_id": task_id,
-                    "project_id": project_id,
-                    "target_id": target_id,
-                    "source": source,
-                    "url": r["url"],
-                    "success": r.get("success", False),
-                    "error": r.get("error"),
-                    "has_findings": bool(r.get("data", {}).get("findings")),
-                    "created_at": datetime.now(),
-                }
-                for r in scan_results
+            # 汇总以数据库终态为准，保证恢复后计数不会只包含本进程结果。
+            persisted_summary = await url_scan_dao.summarize_task(
+                self.db,
+                task_id=task_id,
+                urls=alive_urls,
+            )
+            task_result["scanned_urls"] = persisted_summary["succeeded"]
+            task_result["failed_urls"] = persisted_summary["failed"]
+            task_result["remaining_urls"] = max(
+                0, len(alive) - persisted_summary["processed"]
+            )
+            task_result["short_circuited_urls"] = persisted_summary[
+                "short_circuited"
             ]
-            if scan_docs:
-                await self.db[URL_SCAN_RESULTS].insert_many(scan_docs)
+            try:
+                task_result["total_findings"] = await self.db[
+                    FINDINGS_COLLECTION
+                ].count_documents(
+                    {"task_id": task_id, "source": source}
+                )
+            except Exception:  # test doubles and legacy adapters
+                task_result["total_findings"] = len(all_findings)
 
+            if task_result["remaining_urls"]:
+                raise RuntimeError(
+                    "URL 终态持久化不完整，"
+                    f"仍有 {task_result['remaining_urls']} 条等待恢复"
+                )
             if alive and task_result["scanned_urls"] == 0:
                 failures = [str(item.get("error") or "") for item in scan_results]
                 raise RuntimeError(
@@ -932,10 +1071,28 @@ class UrlScanPipeline:
                     + (f": {failures[0]}" if failures else "")
                 )
 
-            copywriting_count = pipe.state.get("copywriting_count", 0)
+            try:
+                copywriting_count = await self.db[
+                    COPYWRITINGS_COLLECTION
+                ].count_documents({"task_id": task_id, "source": source})
+            except Exception:  # test doubles and legacy adapters
+                copywriting_count = pipe.state.get("copywriting_count", 0)
             task_result["total_copywritings"] = copywriting_count
             task_result["copywriting_errors"] = copywriting_errors[:20]
             task_result["status"] = "completed"
+            await update_source_progress(
+                self.db,
+                task_id=progress_task_id,
+                source=progress_source,
+                total=len(alive),
+                processed=persisted_summary["processed"],
+                succeeded=persisted_summary["succeeded"],
+                failed=persisted_summary["failed"],
+                skipped=len(completed_before),
+                status="completed",
+                message=f"URL 深扫完成，共处理 {persisted_summary['processed']} 条",
+                extra={"remaining": task_result["remaining_urls"]},
+            )
             await self._update_task(task_id, task_result)
             logger.info(
                 f"[pipeline] task={task_id} 完成 ✓ urls={task_result['total_urls']} "

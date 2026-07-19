@@ -30,8 +30,12 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
             "notify_on": "none",
             "include_direct_children": False,
-            "max_resolved_keywords": 12,
-            "detail_max_items": 3,
+            "max_resolved_keywords": 6,
+            "swipe_times": 3,
+            "detail_max_items": 2,
+            "detail_max_total_items": 2,
+            "detail_max_swipes": 6,
+            "max_runtime_seconds": 1800,
         }
     )
     return task
@@ -72,10 +76,12 @@ def _wechat_definition_patch(task_def: dict[str, Any]) -> dict[str, Any]:
         != defaults["max_resolved_keywords"]
     ):
         patch["max_resolved_keywords"] = defaults["max_resolved_keywords"]
-    if is_auto_definition and int(task_def.get("detail_max_items") or 0) != defaults[
-        "detail_max_items"
-    ]:
-        patch["detail_max_items"] = defaults["detail_max_items"]
+    for field in ("detail_max_items", "detail_max_total_items"):
+        if is_auto_definition and int(task_def.get(field) or 0) != defaults[field]:
+            patch[field] = defaults[field]
+    for field in ("swipe_times", "detail_max_swipes", "max_runtime_seconds"):
+        if is_auto_definition and int(task_def.get(field) or 0) != int(defaults[field]):
+            patch[field] = defaults[field]
     return patch
 
 
@@ -251,6 +257,7 @@ async def run_company_wechat_collection(
             "target_name": target_name,
             "target_type": "company",
             "direct_launch_app": True,
+            "parent_task_id": task_id,
         },
         requested_by=requested_by,
         queue_priority=collection_priority,
@@ -258,7 +265,7 @@ async def run_company_wechat_collection(
     )
     return {
         "kind": "wechat",
-        "status": "completed",
+        "status": "partial" if result.get("timed_out") else "completed",
         "task_def_id": task_def_id,
         "device_id": str(task_def.get("device_id") or ""),
         "total": int(result.get("total") or 0),
@@ -271,4 +278,5 @@ async def run_company_wechat_collection(
         "max_score": int(result.get("max_score") or 0),
         "keywords_used": list(result.get("keywords_used") or []),
         "stopped": bool(result.get("stopped")),
+        "timed_out": bool(result.get("timed_out")),
     }

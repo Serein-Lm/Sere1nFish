@@ -15,17 +15,20 @@ import os
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
 import httpx
 
+from core.async_limiter import ResizableLimiter
 from core.logger import get_logger
 
 logger = get_logger("browser_manager")
 
 _BULK_BROWSER_PURPOSES = frozenset({"url_scan"})
+MAX_CHROME_CONTAINERS = 64
 
 
 # ── 数据结构 ──────────────────────────────────────────────
@@ -102,10 +105,59 @@ class ChromeDockerConfig:
     reserved_non_bulk_containers: int = 2  # 为公众号/学者等非批量任务保留容量
     # 容器热切换
     max_consecutive_errors: int = 3  # 连续错误超过此值触发容器热切换
+    # 主机资源保护；只限制新建容器，不中断已有租约
+    host_memory_floor_mb: int = 8192
+    host_load_per_cpu_limit: float = 1.5
+    recent_cdp_failure_limit: int = 12
+    recent_cdp_failure_window_seconds: int = 300
 
     @classmethod
     def from_dict(cls, data: dict) -> "ChromeDockerConfig":
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        normalized = dict(data or {})
+        legacy_aliases = {
+            "min_available_memory_mb": "host_memory_floor_mb",
+            "max_host_load_ratio": "host_load_per_cpu_limit",
+            "max_recoveries_per_minute": "recent_cdp_failure_limit",
+        }
+        for legacy_key, current_key in legacy_aliases.items():
+            if current_key not in normalized and legacy_key in normalized:
+                normalized[current_key] = normalized[legacy_key]
+        if (
+            "max_recoveries_per_minute" in normalized
+            and "recent_cdp_failure_window_seconds" not in normalized
+        ):
+            normalized["recent_cdp_failure_window_seconds"] = 60
+        config = cls(
+            **{
+                key: value
+                for key, value in normalized.items()
+                if key in cls.__dataclass_fields__
+            }
+        )
+        config.max_containers = max(
+            1, min(int(config.max_containers), MAX_CHROME_CONTAINERS)
+        )
+        config.warm_pool_size = max(
+            0, min(int(config.warm_pool_size), config.max_containers)
+        )
+        config.reserved_non_bulk_containers = max(
+            0,
+            min(
+                int(config.reserved_non_bulk_containers),
+                config.max_containers - 1,
+            ),
+        )
+        config.host_memory_floor_mb = max(1024, int(config.host_memory_floor_mb))
+        config.host_load_per_cpu_limit = max(
+            0.5, min(float(config.host_load_per_cpu_limit), 8.0)
+        )
+        config.recent_cdp_failure_limit = max(
+            1, min(int(config.recent_cdp_failure_limit), 100)
+        )
+        config.recent_cdp_failure_window_seconds = max(
+            30, min(int(config.recent_cdp_failure_window_seconds), 3600)
+        )
+        return config
 
     @property
     def normalized_reserved_non_bulk_containers(self) -> int:
@@ -219,8 +271,13 @@ class DockerProvider(BrowserProvider):
         self._port_counter = 0
         self._pending_creates = 0
         self._bulk_slot_limit = config.bulk_container_limit
-        self._bulk_slots = asyncio.Semaphore(self._bulk_slot_limit)
+        self._bulk_slots = ResizableLimiter(self._bulk_slot_limit)
         self._bulk_slot_owners: set[str] = set()
+        self._recent_cdp_failures: deque[float] = deque()
+        self._last_resource_guard: dict[str, Any] = {
+            "restricted": False,
+            "reason": "",
+        }
         self._warm_pool_ready = asyncio.Event()  # 预热池就绪信号
         self._orphan_cleanup_done = False
 
@@ -285,6 +342,105 @@ class DockerProvider(BrowserProvider):
             finally:
                 self._orphan_cleanup_done = True
         self._ensure_background_tasks()
+
+    async def reconfigure(self, config: ChromeDockerConfig) -> dict[str, Any]:
+        """Apply capacity and guard settings without replacing active leases."""
+        previous = self.config
+        self.config = config
+        self._bulk_slot_limit = config.bulk_container_limit
+        self._bulk_slots.resize(self._bulk_slot_limit)
+        self._warm_pool_ready.clear()
+        self._ensure_background_tasks()
+        logger.notice(
+            "[DockerProvider] 运行时配置已更新 | max=%s->%s bulk=%s->%s "
+            "reserve=%s warm=%s",
+            previous.max_containers,
+            config.max_containers,
+            previous.bulk_container_limit,
+            config.bulk_container_limit,
+            config.normalized_reserved_non_bulk_containers,
+            config.warm_pool_size,
+        )
+        return self.capacity_status()
+
+    def _prune_recent_cdp_failures(self) -> None:
+        cutoff = time.monotonic() - self.config.recent_cdp_failure_window_seconds
+        while self._recent_cdp_failures and self._recent_cdp_failures[0] < cutoff:
+            self._recent_cdp_failures.popleft()
+
+    def _record_cdp_failure(self) -> None:
+        self._recent_cdp_failures.append(time.monotonic())
+        self._prune_recent_cdp_failures()
+
+    def _host_resource_snapshot(self) -> dict[str, Any]:
+        try:
+            import psutil
+
+            available_mb = int(psutil.virtual_memory().available / (1024 * 1024))
+            cpu_count = max(1, int(os.cpu_count() or 1))
+            load_1m = float(os.getloadavg()[0])
+            load_per_cpu = load_1m / cpu_count
+        except Exception:  # pragma: no cover - deployment fallback
+            available_mb = -1
+            cpu_count = 1
+            load_1m = 0.0
+            load_per_cpu = 0.0
+        return {
+            "available_memory_mb": available_mb,
+            "memory_floor_mb": self.config.host_memory_floor_mb,
+            "cpu_count": cpu_count,
+            "load_1m": round(load_1m, 2),
+            "load_per_cpu": round(load_per_cpu, 3),
+            "load_per_cpu_limit": self.config.host_load_per_cpu_limit,
+        }
+
+    def _effective_container_limit(self) -> int:
+        self._prune_recent_cdp_failures()
+        snapshot = self._host_resource_snapshot()
+        healthy_active = sum(
+            1
+            for container in self.containers.values()
+            if container.status in {"busy", "idle", "starting"}
+            and not container.unhealthy_reason
+            and container.cdp_healthy
+        ) + self._pending_creates
+        reasons: list[str] = []
+        available_mb = int(snapshot["available_memory_mb"])
+        if 0 <= available_mb < self.config.host_memory_floor_mb:
+            reasons.append("available_memory_below_floor")
+        if float(snapshot["load_per_cpu"]) > self.config.host_load_per_cpu_limit:
+            reasons.append("host_load_above_limit")
+        if len(self._recent_cdp_failures) >= self.config.recent_cdp_failure_limit:
+            reasons.append("recent_cdp_failures")
+        effective = (
+            max(1, min(self.config.max_containers, healthy_active))
+            if reasons
+            else self.config.max_containers
+        )
+        self._last_resource_guard = {
+            **snapshot,
+            "restricted": bool(reasons),
+            "reason": ",".join(reasons),
+            "recent_cdp_failures": len(self._recent_cdp_failures),
+            "recent_cdp_failure_limit": self.config.recent_cdp_failure_limit,
+            "effective_max_containers": effective,
+        }
+        return effective
+
+    def capacity_status(self) -> dict[str, Any]:
+        effective = self._effective_container_limit()
+        return {
+            "configured_max_containers": self.config.max_containers,
+            "effective_max_containers": effective,
+            "bulk_limit": self._bulk_slot_limit,
+            "bulk_in_use": self._bulk_slots.in_use,
+            "bulk_waiting": self._bulk_slots.waiting,
+            "reserved_non_bulk_containers": (
+                self.config.normalized_reserved_non_bulk_containers
+            ),
+            "pending_creates": self._pending_creates,
+            "resource_guard": dict(self._last_resource_guard),
+        }
 
     def _cleanup_orphan_containers(self):
         """
@@ -426,12 +582,14 @@ class DockerProvider(BrowserProvider):
                     and c.unhealthy_reason == ""
                     and c.cdp_healthy
                 ) + self._pending_creates
+                effective_limit = self._effective_container_limit()
                 logger.info(
-                    f"[DockerProvider] 无空闲容器 | 活跃容器数={active_count}/{self.config.max_containers}"
+                    f"[DockerProvider] 无空闲容器 | 活跃容器数={active_count}/{effective_limit} "
+                    f"(configured={self.config.max_containers})"
                 )
-                if active_count >= self.config.max_containers:
+                if active_count >= effective_limit:
                     logger.warning(
-                        f"[DockerProvider] 容器数已达上限 ({self.config.max_containers})，等待空闲容器..."
+                        f"[DockerProvider] 容器数已达当前有效上限 ({effective_limit})，等待空闲容器..."
                     )
                     wait_for_idle = True
                 else:
@@ -474,6 +632,7 @@ class DockerProvider(BrowserProvider):
         try:
             return await self._get_ws_url(claimed)
         except Exception as exc:
+            self._record_cdp_failure()
             claimed.cdp_healthy = False
             claimed.unhealthy_reason = f"CDP 端点获取失败: {exc}"[:300]
             await self.recover_task_container(
@@ -1082,6 +1241,8 @@ class DockerProvider(BrowserProvider):
                     "purpose": info.purpose,
                     "recovered": recovered,
                 },
+                dedupe_key=info.purpose or "browser",
+                cooldown_seconds=600 if recovered else 300,
             )
             return recovered
         except Exception as exc:  # noqa: BLE001
@@ -1105,6 +1266,8 @@ class DockerProvider(BrowserProvider):
                 source="browser_manager",
                 task_id=task_id or None,
                 context={"container": info.container_name, "purpose": info.purpose},
+                dedupe_key=info.purpose or "browser",
+                cooldown_seconds=300,
             )
             return False
         finally:
@@ -1164,6 +1327,7 @@ class DockerProvider(BrowserProvider):
         while True:
             try:
                 async with self._lock:
+                    effective_limit = self._effective_container_limit()
                     idle_healthy_count = sum(
                         1 for info in self.containers.values()
                         if self._is_assignable(info)
@@ -1176,7 +1340,7 @@ class DockerProvider(BrowserProvider):
                     )
                     need = self.config.warm_pool_size - idle_healthy_count
                     can_create = (
-                        self.config.max_containers
+                        effective_limit
                         - total_active
                         - self._pending_creates
                     )
@@ -1217,6 +1381,7 @@ class DockerProvider(BrowserProvider):
             return
 
         info = self.containers[cid]
+        self._record_cdp_failure()
         info.consecutive_errors += 1
         logger.warning(
             f"[DockerProvider] 容器 {info.container_name} 错误上报 | "
@@ -1353,6 +1518,21 @@ def configure_browser_provider(config: dict[str, Any] | None) -> None:
     """注入前端/Mongo 管理的 Chrome Docker 配置。"""
     global _docker_config_data
     _docker_config_data = dict(config or {})
+
+
+async def reconfigure_browser_provider(
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Inject config and apply compatible changes to the live provider."""
+    configure_browser_provider(config)
+    next_config = _load_docker_config()
+    provider = get_browser_provider()
+    if isinstance(provider, DockerProvider) and next_config.enabled:
+        return await provider.reconfigure(next_config)
+    return {
+        "restart_required": True,
+        "reason": "浏览器 Provider 模式切换需重启服务",
+    }
 
 
 def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:

@@ -629,6 +629,7 @@ class BiddingPipeline:
                 source="bidding",
                 source_context_by_url=context_by_url,
                 known_alive_urls=list(dict.fromkeys(known_alive_detail_urls)),
+                parent_task_id=task_id,
                 min_attention_score=min_attention_score,
                 scan_concurrency=scan_concurrency,
                 copywriting_concurrency=copywriting_concurrency,

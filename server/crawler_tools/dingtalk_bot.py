@@ -18,8 +18,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from urllib import parse
+from zoneinfo import ZoneInfo
 
 import aiohttp
+
+
+BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass
@@ -349,7 +353,7 @@ async def send_alert(
     }
     
     emoji = level_emoji.get(level, "ℹ️")
-    today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.now(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     
     text = f"""## {emoji} {title}
 

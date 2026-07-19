@@ -132,6 +132,37 @@ def _find_search_editor(xml_text: str) -> _UiNode | None:
     return max(candidates, key=lambda item: item.score, default=None)
 
 
+def _find_action_node(xml_text: str, labels: set[str]) -> _UiNode | None:
+    """Locate a visible menu action by text/content description and bounds."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    normalized_labels = {label.casefold().strip() for label in labels if label.strip()}
+    candidates: list[_UiNode] = []
+    for node in root.iter("node"):
+        attrs = node.attrib
+        text = str(attrs.get("text") or "").strip()
+        content_desc = str(attrs.get("content-desc") or "").strip()
+        combined = " ".join(value for value in (text, content_desc) if value)
+        normalized = combined.casefold()
+        exact = normalized in normalized_labels
+        contains = any(label in normalized for label in normalized_labels)
+        if not (exact or contains):
+            continue
+        bounds = _parse_bounds(attrs.get("bounds", ""))
+        if not bounds:
+            continue
+        focused = attrs.get("focused") == "true"
+        focusable = attrs.get("focusable") == "true"
+        clickable = attrs.get("clickable") == "true"
+        score = (100 if exact else 60) + (30 if clickable else 0)
+        candidates.append(
+            _UiNode(combined, bounds, focused, focusable, clickable, score)
+        )
+    return max(candidates, key=lambda item: item.score, default=None)
+
+
 def _extract_http_url(raw: str | None, *, allowed_hosts: set[str]) -> str | None:
     if not raw or len(raw) > 8192:
         return None
@@ -347,6 +378,40 @@ class SettingsSearchClipboardBridge:
             self._restore_package(adb_device_id, return_package)
 
 
+class AdbUiHierarchyReader:
+    """Small UIAutomator adapter used by app-specific interaction strategies."""
+
+    def __init__(self, runner: CommandRunner = _default_command_runner) -> None:
+        self._runner = runner
+
+    def dump(self, adb_device_id: str) -> str:
+        try:
+            result = self._runner(
+                [
+                    "-s",
+                    adb_device_id,
+                    "exec-out",
+                    "uiautomator",
+                    "dump",
+                    "--compressed",
+                    "/dev/tty",
+                ],
+                10,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SourceLinkExtractionError("UIAutomator 读取超时") from exc
+        if result.returncode != 0:
+            raise SourceLinkExtractionError(
+                (result.stderr or result.stdout or "UIAutomator 读取失败").strip()[:300]
+            )
+        output = result.stdout or ""
+        start = output.find("<?xml")
+        end = output.rfind("</hierarchy>")
+        if start < 0 or end < 0:
+            raise SourceLinkExtractionError("UIAutomator 未返回有效界面树")
+        return output[start : end + len("</hierarchy>")]
+
+
 class WechatCopyLinkExtractor:
     """通过微信文章分享菜单的“复制链接”提取原文 URL。"""
 
@@ -361,11 +426,24 @@ class WechatCopyLinkExtractor:
         *,
         manager_factory: Callable[[], MobileDeviceManager] = MobileDeviceManager,
         clipboard: ClipboardBridge | None = None,
+        ui_reader: AdbUiHierarchyReader | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._manager_factory = manager_factory
         self._clipboard = clipboard or SettingsSearchClipboardBridge(sleep=sleep)
+        self._ui_reader = ui_reader or AdbUiHierarchyReader()
         self._sleep = sleep
+
+    def _locate_action(
+        self,
+        adb_device_id: str,
+        labels: set[str],
+    ) -> tuple[int, int] | None:
+        try:
+            node = _find_action_node(self._ui_reader.dump(adb_device_id), labels)
+            return node.center if node else None
+        except Exception:
+            return None
 
     def extract(self, device_id: str) -> SourceLinkResult:
         started = time.monotonic()
@@ -384,18 +462,34 @@ class WechatCopyLinkExtractor:
                 raise SourceLinkExtractionError("剪贴板标记回读失败")
 
             device = manager.get_device(device_id)
-            menu_x, menu_y = resolve_tap(
-                *self._MENU_TAP,
-                device_id=adb_device_id,
-                coord_space="normalized_1000",
+            menu_position = self._locate_action(
+                adb_device_id,
+                {"更多", "更多功能", "more", "more options"},
             )
-            copy_x, copy_y = resolve_tap(
-                *self._COPY_LINK_TAP,
-                device_id=adb_device_id,
-                coord_space="normalized_1000",
-            )
+            menu_locator = "uiautomator"
+            if menu_position is None:
+                menu_position = resolve_tap(
+                    *self._MENU_TAP,
+                    device_id=adb_device_id,
+                    coord_space="normalized_1000",
+                )
+                menu_locator = "coordinate_fallback"
+            menu_x, menu_y = menu_position
             device.tap(menu_x, menu_y, delay=0.1)
             self._sleep(0.8)
+            copy_position = self._locate_action(
+                adb_device_id,
+                {"复制链接", "复制原文链接", "copy link"},
+            )
+            copy_locator = "uiautomator"
+            if copy_position is None:
+                copy_position = resolve_tap(
+                    *self._COPY_LINK_TAP,
+                    device_id=adb_device_id,
+                    coord_space="normalized_1000",
+                )
+                copy_locator = "coordinate_fallback"
+            copy_x, copy_y = copy_position
             device.tap(copy_x, copy_y, delay=0.1)
             self._sleep(0.6)
 
@@ -417,6 +511,8 @@ class WechatCopyLinkExtractor:
                 metadata={
                     "adb_device_id": adb_device_id,
                     "host": urlsplit(url).hostname or "",
+                    "menu_locator": menu_locator,
+                    "copy_locator": copy_locator,
                 },
             )
         except Exception as exc:  # noqa: BLE001

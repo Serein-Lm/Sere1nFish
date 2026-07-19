@@ -338,18 +338,57 @@ class CompanyScanPipeline:
             data={"company_name": company_name},
         )
 
+        from api.services.company_scan_recovery import (
+            load_recovery_state,
+            restore_identity,
+        )
+
+        recovery_state = await load_recovery_state(self.db, task_id=task_id)
+        resume_flags = dict(recovery_state.get("resume") or {})
+        checkpoint_results = {
+            str(module): dict(entry.get("result") or {})
+            for module, entry in dict(recovery_state.get("modules") or {}).items()
+            if isinstance(entry, dict)
+            and entry.get("status") == "completed"
+            and isinstance(entry.get("result"), dict)
+        }
+        resume_core_completed = bool(resume_flags.get("core_completed"))
+        resume_mobile_completed = bool(resume_flags.get("mobile_completed"))
+        restored_identity = (
+            await restore_identity(
+                self.db,
+                project_id=project_id,
+                company_name=company_name,
+            )
+            if resume_core_completed
+            else None
+        )
+        if resume_core_completed and not restored_identity:
+            logger.warning(
+                "[company_scan] task=%s 核心恢复标记缺少公司身份，回退完整执行",
+                task_id,
+            )
+            resume_core_completed = False
+
         core_lease = get_company_scan_resource_pool(
             company_core_concurrency
         ).lease(task_id=task_id)
         mobile_task: asyncio.Task[list[Any]] | None = None
         mobile_started = asyncio.Event()
         try:
-            await self._update_progress(
-                task_id,
-                "waiting_core",
-                "等待公司扫描网络与 AI 并发资源...",
-            )
-            await core_lease.acquire()
+            if resume_core_completed:
+                await self._update_progress(
+                    task_id,
+                    "restoring_core",
+                    "复用已完成的网站、API 与学者扫描结果...",
+                )
+            else:
+                await self._update_progress(
+                    task_id,
+                    "waiting_core",
+                    "等待公司扫描网络与 AI 并发资源...",
+                )
+                await core_lease.acquire()
             # ── 阶段 1: 公司标准化与场景路由并发执行 ──
             logger.info(f"[company_scan] task={task_id} 阶段1: 识别公司 '{company_name}'")
             await self._update_progress(task_id, "routing", "识别法定主体、根域名和搜索别名...")
@@ -358,27 +397,36 @@ class CompanyScanPipeline:
             from api.services.targets import attach_normalized_company
             from Sere1nGraph.graph.company_router.router import CompanyRouterResult
 
-            normalized_result, router_result = await asyncio.gather(
-                asyncio.wait_for(
-                    normalize_company(
-                        self.db,
-                        self.app_config,
-                        project_id=project_id,
-                        input_name=company_name,
-                        task_id=task_id,
+            if resume_core_completed:
+                normalized_result = await company_meta_dao.get_company_meta(
+                    self.db, project_id, company_name
+                ) or dict(restored_identity or {})
+                router_result = CompanyRouterResult(
+                    success=False,
+                    error="核心阶段从持久化结果恢复，未重复执行公司路由",
+                )
+            else:
+                normalized_result, router_result = await asyncio.gather(
+                    asyncio.wait_for(
+                        normalize_company(
+                            self.db,
+                            self.app_config,
+                            project_id=project_id,
+                            input_name=company_name,
+                            task_id=task_id,
+                        ),
+                        timeout=COMPANY_NORMALIZE_TIMEOUT_SECONDS,
                     ),
-                    timeout=COMPANY_NORMALIZE_TIMEOUT_SECONDS,
-                ),
-                asyncio.wait_for(
-                    self._run_company_router(
-                        company_name,
-                        project_id=project_id,
-                        task_id=task_id,
+                    asyncio.wait_for(
+                        self._run_company_router(
+                            company_name,
+                            project_id=project_id,
+                            task_id=task_id,
+                        ),
+                        timeout=COMPANY_ROUTER_TIMEOUT_SECONDS,
                     ),
-                    timeout=COMPANY_ROUTER_TIMEOUT_SECONDS,
-                ),
-                return_exceptions=True,
-            )
+                    return_exceptions=True,
+                )
             normalization_error = ""
             if isinstance(normalized_result, Exception):
                 normalization_error = str(normalized_result) or "公司规范化执行超时"
@@ -411,6 +459,10 @@ class CompanyScanPipeline:
                     router_legal_name,
                 ]
             )[:20]
+            resolved_scholar_unit_en = self._derive_scholar_unit_en(
+                aliases,
+                explicit=scholar_unit_en,
+            )
             root_domain = str(company_meta.get("root_domain") or "").strip()
             root_domains = self._dedupe_text(
                 [root_domain, *list(company_meta.get("icp_domains") or [])]
@@ -495,35 +547,58 @@ class CompanyScanPipeline:
                     mode=xhs_target_selection_mode,
                     manual_targets=manual_xhs_targets,
                 )
-                xhs_selection_result = await xhs_selector.select(
-                    [
-                        XhsTargetCandidate(
-                            target_id=target_id,
-                            target_name=normalized_name,
-                            aliases=aliases,
-                            root_domain=root_domain,
-                            context=selection_context,
-                        )
-                    ],
-                    project_id=project_id,
-                    task_id=task_id,
-                )
-                result["xhs"]["selection"] = xhs_selection_result.model_dump(mode="json")
-                root_decision = next(iter(xhs_selection_result.decisions), None)
-                root_xhs_enabled = bool(
-                    root_decision and root_decision.should_collect_xhs
-                )
-                result["xhs"]["root_selected"] = root_xhs_enabled
-                logger.info(
-                    "[company_scan] task=%s XHS 根目标选择 mode=%s selected=%s reason=%s",
-                    task_id,
-                    xhs_selector.mode,
-                    root_xhs_enabled,
-                    root_decision.reason if root_decision else "无判定结果",
-                )
+                if resume_core_completed:
+                    root_xhs_enabled = "xhs" in checkpoint_results
+                    result["xhs"]["root_selected"] = root_xhs_enabled
+                    result["xhs"]["selection"].update(
+                        status="restored",
+                        error=None,
+                    )
+                else:
+                    xhs_selection_result = await xhs_selector.select(
+                        [
+                            XhsTargetCandidate(
+                                target_id=target_id,
+                                target_name=normalized_name,
+                                aliases=aliases,
+                                root_domain=root_domain,
+                                context=selection_context,
+                            )
+                        ],
+                        project_id=project_id,
+                        task_id=task_id,
+                    )
+                    result["xhs"]["selection"] = xhs_selection_result.model_dump(
+                        mode="json"
+                    )
+                    root_decision = next(iter(xhs_selection_result.decisions), None)
+                    root_xhs_enabled = bool(
+                        root_decision and root_decision.should_collect_xhs
+                    )
+                    result["xhs"]["root_selected"] = root_xhs_enabled
+                    logger.info(
+                        "[company_scan] task=%s XHS 根目标选择 mode=%s "
+                        "selected=%s reason=%s",
+                        task_id,
+                        xhs_selector.mode,
+                        root_xhs_enabled,
+                        root_decision.reason if root_decision else "无判定结果",
+                    )
 
             root_wechat_enabled = False
-            if enable_wechat:
+            if enable_wechat and resume_core_completed:
+                root_wechat_enabled = not resume_mobile_completed
+                result["wechat"].update(
+                    selected=True,
+                    priority="normal",
+                )
+                result["wechat"]["selection"].update(
+                    status="restored",
+                    selected_count=1,
+                    skipped_count=0,
+                    error=None,
+                )
+            elif enable_wechat:
                 from api.services.wechat_target_selection import (
                     WechatTargetCandidate,
                     WechatTargetSelectionService,
@@ -571,7 +646,7 @@ class CompanyScanPipeline:
                 )
 
             scholar_resolution: Any = None
-            if enable_scholar:
+            if enable_scholar and not resume_core_completed:
                 from api.services.scholar_direction import (
                     resolve_scholar_direction,
                 )
@@ -609,7 +684,77 @@ class CompanyScanPipeline:
             # ── 阶段 2: 各根 Target 数据源并发执行 ──
             primary_jobs: list[tuple[str, Any]] = []
             xhs_succeeded = False
-            if enable_control_structure:
+            if not resume_core_completed:
+                enabled_checkpoint_modules = {
+                    "control_structure": enable_control_structure,
+                    "asset_url": enable_asset_discovery or enable_url_scan,
+                    "xhs": enable_xhs,
+                    "bidding": enable_bidding,
+                    "scholar": enable_scholar,
+                }
+                for module, enabled in enabled_checkpoint_modules.items():
+                    if enabled and module in checkpoint_results:
+                        primary_jobs.append((
+                            module,
+                            self._completed_module_result(checkpoint_results[module]),
+                        ))
+            if resume_core_completed:
+                from api.services.company_scan_recovery import (
+                    restore_asset_url,
+                    restore_bidding,
+                    restore_control_structure,
+                    restore_scholar,
+                )
+
+                if enable_control_structure:
+                    primary_jobs.append((
+                        "control_structure",
+                        restore_control_structure(
+                            self.db,
+                            project_id=project_id,
+                            parent_target_id=target_id,
+                        ),
+                    ))
+                if enable_asset_discovery or enable_url_scan:
+                    primary_jobs.append((
+                        "asset_url",
+                        restore_asset_url(
+                            self.db,
+                            task_id=task_id,
+                            project_id=project_id,
+                            target_id=target_id,
+                            incremental_scan=incremental_scan,
+                        ),
+                    ))
+                if enable_bidding:
+                    primary_jobs.append((
+                        "bidding",
+                        restore_bidding(
+                            self.db,
+                            task_id=task_id,
+                            company_name=normalized_name,
+                        ),
+                    ))
+                if enable_scholar:
+                    primary_jobs.append((
+                        "scholar",
+                        restore_scholar(
+                            self.db,
+                            task_id=task_id,
+                            unit=normalized_name,
+                        ),
+                    ))
+                if enable_xhs and "xhs" in checkpoint_results:
+                    primary_jobs.append((
+                        "xhs",
+                        self._completed_module_result(checkpoint_results["xhs"]),
+                    ))
+
+            if (
+                enable_control_structure
+                and not resume_core_completed
+                and "control_structure" not in checkpoint_results
+            ):
                 primary_jobs.append((
                     "control_structure",
                     self._run_wholly_owned_investments(
@@ -622,7 +767,9 @@ class CompanyScanPipeline:
                         icp_concurrency=control_icp_concurrency,
                     ),
                 ))
-            if enable_asset_discovery or (enable_url_scan and (url_text or urls)):
+            if not resume_core_completed and (
+                enable_asset_discovery or (enable_url_scan and (url_text or urls))
+            ) and "asset_url" not in checkpoint_results:
                 primary_jobs.append((
                     "asset_url",
                     self._run_asset_and_url_scan(
@@ -645,7 +792,11 @@ class CompanyScanPipeline:
                     ),
                 ))
 
-            if root_xhs_enabled:
+            if (
+                root_xhs_enabled
+                and not resume_core_completed
+                and "xhs" not in checkpoint_results
+            ):
                 xhs_keywords = self._get_xhs_keywords(aliases, router_output)
                 result["xhs"]["keywords_used"] = xhs_keywords
                 primary_jobs.append((
@@ -662,7 +813,11 @@ class CompanyScanPipeline:
                     ),
                 ))
 
-            if enable_bidding:
+            if (
+                enable_bidding
+                and not resume_core_completed
+                and "bidding" not in checkpoint_results
+            ):
                 result["bidding"]["query_name"] = normalized_name
                 primary_jobs.append((
                     "bidding",
@@ -680,7 +835,19 @@ class CompanyScanPipeline:
                     ),
                 ))
 
-            if root_wechat_enabled:
+            if enable_wechat and "wechat" in checkpoint_results:
+                primary_jobs.append((
+                    "wechat",
+                    self._completed_module_result(checkpoint_results["wechat"]),
+                ))
+            elif enable_wechat and resume_mobile_completed:
+                from api.services.company_scan_recovery import restore_wechat
+
+                primary_jobs.append((
+                    "wechat",
+                    restore_wechat(self.db, task_id=task_id),
+                ))
+            elif root_wechat_enabled:
                 primary_jobs.append((
                     "wechat",
                     self._run_wechat_collection(
@@ -697,7 +864,11 @@ class CompanyScanPipeline:
                     ),
                 ))
 
-            if enable_scholar:
+            if (
+                enable_scholar
+                and not resume_core_completed
+                and "scholar" not in checkpoint_results
+            ):
                 primary_jobs.append((
                     "scholar",
                     self._run_scholar_collection(
@@ -706,11 +877,25 @@ class CompanyScanPipeline:
                         unit=normalized_name,
                         direction=scholar_resolution.direction,
                         direction_source=scholar_resolution.source,
-                        unit_en=scholar_unit_en,
+                        unit_en=resolved_scholar_unit_en,
                         limit=scholar_limit,
                     ),
                 ))
 
+            async def _checkpoint_module(kind: str, outcome: Any) -> None:
+                if not isinstance(outcome, dict) or outcome.get("status") == "error":
+                    return
+                from api.services.task_progress import save_module_checkpoint
+
+                await save_module_checkpoint(
+                    self.db,
+                    task_id=task_id,
+                    module=kind,
+                    result=outcome,
+                )
+
+            failed_primary_jobs: set[str] = set()
+            mobile_jobs: list[tuple[str, Any]] = []
             if primary_jobs:
                 logger.info(
                     "[company_scan] task=%s 阶段2: 并行执行 %s",
@@ -724,94 +909,52 @@ class CompanyScanPipeline:
                 )
                 mobile_jobs = [job for job in primary_jobs if job[0] == "wechat"]
                 core_jobs = [job for job in primary_jobs if job[0] != "wechat"]
-                mobile_task = (
-                    asyncio.create_task(
-                        self._gather_named_jobs(mobile_jobs),
+                if mobile_jobs:
+                    from core.background import spawn_background
+
+                    mobile_task = spawn_background(
+                        self._run_mobile_jobs(
+                            mobile_jobs,
+                            task_id=task_id,
+                            on_completed=_checkpoint_module,
+                        ),
                         name=f"company-wechat:{task_id}",
                     )
-                    if mobile_jobs
-                    else None
+                else:
+                    mobile_task = None
+                core_results = await self._gather_named_jobs(
+                    core_jobs,
+                    on_completed=_checkpoint_module,
                 )
-                core_results = await self._gather_named_jobs(core_jobs)
-                mobile_results: list[Any] = []
-                if mobile_task is not None:
-                    core_lease.release()
-                    if not mobile_task.done():
-                        await self._update_progress(
-                            task_id,
-                            "mobile_scanning" if mobile_started.is_set() else "waiting_mobile",
-                            (
-                                "公众号任务正在采集..."
-                                if mobile_started.is_set()
-                                else "网络与 API 扫描已让出并发资源，公众号任务进入手机队列..."
-                            ),
-                        )
-                    mobile_results = await mobile_task
-                    await self._update_progress(
-                        task_id,
-                        "waiting_core",
-                        "公众号采集结束，等待资源汇总扫描结果...",
-                    )
-                    await core_lease.acquire()
-                primary_jobs = [*core_jobs, *mobile_jobs]
-                sub_results = [*core_results, *mobile_results]
+                if self._jobs_completed_successfully(core_results):
+                    from api.services.task_progress import mark_resume_phases
 
-                failed_primary_jobs: set[str] = set()
-                for (kind, _operation), sub in zip(primary_jobs, sub_results):
-                    if isinstance(sub, Exception):
-                        failed_primary_jobs.add(kind)
-                        logger.error("[company_scan] %s 子流水线失败: %s", kind, sub)
-                        result["sub_errors"].append(f"{kind}: {sub}")
-                        if kind == "wechat":
-                            result["wechat"].update(status="error", error=str(sub))
-                        elif kind == "scholar":
-                            result["scholar"].update(status="error", error=str(sub))
-                    elif isinstance(sub, dict):
-                        if kind == "asset_url":
-                            result["assets"].update(sub.get("assets") or {})
-                            result["url_scan"].update(sub.get("url_scan") or {})
-                        elif kind == "control_structure":
-                            result["control_structure"].update(sub.get("result") or {})
-                        elif kind == "bidding":
-                            visual = sub.get("visual_analysis") or {}
-                            bidding_failed = sub.get("status") == "error"
-                            bidding_partial = bool(
-                                visual.get("status") == "error"
-                                or sub.get("archive_error_count")
-                            )
-                            result["bidding"].update(
-                                sub,
-                                status=(
-                                    "error"
-                                    if bidding_failed
-                                    else "partial"
-                                    if bidding_partial
-                                    else "completed"
-                                ),
-                                findings_count=visual.get("findings_count", 0),
-                                copywritings_count=visual.get("copywritings_count", 0),
-                            )
-                            if bidding_failed and sub.get("error"):
-                                failed_primary_jobs.add(kind)
-                                result["sub_errors"].append(str(sub["error"]))
-                        elif kind == "xhs":
-                            result["xhs"].update(sub)
-                            xhs_succeeded = True
-                        elif kind == "wechat":
-                            result["wechat"].update(sub)
-                            if sub.get("status") == "error":
-                                failed_primary_jobs.add(kind)
-                        elif kind == "scholar":
-                            result["scholar"].update(sub)
-                            if sub.get("status") == "error":
-                                failed_primary_jobs.add(kind)
-                if result["wechat"].get("status") == "error":
-                    raise RuntimeError(
-                        "公众号采集失败: "
-                        + str(result["wechat"].get("error") or "未知错误")
+                    completed_phases = ["core_completed"]
+                    if not mobile_jobs:
+                        completed_phases.append("mobile_completed")
+                    await mark_resume_phases(
+                        self.db,
+                        task_id=task_id,
+                        phases=completed_phases,
                     )
-                if len(failed_primary_jobs) == len(primary_jobs):
-                    raise RuntimeError("所有公司扫描子流水线均失败: " + "; ".join(result["sub_errors"]))
+                core_failures, core_xhs_succeeded = self._merge_primary_job_results(
+                    result,
+                    core_jobs,
+                    core_results,
+                )
+                failed_primary_jobs.update(core_failures)
+                xhs_succeeded = xhs_succeeded or core_xhs_succeeded
+
+                # 手机采集继续后台运行；根来源完成后立即让后续网络/API 重新排队。
+                core_lease.release()
+            else:
+                from api.services.task_progress import mark_resume_phases
+
+                await mark_resume_phases(
+                    self.db,
+                    task_id=task_id,
+                    phases=["core_completed", "mobile_completed"],
+                )
 
             wholly_owned_entities = list(result["control_structure"].get("entities") or [])
             child_xhs_decisions: dict[str, dict[str, Any]] = {}
@@ -850,9 +993,13 @@ class CompanyScanPipeline:
                     project_id=project_id,
                     task_id=task_id,
                 )
-                xhs_selection_result = merge_xhs_target_selection_results(
-                    xhs_selection_result,
-                    child_selection,
+                xhs_selection_result = (
+                    merge_xhs_target_selection_results(
+                        xhs_selection_result,
+                        child_selection,
+                    )
+                    if xhs_selection_result is not None
+                    else child_selection
                 )
                 result["xhs"]["selection"] = xhs_selection_result.model_dump(mode="json")
                 child_xhs_decisions = {
@@ -864,7 +1011,16 @@ class CompanyScanPipeline:
                 )
 
             followups: list[tuple[str, Any]] = []
-            if wholly_owned_entities and (enable_asset_discovery or selected_child_xhs):
+            if "wholly_owned_entities" in checkpoint_results:
+                followups.append((
+                    "wholly_owned_entities",
+                    self._completed_module_result(
+                        checkpoint_results["wholly_owned_entities"]
+                    ),
+                ))
+            elif wholly_owned_entities and (
+                enable_asset_discovery or selected_child_xhs
+            ):
                 followups.append((
                     "wholly_owned_entities",
                     self._scan_wholly_owned_entities(
@@ -894,34 +1050,93 @@ class CompanyScanPipeline:
             if followups:
                 await self._update_progress(
                     task_id,
-                    "followup_collection",
-                    "采集全资子公司...",
+                    "waiting_core",
+                    "等待资源采集全资子公司...",
                 )
-                followup_results = await self._gather_named_jobs(followups)
-                for (kind, _operation), outcome in zip(followups, followup_results):
-                    if isinstance(outcome, Exception):
-                        error_message = f"{kind}: {outcome}"
-                        result["sub_errors"].append(error_message)
-                        raise outcome
-                    if kind == "wholly_owned_entities":
-                        result["control_structure"]["entities"] = outcome["entities"]
-                        result["control_structure"]["scan_summary"] = outcome["summary"]
-                        result["control_structure"]["errors"].extend(outcome["errors"])
-                        result["profile_copywritings"]["count"] = int(
-                            outcome["summary"].get("profile_copywritings") or 0
-                        )
+                await core_lease.acquire()
+                try:
+                    await self._update_progress(
+                        task_id,
+                        "followup_collection",
+                        "采集全资子公司...",
+                    )
+                    followup_results = await self._gather_named_jobs(
+                        followups,
+                        on_completed=_checkpoint_module,
+                    )
+                    for (kind, _operation), outcome in zip(followups, followup_results):
+                        if isinstance(outcome, Exception):
+                            error_message = f"{kind}: {outcome}"
+                            result["sub_errors"].append(error_message)
+                            raise outcome
+                        if kind == "wholly_owned_entities":
+                            result["control_structure"]["entities"] = outcome["entities"]
+                            result["control_structure"]["scan_summary"] = outcome["summary"]
+                            result["control_structure"]["errors"].extend(outcome["errors"])
+                            result["profile_copywritings"]["count"] = int(
+                                outcome["summary"].get("profile_copywritings") or 0
+                            )
+                finally:
+                    core_lease.release()
 
             # ── 阶段 3: 画像→话术 ──
-            if root_xhs_enabled and enable_copywriting and xhs_succeeded:
+            if (
+                not resume_core_completed
+                and root_xhs_enabled
+                and enable_copywriting
+                and xhs_succeeded
+            ):
                 logger.info(f"[company_scan] task={task_id} 阶段3: 画像话术生成")
-                await self._update_progress(task_id, "profile_copywriting", "为高分画像生成话术...")
+                await self._update_progress(task_id, "waiting_core", "等待资源生成画像话术...")
+                await core_lease.acquire()
+                try:
+                    await self._update_progress(task_id, "profile_copywriting", "为高分画像生成话术...")
+                    cw_count = await self._run_profile_copywriting(
+                        task_id, project_id, normalized_name,
+                        router_output, profile_copywriting_threshold,
+                        target_id=target_id,
+                    )
+                    result["profile_copywritings"]["count"] += cw_count
+                finally:
+                    core_lease.release()
 
-                cw_count = await self._run_profile_copywriting(
-                    task_id, project_id, normalized_name,
-                    router_output, profile_copywriting_threshold,
-                    target_id=target_id,
+            if mobile_task is not None:
+                if not mobile_task.done():
+                    await self._update_progress(
+                        task_id,
+                        "mobile_scanning" if mobile_started.is_set() else "waiting_mobile",
+                        (
+                            "网站与 API 后续已完成，正在等待公众号采集..."
+                            if mobile_started.is_set()
+                            else "网站与 API 后续已完成，公众号任务仍在手机队列..."
+                        ),
+                    )
+                mobile_results = await mobile_task
+                mobile_failures, mobile_xhs_succeeded = (
+                    self._merge_primary_job_results(
+                        result,
+                        mobile_jobs,
+                        mobile_results,
+                    )
                 )
-                result["profile_copywritings"]["count"] += cw_count
+                failed_primary_jobs.update(mobile_failures)
+                xhs_succeeded = xhs_succeeded or mobile_xhs_succeeded
+                await self._update_progress(
+                    task_id,
+                    "finalizing",
+                    "公众号采集结束，正在汇总已持久化结果...",
+                )
+
+            if result["wechat"].get("status") == "error":
+                raise RuntimeError(
+                    "公众号采集失败: "
+                    + str(result["wechat"].get("error") or "未知错误")
+                )
+            if primary_jobs and len(failed_primary_jobs) == len(primary_jobs):
+                raise RuntimeError(
+                    "所有公司扫描子流水线均失败: "
+                    + "; ".join(result["sub_errors"])
+                )
 
             # ── 保存综合结果 ──
             result["status"] = "completed"
@@ -1430,6 +1645,7 @@ class CompanyScanPipeline:
             "providers": {},
         }
         discovered_urls: list[str] = []
+        known_alive_metadata: dict[str, dict[str, Any]] = {}
         if enable_asset_discovery:
             asset_result = await AssetIntelligenceService(
                 self.db,
@@ -1456,6 +1672,9 @@ class CompanyScanPipeline:
             ]
             asset_result["scan_mode"] = "incremental" if incremental_scan else "full"
             asset_result["scan_candidates"] = len(discovered_urls)
+            known_alive_metadata = dict(
+                asset_result.get("probe_metadata_by_url") or {}
+            )
 
         url_result: dict[str, Any] = {
             "enabled": enable_url_scan,
@@ -1482,12 +1701,22 @@ class CompanyScanPipeline:
                         enable_copywriting,
                         target_id=str(identity.get("target_id") or ""),
                         known_alive_urls=discovered_urls,
+                        known_alive_metadata=known_alive_metadata,
                         probe_concurrency=url_probe_concurrency,
                         scan_concurrency=url_scan_concurrency,
                         copywriting_concurrency=copywriting_concurrency,
                     )
                 )
-        return {"kind": "asset_url", "assets": asset_result, "url_scan": url_result}
+        durable_asset_result = {
+            key: value
+            for key, value in asset_result.items()
+            if key not in {"alive_urls", "scan_urls", "probe_metadata_by_url"}
+        }
+        return {
+            "kind": "asset_url",
+            "assets": durable_asset_result,
+            "url_scan": url_result,
+        }
 
     async def _run_url_scan(
         self,
@@ -1499,6 +1728,7 @@ class CompanyScanPipeline:
         enable_copywriting: bool,
         target_id: str = "",
         known_alive_urls: list[str] | None = None,
+        known_alive_metadata: dict[str, dict[str, Any]] | None = None,
         probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
         scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
@@ -1518,6 +1748,8 @@ class CompanyScanPipeline:
             target_id=target_id,
             enable_copywriting=enable_copywriting,
             known_alive_urls=known_alive_urls,
+            known_alive_metadata=known_alive_metadata,
+            parent_task_id=task_id,
             probe_concurrency=probe_concurrency,
             scan_concurrency=scan_concurrency,
             copywriting_concurrency=copywriting_concurrency,
@@ -1718,15 +1950,130 @@ class CompanyScanPipeline:
     # ══════════════════════════════════════
 
     @staticmethod
+    async def _completed_module_result(result: dict[str, Any]) -> dict[str, Any]:
+        return dict(result)
+
+    @staticmethod
+    def _jobs_completed_successfully(results: list[Any]) -> bool:
+        return all(
+            not isinstance(item, BaseException)
+            and not (
+                isinstance(item, dict) and item.get("status") == "error"
+            )
+            for item in results
+        )
+
+    async def _run_mobile_jobs(
+        self,
+        jobs: list[tuple[str, Any]],
+        *,
+        task_id: str,
+        on_completed: Any = None,
+    ) -> list[Any]:
+        """Run mobile sources and persist their resume boundary independently."""
+        results = await self._gather_named_jobs(
+            jobs,
+            on_completed=on_completed,
+        )
+        if self._jobs_completed_successfully(results):
+            from api.services.task_progress import mark_resume_phase
+
+            await mark_resume_phase(
+                self.db,
+                task_id=task_id,
+                phase="mobile_completed",
+            )
+        return results
+
+    @staticmethod
+    def _merge_primary_job_results(
+        result: dict[str, Any],
+        jobs: list[tuple[str, Any]],
+        outcomes: list[Any],
+    ) -> tuple[set[str], bool]:
+        """Merge independently completed sources without coupling their runtimes."""
+        failed_jobs: set[str] = set()
+        xhs_succeeded = False
+        for (kind, _operation), outcome in zip(jobs, outcomes):
+            if isinstance(outcome, BaseException):
+                failed_jobs.add(kind)
+                logger.error("[company_scan] %s 子流水线失败: %s", kind, outcome)
+                result["sub_errors"].append(f"{kind}: {outcome}")
+                if kind == "wechat":
+                    result["wechat"].update(status="error", error=str(outcome))
+                elif kind == "scholar":
+                    result["scholar"].update(status="error", error=str(outcome))
+                continue
+            if not isinstance(outcome, dict):
+                continue
+            if kind == "asset_url":
+                result["assets"].update(outcome.get("assets") or {})
+                result["url_scan"].update(outcome.get("url_scan") or {})
+            elif kind == "control_structure":
+                result["control_structure"].update(outcome.get("result") or {})
+            elif kind == "bidding":
+                visual = outcome.get("visual_analysis") or {}
+                bidding_failed = outcome.get("status") == "error"
+                bidding_partial = bool(
+                    visual.get("status") == "error"
+                    or outcome.get("archive_error_count")
+                )
+                result["bidding"].update(
+                    outcome,
+                    status=(
+                        "error"
+                        if bidding_failed
+                        else "partial"
+                        if bidding_partial
+                        else "completed"
+                    ),
+                    findings_count=visual.get("findings_count", 0),
+                    copywritings_count=visual.get("copywritings_count", 0),
+                )
+                if bidding_failed and outcome.get("error"):
+                    failed_jobs.add(kind)
+                    result["sub_errors"].append(str(outcome["error"]))
+            elif kind == "xhs":
+                result["xhs"].update(outcome)
+                xhs_succeeded = outcome.get("status") != "error"
+                if not xhs_succeeded:
+                    failed_jobs.add(kind)
+            elif kind == "wechat":
+                result["wechat"].update(outcome)
+                if outcome.get("status") == "error":
+                    failed_jobs.add(kind)
+            elif kind == "scholar":
+                result["scholar"].update(outcome)
+                if outcome.get("status") == "error":
+                    failed_jobs.add(kind)
+        return failed_jobs, xhs_succeeded
+
+    @staticmethod
     async def _gather_named_jobs(
         jobs: list[tuple[str, Any]],
+        *,
+        on_completed: Any = None,
     ) -> list[Any]:
         """Run independent source pipelines concurrently with isolated failures."""
         if not jobs:
             return []
+
+        async def _run(kind: str, operation: Any) -> Any:
+            outcome = await operation
+            if on_completed is not None:
+                try:
+                    await on_completed(kind, outcome)
+                except Exception as checkpoint_error:  # noqa: BLE001
+                    logger.warning(
+                        "公司扫描模块检查点写入失败 | module=%s error=%s",
+                        kind,
+                        checkpoint_error,
+                    )
+            return outcome
+
         return list(
             await asyncio.gather(
-                *(operation for _kind, operation in jobs),
+                *(_run(kind, operation) for kind, operation in jobs),
                 return_exceptions=True,
             )
         )
@@ -1738,6 +2085,26 @@ class CompanyScanPipeline:
                 value.strip() for value in values if isinstance(value, str) and value.strip()
             )
         )
+
+    @staticmethod
+    def _derive_scholar_unit_en(
+        aliases: list[str],
+        *,
+        explicit: str = "",
+    ) -> str:
+        """Prefer an existing English company alias for institution verification."""
+        configured = str(explicit or "").strip()
+        if configured:
+            return configured
+        candidates = [
+            value.strip()
+            for value in aliases
+            if isinstance(value, str)
+            and value.strip()
+            and value.isascii()
+            and any(character.isalpha() for character in value)
+        ]
+        return max(candidates, key=lambda value: (len(value), value), default="")
 
     def _get_xhs_keywords(self, search_names: list[str], router_output: Any) -> list[str]:
         """组合路由结果与数据库 XHS Skill，法定名不再是唯一检索入口。"""

@@ -36,6 +36,7 @@ export interface CollectTaskDef {
   deep_collect?: boolean
   source_link_strategy?: string
   detail_max_items?: number
+  detail_max_total_items?: number
   detail_max_swipes?: number
   min_score_to_detail?: number
   min_subject_match?: number
@@ -69,6 +70,7 @@ export interface CollectTaskInput {
   deep_collect?: boolean
   source_link_strategy?: string
   detail_max_items?: number
+  detail_max_total_items?: number
   detail_max_swipes?: number
   min_score_to_detail?: number
   min_subject_match?: number

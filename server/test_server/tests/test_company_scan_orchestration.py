@@ -177,6 +177,295 @@ def test_xhs_keywords_keep_brand_aliases_and_are_deterministic() -> None:
     assert len(keywords) == len(set(keywords))
 
 
+def test_scholar_unit_en_reuses_longest_ascii_company_alias() -> None:
+    pipeline = CompanyScanPipeline(object(), object())
+
+    assert pipeline._derive_scholar_unit_en(
+        ["安徽广播电视台", "AHTV", "Anhui Radio and Television Station"]
+    ) == "Anhui Radio and Television Station"
+    assert pipeline._derive_scholar_unit_en(
+        ["安徽广播电视台", "AHTV"],
+        explicit="Anhui Broadcasting Corporation",
+    ) == "Anhui Broadcasting Corporation"
+
+
+def test_named_jobs_write_checkpoint_after_each_success() -> None:
+    completed: list[tuple[str, dict[str, Any]]] = []
+
+    async def operation(value: int) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return {"value": value}
+
+    async def checkpoint(kind: str, result: dict[str, Any]) -> None:
+        completed.append((kind, result))
+
+    result = asyncio.run(
+        CompanyScanPipeline._gather_named_jobs(
+            [("asset_url", operation(1)), ("scholar", operation(2))],
+            on_completed=checkpoint,
+        )
+    )
+
+    assert result == [{"value": 1}, {"value": 2}]
+    assert sorted(completed) == [
+        ("asset_url", {"value": 1}),
+        ("scholar", {"value": 2}),
+    ]
+
+
+class _PipelineUpdateResult:
+    matched_count = 1
+
+
+class _PipelineCollection:
+    def __init__(self) -> None:
+        self.updates: list[dict[str, Any]] = []
+
+    async def find_one(
+        self,
+        _query: dict[str, Any],
+        _projection: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        return None
+
+    async def update_one(
+        self,
+        _query: dict[str, Any],
+        update: dict[str, Any],
+        **_kwargs: Any,
+    ) -> _PipelineUpdateResult:
+        self.updates.append(update)
+        return _PipelineUpdateResult()
+
+
+class _PipelineDb:
+    def __init__(self) -> None:
+        self.collection = _PipelineCollection()
+
+    def __getitem__(self, _name: str) -> _PipelineCollection:
+        return self.collection
+
+
+@pytest.mark.asyncio
+async def test_mobile_wait_does_not_block_wholly_owned_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import company_meta as company_meta_dao
+    from api.dao import targets as targets_dao
+    from api.services import company_normalize
+    from api.services import targets as targets_service
+    from Sere1nGraph.graph.company_router.router import CompanyRouterResult
+
+    db = _PipelineDb()
+    pipeline = CompanyScanPipeline(db, object())  # type: ignore[arg-type]
+    mobile_release = asyncio.Event()
+    followup_started = asyncio.Event()
+
+    async def normalize(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "normalized_name": "目标公司",
+            "root_domain": "target.example",
+            "aliases": ["目标公司"],
+            "source": "test",
+            "provenance": {},
+        }
+
+    async def route(*_args: Any, **_kwargs: Any) -> CompanyRouterResult:
+        return CompanyRouterResult(success=False, error="test fallback")
+
+    async def attach(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"target_id": "target-root", "canonical_name": "目标公司"}
+
+    async def upsert_meta(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return dict(kwargs)
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def run_control(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "kind": "control_structure",
+            "result": {
+                "status": "completed",
+                "entities": [
+                    {"name": "目标子公司", "target_id": "target-child"}
+                ],
+                "errors": [],
+            },
+        }
+
+    async def run_assets(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "kind": "asset_url",
+            "assets": {"enabled": True, "alive": 1},
+            "url_scan": {"enabled": False},
+        }
+
+    async def run_mobile(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs["started_event"].set()
+        await mobile_release.wait()
+        return {
+            "kind": "wechat",
+            "status": "completed",
+            "total": 1,
+            "documents": 1,
+        }
+
+    async def run_followup(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        followup_started.set()
+        return {
+            "kind": "wholly_owned_entities",
+            "entities": list(kwargs["entities"]),
+            "summary": {"completed": 1, "profile_copywritings": 0},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(company_normalize, "normalize_company", normalize)
+    monkeypatch.setattr(targets_service, "attach_normalized_company", attach)
+    monkeypatch.setattr(company_meta_dao, "upsert_company_meta", upsert_meta)
+    monkeypatch.setattr(targets_dao, "link_project_target", noop)
+    monkeypatch.setattr(targets_dao, "touch_project_target_collection", noop)
+    monkeypatch.setattr(pipeline, "_run_company_router", route)
+    monkeypatch.setattr(pipeline, "_run_wholly_owned_investments", run_control)
+    monkeypatch.setattr(pipeline, "_run_asset_and_url_scan", run_assets)
+    monkeypatch.setattr(pipeline, "_run_wechat_collection", run_mobile)
+    monkeypatch.setattr(pipeline, "_scan_wholly_owned_entities", run_followup)
+    monkeypatch.setattr(pipeline, "_update_progress", noop)
+
+    pipeline_task = asyncio.create_task(
+        pipeline.run_pipeline(
+            task_id="task-parallel",
+            project_id="project-1",
+            company_name="目标公司",
+            batch_id="batch-1",
+            enable_url_scan=False,
+            enable_asset_discovery=True,
+            enable_xhs=False,
+            enable_bidding=False,
+            enable_wechat=True,
+            wechat_target_selection_mode="all",
+            enable_scholar=False,
+            enable_control_structure=True,
+            enable_copywriting=False,
+            company_core_concurrency=1,
+        )
+    )
+    try:
+        await asyncio.wait_for(followup_started.wait(), timeout=5)
+        assert not mobile_release.is_set()
+        assert not pipeline_task.done()
+    finally:
+        mobile_release.set()
+        await asyncio.wait_for(asyncio.shield(pipeline_task), timeout=5)
+
+    result = pipeline_task.result()
+    assert result["status"] == "completed"
+    assert result["wechat"]["documents"] == 1
+    assert result["control_structure"]["scan_summary"]["completed"] == 1
+    update_fields = [
+        update.get("$set", {}) for update in db.collection.updates
+    ]
+    assert any(fields.get("resume.core_completed") is True for fields in update_fields)
+    assert any(fields.get("resume.mobile_completed") is True for fields in update_fields)
+
+
+@pytest.mark.asyncio
+async def test_wechat_checkpoint_wins_over_incomplete_mobile_resume_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import company_meta as company_meta_dao
+    from api.dao import targets as targets_dao
+    from api.services import company_scan_recovery
+    from api.services import targets as targets_service
+
+    db = _PipelineDb()
+    pipeline = CompanyScanPipeline(db, object())  # type: ignore[arg-type]
+    checkpoint_result = {
+        "kind": "wechat",
+        "status": "completed",
+        "total": 3,
+        "documents": 2,
+        "from_checkpoint": True,
+    }
+
+    async def load_state(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "resume": {"core_completed": True, "mobile_completed": False},
+            "modules": {
+                "wechat": {
+                    "status": "completed",
+                    "result": checkpoint_result,
+                }
+            },
+        }
+
+    async def restore_identity(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "input_name": "目标公司",
+            "normalized_name": "目标公司",
+            "root_domain": "target.example",
+            "root_domains": ["target.example"],
+            "aliases": ["目标公司"],
+            "target_id": "target-root",
+        }
+
+    async def get_meta(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "normalized_name": "目标公司",
+            "root_domain": "target.example",
+            "icp_domains": ["target.example"],
+            "aliases": ["目标公司"],
+            "target_id": "target-root",
+            "source": "test",
+            "provenance": {},
+        }
+
+    async def upsert_meta(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return dict(kwargs)
+
+    async def attach(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"target_id": "target-root", "canonical_name": "目标公司"}
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def unexpected_mobile(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("已有公众号模块检查点时不应重新启动手机采集")
+
+    monkeypatch.setattr(company_scan_recovery, "load_recovery_state", load_state)
+    monkeypatch.setattr(company_scan_recovery, "restore_identity", restore_identity)
+    monkeypatch.setattr(company_meta_dao, "get_company_meta", get_meta)
+    monkeypatch.setattr(company_meta_dao, "upsert_company_meta", upsert_meta)
+    monkeypatch.setattr(targets_service, "attach_normalized_company", attach)
+    monkeypatch.setattr(targets_dao, "link_project_target", noop)
+    monkeypatch.setattr(targets_dao, "touch_project_target_collection", noop)
+    monkeypatch.setattr(pipeline, "_run_wechat_collection", unexpected_mobile)
+    monkeypatch.setattr(pipeline, "_update_progress", noop)
+
+    result = await pipeline.run_pipeline(
+        task_id="task-wechat-checkpoint",
+        project_id="project-1",
+        company_name="目标公司",
+        batch_id="batch-1",
+        enable_url_scan=False,
+        enable_asset_discovery=False,
+        enable_xhs=False,
+        enable_bidding=False,
+        enable_wechat=True,
+        enable_scholar=False,
+        enable_control_structure=False,
+        enable_copywriting=False,
+    )
+
+    assert result["status"] == "completed"
+    assert result["wechat"]["from_checkpoint"] is True
+    update_fields = [
+        update.get("$set", {}) for update in db.collection.updates
+    ]
+    assert any(fields.get("resume.mobile_completed") is True for fields in update_fields)
+
+
 @pytest.mark.asyncio
 async def test_legal_company_reuses_existing_brand_target(
     monkeypatch: pytest.MonkeyPatch,

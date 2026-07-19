@@ -16,13 +16,16 @@ async def pool_status():
         from browser_manager import get_browser_provider
         provider = get_browser_provider()
         containers = await provider.get_pool_status()
-        return {
+        response = {
             "mode": "docker" if containers is not None else "local",
             "containers": containers or [],
             "total": len(containers) if containers else 0,
             "busy": sum(1 for c in (containers or []) if c.get("status") == "busy"),
             "idle": sum(1 for c in (containers or []) if c.get("status") == "idle"),
         }
+        if hasattr(provider, "capacity_status"):
+            response["capacity"] = provider.capacity_status()
+        return response
     except Exception as e:
         return {"mode": "local", "containers": [], "error": str(e)}
 
@@ -31,8 +34,15 @@ async def pool_status():
 async def pool_config():
     """获取 Docker Chrome 配置"""
     try:
-        from browser_manager.provider import _load_docker_config
-        config = _load_docker_config()
+        from browser_manager import get_browser_provider
+        from browser_manager.provider import DockerProvider, _load_docker_config
+
+        provider = get_browser_provider()
+        config = (
+            provider.config
+            if isinstance(provider, DockerProvider)
+            else _load_docker_config()
+        )
         return {
             "enabled": config.enabled,
             "image": config.image,
@@ -47,6 +57,13 @@ async def pool_config():
             "generic_busy_lease_timeout": config.generic_busy_lease_timeout,
             "screen_width": config.screen_width,
             "screen_height": config.screen_height,
+            "warm_pool_size": config.warm_pool_size,
+            "host_memory_floor_mb": config.host_memory_floor_mb,
+            "capacity": (
+                provider.capacity_status()
+                if isinstance(provider, DockerProvider)
+                else {}
+            ),
         }
     except Exception as e:
         return {"enabled": False, "error": str(e)}

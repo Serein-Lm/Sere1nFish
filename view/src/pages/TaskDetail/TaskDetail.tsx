@@ -37,7 +37,12 @@ const STATUS_MAP: Record<string, { color: string; icon: React.ReactNode; label: 
   running: { color: 'processing', icon: <SyncOutlined spin />, label: '执行中' },
   completed: { color: 'success', icon: <CheckCircleOutlined />, label: '已完成' },
   error: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
+  failed: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
+  paused: { color: 'warning', icon: <ClockCircleOutlined />, label: '已暂停' },
+  cancelled: { color: 'default', icon: <ClockCircleOutlined />, label: '已取消' },
 }
+
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'error', 'failed', 'paused', 'cancelled'])
 
 const XHS_CATEGORY_LABELS: Record<string, string> = {
   large_enterprise: '大型企业',
@@ -58,6 +63,22 @@ const XHS_SELECTION_STATUS: Record<string, { label: string; color: string }> = {
   completed: { label: '判定完成', color: 'success' },
   fallback: { label: '保守降级', color: 'warning' },
   disabled: { label: '未启用', color: 'default' },
+  restored: { label: '恢复复用', color: 'cyan' },
+}
+
+const TASK_SOURCE_LABELS: Record<string, string> = {
+  web_tagging_url_scan: '网站深扫',
+  bidding_url_scan: '招投标页面',
+  wechat: '公众号',
+  scholar: '学者',
+  xhs: '小红书',
+}
+
+const SOURCE_STATUS_LABELS: Record<string, { label: string; color: string }> = {
+  running: { label: '执行中', color: 'processing' },
+  completed: { label: '已完成', color: 'success' },
+  partial: { label: '部分完成', color: 'warning' },
+  error: { label: '失败', color: 'error' },
 }
 
 const WECHAT_CATEGORY_LABELS: Record<string, string> = {
@@ -122,13 +143,13 @@ export default function TaskDetail() {
 
   // 轮询非终态任务
   useEffect(() => {
-    if (!task || task.status === 'completed' || task.status === 'error') return
+    if (!task || TERMINAL_TASK_STATUSES.has(task.status)) return
     const timer = setInterval(async () => {
       if (!taskId || !projectId) return
       try {
         const updated = await getTask(projectId, taskId)
         setTask(updated)
-        if (updated.status === 'completed' || updated.status === 'error') {
+        if (TERMINAL_TASK_STATUSES.has(updated.status)) {
           clearInterval(timer)
           fetchData()
         }
@@ -150,6 +171,8 @@ export default function TaskDetail() {
   }
 
   const progress = task?.progress || {} as TaskProgress
+  const sourceProgress = Object.values(progress.sources || {})
+    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))
   const xhsSelection = task?.task_type === 'company_scan'
     ? task.result?.xhs?.selection
     : undefined
@@ -414,6 +437,35 @@ export default function TaskDetail() {
               <Col xs={12} sm={8} md={4}><Statistic title="Findings" value={findings.length} /></Col>
               <Col xs={12} sm={8} md={4}><Statistic title="耗时" value={task.elapsed_ms ? `${(task.elapsed_ms / 1000).toFixed(1)}s` : '-'} /></Col>
             </Row>
+            {(progress.stage || progress.message) && (
+              <div className="task-current-stage">
+                {progress.stage ? <Tag color="processing">{progress.stage}</Tag> : null}
+                <Text>{progress.message || '任务正在执行'}</Text>
+              </div>
+            )}
+            {sourceProgress.length > 0 && (
+              <div className="task-source-progress-list">
+                {sourceProgress.map((source) => {
+                  const total = Number(source.total || 0)
+                  const processed = Number(source.processed || 0)
+                  const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0
+                  const status = SOURCE_STATUS_LABELS[source.status] || SOURCE_STATUS_LABELS.running
+                  return (
+                    <div className="task-source-progress-row" key={source.source}>
+                      <div className="task-source-progress-heading">
+                        <Space size={6} wrap>
+                          <Text strong>{TASK_SOURCE_LABELS[source.source] || source.source}</Text>
+                          <Tag color={status.color}>{status.label}</Tag>
+                        </Space>
+                        {total > 0 ? <Text type="secondary">{processed}/{total}</Text> : null}
+                      </div>
+                      {total > 0 ? <Progress percent={percent} size="small" /> : null}
+                      {source.message ? <Text type="secondary">{source.message}</Text> : null}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
             {/* url_scan 进度 */}
             {task.task_type === 'url_scan' && progress.total_urls != null && (
               <Row gutter={16} style={{ marginTop: 12 }}>

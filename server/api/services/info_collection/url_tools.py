@@ -23,6 +23,82 @@ from core.logger import get_logger
 logger = get_logger("api.services.info_collection.url_tools")
 
 
+_GENERIC_PAGE_TITLES = (
+    "400 bad request",
+    "403 forbidden",
+    "404 not found",
+    "access denied",
+    "bad gateway",
+    "default web site page",
+    "error page",
+    "internal server error",
+    "nginx",
+    "page not found",
+    "service unavailable",
+    "temporarily unavailable",
+    "web application firewall",
+    "welcome to nginx",
+    "页面不存在",
+    "访问被拒绝",
+    "网站防火墙",
+)
+
+
+def classify_terminal_probe(target_info: dict[str, Any]) -> tuple[str, str] | None:
+    """Identify deterministic error/default pages that do not need an Agent."""
+    probe = target_info.get("probe") or {}
+    status = target_info.get("status_code")
+    if status is None:
+        status = probe.get("status_code")
+    try:
+        status_code = int(status) if status is not None else 0
+    except (TypeError, ValueError):
+        status_code = 0
+    title = str(
+        target_info.get("title") or probe.get("title") or ""
+    ).strip()
+    normalized_title = " ".join(title.casefold().split())
+    if status_code >= 400:
+        return (
+            "http_error",
+            f"探活已确认 HTTP {status_code}，无需启动浏览器 Agent",
+        )
+    if normalized_title and any(
+        marker in normalized_title for marker in _GENERIC_PAGE_TITLES
+    ):
+        return (
+            "generic_error_page",
+            f"探活已确认通用错误或默认页: {title[:160]}",
+        )
+    return None
+
+
+def _terminal_page_output(
+    url: str,
+    target_info: dict[str, Any],
+    *,
+    classification: str,
+    reason: str,
+) -> dict[str, Any]:
+    probe = target_info.get("probe") or {}
+    title = str(target_info.get("title") or probe.get("title") or "").strip()
+    host = urlsplit(url).hostname or ""
+    return {
+        "intro": {
+            "url": url,
+            "final_url": url,
+            "domain": host,
+            "site_name": title or host,
+            "entity_name": title or host,
+            "summary": reason,
+        },
+        "has_findings": False,
+        "no_findings_reason": reason,
+        "findings": [],
+        "classification": classification,
+    }
+
+
 def _web_agent_tool_limit(options: dict[str, Any]) -> int:
     from Sere1nGraph.graph.agents.factory import (
         DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT,
@@ -261,6 +337,31 @@ class UrlWebScanTool:
         attempt = request.options.get("attempt", 0)
         source_context = str(request.target_info.get("source_context") or "").strip()
         url_task_id = f"url_scan_w{worker_id}_{pipeline_id}_{item_id}"
+
+        terminal_probe = classify_terminal_probe(request.target_info)
+        if terminal_probe:
+            classification, reason = terminal_probe
+            logger.info(
+                "[scan-w%s] 短路浏览器 Agent url=%s class=%s",
+                worker_id,
+                url,
+                classification,
+            )
+            return ScanResult(
+                source=request.source,
+                target=url,
+                success=True,
+                data=_terminal_page_output(
+                    url,
+                    request.target_info,
+                    classification=classification,
+                    reason=reason,
+                ),
+                meta={
+                    "short_circuited": True,
+                    "classification": classification,
+                },
+            )
 
         provider = get_browser_provider()
         cdp_url = await provider.get_cdp_endpoint(task_id=url_task_id, purpose="url_scan")

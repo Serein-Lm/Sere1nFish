@@ -73,10 +73,9 @@ async def prepare_interrupted_tasks(
             {"task_id": {"$in": pending_ids}, "status": "pending"},
             {
                 "$set": {
-                    "progress": {
-                        "stage": "recovering",
-                        "message": "服务已启动，排队任务等待重新认领",
-                    },
+                    "progress.stage": "recovering",
+                    "progress.message": "服务已启动，排队任务等待重新认领",
+                    "progress.last_activity_at": now,
                     "last_requeued_at": now,
                     "updated_at": now,
                 },
@@ -96,10 +95,9 @@ async def prepare_interrupted_tasks(
             {
                 "$set": {
                     "status": "pending",
-                    "progress": {
-                        "stage": "recovering",
-                        "message": "服务已恢复，资源队列任务等待重新认领",
-                    },
+                    "progress.stage": "recovering",
+                    "progress.message": "服务已恢复，资源队列任务等待重新认领",
+                    "progress.last_activity_at": now,
                     "last_requeued_at": now,
                     "updated_at": now,
                 },
@@ -123,10 +121,9 @@ async def prepare_interrupted_tasks(
             {
                 "$set": {
                     "status": "pending",
-                    "progress": {
-                        "stage": "recovering",
-                        "message": "服务已恢复，中断任务等待重新认领",
-                    },
+                    "progress.stage": "recovering",
+                    "progress.message": "服务已恢复，中断任务等待重新认领",
+                    "progress.last_activity_at": now,
                     "last_recovered_at": now,
                     "updated_at": now,
                 },
@@ -293,7 +290,9 @@ async def release_interrupted_task(
         {
             "$set": {
                 "status": "pending",
-                "progress": {"stage": "recovering", "message": reason},
+                "progress.stage": "recovering",
+                "progress.message": reason,
+                "progress.last_activity_at": now,
                 "updated_at": now,
             },
             "$unset": {"runtime_id": "", "heartbeat_at": ""},

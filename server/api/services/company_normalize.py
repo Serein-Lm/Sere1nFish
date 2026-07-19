@@ -155,12 +155,22 @@ async def normalize_company(
     cached = await company_meta_dao.get_company_meta(db, project_id, input_name)
     # 降级结果不能成为永久缓存，否则一次浏览器故障会让后续资产发现永远缺失根域名。
     cached_provenance = dict((cached or {}).get("provenance") or {})
+    same_task_cache = bool(
+        task_id
+        and cached
+        and str(cached.get("latest_task_id") or "") == str(task_id)
+    )
     if (
         cached
         and cached.get("normalized_name")
-        and str(cached.get("source") or "") not in {"fallback", "company_scan"}
-        and int(cached_provenance.get("normalization_version") or 0)
-        >= NORMALIZATION_VERSION
+        and (
+            same_task_cache
+            or (
+                str(cached.get("source") or "") not in {"fallback", "company_scan"}
+                and int(cached_provenance.get("normalization_version") or 0)
+                >= NORMALIZATION_VERSION
+            )
+        )
     ):
         if not cached.get("target_id"):
             from api.services.targets import attach_normalized_company
@@ -190,7 +200,12 @@ async def normalize_company(
                 icp_domains=list(cached.get("icp_domains") or []),
                 provenance=cached_provenance,
             )
-        logger.info(f"[normalize] 命中缓存: {input_name} → {cached.get('normalized_name')}")
+        logger.info(
+            "[normalize] 命中%s缓存: %s → %s",
+            "同任务" if same_task_cache else "可信",
+            input_name,
+            cached.get("normalized_name"),
+        )
         return cached
 
     # 2. 跨项目复用全局 Target 别名。品牌名（如“B站”）已聚类过时，不再重复启动浏览器。

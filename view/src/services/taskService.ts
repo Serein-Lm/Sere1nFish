@@ -6,20 +6,38 @@ import type { PaginatedResponse } from './projectService'
 // ============================================
 
 export type TaskType = 'url_scan' | 'xhs_search' | 'douyin_search' | 'web_tagging' | 'company_scan' | 'fofa_collect' | 'scholar_contact'
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'error'
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'error' | 'failed' | 'paused' | 'cancelled'
 
 export interface TaskProgress {
+  stage?: string
+  message?: string
+  last_activity_at?: string
   total_urls?: number
   alive_urls?: number
   scanned_urls?: number
   total_findings?: number
   total_copywritings?: number
+  sources?: Record<string, TaskSourceProgress>
+}
+
+export interface TaskSourceProgress {
+  source: string
+  status: string
+  processed?: number
+  total?: number
+  succeeded?: number
+  failed?: number
+  skipped?: number
+  remaining?: number
+  message?: string
+  updated_at?: string
+  current_keyword?: string
 }
 
 export type XhsTargetSelectionMode = 'auto' | 'manual'
-export type XhsTargetSelectionStatus = 'pending' | 'completed' | 'fallback' | 'disabled'
+export type XhsTargetSelectionStatus = 'pending' | 'completed' | 'fallback' | 'disabled' | 'restored'
 export type WechatTargetSelectionMode = 'auto' | 'all'
-export type WechatTargetSelectionStatus = 'pending' | 'completed' | 'fallback' | 'disabled'
+export type WechatTargetSelectionStatus = 'pending' | 'completed' | 'fallback' | 'disabled' | 'restored'
 
 export interface XhsTargetDecision {
   target_id: string

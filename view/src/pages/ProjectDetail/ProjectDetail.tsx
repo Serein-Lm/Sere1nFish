@@ -83,10 +83,10 @@ const { Title, Paragraph, Text } = Typography
 const TASK_TUNING_DEFAULTS = {
   asset_probe_concurrency: 96,
   url_probe_concurrency: 64,
-  url_scan_concurrency: 10,
+  url_scan_concurrency: 24,
   copywriting_concurrency: 6,
   xhs_search_concurrency: 1,
-  company_scan_concurrency: 2,
+  company_scan_concurrency: 6,
 }
 
 const TASK_TUNING_FORM_DEFAULTS = {
@@ -97,6 +97,14 @@ const TASK_TUNING_FORM_DEFAULTS = {
   copywriting_concurrency: TASK_TUNING_DEFAULTS.copywriting_concurrency,
   xhs_search_concurrency: TASK_TUNING_DEFAULTS.xhs_search_concurrency,
   company_scan_concurrency: TASK_TUNING_DEFAULTS.company_scan_concurrency,
+}
+
+const TASK_SOURCE_LABELS: Record<string, string> = {
+  web_tagging_url_scan: '网站深扫',
+  bidding_url_scan: '招投标页面',
+  wechat: '公众号',
+  scholar: '学者',
+  xhs: '小红书',
 }
 
 const MAX_COMPANY_SCAN_BATCH_SIZE = 200
@@ -1103,10 +1111,10 @@ export default function ProjectDetail() {
           asset_probe_concurrency: boundedTaskTuning(config.asset_probe_concurrency, TASK_TUNING_DEFAULTS.asset_probe_concurrency, 128),
           probe_concurrency: boundedTaskTuning(config.asset_probe_concurrency, TASK_TUNING_DEFAULTS.asset_probe_concurrency, 128),
           url_probe_concurrency: boundedTaskTuning(config.url_probe_concurrency, TASK_TUNING_DEFAULTS.url_probe_concurrency, 128),
-          url_scan_concurrency: boundedTaskTuning(config.url_scan_concurrency, TASK_TUNING_DEFAULTS.url_scan_concurrency, 16),
+          url_scan_concurrency: boundedTaskTuning(config.url_scan_concurrency, TASK_TUNING_DEFAULTS.url_scan_concurrency, 48),
           copywriting_concurrency: boundedTaskTuning(config.copywriting_concurrency, TASK_TUNING_DEFAULTS.copywriting_concurrency, 12),
           xhs_search_concurrency: boundedTaskTuning(config.xhs_search_concurrency, TASK_TUNING_DEFAULTS.xhs_search_concurrency, 8),
-          company_scan_concurrency: boundedTaskTuning(config.company_scan_concurrency, TASK_TUNING_DEFAULTS.company_scan_concurrency, 3),
+          company_scan_concurrency: boundedTaskTuning(config.company_scan_concurrency, TASK_TUNING_DEFAULTS.company_scan_concurrency, 12),
         })
       } else {
         setTaskTuningValues(TASK_TUNING_FORM_DEFAULTS)
@@ -2421,6 +2429,7 @@ export default function ProjectDetail() {
                 if (projectId) fetchRecords(projectId, page, pageSize, websiteTargetId)
               },
             }}
+            scroll={{ x: 1180 }}
             expandable={{
               expandedRowRender: (rec) => <ExpandedRecordContent record={rec} onViewCopywriting={handleViewFindingCopywriting} />,
               expandRowByClick: true,
@@ -3749,6 +3758,9 @@ export default function ProjectDetail() {
                   running: { color: 'processing', icon: <SyncOutlined spin />, label: '执行中' },
                   completed: { color: 'success', icon: <CheckCircleOutlined />, label: '已完成' },
                   error: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
+                  failed: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
+                  paused: { color: 'warning', icon: <ClockCircleOutlined />, label: '已暂停' },
+                  cancelled: { color: 'default', icon: <ClockCircleOutlined />, label: '已取消' },
                 }
                 const info = map[val] || map.pending
                 return <Tag icon={info.icon} color={info.color}>{info.label}</Tag>
@@ -3768,6 +3780,34 @@ export default function ProjectDetail() {
                       <Tag>{rec.batch_index}/{rec.batch_total}</Tag>
                     ) : null}
                   </Space>
+                )
+              },
+            },
+            {
+              title: '当前进度',
+              key: 'progress',
+              width: 280,
+              render: (_: unknown, rec: Task) => {
+                const sources = Object.values(rec.progress?.sources || {})
+                  .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))
+                const activeSource = sources[0]
+                const total = Number(activeSource?.total || 0)
+                const processed = Number(activeSource?.processed || 0)
+                const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0
+                const label = activeSource
+                  ? TASK_SOURCE_LABELS[activeSource.source] || activeSource.source
+                  : rec.progress?.stage || ''
+                const detail = activeSource?.message || rec.progress?.message || ''
+                if (!label && !detail) return <Text type="secondary">-</Text>
+                return (
+                  <div style={{ minWidth: 220 }}>
+                    <Space size={6} wrap>
+                      {label ? <Tag>{label}</Tag> : null}
+                      {total > 0 ? <Text type="secondary">{processed}/{total}</Text> : null}
+                    </Space>
+                    {total > 0 ? <Progress percent={percent} size="small" showInfo={false} /> : null}
+                    {detail ? <Text type="secondary" ellipsis={{ tooltip: detail }}>{detail}</Text> : null}
+                  </div>
                 )
               },
             },
@@ -4355,7 +4395,7 @@ export default function ProjectDetail() {
                           <Input.TextArea rows={3} placeholder="每行一个 URL；留空时由公司身份、FOFA 和 Hunter 自动发现" />
                         </Form.Item>
                         <Form.Item name="company_scan_concurrency" label="批量公司并发" tooltip="网站和 API 公司任务可并行；同一手机仍会自动排队逐个执行。">
-                          <InputNumber min={1} max={3} style={{ width: '100%' }} />
+                          <InputNumber min={1} max={12} style={{ width: '100%' }} />
                         </Form.Item>
                         <Form.Item label="扫描模块">
                           <Space orientation="vertical">
@@ -4542,7 +4582,7 @@ export default function ProjectDetail() {
                           </Col>
                           <Col xs={24} sm={6}>
                             <Form.Item name="url_scan_concurrency" label="浏览器深扫并发">
-                              <InputNumber min={1} max={16} style={{ width: '100%' }} />
+                              <InputNumber min={1} max={48} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>
@@ -4599,7 +4639,7 @@ export default function ProjectDetail() {
                           </Col>
                           <Col xs={24} sm={8}>
                             <Form.Item name="url_scan_concurrency" label="浏览器深扫并发">
-                              <InputNumber min={1} max={16} style={{ width: '100%' }} />
+                              <InputNumber min={1} max={48} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={8}>
@@ -4686,7 +4726,7 @@ export default function ProjectDetail() {
                           </Col>
                           <Col xs={24} sm={6}>
                             <Form.Item name="url_scan_concurrency" label="浏览器深扫并发">
-                              <InputNumber min={1} max={16} style={{ width: '100%' }} />
+                              <InputNumber min={1} max={48} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>

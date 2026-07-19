@@ -250,6 +250,201 @@ def test_request_stop_unknown_is_idempotent():
     assert pl.is_running("never-started") is False
 
 
+def test_detail_limit_is_shared_across_keyword_screens(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    stage = pl._CollectStage()
+    dives: list[str] = []
+
+    async def navigate(*_args, **_kwargs):
+        return True
+
+    async def capture(*_args, **_kwargs):
+        return "QUJD", "shot", "/shot"
+
+    async def analyze(*_args, **_kwargs):
+        return [
+            {
+                "fields": {"title": "A", "account": "account"},
+                "score": 90,
+                "subject_match": 95,
+                "tap_x": 100,
+                "tap_y": 200,
+            },
+            {
+                "fields": {"title": "B", "account": "account"},
+                "score": 85,
+                "subject_match": 95,
+                "tap_x": 100,
+                "tap_y": 300,
+            },
+        ]
+
+    async def deep_dive(_ctx, _keyword, candidate, _target):
+        dives.append(candidate["fields"]["title"])
+
+    class _Context:
+        worker_id = 0
+        logger = __import__("logging").getLogger("detail-limit-test")
+        state = {
+            "stop_event": asyncio.Event(),
+            "device_id": "device",
+            "app_name": "微信",
+            "project_id": "project",
+            "run_task_id": "run",
+            "deep_collect": True,
+            "detail_max_items": 2,
+            "min_score_to_detail": 60,
+            "min_subject_match": 70,
+            "no_new_stop_threshold": 9,
+            "task_def_id": "definition",
+            "dedup_key_fields": ["title", "account"],
+            "direct_launch_app": False,
+            "search_hint": "",
+            "owner": "test",
+            "swipe_times": 2,
+            "swipe_interval": 0.01,
+            "parent_task_id": "",
+            "keyword_total": 1,
+            "keywords_completed": 0,
+        }
+
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(pl, "_run_search_navigation", navigate)
+    monkeypatch.setattr(stage, "_capture_save", capture)
+    monkeypatch.setattr(stage, "_analyze_list", analyze)
+    monkeypatch.setattr(stage, "_deep_dive", deep_dive)
+    monkeypatch.setattr(pl, "_do_swipe", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pl, "obs_log", lambda *_args, **_kwargs: "")
+
+    asyncio.run(stage.handle(type("Item", (), {"payload": {"keyword": "目标"}, "item_id": "1"})(), _Context()))
+
+    assert dives == ["A", "B"]
+
+
+def test_detail_total_limit_is_shared_across_keywords(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    stage = pl._CollectStage()
+    dives: list[str] = []
+
+    async def navigate(*_args, **_kwargs):
+        return True
+
+    async def capture(*_args, **_kwargs):
+        return "QUJD", "shot", "/shot"
+
+    async def analyze(_ctx, keyword, _image):
+        return [
+            {
+                "fields": {"title": f"{keyword}-{index}", "account": "account"},
+                "score": 90 - index,
+                "subject_match": 95,
+                "tap_x": 100,
+                "tap_y": 200 + index * 100,
+            }
+            for index in range(2)
+        ]
+
+    async def deep_dive(_ctx, _keyword, candidate, _target):
+        dives.append(candidate["fields"]["title"])
+
+    class _Context:
+        worker_id = 0
+        logger = __import__("logging").getLogger("detail-total-limit-test")
+        state = {
+            "stop_event": asyncio.Event(),
+            "device_id": "device",
+            "app_name": "微信",
+            "project_id": "project",
+            "run_task_id": "run",
+            "deep_collect": True,
+            "detail_max_items": 2,
+            "detail_max_total_items": 2,
+            "details_attempted": 0,
+            "detailed_record_keys": set(),
+            "min_score_to_detail": 60,
+            "min_subject_match": 70,
+            "no_new_stop_threshold": 1,
+            "task_def_id": "definition",
+            "dedup_key_fields": ["title", "account"],
+            "direct_launch_app": False,
+            "search_hint": "",
+            "owner": "test",
+            "swipe_times": 0,
+            "swipe_interval": 0.01,
+            "parent_task_id": "",
+            "keyword_total": 2,
+            "keywords_completed": 0,
+        }
+
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    context = _Context()
+    monkeypatch.setattr(pl, "_run_search_navigation", navigate)
+    monkeypatch.setattr(stage, "_capture_save", capture)
+    monkeypatch.setattr(stage, "_analyze_list", analyze)
+    monkeypatch.setattr(stage, "_deep_dive", deep_dive)
+    monkeypatch.setattr(pl, "obs_log", lambda *_args, **_kwargs: "")
+
+    asyncio.run(
+        stage.handle(
+            type("Item", (), {"payload": {"keyword": "A"}, "item_id": "1"})(),
+            context,
+        )
+    )
+    asyncio.run(
+        stage.handle(
+            type("Item", (), {"payload": {"keyword": "B"}, "item_id": "2"})(),
+            context,
+        )
+    )
+
+    assert dives == ["A-0", "A-1"]
+    assert context.state["details_attempted"] == 2
+
+
+def test_collect_stage_rejects_unfinished_navigation(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    async def navigate(*_args, **_kwargs):
+        return False
+
+    class _Context:
+        worker_id = 0
+        logger = __import__("logging").getLogger("navigation-not-done-test")
+        state = {
+            "stop_event": asyncio.Event(),
+            "device_id": "device",
+            "app_name": "微信",
+            "project_id": "project",
+            "run_task_id": "run",
+            "task_def_id": "definition",
+            "dedup_key_fields": [],
+            "direct_launch_app": False,
+            "search_hint": "",
+            "owner": "test",
+        }
+
+    monkeypatch.setattr(pl, "_run_search_navigation", navigate)
+    monkeypatch.setattr(pl, "obs_log", lambda *_args, **_kwargs: "")
+
+    with pytest.raises(RuntimeError, match="手机搜索导航未完成"):
+        asyncio.run(
+            pl._CollectStage().handle(
+                type(
+                    "Item",
+                    (),
+                    {"payload": {"keyword": "目标"}, "item_id": "1"},
+                )(),
+                _Context(),
+            )
+        )
+
+
 def test_search_navigation_requires_explicit_done(monkeypatch):
     from core.mobile.collect import pipeline as pl
 
