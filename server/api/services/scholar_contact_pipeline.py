@@ -275,12 +275,16 @@ async def run_scholar_contact_collect(
             f"articles={summary['articles_total']} contacts={summary['contacts_total']} "
             f"corr={summary['corresponding_count']} dry_run={dry_run}"
         )
-        if not dry_run and notify_completion:
+        if (
+            not dry_run
+            and notify_completion
+            and summary["verified_articles_total"] > 0
+        ):
             notify_event_background(
                 event="scholar_contact_done", level="info",
-                title="学者联系采集完成",
-                content=(f"单位『{unit}』方向『{direction}』: 文章 {summary['articles_total']} 篇, "
-                         f"联系 {summary['contacts_total']} 条(通讯 {summary['corresponding_count']})"),
+                title="发现目标单位已验证学者文章",
+                content=(f"单位『{unit}』方向『{direction}』: "
+                         f"已验证文章 {summary['verified_articles_total']} 篇"),
                 source="scholar_contact", project_id=project_id, task_id=task_id,
                 context={"unit": unit, "direction": direction},
             )

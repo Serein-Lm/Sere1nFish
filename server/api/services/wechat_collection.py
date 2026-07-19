@@ -28,6 +28,7 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "use_target_keyword_library": True,
             "deep_collect": True,
             "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
+            "notify_on": "none",
             "include_direct_children": False,
             "max_resolved_keywords": 12,
             "detail_max_items": 3,
@@ -57,6 +58,10 @@ def _wechat_definition_patch(task_def: dict[str, Any]) -> dict[str, Any]:
     if not task_def.get("deep_collect"):
         patch["deep_collect"] = True
     is_auto_definition = str(task_def.get("name") or "") == WECHAT_AUTO_TASK_NAME
+    if is_auto_definition and str(task_def.get("notify_on") or "") != defaults[
+        "notify_on"
+    ]:
+        patch["notify_on"] = defaults["notify_on"]
     if "include_direct_children" not in task_def or (
         is_auto_definition and task_def.get("include_direct_children") is not False
     ):
@@ -261,6 +266,9 @@ async def run_company_wechat_collection(
         "changed": int(result.get("changed") or 0),
         "contacts": int(result.get("contacts") or 0),
         "documents": int(result.get("documents") or 0),
+        "high_score_records": int(result.get("high_score_records") or 0),
+        "high_score_documents": int(result.get("high_score_documents") or 0),
+        "max_score": int(result.get("max_score") or 0),
         "keywords_used": list(result.get("keywords_used") or []),
         "stopped": bool(result.get("stopped")),
     }

@@ -111,17 +111,16 @@ async def recover_interrupted_runtime(db: Any) -> dict[str, int]:
     )
     scheduled = await _schedule_recovered_tasks(resumable)
 
-    if scheduled or exhausted or unsupported_count:
+    if exhausted or unsupported_count:
         from api.services.notifications import notify_event_background
 
         notify_event_background(
             event="task.runtime.recovered",
-            title="扫描任务运行时已恢复",
+            title="扫描任务恢复存在异常",
             content=(
-                f"已重新下发 {scheduled} 条未完成任务；"
                 f"达到恢复上限 {exhausted} 条；不支持恢复 {unsupported_count} 条。"
             ),
-            level="warning" if exhausted or unsupported_count else "notice",
+            level="warning",
             source="task_runtime_recovery",
             context={
                 "scheduled": scheduled,

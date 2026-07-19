@@ -126,19 +126,39 @@ def test_target_completion_notification_uses_unified_event(
         target_id="target-1",
         target_name="示例公司",
         source="company_scan_pipeline",
-        summary={"assets_alive": 3},
+        summary={"url_findings": 3},
     )
     assert captured["event"] == "target.collection.completed"
-    assert captured["title"] == "示例公司 信息收集完成"
-    assert "存活网站资产：3" in captured["content"]
+    assert captured["title"] == "示例公司 发现高价值信息"
+    assert "网站高价值发现：3" in captured["content"]
     assert "**重点**" in captured["content"]
-    assert "- 网站资产" in captured["content"]
+    assert "- 网站" in captured["content"]
     assert captured["context"] == {
         "target_id": "target-1",
         "target_name": "示例公司",
         "status": "completed",
-        "summary": {"assets_alive": 3},
+        "summary": {"url_findings": 3},
     }
+
+
+def test_target_completion_without_high_value_does_not_notify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import notifications
+
+    monkeypatch.setattr(
+        notifications,
+        "notify_event_background",
+        lambda **_kwargs: pytest.fail("低价值完成不应发送通知"),
+    )
+    assert notifications.notify_target_collection_completed(
+        project_id="project-1",
+        task_id="task-1",
+        target_id="target-1",
+        target_name="示例公司",
+        source="company_scan_pipeline",
+        summary={"assets_alive": 30, "bidding_records": 10},
+    ) is False
 
 
 def test_human_notification_markdown_hides_internal_context() -> None:
@@ -225,10 +245,41 @@ async def test_multi_company_completion_sends_one_compact_summary(
 
     assert result.ok is True
     assert len(captured) == 1
-    assert captured[0]["title"] == "2 家公司扫描结束"
-    assert "共 2 家：完成 1，失败 1" in captured[0]["content"]
-    assert "学者：候选文章 8，目标单位验证 2，联系方式 0" in captured[0]["content"]
+    assert captured[0]["title"] == "1 家公司发现高价值信息"
+    assert "共 2 家：完成 1，高价值 1，失败 1" in captured[0]["content"]
+    assert "目标单位已验证学者文章：2" in captured[0]["content"]
     assert "安徽广播电视台" in captured[0]["content"]
     assert "失败目标" in captured[0]["content"]
     assert "鞍钢集团有限公司" in captured[0]["content"]
     assert "```json" not in captured[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_multi_company_completion_skips_batch_without_high_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import notifications
+
+    async def _notify(**_kwargs: Any) -> notifications.NotificationDispatchResult:
+        pytest.fail("无高价值且无异常的批次不应发送通知")
+
+    monkeypatch.setattr(notifications, "notify_event", _notify)
+    result = await notifications.notify_company_scan_batch_completed(
+        project_id="project-1",
+        batch_id="batch-1",
+        tasks=[
+            {
+                "task_id": "task-1",
+                "batch_index": 1,
+                "status": "completed",
+                "params": {"company_name": "普通公司"},
+                "result": {
+                    "assets": {"alive": 20},
+                    "bidding": {"records_fetched": 12},
+                },
+            }
+        ],
+    )
+
+    assert result.ok is True
+    assert result.skipped is True

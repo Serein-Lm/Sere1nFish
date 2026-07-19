@@ -407,17 +407,50 @@ async def test_pending_tasks_do_not_consume_recovery_budget() -> None:
     documents = [
         {"task_id": "pending", "status": "pending", "recovery_count": 3},
         {"task_id": "running", "status": "running", "recovery_count": 2},
+        {
+            "task_id": "waiting",
+            "status": "running",
+            "recovery_count": 3,
+            "progress": {"stage": "waiting_core"},
+        },
         {"task_id": "exhausted", "status": "running", "recovery_count": 3},
     ]
     recovered, exhausted = await tasks_dao.prepare_interrupted_tasks(_Db(documents))
 
-    assert {item["task_id"] for item in recovered} == {"pending", "running"}
+    assert {item["task_id"] for item in recovered} == {
+        "pending",
+        "running",
+        "waiting",
+    }
     assert exhausted == 1
     assert documents[0]["status"] == "pending"
     assert documents[0]["recovery_count"] == 3
     assert documents[1]["status"] == "pending"
     assert documents[1]["recovery_count"] == 3
-    assert documents[2]["status"] == "error"
+    assert documents[2]["status"] == "pending"
+    assert documents[2]["recovery_count"] == 3
+    assert documents[3]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_background_shutdown_cancels_and_drains_retained_tasks() -> None:
+    from core.background import cancel_background_tasks, spawn_background
+
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def worker() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    spawn_background(worker(), name="shutdown-test")
+    await started.wait()
+
+    assert await cancel_background_tasks(timeout=1) >= 1
+    assert stopped.is_set()
 
 
 @pytest.mark.asyncio

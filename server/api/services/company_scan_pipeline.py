@@ -301,6 +301,9 @@ class CompanyScanPipeline:
                 "changed": 0,
                 "contacts": 0,
                 "documents": 0,
+                "high_score_records": 0,
+                "high_score_documents": 0,
+                "max_score": 0,
                 "keywords_used": [],
                 "selection": {
                     "mode": str(wechat_target_selection_mode or "auto"),
@@ -967,6 +970,10 @@ class CompanyScanPipeline:
                         "xhs_notes": result["xhs"].get("notes_count", 0),
                         "xhs_profiles": result["xhs"].get("profiles_count", 0),
                         "wechat_documents": result["wechat"].get("documents", 0),
+                        "wechat_high_score_records": result["wechat"].get(
+                            "high_score_records", 0
+                        ),
+                        "wechat_max_score": result["wechat"].get("max_score", 0),
                         "wechat_contacts": result["wechat"].get("contacts", 0),
                         "bidding_records": result["bidding"].get("records_fetched", 0),
                         "bidding_findings": result["bidding"].get("findings_count", 0),

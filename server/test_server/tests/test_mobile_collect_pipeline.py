@@ -164,6 +164,8 @@ def test_pipeline_full_chain_persists_and_notifies(monkeypatch):
     assert rec["screenshot_ids"] == ["shot1"]
     assert len(notifies) == 1
     assert notifies[0]["event"] == "mobile_collect_incremental"
+    assert result["high_score_records"] == 1
+    assert result["max_score"] == 80
     assert ("acquire", "dk-devA") in _FakePool.events
     assert ("release", "dk-devA") in _FakePool.events
     assert pl.request_stop("run-1") is False
@@ -183,6 +185,39 @@ def test_pipeline_no_notify_when_notify_on_none(monkeypatch):
     assert result["new"] == 1
     assert notifies == []
     assert ("release", "dk-devA") in _FakePool.events
+
+
+def test_pipeline_suppresses_low_score_incremental_notification(monkeypatch):
+    pl, notifies = _patch_pipeline(
+        monkeypatch,
+        analyze_returns=[{"title": "低分结果", "author": "x"}],
+    )
+    db = _FakeDB()
+
+    async def low_score_triage(*_args, **_kwargs):
+        return [
+            {
+                "fields": {"title": "低分结果", "author": "x"},
+                "score": 45,
+                "subject_match": 80,
+                "score_reason": "test",
+                "source_url": None,
+            }
+        ]
+
+    monkeypatch.setattr(pl, "triage_screenshot", low_score_triage)
+    result = asyncio.new_event_loop().run_until_complete(
+        pl.run_collect_task(
+            db,
+            run_task_id="run-low-score",
+            project_id="p1",
+            task_def=_task_def(notify_on="new", min_score_to_detail=60),
+        )
+    )
+
+    assert result["new"] == 1
+    assert result["high_score_records"] == 0
+    assert notifies == []
 
 
 def test_pipeline_raises_when_every_keyword_enters_dlq(monkeypatch):

@@ -29,6 +29,7 @@ def test_company_wechat_definition_enforces_phone_work_limits() -> None:
     assert patch["include_direct_children"] is False
     assert patch["max_resolved_keywords"] == 12
     assert patch["detail_max_items"] == 3
+    assert patch["notify_on"] == "none"
 
 
 @pytest.mark.asyncio
@@ -71,6 +72,7 @@ async def test_ensure_wechat_configuration_creates_unbound_project_definition(
     assert captured["max_resolved_keywords"] == 12
     assert captured["extract_fields"]
     assert captured["dedup_key_fields"] == ["title", "account"]
+    assert captured["notify_on"] == "none"
 
 
 @pytest.mark.asyncio

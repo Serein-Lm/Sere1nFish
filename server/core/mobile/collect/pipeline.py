@@ -793,6 +793,19 @@ class _PersistStage(Stage):
         elif result["is_changed"]:
             counters["changed"] += 1
 
+        try:
+            notification_score = max(int(raw_score or 0), int(score or 0))
+        except (TypeError, ValueError):
+            notification_score = int(score or 0)
+        notification_min_score = int(st.get("notification_min_score", 60) or 60)
+        is_high_score = notification_score >= notification_min_score
+        is_incremental = bool(result["is_new"] or result["is_changed"])
+        if is_high_score and is_incremental:
+            counters["high_score_records"] += 1
+            counters["max_score"] = max(counters["max_score"], notification_score)
+            if payload.get("source_document_id"):
+                counters["high_score_documents"] += 1
+
         # 数据分类: 抽取联系方式并接入统一 findings(需归属项目)
         project_id = st["project_id"]
         if project_id and contacts:
@@ -836,13 +849,13 @@ class _PersistStage(Stage):
         should_notify = (result["is_new"] and notify_on in ("new", "both")) or (
             result["is_changed"] and notify_on in ("changed", "both")
         )
-        if should_notify:
+        if should_notify and is_high_score:
             await ctx.emit(
                 "notify",
                 {
                     "record_id": result["record_id"],
                     "fields": payload["fields"],
-                    "score": score,
+                    "score": notification_score,
                     "keyword": payload["keyword"],
                     "kind": "new" if result["is_new"] else "changed",
                 },
@@ -920,6 +933,9 @@ async def run_collect_task(
         "changed": 0,
         "contacts": 0,
         "documents": 0,
+        "high_score_records": 0,
+        "high_score_documents": 0,
+        "max_score": 0,
     }
     preview: list[dict[str, Any]] = []
 
@@ -1028,6 +1044,10 @@ async def run_collect_task(
         "detail_max_items": int(task_def.get("detail_max_items", 5) or 0),
         "detail_max_swipes": int(task_def.get("detail_max_swipes", 12) or 12),
         "min_score_to_detail": int(task_def.get("min_score_to_detail", 60) or 0),
+        "notification_min_score": max(
+            60,
+            int(task_def.get("min_score_to_detail", 60) or 0),
+        ),
         "min_subject_match": int(task_def.get("min_subject_match", 70) or 0),
         "min_score_to_persist": int(task_def.get("min_score_to_persist", 0) or 0),
         "no_new_stop_threshold": int(task_def.get("no_new_stop_threshold", 2) or 2),

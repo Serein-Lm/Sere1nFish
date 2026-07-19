@@ -14,6 +14,7 @@ from api.db.collections import TASKS_COLLECTION
 MAX_AUTOMATIC_RECOVERIES = 3
 _BATCH_NOTIFICATION_CLAIM_SECONDS = 10 * 60
 _TERMINAL_TASK_STATUSES = {"completed", "error", "failed", "cancelled"}
+_NON_COUNTING_RECOVERY_STAGES = {"waiting_core", "waiting_mobile", "recovering"}
 
 
 async def insert_tasks(
@@ -46,16 +47,24 @@ async def prepare_interrupted_tasks(
         for item in unfinished
         if str(item.get("status") or "") == "running"
     ]
-    recoverable_running = [
+    waiting_running = [
         item
         for item in interrupted
+        if str((item.get("progress") or {}).get("stage") or "")
+        in _NON_COUNTING_RECOVERY_STAGES
+    ]
+    active_running = [item for item in interrupted if item not in waiting_running]
+    recoverable_active_running = [
+        item
+        for item in active_running
         if int(item.get("recovery_count") or 0) < MAX_AUTOMATIC_RECOVERIES
     ]
     exhausted = [
         item
-        for item in interrupted
+        for item in active_running
         if int(item.get("recovery_count") or 0) >= MAX_AUTOMATIC_RECOVERIES
     ]
+    recoverable_running = [*waiting_running, *recoverable_active_running]
     recoverable = [*pending, *recoverable_running]
 
     pending_ids = [str(item.get("task_id") or "") for item in pending]
@@ -80,10 +89,37 @@ async def prepare_interrupted_tasks(
             },
         )
 
-    running_ids = [str(item.get("task_id") or "") for item in recoverable_running]
-    if running_ids:
+    waiting_ids = [str(item.get("task_id") or "") for item in waiting_running]
+    if waiting_ids:
         await db[TASKS_COLLECTION].update_many(
-            {"task_id": {"$in": running_ids}, "status": "running"},
+            {"task_id": {"$in": waiting_ids}, "status": "running"},
+            {
+                "$set": {
+                    "status": "pending",
+                    "progress": {
+                        "stage": "recovering",
+                        "message": "服务已恢复，资源队列任务等待重新认领",
+                    },
+                    "last_requeued_at": now,
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "runtime_id": "",
+                    "heartbeat_at": "",
+                    "completed_at": "",
+                    "error": "",
+                },
+            },
+        )
+        for item in waiting_running:
+            item["status"] = "pending"
+
+    active_ids = [
+        str(item.get("task_id") or "") for item in recoverable_active_running
+    ]
+    if active_ids:
+        await db[TASKS_COLLECTION].update_many(
+            {"task_id": {"$in": active_ids}, "status": "running"},
             {
                 "$set": {
                     "status": "pending",
@@ -103,7 +139,7 @@ async def prepare_interrupted_tasks(
                 },
             },
         )
-        for item in recoverable_running:
+        for item in recoverable_active_running:
             item["status"] = "pending"
             item["recovery_count"] = int(item.get("recovery_count") or 0) + 1
             item["last_recovered_at"] = now
@@ -290,6 +326,9 @@ async def claim_completed_batch_notification(
         "result.bidding.records_fetched": 1,
         "result.bidding.findings_count": 1,
         "result.wechat.documents": 1,
+        "result.wechat.high_score_records": 1,
+        "result.wechat.high_score_documents": 1,
+        "result.wechat.max_score": 1,
         "result.wechat.contacts": 1,
         "result.scholar.articles_total": 1,
         "result.scholar.verified_articles_total": 1,

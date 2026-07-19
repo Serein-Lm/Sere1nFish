@@ -46,3 +46,25 @@ def spawn_background(
 def background_task_count() -> int:
     """当前保活中的后台任务数量(供观测/自检)。"""
     return len(_BACKGROUND_TASKS)
+
+
+async def cancel_background_tasks(*, timeout: float = 30.0) -> int:
+    """Cancel and drain retained background work before runtime shutdown."""
+    current = asyncio.current_task()
+    tasks = [
+        task
+        for task in tuple(_BACKGROUND_TASKS)
+        if task is not current and not task.done()
+    ]
+    if not tasks:
+        return 0
+
+    for task in tasks:
+        task.cancel()
+    _done, pending = await asyncio.wait(tasks, timeout=max(0.1, timeout))
+    if pending:
+        logger.warning(
+            "后台任务关闭超时，仍有 %s 条等待事件循环终止",
+            len(pending),
+        )
+    return len(tasks) - len(pending)

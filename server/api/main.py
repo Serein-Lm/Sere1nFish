@@ -356,6 +356,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"定时调度器停止失败: {e}")
 
+    # 关闭时：在 MongoDB 和浏览器资源仍可用时取消业务后台任务，
+    # 让持久任务把 running 原子退回 pending，避免热重载消耗恢复预算。
+    try:
+        from core.background import cancel_background_tasks
+
+        cancelled = await cancel_background_tasks(timeout=30)
+        logger.info(f"业务后台任务已停止: {cancelled}")
+    except Exception as e:
+        logger.warning(f"业务后台任务停止失败: {e}")
+
     # 关闭时：先 drain 观测组件，把内存待写记录全部落库（须先于 close_mongo）
     try:
         from Sere1nGraph.graph.observability import get_global_tracker
