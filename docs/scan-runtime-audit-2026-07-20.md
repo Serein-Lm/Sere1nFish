@@ -202,5 +202,6 @@
 - 主机保护改用当前配置字段：可用内存底线 8 GiB，每核 load 上限 1.25，近期 CDP 失败阈值 12。达到保护条件时只停止新建，不中断已有任务。
 - FOFA 默认请求间隔提高到 4 秒，命中 `45012` 后把全局请求门额外后推 12 秒；重试仍经过同一进程级请求门。
 - CompanyRouter 改为普通 JSON mode + Pydantic 本地校验，格式失败时注入错误和原输出纠正一次，避免严格 JSON schema 直接中止及内部 `parsed` 序列化告警。
+- 恢复验证发现仅把 URL 记录标成 `retryable` 还不够：若父公司的 `asset_url` 或 `bidding` 模块检查点已完成，父流水线会跳过整个模块。现在恢复入口会查询两个确定性的 URL 子任务，只使仍含 retryable 行的模块检查点失效；其余模块、公司身份和成功 URL 继续复用。
 
 第三阶段恢复前基线：批次仍为 `4eafabcb1b2e`，5 条 completed 保持不变，105 条 pending 等待单次启动恢复；模块检查点已增长到 `asset_url=25`、`bidding=29`、`control_structure=35`、`scholar=35`、`wechat=2`。

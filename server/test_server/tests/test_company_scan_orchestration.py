@@ -238,6 +238,13 @@ class _PipelineCollection:
         self.updates.append(update)
         return _PipelineUpdateResult()
 
+    async def distinct(
+        self,
+        _field: str,
+        _query: dict[str, Any],
+    ) -> list[str]:
+        return []
+
 
 class _PipelineDb:
     def __init__(self) -> None:
@@ -464,6 +471,123 @@ async def test_wechat_checkpoint_wins_over_incomplete_mobile_resume_flag(
         update.get("$set", {}) for update in db.collection.updates
     ]
     assert any(fields.get("resume.mobile_completed") is True for fields in update_fields)
+
+
+@pytest.mark.asyncio
+async def test_retryable_url_child_reopens_only_asset_module_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import company_meta as company_meta_dao
+    from api.dao import targets as targets_dao
+    from api.services import company_normalize
+    from api.services import company_scan_recovery
+    from api.services import targets as targets_service
+
+    db = _PipelineDb()
+    pipeline = CompanyScanPipeline(db, object())  # type: ignore[arg-type]
+    asset_runs = 0
+
+    async def load_state(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "resume": {"core_completed": True, "mobile_completed": True},
+            "modules": {
+                "asset_url": {
+                    "status": "completed",
+                    "result": {
+                        "kind": "asset_url",
+                        "assets": {"alive": 99},
+                        "url_scan": {"status": "completed"},
+                    },
+                }
+            },
+        }
+
+    async def retryable_modules(*_args: Any, **_kwargs: Any) -> set[str]:
+        return {"asset_url"}
+
+    async def restore_identity(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "input_name": "目标公司",
+            "normalized_name": "目标公司",
+            "root_domain": "target.example",
+            "root_domains": ["target.example"],
+            "aliases": ["目标公司"],
+            "target_id": "target-root",
+        }
+
+    async def get_meta(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "normalized_name": "目标公司",
+            "root_domain": "target.example",
+            "icp_domains": ["target.example"],
+            "aliases": ["目标公司"],
+            "target_id": "target-root",
+            "source": "test",
+            "provenance": {},
+        }
+
+    async def upsert_meta(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return dict(kwargs)
+
+    async def attach(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"target_id": "target-root", "canonical_name": "目标公司"}
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def unexpected(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("恢复 URL 子任务时不应重复公司规范化或路由")
+
+    async def run_assets(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal asset_runs
+        asset_runs += 1
+        return {
+            "kind": "asset_url",
+            "assets": {"enabled": True, "alive": 2},
+            "url_scan": {
+                "enabled": True,
+                "status": "completed",
+                "scanned_urls": 2,
+                "failed_urls": 0,
+            },
+        }
+
+    monkeypatch.setattr(company_scan_recovery, "load_recovery_state", load_state)
+    monkeypatch.setattr(
+        company_scan_recovery,
+        "find_retryable_core_modules",
+        retryable_modules,
+    )
+    monkeypatch.setattr(company_scan_recovery, "restore_identity", restore_identity)
+    monkeypatch.setattr(company_meta_dao, "get_company_meta", get_meta)
+    monkeypatch.setattr(company_meta_dao, "upsert_company_meta", upsert_meta)
+    monkeypatch.setattr(company_normalize, "normalize_company", unexpected)
+    monkeypatch.setattr(targets_service, "attach_normalized_company", attach)
+    monkeypatch.setattr(targets_dao, "link_project_target", noop)
+    monkeypatch.setattr(targets_dao, "touch_project_target_collection", noop)
+    monkeypatch.setattr(pipeline, "_run_company_router", unexpected)
+    monkeypatch.setattr(pipeline, "_run_asset_and_url_scan", run_assets)
+    monkeypatch.setattr(pipeline, "_update_progress", noop)
+
+    result = await pipeline.run_pipeline(
+        task_id="task-retryable-asset",
+        project_id="project-1",
+        company_name="目标公司",
+        batch_id="batch-1",
+        enable_url_scan=True,
+        enable_asset_discovery=True,
+        enable_xhs=False,
+        enable_bidding=False,
+        enable_wechat=False,
+        enable_scholar=False,
+        enable_control_structure=False,
+        enable_copywriting=False,
+    )
+
+    assert asset_runs == 1
+    assert result["status"] == "completed"
+    assert result["assets"]["alive"] == 2
+    assert result["url_scan"]["scanned_urls"] == 2
 
 
 @pytest.mark.asyncio

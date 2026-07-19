@@ -352,7 +352,24 @@ class CompanyScanPipeline:
             and entry.get("status") == "completed"
             and isinstance(entry.get("result"), dict)
         }
-        resume_core_completed = bool(resume_flags.get("core_completed"))
+        from api.services.company_scan_recovery import find_retryable_core_modules
+
+        retryable_core_modules = await find_retryable_core_modules(
+            self.db,
+            task_id=task_id,
+        )
+        for module in retryable_core_modules:
+            checkpoint_results.pop(module, None)
+        restore_core_context = bool(resume_flags.get("core_completed"))
+        resume_core_completed = (
+            restore_core_context and not retryable_core_modules
+        )
+        if retryable_core_modules:
+            logger.warning(
+                "[company_scan] task=%s 检查点包含可重试 URL，重开模块: %s",
+                task_id,
+                ", ".join(sorted(retryable_core_modules)),
+            )
         resume_mobile_completed = bool(resume_flags.get("mobile_completed"))
         restored_identity = (
             await restore_identity(
@@ -360,14 +377,15 @@ class CompanyScanPipeline:
                 project_id=project_id,
                 company_name=company_name,
             )
-            if resume_core_completed
+            if restore_core_context
             else None
         )
-        if resume_core_completed and not restored_identity:
+        if restore_core_context and not restored_identity:
             logger.warning(
                 "[company_scan] task=%s 核心恢复标记缺少公司身份，回退完整执行",
                 task_id,
             )
+            restore_core_context = False
             resume_core_completed = False
 
         core_lease = get_company_scan_resource_pool(
@@ -397,7 +415,7 @@ class CompanyScanPipeline:
             from api.services.targets import attach_normalized_company
             from Sere1nGraph.graph.company_router.router import CompanyRouterResult
 
-            if resume_core_completed:
+            if restore_core_context:
                 normalized_result = await company_meta_dao.get_company_meta(
                     self.db, project_id, company_name
                 ) or dict(restored_identity or {})
@@ -547,7 +565,7 @@ class CompanyScanPipeline:
                     mode=xhs_target_selection_mode,
                     manual_targets=manual_xhs_targets,
                 )
-                if resume_core_completed:
+                if restore_core_context:
                     root_xhs_enabled = "xhs" in checkpoint_results
                     result["xhs"]["root_selected"] = root_xhs_enabled
                     result["xhs"]["selection"].update(
@@ -586,7 +604,7 @@ class CompanyScanPipeline:
                     )
 
             root_wechat_enabled = False
-            if enable_wechat and resume_core_completed:
+            if enable_wechat and restore_core_context:
                 root_wechat_enabled = not resume_mobile_completed
                 result["wechat"].update(
                     selected=True,
@@ -646,7 +664,7 @@ class CompanyScanPipeline:
                 )
 
             scholar_resolution: Any = None
-            if enable_scholar and not resume_core_completed:
+            if enable_scholar and not restore_core_context:
                 from api.services.scholar_direction import (
                     resolve_scholar_direction,
                 )
@@ -679,7 +697,7 @@ class CompanyScanPipeline:
             )
 
             if not router_output.success:
-                if resume_core_completed:
+                if restore_core_context:
                     logger.info(
                         "[company_scan] task=%s 核心阶段已恢复，跳过重复公司路由",
                         task_id,
@@ -1090,7 +1108,7 @@ class CompanyScanPipeline:
 
             # ── 阶段 3: 画像→话术 ──
             if (
-                not resume_core_completed
+                not restore_core_context
                 and root_xhs_enabled
                 and enable_copywriting
                 and xhs_succeeded

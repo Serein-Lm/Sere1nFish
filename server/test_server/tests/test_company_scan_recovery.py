@@ -88,3 +88,31 @@ async def test_bidding_recovery_uses_archive_and_visual_child_task_ids() -> None
     assert result["records_fetched"] == 1
     assert result["attachments_archived"] == 1
     assert result["visual_analysis"]["findings_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_retryable_child_scans_invalidate_only_their_parent_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import url_scan as url_scan_dao
+    from api.services.company_scan_recovery import find_retryable_core_modules
+
+    captured: set[str] = set()
+
+    async def retryable_task_ids(*_args: Any, **kwargs: Any) -> set[str]:
+        nonlocal captured
+        captured = set(kwargs["task_ids"])
+        return {"company-task_url"}
+
+    monkeypatch.setattr(url_scan_dao, "retryable_task_ids", retryable_task_ids)
+
+    modules = await find_retryable_core_modules(
+        object(),  # type: ignore[arg-type]
+        task_id="company-task",
+    )
+
+    assert captured == {
+        "company-task_url",
+        "company-task_bidding_visual",
+    }
+    assert modules == {"asset_url"}

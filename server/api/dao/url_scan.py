@@ -150,6 +150,32 @@ async def completed_urls(
     return {str(item.get("url") or "") async for item in cursor}
 
 
+async def retryable_task_ids(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_ids: list[str] | set[str] | tuple[str, ...],
+) -> set[str]:
+    """Return child scan task IDs that still contain retryable URL rows."""
+    normalized = sorted(
+        {
+            str(task_id or "").strip()
+            for task_id in task_ids
+            if str(task_id or "").strip()
+        }
+    )
+    if not normalized:
+        return set()
+    values = await db[URL_SCAN_RESULTS_COLLECTION].distinct(
+        "task_id",
+        {
+            "task_id": {"$in": normalized},
+            "terminal": False,
+            "retryable": True,
+        },
+    )
+    return {str(value) for value in values if str(value or "").strip()}
+
+
 async def summarize_task(
     db: AsyncIOMotorDatabase,
     *,

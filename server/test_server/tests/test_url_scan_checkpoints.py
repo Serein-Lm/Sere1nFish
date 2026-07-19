@@ -26,6 +26,7 @@ class _Collection:
         self.find_query = None
         self.update_query = None
         self.update = None
+        self.distinct_query = None
 
     def find(self, query, _projection):
         self.find_query = query
@@ -34,6 +35,11 @@ class _Collection:
     async def update_one(self, query, update, **_kwargs):
         self.update_query = query
         self.update = update
+
+    async def distinct(self, field, query):
+        assert field == "task_id"
+        self.distinct_query = query
+        return ["task-retry"]
 
 
 class _Db:
@@ -83,3 +89,20 @@ async def test_retryable_result_keeps_attempt_history_without_completion() -> No
     assert result["retryable"] is True
     assert db.collection.update["$unset"] == {"completed_at": ""}
     assert db.collection.update["$push"]["attempt_errors"]["$slice"] == -10
+
+
+@pytest.mark.asyncio
+async def test_retryable_task_ids_query_explicit_non_terminal_rows() -> None:
+    db = _Db()
+
+    task_ids = await url_scan.retryable_task_ids(
+        db,
+        task_ids={"task-done", "task-retry"},
+    )
+
+    assert task_ids == {"task-retry"}
+    assert db.collection.distinct_query == {
+        "task_id": {"$in": ["task-done", "task-retry"]},
+        "terminal": False,
+        "retryable": True,
+    }

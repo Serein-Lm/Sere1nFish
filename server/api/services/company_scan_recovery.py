@@ -34,6 +34,29 @@ async def load_recovery_state(
     }
 
 
+async def find_retryable_core_modules(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+) -> set[str]:
+    """Map unfinished URL child tasks back to company module checkpoints."""
+    from api.dao import url_scan as url_scan_dao
+
+    child_tasks = {
+        "asset_url": f"{task_id}_url",
+        "bidding": f"{task_id}_bidding_visual",
+    }
+    retryable = await url_scan_dao.retryable_task_ids(
+        db,
+        task_ids=set(child_tasks.values()),
+    )
+    return {
+        module
+        for module, child_task_id in child_tasks.items()
+        if child_task_id in retryable
+    }
+
+
 async def restore_identity(
     db: AsyncIOMotorDatabase,
     *,
