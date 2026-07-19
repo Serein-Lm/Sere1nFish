@@ -166,6 +166,7 @@ class _UrlScanStage(Stage):
 
     async def handle(self, item: Item, ctx) -> None:
         from api.services.info_collection import ScanRequest
+        from core.llm_capacity import LLMCapacityUnavailableError
 
         url_info = item.payload
         url = url_info["url"]
@@ -174,21 +175,35 @@ class _UrlScanStage(Stage):
         if not scan_tool:
             raise RuntimeError("url_scan_tool 未初始化")
 
-        scan_result = await scan_tool.scan(
-            ScanRequest(
-                source=self.source,
-                target=url,
-                project_id=self.project_id,
-                task_id=self.task_id,
-                target_info=url_info,
-                options={
-                    "worker_id": wid,
-                    "pipeline_id": ctx.pipeline.pipeline_id,
-                    "item_id": item.item_id,
-                    "attempt": item.attempt,
-                },
+        try:
+            scan_result = await scan_tool.scan(
+                ScanRequest(
+                    source=self.source,
+                    target=url,
+                    project_id=self.project_id,
+                    task_id=self.task_id,
+                    target_info=url_info,
+                    options={
+                        "worker_id": wid,
+                        "pipeline_id": ctx.pipeline.pipeline_id,
+                        "item_id": item.item_id,
+                        "attempt": item.attempt,
+                    },
+                )
             )
-        )
+        except LLMCapacityUnavailableError as exc:
+            from api.dao import url_scan as url_scan_dao
+
+            await url_scan_dao.upsert_retryable_result(
+                ctx.state["db"],
+                task_id=self.task_id,
+                project_id=self.project_id,
+                target_id=str(url_info.get("target_id") or ""),
+                source=self.source,
+                url=url,
+                error=str(exc),
+            )
+            raise
         if not scan_result.success:
             raise RuntimeError(scan_result.error or f"扫描失败 (url={url})")
 
@@ -1114,6 +1129,25 @@ class UrlScanPipeline:
             )
 
         except Exception as e:
+            from core.llm_capacity import LLMCapacityUnavailableError
+
+            if isinstance(e, LLMCapacityUnavailableError):
+                task_result["status"] = "waiting_model"
+                task_result["error"] = None
+                await self._update_task(task_id, task_result)
+                await update_source_progress(
+                    self.db,
+                    task_id=str(parent_task_id or task_id),
+                    source=f"{source}_url_scan",
+                    status="waiting",
+                    message="模型额度暂不可用，URL 深扫等待自动恢复",
+                    extra={"remaining": task_result.get("remaining_urls", 0)},
+                )
+                logger.warning(
+                    "[pipeline] task=%s 模型容量暂停，保留 URL 检查点等待恢复",
+                    task_id,
+                )
+                raise
             task_result["status"] = "error"
             task_result["error"] = str(e)
             await self._update_task(task_id, task_result)

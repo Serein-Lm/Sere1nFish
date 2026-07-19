@@ -304,8 +304,8 @@ def test_pool_config_hard_caps_chrome_and_applies_resource_guard(
             "host_memory_floor_mb": 8192,
         }
     )
-    assert config.max_containers == 80
-    assert config.warm_pool_size == 80
+    assert config.max_containers == 96
+    assert config.warm_pool_size == 96
 
     provider = DockerProvider(config)
     provider.containers = {
@@ -451,6 +451,48 @@ async def test_container_health_checks_use_bounded_docker_concurrency(
 
     assert peak == 2
     assert provider._health_slots.in_use == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_cdp_health_failure_requires_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DockerProvider(
+        ChromeDockerConfig(
+            cdp_health_failure_threshold=2,
+            memory_check_interval=180,
+        )
+    )
+    info = ContainerInfo(
+        container_id="container-1",
+        container_name="chrome-1",
+        cdp_host="chrome-1",
+        cdp_port=9222,
+        api_port=8250,
+        vnc_port=5900,
+        novnc_port=6080,
+        status="idle",
+        last_memory_check_at=datetime.now(),
+    )
+    recoveries: list[str] = []
+
+    async def unhealthy(_info: ContainerInfo) -> tuple[bool, str]:
+        return False, "TimeoutException"
+
+    async def recover(_info: ContainerInfo, *, reason: str) -> bool:
+        recoveries.append(reason)
+        return True
+
+    monkeypatch.setattr(provider, "_query_cdp_health", unhealthy)
+    monkeypatch.setattr(provider, "_restart_chrome_for_recovery", recover)
+
+    await provider._inspect_container_health(info.container_id, info)
+    assert recoveries == []
+    assert info.cdp_healthy is True
+
+    await provider._inspect_container_health(info.container_id, info)
+    assert len(recoveries) == 1
+    assert info.cdp_healthy is False
 
 
 @pytest.mark.asyncio

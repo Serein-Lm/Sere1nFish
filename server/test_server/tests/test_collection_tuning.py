@@ -10,6 +10,9 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "copywriting_concurrency": 6,
         "xhs_search_concurrency": 1,
         "company_scan_concurrency": 6,
+        "llm_concurrency": 12,
+        "llm_quota_cooldown_seconds": 120,
+        "llm_quota_max_cooldown_seconds": 900,
     }
 
     bounded = CollectionRuntimeTuning.from_config(
@@ -20,6 +23,9 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
             "copywriting_concurrency": "8",
             "xhs_search_concurrency": None,
             "company_scan_concurrency": 99,
+            "llm_concurrency": 999,
+            "llm_quota_cooldown_seconds": 9999,
+            "llm_quota_max_cooldown_seconds": 9999,
         }
     )
     assert bounded.as_dict() == {
@@ -29,6 +35,9 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "copywriting_concurrency": 8,
         "xhs_search_concurrency": 1,
         "company_scan_concurrency": 12,
+        "llm_concurrency": 32,
+        "llm_quota_cooldown_seconds": 1800,
+        "llm_quota_max_cooldown_seconds": 1800,
     }
 
     overridden = defaults.with_overrides(
@@ -43,4 +52,7 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "copywriting_concurrency": 6,
         "xhs_search_concurrency": 1,
         "company_scan_concurrency": 6,
+        "llm_concurrency": 12,
+        "llm_quota_cooldown_seconds": 120,
+        "llm_quota_max_cooldown_seconds": 900,
     }

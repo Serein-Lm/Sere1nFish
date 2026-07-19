@@ -28,7 +28,7 @@ from core.logger import get_logger
 logger = get_logger("browser_manager")
 
 _BULK_BROWSER_PURPOSES = frozenset({"url_scan"})
-MAX_CHROME_CONTAINERS = 80
+MAX_CHROME_CONTAINERS = 96
 
 
 # ── 数据结构 ──────────────────────────────────────────────
@@ -55,6 +55,8 @@ class ContainerInfo:
     cdp_healthy: bool = True
     recovery_in_progress: bool = False
     last_recovery_at: Optional[datetime] = None
+    health_check_failures: int = 0
+    last_memory_check_at: Optional[datetime] = None
 
     @property
     def cdp_url(self) -> str:
@@ -105,6 +107,9 @@ class ChromeDockerConfig:
     reserved_non_bulk_containers: int = 2  # 为公众号/学者等非批量任务保留容量
     container_create_concurrency: int = 4  # Docker API 创建并发，避免启动风暴
     container_health_concurrency: int = 12  # stats/CDP 健康检查并发
+    docker_api_timeout_seconds: int = 90
+    memory_check_interval: int = 180
+    cdp_health_failure_threshold: int = 2
     # 容器热切换
     max_consecutive_errors: int = 3  # 连续错误超过此值触发容器热切换
     # 主机资源保护；只限制新建容器，不中断已有租约
@@ -154,6 +159,15 @@ class ChromeDockerConfig:
         )
         config.container_health_concurrency = max(
             1, min(int(config.container_health_concurrency), 32)
+        )
+        config.docker_api_timeout_seconds = max(
+            30, min(int(config.docker_api_timeout_seconds), 180)
+        )
+        config.memory_check_interval = max(
+            30, min(int(config.memory_check_interval), 1800)
+        )
+        config.cdp_health_failure_threshold = max(
+            1, min(int(config.cdp_health_failure_threshold), 5)
         )
         config.host_memory_floor_mb = max(1024, int(config.host_memory_floor_mb))
         config.host_load_per_cpu_limit = max(
@@ -276,6 +290,7 @@ class DockerProvider(BrowserProvider):
         self._health_checker_task: Optional[asyncio.Task] = None
         self._warm_pool_task: Optional[asyncio.Task] = None
         self._docker_client = None
+        self._http_client: httpx.AsyncClient | None = None
         self._port_counter = 0
         self._pending_creates = 0
         self._bulk_slot_limit = config.bulk_container_limit
@@ -344,7 +359,9 @@ class DockerProvider(BrowserProvider):
         if self._docker_client is None:
             try:
                 import docker
-                self._docker_client = docker.from_env(timeout=30)
+                self._docker_client = docker.from_env(
+                    timeout=self.config.docker_api_timeout_seconds
+                )
             except ImportError:
                 raise RuntimeError(
                     "docker-py 未安装。请运行: pip install docker"
@@ -352,6 +369,20 @@ class DockerProvider(BrowserProvider):
             except Exception as e:
                 raise RuntimeError(f"无法连接 Docker daemon: {e}")
         return self._docker_client
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0),
+                limits=httpx.Limits(
+                    max_connections=max(32, self.config.container_health_concurrency * 4),
+                    max_keepalive_connections=max(
+                        16,
+                        self.config.container_health_concurrency * 2,
+                    ),
+                ),
+            )
+        return self._http_client
 
     async def start(self) -> None:
         """服务启动时立即启动健康检查、回收器和预热池。"""
@@ -481,12 +512,15 @@ class DockerProvider(BrowserProvider):
         """
         try:
             client = self._get_docker_client()
-            # 仅清理由本 Provider 命名且使用同一镜像的临时容器。
+            # 仅清理由本 Provider 打标签、命名且使用同一镜像的临时容器。
             containers = [
                 container
                 for container in client.containers.list(
                     all=True,
-                    filters={"ancestor": self.config.image},
+                    filters={
+                        "ancestor": self.config.image,
+                        "label": "sere1nfish.browser.managed=true",
+                    },
                 )
                 if str(container.name or "").startswith("chrome-")
             ]
@@ -757,6 +791,13 @@ class DockerProvider(BrowserProvider):
                 return_exceptions=True,
             )
 
+        # docker-py 的线程调用可能在客户端超时后才由 daemon 完成创建。
+        # 所有创建任务回收后再按 managed 标签清扫一次，避免遗留 Created 容器。
+        await asyncio.to_thread(self._cleanup_orphan_containers)
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
         logger.info(f"[DockerProvider] 所有容器已销毁 (共 {container_count} 个)")
 
     async def get_pool_status(self) -> list[dict]:
@@ -886,19 +927,27 @@ class DockerProvider(BrowserProvider):
         except asyncio.CancelledError:
             # Docker SDK calls cannot be cancelled once dispatched to a thread.
             # Drain the call and remove any container it created before exiting.
+            cleanup_by_name = False
             try:
                 orphan = await asyncio.shield(run_task)
             except Exception:
-                pass
+                cleanup_by_name = True
             else:
                 try:
                     await asyncio.to_thread(orphan.remove, force=True)
                 except Exception as exc:  # noqa: BLE001
+                    cleanup_by_name = True
                     logger.warning(
                         "[DockerProvider] 取消创建后清理容器失败 %s: %s",
                         name,
                         exc,
                     )
+            if cleanup_by_name:
+                await self._remove_managed_container_by_name(name)
+            raise
+        except BaseException:
+            # Docker daemon may finish a create after the HTTP client times out.
+            await self._remove_managed_container_by_name(name)
             raise
         t_created = time.time()
         logger.info(
@@ -915,6 +964,7 @@ class DockerProvider(BrowserProvider):
             vnc_port=5900 if use_internal_network else ports["vnc"],
             novnc_port=6080 if use_internal_network else ports["novnc"],
             status="starting",
+            last_memory_check_at=datetime.now(),
         )
         try:
             await self._wait_healthy(info, timeout=30)
@@ -946,6 +996,47 @@ class DockerProvider(BrowserProvider):
                 f"(id={container_id[:12]}): {exc}"
             )
 
+    async def _remove_managed_container_by_name(
+        self,
+        container_name: str,
+        *,
+        attempts: int = 8,
+    ) -> None:
+        """Remove a timed-out create by its deterministic name after daemon completion."""
+        client = self._get_docker_client()
+        for attempt in range(max(1, attempts)):
+            try:
+                container = await asyncio.to_thread(
+                    client.containers.get,
+                    container_name,
+                )
+            except Exception as exc:
+                if type(exc).__name__ != "NotFound" and attempt + 1 >= attempts:
+                    logger.warning(
+                        "[DockerProvider] 按名称清理容器失败 %s: %s",
+                        container_name,
+                        exc,
+                    )
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(1)
+                continue
+            labels = dict(getattr(container, "labels", None) or {})
+            if labels.get("sere1nfish.browser.managed") != "true":
+                logger.error(
+                    "[DockerProvider] 拒绝删除无 managed 标签的同名容器: %s",
+                    container_name,
+                )
+                return
+            try:
+                await asyncio.to_thread(container.remove, force=True)
+            except Exception as exc:
+                logger.warning(
+                    "[DockerProvider] 按名称删除容器失败 %s: %s",
+                    container_name,
+                    exc,
+                )
+            return
+
     async def _wait_healthy(self, info: ContainerInfo, timeout: int = 30):
         """等待容器 CDP 端口可达"""
         start = time.time()
@@ -954,17 +1045,19 @@ class DockerProvider(BrowserProvider):
         while time.time() - start < timeout:
             attempt += 1
             try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"{info.api_url}/health", timeout=3)
-                    if resp.status_code == 200:
-                        elapsed = time.time() - start
-                        logger.info(
-                            f"[DockerProvider] 容器 {info.container_name} 健康检查通过 | "
-                            f"尝试 {attempt} 次 | 耗时 {elapsed:.1f}s"
-                        )
-                        return
-                    else:
-                        last_error = f"HTTP {resp.status_code}: {resp.text[:100]}"
+                resp = await self._get_http_client().get(
+                    f"{info.api_url}/health",
+                    timeout=3,
+                )
+                if resp.status_code == 200:
+                    elapsed = time.time() - start
+                    logger.info(
+                        f"[DockerProvider] 容器 {info.container_name} 健康检查通过 | "
+                        f"尝试 {attempt} 次 | 耗时 {elapsed:.1f}s"
+                    )
+                    return
+                else:
+                    last_error = f"HTTP {resp.status_code}: {resp.text[:100]}"
             except httpx.ConnectError:
                 last_error = "连接被拒绝（容器可能还在启动）"
             except httpx.TimeoutException:
@@ -1197,13 +1290,23 @@ class DockerProvider(BrowserProvider):
         info: ContainerInfo,
     ) -> None:
         try:
-            memory_result, health_result = await asyncio.gather(
-                self._query_container_memory(container_id),
-                self._query_cdp_health(info),
-                return_exceptions=True,
+            now = datetime.now()
+            should_check_memory = (
+                info.last_memory_check_at is None
+                or (now - info.last_memory_check_at).total_seconds()
+                >= self.config.memory_check_interval
             )
-            if not isinstance(memory_result, BaseException):
-                info.memory_usage_mb = float(memory_result)
+            if should_check_memory:
+                memory_result, health_result = await asyncio.gather(
+                    self._query_container_memory(container_id),
+                    self._query_cdp_health(info),
+                    return_exceptions=True,
+                )
+                info.last_memory_check_at = now
+                if not isinstance(memory_result, BaseException):
+                    info.memory_usage_mb = float(memory_result)
+            else:
+                health_result = await self._query_cdp_health(info)
             cdp_healthy = (
                 bool(health_result[0])
                 if isinstance(health_result, tuple)
@@ -1212,9 +1315,13 @@ class DockerProvider(BrowserProvider):
             health_error = (
                 str(health_result[1])
                 if isinstance(health_result, tuple)
-                else str(health_result)
+                else f"{type(health_result).__name__}: {health_result}"
             )
-            info.cdp_healthy = cdp_healthy
+            if cdp_healthy:
+                info.cdp_healthy = True
+                info.health_check_failures = 0
+            else:
+                info.health_check_failures += 1
 
             if info.memory_usage_mb > self.config.memory_unhealthy_mb:
                 info.unhealthy_reason = (
@@ -1243,10 +1350,23 @@ class DockerProvider(BrowserProvider):
                         f"超过上限 {lease_limit}s"
                     ),
                 )
-            elif not cdp_healthy:
+            elif (
+                not cdp_healthy
+                and info.health_check_failures
+                >= self.config.cdp_health_failure_threshold
+            ):
+                info.cdp_healthy = False
                 await self._restart_chrome_for_recovery(
                     info,
                     reason=f"CDP 健康检查失败: {health_error}",
+                )
+            elif not cdp_healthy:
+                logger.warning(
+                    "[HealthCheck] CDP 瞬时失败，等待复检 container=%s failures=%s/%s error=%s",
+                    info.container_name,
+                    info.health_check_failures,
+                    self.config.cdp_health_failure_threshold,
+                    health_error,
                 )
         except asyncio.CancelledError:
             raise
@@ -1259,12 +1379,11 @@ class DockerProvider(BrowserProvider):
 
     async def _query_cdp_health(self, info: ContainerInfo) -> tuple[bool, str]:
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{info.api_url}/health",
-                    headers=self._auth_headers(),
-                    timeout=5,
-                )
+            response = await self._get_http_client().get(
+                f"{info.api_url}/health",
+                headers=self._auth_headers(),
+                timeout=5,
+            )
             payload = response.json() if response.content else {}
             healthy = bool(
                 response.status_code == 200
@@ -1273,7 +1392,7 @@ class DockerProvider(BrowserProvider):
             )
             return healthy, "" if healthy else f"HTTP {response.status_code} {payload}"
         except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
+            return False, f"{type(exc).__name__}: {exc}"
 
     async def _wait_cdp_recovered(
         self,
@@ -1339,6 +1458,7 @@ class DockerProvider(BrowserProvider):
             if recovered:
                 info.unhealthy_reason = ""
                 info.consecutive_errors = 0
+                info.health_check_failures = 0
                 info.last_used_at = datetime.now()
             else:
                 info.unhealthy_reason = f"浏览器自动恢复失败: {reason}"[:300]

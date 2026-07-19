@@ -33,6 +33,7 @@ from core.stream.types import Item, Context
 from core.stream.stage import Stage, RetryPolicy
 from core.stream.pipeline import Pipeline, StageMetrics
 from core.stream.dlq import DeadLetter, InMemoryDeadLetter, MongoDeadLetter
+from core.stream.errors import PipelineAbortError
 
 __all__ = [
     "Item",
@@ -44,4 +45,5 @@ __all__ = [
     "DeadLetter",
     "InMemoryDeadLetter",
     "MongoDeadLetter",
+    "PipelineAbortError",
 ]

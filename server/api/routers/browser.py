@@ -64,6 +64,9 @@ async def pool_config():
             "container_health_concurrency": (
                 config.container_health_concurrency
             ),
+            "docker_api_timeout_seconds": config.docker_api_timeout_seconds,
+            "memory_check_interval": config.memory_check_interval,
+            "cdp_health_failure_threshold": config.cdp_health_failure_threshold,
             "host_memory_floor_mb": config.host_memory_floor_mb,
             "capacity": (
                 provider.capacity_status()

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 from dataclasses import dataclass, field
 
@@ -23,6 +24,10 @@ from .schemas import (
     IndustryType,
 )
 from .keywords import KeywordLibrary
+from core.logger import get_logger
+
+
+logger = get_logger("company_router")
 
 
 @dataclass
@@ -59,7 +64,7 @@ class CompanyRouter:
         """获取 LLM 实例"""
         if self._llm is None:
             from ..agents.runtime import create_llm
-            self._llm = create_llm(self.app_config)
+            self._llm = create_llm(self.app_config, streaming=False)
         return self._llm
     
     async def route(self, company_name: str) -> CompanyRouterResult:
@@ -76,20 +81,79 @@ class CompanyRouter:
             from ..prompts.loader import load_prompt
 
             llm = self._get_llm()
-            
-            # 使用结构化输出
-            structured_llm = llm.with_structured_output(CompanyRouterOutput)
-            
             from api.services.search_terms import get_keyword_skill_context
+            from api.utils.json_extract import extract_json_object
 
             keyword_context = get_keyword_skill_context(["xhs", "weixin"])
             system_prompt = load_prompt("company_router/company_router")
             if keyword_context:
                 system_prompt = f"{system_prompt}\n\n# 当前场景渐进加载的搜索 Skill\n\n{keyword_context}"
-            result = await structured_llm.ainvoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=f"请分析以下公司并生成搜索策略：\n\n{company_name}"),
-            ])
+            schema = json.dumps(
+                CompanyRouterOutput.model_json_schema(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "只输出一个 JSON 对象，不要使用 Markdown。JSON 必须符合以下 schema：\n"
+                f"{schema}"
+            )
+            json_llm = llm.bind(response_format={"type": "json_object"})
+            result: CompanyRouterOutput | None = None
+            last_error = ""
+            raw_output = ""
+            for attempt in range(2):
+                correction = ""
+                if attempt:
+                    correction = (
+                        "\n\n上一次输出未通过 JSON/schema 校验。"
+                        f"错误：{last_error[:500]}。"
+                        "请修正字段类型和缺失字段，只返回完整 JSON。"
+                    )
+                    if raw_output:
+                        correction += f"\n上一次输出：{raw_output[:2_000]}"
+                try:
+                    response = await json_llm.ainvoke(
+                        [
+                            SystemMessage(content=system_prompt),
+                            HumanMessage(
+                                content=(
+                                    "请分析以下公司并生成搜索策略：\n\n"
+                                    f"{company_name}{correction}"
+                                )
+                            ),
+                        ]
+                    )
+                    content = getattr(response, "content", "")
+                    if isinstance(content, str):
+                        raw_output = content
+                    elif isinstance(content, list):
+                        raw_output = "\n".join(
+                            str(item.get("text") or item)
+                            if isinstance(item, dict)
+                            else str(item)
+                            for item in content
+                        )
+                    else:
+                        raw_output = str(content or "")
+                    result = CompanyRouterOutput.model_validate(
+                        extract_json_object(raw_output)
+                    )
+                    break
+                except Exception as exc:
+                    from core.llm_capacity import LLMCapacityUnavailableError
+
+                    if isinstance(exc, LLMCapacityUnavailableError):
+                        raise
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    logger.warning(
+                        "CompanyRouter 输出校验失败，注入纠正提示后重试 | company=%s attempt=%s/2 error=%s",
+                        company_name,
+                        attempt + 1,
+                        last_error,
+                    )
+            if result is None:
+                raise RuntimeError(last_error or "CompanyRouter 未返回有效 JSON")
             
             # 后处理：合并关键词库的默认配置
             search_strategy = self._enhance_strategy(result.company_profile, result.search_strategy)
@@ -108,6 +172,10 @@ class CompanyRouter:
             )
             
         except Exception as e:
+            from core.llm_capacity import LLMCapacityUnavailableError
+
+            if isinstance(e, LLMCapacityUnavailableError):
+                raise
             return CompanyRouterResult(
                 success=False,
                 error=str(e),

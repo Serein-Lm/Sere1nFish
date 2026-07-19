@@ -29,6 +29,7 @@ from .streaming import process_agent_stream, console_event_handler, process_agen
 
 from core.logger import get_logger
 from core.llm_params import disable_thinking_extra_body
+from core.llm_capacity import get_global_llm_capacity_guard
 
 logger = get_logger("agent_runtime")
 
@@ -38,6 +39,19 @@ OutputMode = Literal["silent", "console", "sse"]
 # 默认超时（秒）
 DEFAULT_AGENT_TIMEOUT = 500
 DEFAULT_TOOL_TIMEOUT = 60
+
+
+class GuardedChatOpenAI(ChatOpenAI):
+    """Route every async model request through the process-wide capacity guard."""
+
+    async def _agenerate(self, *args: Any, **kwargs: Any):
+        async with get_global_llm_capacity_guard().lease():
+            return await super()._agenerate(*args, **kwargs)
+
+    async def _astream(self, *args: Any, **kwargs: Any):
+        async with get_global_llm_capacity_guard().lease():
+            async for chunk in super()._astream(*args, **kwargs):
+                yield chunk
 
 
 def _wrap_tools_with_error_handling(
@@ -201,6 +215,7 @@ def create_llm(
         "streaming": streaming,
         "stream_usage": streaming,
         "extra_body": disable_thinking_extra_body(extra_body),
+        "max_retries": 0,
     }
 
     # 注入观测层 callback
@@ -225,7 +240,7 @@ def create_llm(
             raise ValueError("必须提供 app_config 或 model_name")
         kwargs["model"] = model_name
 
-    return ChatOpenAI(**kwargs)
+    return GuardedChatOpenAI(**kwargs)
 
 
 def create_agent_node(
@@ -391,6 +406,11 @@ def create_agent_node(
                 try:
                     return await _single_attempt()
                 except (ExceptionGroup, BaseExceptionGroup) as eg:
+                    from core.llm_capacity import find_llm_capacity_error
+
+                    capacity_error = find_llm_capacity_error(eg)
+                    if capacity_error is not None:
+                        raise capacity_error
                     # MCP TaskGroup 异常 — 递归展开子异常，定位根因
                     sub_errors = []
                     needs_restart = False
@@ -417,6 +437,10 @@ def create_agent_node(
                     last_error = f"超时({timeout}s)"
                     logger.warning(f"[runtime] 第 {attempt}/{max_runtime_attempts} 次执行超时")
                 except Exception as e:
+                    from core.llm_capacity import LLMCapacityUnavailableError
+
+                    if isinstance(e, LLMCapacityUnavailableError):
+                        raise
                     last_error = str(e)
                     err_type = type(e).__name__
                     logger.warning(f"[runtime] 第 {attempt}/{max_runtime_attempts} 次执行失败 ({err_type}): {last_error}")
@@ -665,6 +689,10 @@ async def extract_with_retry(
                 logger.info("[runtime] LLM 修复成功")
                 return parsed
     except Exception as e:
+        from core.llm_capacity import LLMCapacityUnavailableError
+
+        if isinstance(e, LLMCapacityUnavailableError):
+            raise
         logger.warning(f"[runtime] LLM 修复失败: {e}")
 
     return None

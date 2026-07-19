@@ -34,6 +34,7 @@ from core.stream import (
     Item,
     RetryPolicy,
     InMemoryDeadLetter,
+    PipelineAbortError,
 )
 
 
@@ -246,3 +247,29 @@ async def test_pipeline_cancellation_is_not_logged_as_runtime_error(monkeypatch)
         await running
     assert any("pipeline 已取消" in message for message in infos)
     assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_abort_stops_queued_items_without_dlq() -> None:
+    entered = asyncio.Event()
+    dlq = InMemoryDeadLetter()
+
+    class _Abort(Stage):
+        name = "abort"
+        concurrency = 2
+        queue_maxsize = 2
+
+        async def handle(self, _item, _ctx):
+            entered.set()
+            raise PipelineAbortError("shared dependency unavailable")
+
+    pipe = Pipeline(dlq=dlq, pipeline_id="abort-test")
+    pipe.add(_Abort())
+
+    with pytest.raises(PipelineAbortError, match="shared dependency"):
+        await asyncio.wait_for(
+            pipe.run(seeds=range(100), entry="abort"),
+            timeout=1,
+        )
+    assert entered.is_set()
+    assert dlq.entries == []

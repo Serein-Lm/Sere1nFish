@@ -19,6 +19,7 @@ logger = get_logger("project_task_runtime")
 _RUNTIME_ID = uuid.uuid4().hex
 _TASK_DISPATCHERS: dict[str, TaskDispatcher] = {}
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
+_NOTIFIED_LLM_CAPACITY_INCIDENTS: set[int] = set()
 
 
 def register_task_dispatchers(dispatchers: Mapping[str, TaskDispatcher]) -> None:
@@ -100,7 +101,57 @@ async def execute_project_task(
     )
 
     try:
-        result = await dispatcher(task_id, project_id, params)
+        while True:
+            try:
+                result = await dispatcher(task_id, project_id, params)
+                break
+            except Exception as exc:
+                from core.llm_capacity import (
+                    LLMCapacityUnavailableError,
+                    get_global_llm_capacity_guard,
+                )
+
+                if not isinstance(exc, LLMCapacityUnavailableError):
+                    raise
+                await tasks_dao.mark_task_waiting_resource(
+                    db,
+                    task_id=task_id,
+                    runtime_id=_RUNTIME_ID,
+                    stage="waiting_model",
+                    message=(
+                        "模型额度暂不可用，已保留扫描检查点，"
+                        f"约 {exc.retry_after_seconds:.0f} 秒后自动重试"
+                    ),
+                )
+                if exc.incident_id not in _NOTIFIED_LLM_CAPACITY_INCIDENTS:
+                    _NOTIFIED_LLM_CAPACITY_INCIDENTS.add(exc.incident_id)
+                    from api.services.notifications import notify_event_background
+
+                    notify_event_background(
+                        event="llm.capacity.paused",
+                        title="模型额度不足，扫描已自动等待",
+                        content=(
+                            "**结论**\n"
+                            "- 未完成任务和 URL 检查点均已保留，不会记为扫描失败。\n\n"
+                            "**处理**\n"
+                            f"- 系统将在约 {exc.retry_after_seconds:.0f} 秒后单路探测恢复。"
+                        ),
+                        level="critical",
+                        source="project_task_runtime",
+                        project_id=project_id,
+                        task_id=task_id,
+                        dedupe_key="llm-capacity",
+                        cooldown_seconds=1800,
+                    )
+                logger.warning(
+                    "任务等待模型容量恢复 | task=%s incident=%s retry_after=%.0fs",
+                    task_id,
+                    exc.incident_id,
+                    exc.retry_after_seconds,
+                )
+                await get_global_llm_capacity_guard().wait_for_retry_window(
+                    exc.incident_id
+                )
         elapsed_ms = round((time.monotonic() - started) * 1000)
         await tasks_dao.complete_task(
             db,

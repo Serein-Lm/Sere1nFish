@@ -99,6 +99,23 @@ async def lifespan(app: FastAPI):
             logger.warning(f"system_config 加密迁移失败（不影响运行）: {e}")
         try:
             from browser_manager import configure_browser_provider, get_browser_provider
+            from api.services.info_collection.tuning import (
+                get_collection_runtime_tuning,
+            )
+            from core.llm_capacity import configure_global_llm_capacity
+
+            tuning = await get_collection_runtime_tuning()
+            configure_global_llm_capacity(
+                max_concurrency=tuning.llm_concurrency,
+                cooldown_seconds=tuning.llm_quota_cooldown_seconds,
+                max_cooldown_seconds=tuning.llm_quota_max_cooldown_seconds,
+            )
+            logger.info(
+                "模型容量保护已从 MongoDB 注入: concurrency=%s cooldown=%ss max=%ss",
+                tuning.llm_concurrency,
+                tuning.llm_quota_cooldown_seconds,
+                tuning.llm_quota_max_cooldown_seconds,
+            )
 
             chrome_doc = await config_dao.get_config(db, "chrome_docker")
             configure_browser_provider(chrome_doc.get("config", {}) if chrome_doc else {})

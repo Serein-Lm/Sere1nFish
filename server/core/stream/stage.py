@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from core.stream.types import Item, Context
+from core.stream.errors import PipelineAbortError
 
 
 @dataclass
@@ -100,6 +101,8 @@ class Stage(ABC):
                 await self.handle(item, ctx)
                 return True, None
             except asyncio.CancelledError:
+                raise
+            except PipelineAbortError:
                 raise
             except BaseException as e:
                 last_err = e

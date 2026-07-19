@@ -1235,6 +1235,39 @@ class CompanyScanPipeline:
             )
 
         except Exception as e:
+            from core.llm_capacity import LLMCapacityUnavailableError
+
+            if isinstance(e, LLMCapacityUnavailableError):
+                if mobile_task is not None:
+                    if not mobile_task.done():
+                        await self._update_progress(
+                            task_id,
+                            "waiting_model",
+                            "模型额度暂不可用，公众号采集继续运行...",
+                        )
+                    await mobile_task
+                    mobile_task = None
+                result["status"] = "waiting_model"
+                result["error"] = None
+                await self.db[COMPANY_SCAN_COLLECTION].update_one(
+                    {"task_id": task_id},
+                    {
+                        "$set": {
+                            "task_id": task_id,
+                            "project_id": project_id,
+                            "company_name": company_name,
+                            "result": result,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                    upsert=True,
+                )
+                await self._update_progress(
+                    task_id,
+                    "waiting_model",
+                    "模型额度暂不可用，已保留各模块检查点并等待自动恢复",
+                )
+                raise
             result["status"] = "error"
             result["error"] = str(e)
             logger.error(f"[company_scan] task={task_id} 流水线异常: {e}")
@@ -1425,6 +1458,10 @@ class CompanyScanPipeline:
                 copywriting_concurrency=max(1, min(int(copywriting_concurrency), 2)),
             )
         except Exception as exc:  # noqa: BLE001
+            from core.llm_capacity import LLMCapacityUnavailableError
+
+            if isinstance(exc, LLMCapacityUnavailableError):
+                raise
             logger.exception("[company_scan] 招投标子流水线失败: %s", exc)
             return {
                 "kind": "bidding",
@@ -2080,12 +2117,18 @@ class CompanyScanPipeline:
                     )
             return outcome
 
-        return list(
+        results = list(
             await asyncio.gather(
                 *(_run(kind, operation) for kind, operation in jobs),
                 return_exceptions=True,
             )
         )
+        from core.llm_capacity import LLMCapacityUnavailableError
+
+        for result in results:
+            if isinstance(result, LLMCapacityUnavailableError):
+                raise result
+        return results
 
     @staticmethod
     def _dedupe_text(values: list[str]) -> list[str]:

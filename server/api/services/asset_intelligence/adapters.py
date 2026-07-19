@@ -42,6 +42,22 @@ class _AsyncRequestGate:
                 await self._sleep(delay)
             self._next_allowed_at = self._clock() + interval
 
+    async def penalize(self, delay_seconds: float) -> None:
+        """Push the shared gate forward after a provider-side throttle response."""
+        delay = max(0.0, float(delay_seconds))
+        if delay <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop or self._lock is None:
+            self._loop = loop
+            self._lock = asyncio.Lock()
+            self._next_allowed_at = 0.0
+        async with self._lock:
+            self._next_allowed_at = max(
+                self._next_allowed_at,
+                self._clock() + delay,
+            )
+
 
 _FOFA_REQUEST_GATE = _AsyncRequestGate()
 
@@ -80,7 +96,7 @@ class FofaAssetProvider:
     def __init__(
         self,
         *,
-        query_interval_seconds: float = 2.0,
+        query_interval_seconds: float = 4.0,
         retry_delay_seconds: float = 4.0,
         max_attempts: int = 2,
     ) -> None:
@@ -103,13 +119,18 @@ class FofaAssetProvider:
 
         async def _search(search_type: str, query: str) -> list[Any]:
             await _FOFA_REQUEST_GATE.wait(self.query_interval_seconds)
-            return await fofa_tools.search_fofa(
-                query=query,
-                search_type=search_type,
-                size=size,
-                api_key=api_key,
-                raise_on_error=True,
-            )
+            try:
+                return await fofa_tools.search_fofa(
+                    query=query,
+                    search_type=search_type,
+                    size=size,
+                    api_key=api_key,
+                    raise_on_error=True,
+                )
+            except Exception as exc:
+                if "45012" in str(exc):
+                    await _FOFA_REQUEST_GATE.penalize(12.0)
+                raise
 
         responses = await _run_paced_queries(
             specs,

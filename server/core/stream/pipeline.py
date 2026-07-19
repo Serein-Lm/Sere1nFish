@@ -32,6 +32,7 @@ from core.logger import get_logger
 from core.stream.types import Item, Context
 from core.stream.stage import Stage
 from core.stream.dlq import DeadLetter, InMemoryDeadLetter
+from core.stream.errors import PipelineAbortError
 
 logger = get_logger("stream.pipeline")
 
@@ -107,6 +108,8 @@ class Pipeline:
         self._defs: dict[str, tuple[Stage, list[str]]] = {}  # name → (stage, downstream)
         self._runtime: dict[str, _StageRuntime] = {}
         self._running = False
+        self._fatal_error: BaseException | None = None
+        self._fatal_event: asyncio.Event | None = None
 
     # ── 注册 ──────────────────────────────────────────
     def add(self, stage: Stage, *, downstream: list[str] | None = None) -> "Pipeline":
@@ -159,7 +162,7 @@ class Pipeline:
         rt = self._runtime.get(stage_name)
         if rt is None:
             raise KeyError(f"emit 目标 stage '{stage_name}' 不存在或 pipeline 未运行")
-        await rt.queue.put(item)
+        await self._put_or_fatal(rt.queue, item)
         # 统计 src_stage → stage_name 的扇出
         if src_stage and src_stage in self._runtime:
             m = self._runtime[src_stage].metrics
@@ -175,6 +178,8 @@ class Pipeline:
         if self._running:
             raise RuntimeError("pipeline 已经在运行")
         self._running = True
+        self._fatal_error = None
+        self._fatal_event = asyncio.Event()
         t0 = time.time()
 
         try:
@@ -225,7 +230,7 @@ class Pipeline:
             seed_count = 0
             for s in seeds:
                 item = s if isinstance(s, Item) else Item(payload=s)
-                await entry_rt.queue.put(item)
+                await self._put_or_fatal(entry_rt.queue, item)
                 seed_count += 1
             logger.info(
                 f"[{self.pipeline_id}] 启动: stages={list(self._defs)} | "
@@ -240,7 +245,7 @@ class Pipeline:
                 for up in rt.upstream:
                     await self._runtime[up].closed.wait()
                 # 等队列里残留的 item 处理完
-                await rt.queue.join()
+                await self._wait_queue_or_fatal(rt.queue)
                 # 标记本 stage 关闭 (供下游拓扑等待)
                 rt.closed.set()
                 # 向每个 worker 注入毒丸, 精确唤醒并退出 (零尾延迟, 无空转).
@@ -274,7 +279,8 @@ class Pipeline:
             await self._cancel_all()
             raise
         except BaseException as e:
-            logger.error(f"[{self.pipeline_id}] ✗ pipeline 异常, 取消所有 worker: {e}")
+            log = logger.warning if isinstance(e, PipelineAbortError) else logger.error
+            log(f"[{self.pipeline_id}] pipeline 中止, 取消所有 worker: {e}")
             await self._cancel_all()
             raise
         finally:
@@ -287,6 +293,58 @@ class Pipeline:
                     w.cancel()
         for rt in self._runtime.values():
             await asyncio.gather(*rt.workers, return_exceptions=True)
+
+    def _set_fatal_error(self, error: BaseException) -> None:
+        if self._fatal_error is not None:
+            return
+        self._fatal_error = error
+        if self._fatal_event is not None:
+            self._fatal_event.set()
+
+    def _raise_fatal_error(self) -> None:
+        if self._fatal_error is not None:
+            raise self._fatal_error
+
+    async def _put_or_fatal(self, queue: asyncio.Queue, item: Any) -> None:
+        self._raise_fatal_error()
+        if self._fatal_event is None:
+            await queue.put(item)
+            return
+        put_task = asyncio.create_task(queue.put(item))
+        fatal_task = asyncio.create_task(self._fatal_event.wait())
+        done, pending = await asyncio.wait(
+            {put_task, fatal_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if fatal_task in done and self._fatal_event.is_set():
+            if not put_task.done():
+                put_task.cancel()
+                await asyncio.gather(put_task, return_exceptions=True)
+            self._raise_fatal_error()
+        await put_task
+        self._raise_fatal_error()
+
+    async def _wait_queue_or_fatal(self, queue: asyncio.Queue) -> None:
+        self._raise_fatal_error()
+        if self._fatal_event is None:
+            await queue.join()
+            return
+        join_task = asyncio.create_task(queue.join())
+        fatal_task = asyncio.create_task(self._fatal_event.wait())
+        done, pending = await asyncio.wait(
+            {join_task, fatal_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if fatal_task in done and self._fatal_event.is_set():
+            self._raise_fatal_error()
+        await join_task
+        self._raise_fatal_error()
 
     # ── Worker 主循环 ─────────────────────────────────
     async def _worker_loop(self, rt: _StageRuntime, *, worker_id: int) -> None:
@@ -332,14 +390,18 @@ class Pipeline:
             except asyncio.CancelledError:
                 # 让 join 仍能完成
                 raise
+            except PipelineAbortError as e:
+                rt.metrics.failed += 1
+                self._set_fatal_error(e)
+                return
             except BaseException as e:
-                # _process_with_retry 不应该抛出 CancelledError 之外的异常,
-                # 这里防御性兜底.
                 rt.metrics.failed += 1
                 logger.error(
                     f"[{self.pipeline_id}/{rt.stage.name}/w{worker_id}] "
                     f"worker 内部异常 item={item.item_id}: {e}"
                 )
+                self._set_fatal_error(e)
+                return
             finally:
                 if had_retry:
                     rt.metrics.retried += 1

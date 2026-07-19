@@ -54,6 +54,7 @@ async def upsert_terminal_result(
         "url": url,
         "success": bool(success),
         "terminal": True,
+        "retryable": False,
         "error": str(error or "")[:2_000] or None,
         "has_findings": bool(has_findings),
         "short_circuited": bool(short_circuited),
@@ -69,6 +70,66 @@ async def upsert_terminal_result(
     return fields
 
 
+async def upsert_retryable_result(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+    project_id: str,
+    url: str,
+    source: str,
+    target_id: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    """Persist an infrastructure failure without treating the URL as completed."""
+    now = _now()
+    stable_id = result_id(task_id, url)
+    entry = {
+        "recorded_at": now,
+        "error": str(error or "")[:2_000],
+    }
+    fields: dict[str, Any] = {
+        "result_id": stable_id,
+        "task_id": task_id,
+        "project_id": project_id,
+        "target_id": target_id,
+        "source": source,
+        "url": url,
+        "success": False,
+        "terminal": False,
+        "retryable": True,
+        "error": entry["error"] or None,
+        "updated_at": now,
+    }
+    await db[URL_SCAN_RESULTS_COLLECTION].update_one(
+        {"result_id": stable_id},
+        {
+            "$set": fields,
+            "$unset": {"completed_at": ""},
+            "$setOnInsert": {"created_at": now},
+            "$push": {
+                "attempt_errors": {
+                    "$each": [entry],
+                    "$slice": -10,
+                }
+            },
+        },
+        upsert=True,
+    )
+    return fields
+
+
+def _terminal_result_filter() -> dict[str, Any]:
+    return {
+        "$or": [
+            {"terminal": True},
+            {
+                "terminal": {"$exists": False},
+                "success": {"$exists": True},
+            },
+        ]
+    }
+
+
 async def completed_urls(
     db: AsyncIOMotorDatabase,
     *,
@@ -82,10 +143,7 @@ async def completed_urls(
         {
             "task_id": task_id,
             "url": {"$in": urls},
-            "$or": [
-                {"terminal": True},
-                {"success": {"$exists": True}},
-            ],
+            **_terminal_result_filter(),
         },
         {"_id": 0, "url": 1},
     )
@@ -104,7 +162,7 @@ async def summarize_task(
     collection = db[URL_SCAN_RESULTS_COLLECTION]
     terminal_query = {
         **query,
-        "$or": [{"terminal": True}, {"success": {"$exists": True}}],
+        **_terminal_result_filter(),
     }
     rows = await collection.find(
         terminal_query,

@@ -14,7 +14,12 @@ from api.db.collections import TASKS_COLLECTION
 MAX_AUTOMATIC_RECOVERIES = 3
 _BATCH_NOTIFICATION_CLAIM_SECONDS = 10 * 60
 _TERMINAL_TASK_STATUSES = {"completed", "error", "failed", "cancelled"}
-_NON_COUNTING_RECOVERY_STAGES = {"waiting_core", "waiting_mobile", "recovering"}
+_NON_COUNTING_RECOVERY_STAGES = {
+    "waiting_core",
+    "waiting_mobile",
+    "waiting_model",
+    "recovering",
+}
 
 
 async def insert_tasks(
@@ -224,6 +229,32 @@ async def heartbeat_task(
         {"$set": {"heartbeat_at": datetime.now(timezone.utc)}},
     )
     return bool(result.modified_count)
+
+
+async def mark_task_waiting_resource(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+    runtime_id: str,
+    stage: str,
+    message: str,
+) -> bool:
+    """Keep a claimed task alive while a shared external resource recovers."""
+    now = datetime.now(timezone.utc)
+    updated = await db[TASKS_COLLECTION].update_one(
+        {"task_id": task_id, "status": "running", "runtime_id": runtime_id},
+        {
+            "$set": {
+                "progress.stage": str(stage or "waiting_resource"),
+                "progress.message": str(message or "等待外部资源恢复")[:500],
+                "progress.last_activity_at": now,
+                "heartbeat_at": now,
+                "updated_at": now,
+            },
+            "$inc": {"resource_wait_count": 1},
+        },
+    )
+    return bool(updated.modified_count)
 
 
 async def complete_task(
@@ -447,7 +478,9 @@ async def claim_stalled_task_alerts(
     query = {
         "status": "running",
         "updated_at": {"$lt": stale_before},
-        "progress.stage": {"$nin": ["waiting_mobile", "waiting_core"]},
+        "progress.stage": {
+            "$nin": ["waiting_mobile", "waiting_core", "waiting_model"]
+        },
         "$or": [
             {"last_stall_alert_at": {"$exists": False}},
             {"last_stall_alert_at": {"$lt": cooldown_before}},

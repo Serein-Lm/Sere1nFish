@@ -290,6 +290,50 @@ async def test_fofa_provider_instances_share_one_request_gate(
 
 
 @pytest.mark.asyncio
+async def test_fofa_throttle_extends_shared_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import adapters
+    from crawler_tools import fofa_tools
+
+    calls = 0
+    penalties: list[float] = []
+
+    class _Gate:
+        async def wait(self, _interval: float) -> None:
+            return None
+
+        async def penalize(self, delay: float) -> None:
+            penalties.append(delay)
+
+    async def configured_key() -> str:
+        return "configured"
+
+    async def search_fofa(**_kwargs: Any) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("FOFA 查询返回错误: [45012] 请求速度过快")
+        return []
+
+    monkeypatch.setattr(fofa_tools, "get_configured_api_key", configured_key)
+    monkeypatch.setattr(fofa_tools, "search_fofa", search_fofa)
+    monkeypatch.setattr(adapters, "_FOFA_REQUEST_GATE", _Gate())
+
+    result = await FofaAssetProvider(
+        query_interval_seconds=0,
+        retry_delay_seconds=0,
+        max_attempts=2,
+    ).search(
+        AssetIdentity("A", "A", "a.example.com"),
+        size=10,
+    )
+
+    assert result.errors == []
+    assert penalties == [12.0]
+
+
+@pytest.mark.asyncio
 async def test_asset_queries_accept_legacy_and_multi_target_fields() -> None:
     collection = _QueryCollection()
     db = _QueryDb(collection)

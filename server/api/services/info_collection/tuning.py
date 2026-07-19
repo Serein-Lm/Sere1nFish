@@ -17,6 +17,9 @@ DEFAULT_URL_SCAN_CONCURRENCY = 24
 DEFAULT_COPYWRITING_CONCURRENCY = 6
 DEFAULT_XHS_SEARCH_CONCURRENCY = 1
 DEFAULT_COMPANY_SCAN_CONCURRENCY = 6
+DEFAULT_LLM_CONCURRENCY = 12
+DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS = 120
+DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS = 900
 
 MAX_ASSET_PROBE_CONCURRENCY = 128
 MAX_URL_PROBE_CONCURRENCY = 128
@@ -24,6 +27,8 @@ MAX_URL_SCAN_CONCURRENCY = 48
 MAX_COPYWRITING_CONCURRENCY = 12
 MAX_XHS_SEARCH_CONCURRENCY = 8
 MAX_COMPANY_SCAN_CONCURRENCY = 12
+MAX_LLM_CONCURRENCY = 32
+MAX_LLM_QUOTA_COOLDOWN_SECONDS = 1800
 
 
 def _bounded(value: Any, *, default: int, maximum: int) -> int:
@@ -44,6 +49,9 @@ class CollectionRuntimeTuning:
     copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY
     xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY
     company_scan_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY
+    llm_concurrency: int = DEFAULT_LLM_CONCURRENCY
+    llm_quota_cooldown_seconds: int = DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS
+    llm_quota_max_cooldown_seconds: int = DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None) -> "CollectionRuntimeTuning":
@@ -78,6 +86,21 @@ class CollectionRuntimeTuning:
                 data.get("company_scan_concurrency"),
                 default=DEFAULT_COMPANY_SCAN_CONCURRENCY,
                 maximum=MAX_COMPANY_SCAN_CONCURRENCY,
+            ),
+            llm_concurrency=_bounded(
+                data.get("llm_concurrency"),
+                default=DEFAULT_LLM_CONCURRENCY,
+                maximum=MAX_LLM_CONCURRENCY,
+            ),
+            llm_quota_cooldown_seconds=_bounded(
+                data.get("llm_quota_cooldown_seconds"),
+                default=DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS,
+                maximum=MAX_LLM_QUOTA_COOLDOWN_SECONDS,
+            ),
+            llm_quota_max_cooldown_seconds=_bounded(
+                data.get("llm_quota_max_cooldown_seconds"),
+                default=DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS,
+                maximum=MAX_LLM_QUOTA_COOLDOWN_SECONDS,
             ),
         )
 

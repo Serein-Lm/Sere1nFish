@@ -175,3 +175,32 @@
 - 资产 LLM 分诊一次返回 30 条时在第 27 条附近被截断。默认批次降为 20，格式失败后拆半并带纠正提示重试；重试仍失败时继续保留资产，不丢 URL。
 - 正常服务关闭导致 stream pipeline 收到 `CancelledError`，旧日志误记为 ERROR。现在按正常取消记录 info，同时仍执行 worker 回收；真实异常继续记 ERROR。
 - 单元测试中的 ADB server 异常曾在源码挂载目录生成 32 MiB core dump。后端容器已禁用 core dump，异常仍保留日志和退出码，不再污染工作区或占用磁盘。
+
+## 第三阶段容量与额度审计
+
+第二次恢复运行在北京时间 2026-07-20 02:50 左右快速扩大到约 56 个 Chrome。内存仍有约 26 GiB 可用，但 1 分钟 load 在容器创建和巡检波峰中达到 112.66，Docker API 开始超时；同时模型供应商返回 `429 insufficient_quota`。继续提高 URL worker 会更快地产生错误终态，因此在 02:55 优雅停止后端，MongoDB 和 Redis 保持运行。
+
+本次停机前的精确计数：
+
+- 模型额度错误日志 694 行，其中 150 条 URL 明确写成额度失败终态。
+- 本次事故窗口共有 161 条 URL 失败终态，分布在 5 个网站子任务和 1 个招投标视觉子任务；除额度错误外还有同一资源波峰内的超时和解析失败。
+- Docker API `Read timed out` 13 次，停止后发现 13 个带 `sere1nfish.browser.managed=true` 标签的 `Created` 容器。
+- CDP 健康巡检在负载波峰中连续触发 3 次恢复，但没有 `Could not connect to Chrome`，属于单次探测过于激进。
+- FOFA 仍出现 2 次 `[45012]`；CompanyRouter 出现 1 次严格 JSON 生成中止和 6 次 Pydantic 序列化告警。
+- 本轮没有再出现 npm `TAR_ENTRY_ERROR`、ADB 逻辑设备映射错误或旧 Chrome 连接失败。
+
+第三阶段修复：
+
+- 新增进程级模型容量服务：全局最多 12 条模型工作并发；首次额度/限流错误立即熔断 120 秒，之后只允许单路半开探测，连续失败指数退避，最长 900 秒。
+- 网站 Agent 在申请 Chrome 之前先申请模型租约。额度等待不占浏览器；额度错误作为可恢复基础设施事件中止整条 URL 流，不进入 DLQ、不计业务失败。
+- 修复 `core.stream` 文档与实现不一致的问题：worker 的致命异常现在会唤醒主编排、取消同流水线其他 worker，并解除满队列等待，不再被吞掉后继续消费。
+- 项目任务进入 `waiting_model` 并保持 heartbeat；检查点保留，冷却后自动重试。钉钉每次额度事故最多发送一条重点告警，不逐 URL 通知。
+- URL 结果新增 `retryable` 与最近 10 次 `attempt_errors`。历史兼容查询只把 `terminal=true` 或旧版缺少 terminal 的结果视为完成，显式 `terminal=false` 会继续扫描。
+- 已把事故窗口 161 条失败记录原样追加到 `attempt_errors` 后改为可重试，没有删除记录；恢复时仅重跑这些未完成 URL。
+- Chrome 上限提高到 `96 max / 88 bulk / 8 reserved / 20 warm`。Docker API 客户端超时提高到 90 秒，容器创建失败按 managed 标签和确定名称延迟清理，关闭后再执行一次标签清扫。
+- Chrome CDP 单次巡检失败只记录并复检，连续 2 次才恢复；Docker stats 内存检查降为每容器 180 秒一次，CDP HTTP 复用共享连接池，避免每 30 秒对全部容器同时执行昂贵 stats。
+- 主机保护改用当前配置字段：可用内存底线 8 GiB，每核 load 上限 1.25，近期 CDP 失败阈值 12。达到保护条件时只停止新建，不中断已有任务。
+- FOFA 默认请求间隔提高到 4 秒，命中 `45012` 后把全局请求门额外后推 12 秒；重试仍经过同一进程级请求门。
+- CompanyRouter 改为普通 JSON mode + Pydantic 本地校验，格式失败时注入错误和原输出纠正一次，避免严格 JSON schema 直接中止及内部 `parsed` 序列化告警。
+
+第三阶段恢复前基线：批次仍为 `4eafabcb1b2e`，5 条 completed 保持不变，105 条 pending 等待单次启动恢复；模块检查点已增长到 `asset_url=25`、`bidding=29`、`control_structure=35`、`scholar=35`、`wechat=2`。

@@ -363,8 +363,42 @@ class UrlWebScanTool:
                 },
             )
 
-        provider = get_browser_provider()
-        cdp_url = await provider.get_cdp_endpoint(task_id=url_task_id, purpose="url_scan")
+        from core.llm_capacity import get_global_llm_capacity_guard
+
+        async with get_global_llm_capacity_guard().lease():
+            return await self._scan_with_browser(
+                request,
+                url=url,
+                worker_id=worker_id,
+                attempt=attempt,
+                source_context=source_context,
+                url_task_id=url_task_id,
+                provider=get_browser_provider(),
+                observation_context=observation_context,
+                human_message_type=HumanMessage,
+                create_web_tagging_agent=create_web_tagging_agent,
+                extract_with_retry=extract_with_retry,
+            )
+
+    async def _scan_with_browser(
+        self,
+        request: ScanRequest,
+        *,
+        url: str,
+        worker_id: int,
+        attempt: int,
+        source_context: str,
+        url_task_id: str,
+        provider: Any,
+        observation_context: Any,
+        human_message_type: Any,
+        create_web_tagging_agent: Any,
+        extract_with_retry: Any,
+    ) -> ScanResult:
+        cdp_url = await provider.get_cdp_endpoint(
+            task_id=url_task_id,
+            purpose="url_scan",
+        )
         if not cdp_url:
             raise RuntimeError(f"无法获取 Chrome 容器 (url={url})")
 
@@ -399,8 +433,11 @@ class UrlWebScanTool:
                     tool_limit=tool_limit,
                     source_context=source_context,
                 )
+
                 async def _execute_agent() -> tuple[Any, Any]:
-                    result = await agent({"messages": [HumanMessage(content=message)]})
+                    result = await agent(
+                        {"messages": [human_message_type(content=message)]}
+                    )
                     parsed = await extract_with_retry(
                         result,
                         worker_config,
@@ -410,7 +447,8 @@ class UrlWebScanTool:
 
                 try:
                     raw, tagging = await asyncio.wait_for(
-                        _execute_agent(), timeout=agent_timeout
+                        _execute_agent(),
+                        timeout=agent_timeout,
                     )
                 except asyncio.TimeoutError as exc:
                     raise TimeoutError(
@@ -442,7 +480,9 @@ class UrlWebScanTool:
 
             elapsed = time.time() - started
             findings_count = len(tagging.get("findings", []))
-            logger.info(f"[scan-w{worker_id}] ✓ {url} ({elapsed:.1f}s) findings={findings_count}")
+            logger.info(
+                f"[scan-w{worker_id}] ✓ {url} ({elapsed:.1f}s) findings={findings_count}"
+            )
             try:
                 await web_tagging_dao.insert_web_tagging_result(
                     self._db,
@@ -462,7 +502,10 @@ class UrlWebScanTool:
                 success=True,
                 data=tagging,
                 raw=raw,
-                meta={"elapsed_seconds": elapsed, "findings_count": findings_count},
+                meta={
+                    "elapsed_seconds": elapsed,
+                    "findings_count": findings_count,
+                },
             )
         finally:
             try:
