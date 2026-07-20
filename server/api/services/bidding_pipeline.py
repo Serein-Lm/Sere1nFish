@@ -543,6 +543,7 @@ class BiddingPipeline:
         target_id: str = "",
         parent_task_id: str = "",
         page_size: int = 20,
+        max_records: int = 2000,
         enable_visual_analysis: bool = True,
         enable_copywriting: bool = True,
         min_attention_score: int = 40,
@@ -563,10 +564,18 @@ class BiddingPipeline:
             source="bidding_pipeline",
             level="notice",
             event="pipeline_start",
-            data={"company_name": company_name, "page_size": page_size},
+            data={
+                "company_name": company_name,
+                "page_size": page_size,
+                "max_records": max_records,
+            },
         )
         client = await TianyanchaClient.from_runtime_config()
-        search = await client.search_bids(company_name, page_size=page_size)
+        search = await client.search_all_bids(
+            company_name,
+            page_size=page_size,
+            max_records=max_records,
+        )
         archives = await BiddingArchiveService().archive_records(
             search.records,
             project_id=project_id,
@@ -665,6 +674,8 @@ class BiddingPipeline:
             "publish_end": search.publish_end,
             "total_reported": search.total_reported,
             "records_fetched": len(search.records),
+            "pages_fetched": search.pages_fetched,
+            "truncated": search.truncated,
             **stored,
             "raw_archived": sum(bool(item.get("raw_content_object_id")) for item in archives),
             "provider_payloads_archived": sum(
@@ -690,6 +701,8 @@ class BiddingPipeline:
             data={
                 "records": len(search.records),
                 "total_reported": search.total_reported,
+                "pages_fetched": search.pages_fetched,
+                "truncated": search.truncated,
                 "attachments": result["attachments_archived"],
                 "findings": scan_result["findings_count"],
                 "copywritings": scan_result["copywritings_count"],

@@ -17,10 +17,30 @@ interface CachedAccess {
 const accessCache = new Map<string, CachedAccess>()
 const pendingAccess = new Map<string, Promise<StorageObjectAccess>>()
 
+function decodedRouteId(match: RegExpMatchArray | null): string {
+  if (!match?.[1]) return ''
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return ''
+  }
+}
+
+function isMobileScreenshotPath(value: string): boolean {
+  return /\/mobile\/screenshots\/[^/?#]+\/image(?:[?#]|$)/.test(value)
+}
+
 export function storageObjectId(pathOrId: string): string {
   const value = String(pathOrId || '').trim()
-  const match = value.match(/\/objects\/([^/?#]+)\/(?:content|access)(?:[?#]|$)/)
-  return decodeURIComponent(match?.[1] || value)
+  const storageRouteId = decodedRouteId(
+    value.match(/\/storage\/objects\/([^/?#]+)\/(?:content|access)(?:[?#]|$)/),
+  )
+  if (storageRouteId) return storageRouteId
+  const screenshotObjectId = decodedRouteId(
+    value.match(/\/mobile\/screenshots\/([^/?#]+)\/image(?:[?#]|$)/),
+  )
+  if (screenshotObjectId) return screenshotObjectId
+  return value && !/[/?#]/.test(value) && !value.includes('://') ? value : ''
 }
 
 export async function getStorageObjectAccess(pathOrId: string): Promise<StorageObjectAccess> {
@@ -48,10 +68,25 @@ export async function resolveStorageImage(
   pathOrId: string,
   signal?: AbortSignal,
 ): Promise<{ url: string; revoke?: () => void }> {
-  const access = await getStorageObjectAccess(pathOrId)
-  if (access.mode === 'redirect') return { url: access.url }
+  const source = String(pathOrId || '').trim()
+  const objectId = storageObjectId(source)
+  if (objectId) {
+    try {
+      const access = await getStorageObjectAccess(objectId)
+      if (access.mode === 'redirect') return { url: access.url }
 
-  const blob = await fetchBlobWithAuth(access.url, signal)
+      const blob = await fetchBlobWithAuth(access.url, signal)
+      const objectUrl = URL.createObjectURL(blob)
+      return { url: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) }
+    } catch (error) {
+      if (!isMobileScreenshotPath(source)) throw error
+    }
+  }
+
+  if (!source || (!source.startsWith('/') && !source.includes('://'))) {
+    throw new Error('图片地址不是有效的鉴权资源')
+  }
+  const blob = await fetchBlobWithAuth(source, signal)
   const objectUrl = URL.createObjectURL(blob)
   return { url: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) }
 }

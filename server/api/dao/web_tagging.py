@@ -137,6 +137,40 @@ async def list_web_tagging_results(
     return items, total
 
 
+async def list_web_tagging_identities(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_ids: list[str],
+) -> list[dict[str, Any]]:
+    """读取 Target 计数所需的最小网站身份字段。"""
+    selected = [str(value or "").strip() for value in target_ids if str(value or "").strip()]
+    if not selected:
+        return []
+    query: dict[str, Any] = {
+        "project_id": {"$in": _project_id_values(project_id)},
+        "target_id": {"$in": selected},
+        "$or": [
+            {"source": "web_tagging"},
+            {"source": {"$exists": False}},
+            {"source": None},
+        ],
+    }
+    projection = {
+        "_id": 0,
+        "target_id": 1,
+        "url": 1,
+        "endpoint_key": 1,
+        "excluded": 1,
+        "intro": 1,
+        "data.intro": 1,
+    }
+    return [
+        doc
+        async for doc in db[WEB_TAGS_COLLECTION].find(query, projection)
+    ]
+
+
 async def delete_web_tagging_results_by_project_id(db: AsyncIOMotorDatabase, project_id: str) -> int:
     project_values = _project_id_values(project_id)
     result = await db[WEB_TAGS_COLLECTION].delete_many(

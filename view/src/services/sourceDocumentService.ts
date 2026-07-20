@@ -142,7 +142,7 @@ export function getSourceDocument(documentId: string, projectId?: string, versio
 
 export function listProjectTargets(projectId: string) {
   return apiFetch<{ items: ProjectTargetSummary[]; total: number }>(
-    `/v1/targets?project_id=${encodeURIComponent(projectId)}`,
+    `/v1/targets?project_id=${encodeURIComponent(projectId)}&compact=true`,
   )
 }
 

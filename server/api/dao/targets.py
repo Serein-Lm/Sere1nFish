@@ -320,10 +320,35 @@ async def list_project_target_children(
 
 
 async def list_project_targets(
-    db: AsyncIOMotorDatabase, project_id: str
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    *,
+    summary_only: bool = False,
 ) -> list[dict[str, Any]]:
+    projection: dict[str, int] = {"_id": 0}
+    if summary_only:
+        projection.update(
+            {
+                "project_target_id": 1,
+                "project_id": 1,
+                "target_id": 1,
+                "target_type": 1,
+                "target_name": 1,
+                "root_domain": 1,
+                "root_domains": 1,
+                "parent_target_id": 1,
+                "parent_target_name": 1,
+                "relation_type": 1,
+                "relation_depth": 1,
+                "ownership_percent": 1,
+                "relation_source": 1,
+                "run_task_ids": 1,
+                "task_def_ids": 1,
+                "last_collected_at": 1,
+            }
+        )
     cursor = db[PROJECT_TARGETS_COLLECTION].find(
-        {"project_id": project_id, "active": {"$ne": False}}, {"_id": 0}
+        {"project_id": project_id, "active": {"$ne": False}}, projection
     ).sort("updated_at", -1)
     return [doc async for doc in cursor]
 

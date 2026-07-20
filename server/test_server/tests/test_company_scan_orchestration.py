@@ -39,6 +39,7 @@ def test_bidding_collection_is_enabled_by_default() -> None:
 
     assert parameters["enable_bidding"].default is True
     assert parameters["bidding_page_size"].default == 20
+    assert parameters["bidding_max_records"].default == 2000
 
 
 def test_wechat_target_selection_is_automatic_by_default() -> None:
@@ -101,6 +102,7 @@ async def test_scholar_collection_uses_shared_pipeline_adapter(
     result = await CompanyScanPipeline(object(), object())._run_scholar_collection(
         task_id="task-1",
         project_id="project-1",
+        target_id="target-1",
         unit="安徽广播电视台",
         direction="融媒体技术",
         unit_en="Anhui Broadcasting",
@@ -111,6 +113,7 @@ async def test_scholar_collection_uses_shared_pipeline_adapter(
     assert result["contacts_total"] == 1
     assert result["direction_source"] == "manual"
     assert captured["task_id"] == "task-1"
+    assert captured["target_id"] == "target-1"
     assert captured["unit_en"] == "Anhui Broadcasting"
     assert captured["limit"] == 12
     assert captured["notify_completion"] is False

@@ -143,12 +143,14 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     )
 
     class _Client:
-        async def search_bids(self, company_name: str, **kwargs: Any) -> BiddingSearchResult:
+        async def search_all_bids(self, company_name: str, **kwargs: Any) -> BiddingSearchResult:
             assert company_name == "安徽广播电视台"
             assert kwargs["page_size"] == 20
+            assert kwargs["max_records"] == 2000
             return BiddingSearchResult(
                 records=[record],
                 total_reported=1,
+                pages_fetched=1,
                 publish_start="2026-01-18",
                 publish_end="2026-07-17",
             )
@@ -242,6 +244,8 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert "设备采购联系人：张老师" in evidence
     assert result["visual_analysis"]["findings_count"] == 2
     assert result["visual_analysis"]["copywritings_count"] == 1
+    assert result["pages_fetched"] == 1
+    assert result["truncated"] is False
 
 
 @pytest.mark.asyncio
@@ -257,8 +261,12 @@ async def test_pipeline_falls_back_from_relative_detail_to_provider_url(
     )
 
     class _Client:
-        async def search_bids(self, *_args: Any, **_kwargs: Any) -> BiddingSearchResult:
-            return BiddingSearchResult(records=[record], total_reported=1)
+        async def search_all_bids(self, *_args: Any, **_kwargs: Any) -> BiddingSearchResult:
+            return BiddingSearchResult(
+                records=[record],
+                total_reported=1,
+                pages_fetched=1,
+            )
 
     async def _configured_client() -> _Client:
         return _Client()

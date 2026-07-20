@@ -216,6 +216,39 @@ async def test_bidding_query_uses_legal_name_date_window_and_supplier_limit() ->
     assert result.page_size == 20
 
 
+@pytest.mark.asyncio
+async def test_bidding_query_reads_all_pages_with_bounded_concurrency() -> None:
+    requested_pages: list[int] = []
+
+    class _Client(TianyanchaClient):
+        def __init__(self) -> None:
+            super().__init__("test-key")
+
+        async def _request(self, _endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+            page = int(params["pageNum"])
+            requested_pages.append(page)
+            start = (page - 1) * 20
+            items = [
+                {"uuid": f"bid-{index}", "title": f"公告 {index}"}
+                for index in range(start, min(start + 20, 45))
+            ]
+            return {"error_code": 0, "result": {"total": 45, "items": items}}
+
+    result = await _Client().search_all_bids(
+        "安徽广播电视台",
+        page_size=20,
+        max_records=100,
+        page_concurrency=2,
+        end_date=date(2026, 7, 17),
+    )
+
+    assert requested_pages == [1, 2, 3]
+    assert result.total_reported == 45
+    assert len(result.records) == 45
+    assert result.pages_fetched == 3
+    assert result.truncated is False
+
+
 def test_keyword_skill_ignores_standalone_company_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

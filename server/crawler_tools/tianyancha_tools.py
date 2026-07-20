@@ -160,6 +160,8 @@ class BiddingSearchResult:
     total_reported: int = 0
     page_num: int = 1
     page_size: int = 20
+    pages_fetched: int = 0
+    truncated: bool = False
     bid_type: str = "2"
     publish_start: str = ""
     publish_end: str = ""
@@ -544,7 +546,7 @@ class TianyanchaClient:
         lookback_days: int = 180,
         end_date: date | None = None,
     ) -> BiddingSearchResult:
-        """按法定主体查询招投标公告，默认最近 180 天、最多 20 条。"""
+        """按法定主体查询单页招投标公告。"""
         keyword = str(company_name or "").strip()
         if not keyword:
             raise ValueError("公司法定名称不能为空")
@@ -570,9 +572,76 @@ class TianyanchaClient:
             total_reported=int(result.get("total") or 0),
             page_num=safe_page,
             page_size=safe_size,
+            pages_fetched=1,
             bid_type=str(bid_type or "2"),
             publish_start=publish_start.isoformat(),
             publish_end=publish_end.isoformat(),
+        )
+
+    async def search_all_bids(
+        self,
+        company_name: str,
+        *,
+        bid_type: str = "2",
+        page_size: int = 20,
+        max_records: int = 2000,
+        page_concurrency: int = 3,
+        lookback_days: int = 180,
+        end_date: date | None = None,
+    ) -> BiddingSearchResult:
+        """分页读取招投标公告，并以稳定记录 ID 去重。"""
+        safe_size = max(1, min(int(page_size), 20))
+        safe_limit = max(1, min(int(max_records), 2000))
+        first = await self.search_bids(
+            company_name,
+            bid_type=bid_type,
+            page_num=1,
+            page_size=safe_size,
+            lookback_days=lookback_days,
+            end_date=end_date,
+        )
+        total_pages = max(1, math.ceil(first.total_reported / safe_size))
+        pages_to_fetch = min(total_pages, max(1, math.ceil(safe_limit / safe_size)))
+        resolved_end_date = end_date or date.fromisoformat(first.publish_end)
+        records_by_id = {record.record_id: record for record in first.records}
+        pages_fetched = 1
+        next_page = 2
+        batch_size = max(1, min(int(page_concurrency), 6))
+
+        while next_page <= pages_to_fetch:
+            page_numbers = list(
+                range(next_page, min(pages_to_fetch + 1, next_page + batch_size))
+            )
+            pages = await asyncio.gather(
+                *[
+                    self.search_bids(
+                        company_name,
+                        bid_type=bid_type,
+                        page_num=page,
+                        page_size=safe_size,
+                        lookback_days=lookback_days,
+                        end_date=resolved_end_date,
+                    )
+                    for page in page_numbers
+                ]
+            )
+            pages_fetched += len(pages)
+            next_page += len(pages)
+            for page in pages:
+                for record in page.records:
+                    records_by_id.setdefault(record.record_id, record)
+
+        records = list(records_by_id.values())[:safe_limit]
+        return BiddingSearchResult(
+            records=records,
+            total_reported=first.total_reported,
+            page_num=1,
+            page_size=safe_size,
+            pages_fetched=pages_fetched,
+            truncated=first.total_reported > len(records),
+            bid_type=first.bid_type,
+            publish_start=first.publish_start,
+            publish_end=first.publish_end,
         )
 
 

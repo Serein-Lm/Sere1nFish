@@ -290,3 +290,63 @@ async def test_website_records_sort_sources_together_before_pagination_and_filte
         "https://legacy-b.example",
     }
     assert calls[-1] == "target-b"
+
+
+@pytest.mark.asyncio
+async def test_website_target_counts_use_lightweight_deduplicated_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import website_records
+
+    db = _Db(
+        [
+            {
+                "project_id": "project-1",
+                "target_id": "target-a",
+                "source": "web_tagging",
+                "url": "http://example.com/login",
+            },
+            {
+                "project_id": "project-1",
+                "target_id": "target-a",
+                "source": "web_tagging",
+                "url": "https://example.com/login",
+            },
+            {
+                "project_id": "project-1",
+                "target_id": "target-a",
+                "source": "web_tagging",
+                "url": "https://example.com/kkfileview/index",
+            },
+            {
+                "project_id": "project-1",
+                "target_id": "target-b",
+                "source": "web_tagging",
+                "url": "https://b.example.com",
+            },
+        ],
+        [],
+    )
+
+    async def list_legacy_identities(*_args: Any, **_kwargs: Any):
+        return [
+            {
+                "target_id": "target-a",
+                "url": "https://example.com/login",
+                "data": {"intro": {}},
+            }
+        ]
+
+    monkeypatch.setattr(
+        website_records.web_tagging_dao,
+        "list_web_tagging_identities",
+        list_legacy_identities,
+    )
+
+    counts = await website_records.count_project_website_records_by_target(
+        db,
+        project_id="project-1",
+        target_ids=["target-a", "target-b"],
+    )
+
+    assert counts == {"target-a": 1, "target-b": 1}

@@ -170,9 +170,16 @@ async def attach_normalized_company(
 
 
 async def list_project_target_summaries(
-    db: AsyncIOMotorDatabase, project_id: str
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    *,
+    compact: bool = False,
 ) -> list[dict[str, Any]]:
-    relations = await targets_dao.list_project_targets(db, project_id)
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=compact,
+    )
     target_ids = [str(item.get("target_id") or "") for item in relations]
     if not target_ids:
         return []
@@ -424,9 +431,28 @@ async def list_project_target_summaries(
         for item in record_counts
     }
     tasks_by_id = {str(item.get("task_id") or ""): item for item in task_docs}
+
+    def _relation_payload(relation: dict[str, Any]) -> dict[str, Any]:
+        if not compact:
+            return relation
+        return {
+            key: relation.get(key)
+            for key in (
+                "project_target_id",
+                "target_id",
+                "target_type",
+                "target_name",
+                "root_domain",
+                "parent_target_id",
+                "relation_type",
+                "relation_depth",
+            )
+            if key in relation
+        }
+
     summaries = [
         {
-            **relation,
+            **_relation_payload(relation),
             "document_count": int(
                 by_target.get(str(relation.get("target_id") or ""), {}).get(
                     "document_count", 0

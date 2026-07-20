@@ -31,8 +31,15 @@ class ProjectTargetLinkRequest(BaseModel):
 
 
 @router.get("/targets")
-async def list_targets(project_id: str = Query(min_length=1)):
-    items = await list_project_target_summaries(get_db(), project_id)
+async def list_targets(
+    project_id: str = Query(min_length=1),
+    compact: bool = Query(default=False),
+):
+    items = await list_project_target_summaries(
+        get_db(),
+        project_id,
+        compact=compact,
+    )
     return {"items": items, "total": len(items)}
 
 

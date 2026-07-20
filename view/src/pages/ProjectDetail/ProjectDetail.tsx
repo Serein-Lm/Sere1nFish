@@ -669,17 +669,13 @@ export default function ProjectDetail() {
     const selectedTargetId = targetId ?? wechatTargetId
     setWechatLoading(true)
     try {
-      const [res, targetResult] = await Promise.all([
-        listCollectRecords({
-          project_id: pid,
-          target_id: selectedTargetId || undefined,
-          only_incremental: onlyInc,
-          archived_only: true,
-          limit: 100,
-        }),
-        listProjectTargets(pid),
-      ])
-      setProjectTargets(targetResult.items)
+      const res = await listCollectRecords({
+        project_id: pid,
+        target_id: selectedTargetId || undefined,
+        only_incremental: onlyInc,
+        archived_only: true,
+        limit: 100,
+      })
       const sorted = res.items.filter(
         (record) => Boolean(record.source_document_id && record.source_url),
       ).sort((a, b) => {
@@ -732,15 +728,11 @@ export default function ProjectDetail() {
   ) => {
     setBiddingLoading(true)
     try {
-      const [result, targetResult] = await Promise.all([
-        listProjectBiddingRecords(pid, {
-          page,
-          page_size: pageSize,
-          target_id: targetId || undefined,
-        }),
-        listProjectTargets(pid),
-      ])
-      setProjectTargets(targetResult.items)
+      const result = await listProjectBiddingRecords(pid, {
+        page,
+        page_size: pageSize,
+        target_id: targetId || undefined,
+      })
       setBiddingRecords(result.items)
       setBiddingRecordsTotal(result.total)
       setBiddingPage(result.page)
@@ -4360,6 +4352,7 @@ export default function ProjectDetail() {
                     }
                     params.enable_bidding = values.enable_bidding ?? true
                     if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
+                    if (values.bidding_max_records) params.bidding_max_records = values.bidding_max_records
                     params.enable_wechat = values.enable_wechat ?? false
                     if (values.enable_wechat) {
                       params.wechat_device_id = values.wechat_device_id
@@ -4472,7 +4465,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4551,7 +4544,7 @@ export default function ProjectDetail() {
                               <Checkbox>小红书采集（按目标选择策略执行）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_bidding" valuePropName="checked" noStyle>
-                              <Checkbox>招投标采集（法定主体，默认 20 条）</Checkbox>
+                              <Checkbox>招投标采集（法定主体，按总数自动分页）</Checkbox>
                             </Form.Item>
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (
@@ -4740,7 +4733,7 @@ export default function ProjectDetail() {
                           </Col>
                         </Row>
                         <Row gutter={16}>
-                          <Col xs={24} sm={8}>
+                          <Col xs={24} sm={6}>
                             <Form.Item
                               name="xhs_max_notes"
                               label="小红书最大入库笔记数"
@@ -4749,12 +4742,17 @@ export default function ProjectDetail() {
                               <InputNumber min={1} max={100} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
-                          <Col xs={24} sm={8}>
-                            <Form.Item name="bidding_page_size" label="招投标公告数">
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="bidding_page_size" label="招投标单页数量" tooltip="天眼查单次请求数量；系统会自动读取后续页">
                               <InputNumber min={1} max={20} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
-                          <Col xs={24} sm={8}>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="bidding_max_records" label="招投标最大公告数" tooltip="按供应商返回总数自动分页，达到此安全上限后停止">
+                              <InputNumber min={20} max={2000} step={20} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={6}>
                             <Form.Item name="min_attention_score" label="最低关注度阈值">
                               <InputNumber min={0} max={100} style={{ width: '100%' }} />
                             </Form.Item>

@@ -341,9 +341,42 @@ async def count_project_website_records_by_target(
     counts = {target_id: 0 for target_id in selected}
     if not selected:
         return counts
-    records = await _load_unified_records(db, project_id=project_id)
-    for record in records:
+
+    async def _list_scan_identities() -> list[dict[str, Any]]:
+        cursor = db[URL_SCAN_RESULTS_COLLECTION].find(
+            {
+                "project_id": project_id,
+                "source": "web_tagging",
+                "target_id": {"$in": list(selected)},
+                "excluded": {"$ne": True},
+            },
+            {
+                "_id": 0,
+                "target_id": 1,
+                "url": 1,
+                "endpoint_key": 1,
+                "excluded": 1,
+                "intro": 1,
+            },
+        )
+        return [doc async for doc in cursor]
+
+    scan_records, legacy_records = await asyncio.gather(
+        _list_scan_identities(),
+        web_tagging_dao.list_web_tagging_identities(
+            db,
+            project_id=project_id,
+            target_ids=list(selected),
+        ),
+    )
+    identities: set[tuple[str, str]] = set()
+    for record in [*scan_records, *legacy_records]:
         target_id = str(record.get("target_id") or "").strip()
-        if target_id in counts:
-            counts[target_id] += 1
+        if target_id not in counts or _is_excluded(record):
+            continue
+        url = str(record.get("url") or "")
+        endpoint_key = str(record.get("endpoint_key") or endpoint_identity(url))
+        identities.add((target_id, endpoint_key))
+    for target_id, _endpoint_key in identities:
+        counts[target_id] += 1
     return counts
