@@ -32,6 +32,10 @@ class _FakeDevice:
     def back(self, delay=None) -> None:
         self.events.append(("back",))
 
+    def press_key(self, key: str, delay=None) -> bool:
+        self.events.append(("press", key))
+        return True
+
 
 class _FakeManager:
     def __init__(self, device: _FakeDevice) -> None:
@@ -108,6 +112,7 @@ def test_wechat_search_navigator_uses_verified_activity_path(monkeypatch) -> Non
 
     assert result.ok is True
     assert result.metadata["activity"].endswith("MMFTSSOSHomeWebViewUI")
+    assert result.metadata["submission"] == "suggestion_tap"
     assert launcher.calls == [("10.0.0.2:5555", "微信", "primary")]
     assert device.events == [
         ("tap", 830, 67),
@@ -180,6 +185,42 @@ def test_wechat_search_navigator_reuses_result_search_input(monkeypatch) -> None
     assert result.ok is True
     assert device.events[:2] == [("back",), ("back",)]
     assert ("type", "AHTV 招标") in device.events
+
+
+def test_wechat_search_navigator_retries_enter_when_suggestion_does_not_submit(
+    monkeypatch,
+) -> None:
+    from core.mobile.collect import search_navigation
+
+    device = _FakeDevice()
+    monkeypatch.setattr(
+        search_navigation,
+        "resolve_tap",
+        lambda x, y, **_kwargs: (x, y),
+    )
+    search_activity = "com.tencent.mm.plugin.fts.ui.FTSMainUI"
+    result_activity = (
+        "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI"
+    )
+    navigator = WechatArticleSearchNavigator(
+        manager_factory=lambda: _FakeManager(device),
+        launcher_factory=_FakeLauncher,
+        runner=_activity_runner(
+            [search_activity, *([search_activity] * 4), result_activity]
+        ),
+        sleep=lambda _seconds: None,
+    )
+
+    result = navigator.navigate(
+        "device-a",
+        app_name="微信",
+        app_instance="primary",
+        keyword="安徽广播电视台 招标",
+    )
+
+    assert result.ok is True
+    assert result.metadata["submission"] == "enter_retry_1"
+    assert ("press", "enter") in device.events
 
 
 def test_registered_navigation_runs_without_visual_agent(monkeypatch) -> None:

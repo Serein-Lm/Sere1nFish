@@ -134,6 +134,7 @@ class WechatArticleSearchNavigator:
         expected: str,
         *,
         attempts: int = 5,
+        pending: str | None = None,
     ) -> str:
         current = ""
         last_error: Exception | None = None
@@ -146,6 +147,8 @@ class WechatArticleSearchNavigator:
                 last_error = exc
             if attempt + 1 < attempts:
                 self._sleep(0.25)
+        if pending and current == pending:
+            return current
         if last_error and not current:
             raise RuntimeError(f"微信页面校验失败: {last_error}") from last_error
         raise RuntimeError(
@@ -178,6 +181,31 @@ class WechatArticleSearchNavigator:
             "微信当前页面不支持确定性搜索导航: "
             f"{activity.rsplit('.', 1)[-1] if activity else 'unknown'}"
         )
+
+    def _submit_search(self, device, adb_device_id: str) -> tuple[str, str]:
+        """提交搜索并校验结果页；建议项未响应时用键盘确定性重试。"""
+        self._tap_normalized(
+            device,
+            adb_device_id,
+            self._EXACT_QUERY_SUGGESTION,
+        )
+        submission = "suggestion_tap"
+        for attempt in range(4):
+            activity = self._wait_for_activity(
+                adb_device_id,
+                self._RESULT_ACTIVITY,
+                attempts=4,
+                pending=self._SEARCH_ACTIVITY,
+            )
+            if activity == self._RESULT_ACTIVITY:
+                return activity, submission
+            if attempt >= 3:
+                break
+            if not device.press_key("enter", delay=0.1):
+                raise RuntimeError("微信搜索提交失败: Enter 按键未执行")
+            submission = f"enter_retry_{attempt + 1}"
+            self._sleep(0.25)
+        raise RuntimeError("微信搜索提交失败: 多次提交后仍停留在 FTSMainUI")
 
     @staticmethod
     def _tap_normalized(device, adb_device_id: str, point: tuple[int, int]) -> None:
@@ -228,15 +256,9 @@ class WechatArticleSearchNavigator:
                 device.clear_text()
                 device.type_text(normalized_keyword)
                 self._sleep(0.35)
-                self._tap_normalized(
+                activity, submission = self._submit_search(
                     device,
                     adb_device_id,
-                    self._EXACT_QUERY_SUGGESTION,
-                )
-                activity = self._wait_for_activity(
-                    adb_device_id,
-                    self._RESULT_ACTIVITY,
-                    attempts=8,
                 )
             finally:
                 if previous_ime:
@@ -249,6 +271,7 @@ class WechatArticleSearchNavigator:
                 "activity": activity,
                 "keyword": normalized_keyword,
                 "app_instance": "clone" if app_instance == "clone" else "primary",
+                "submission": submission,
             }
             if restore_error:
                 metadata["keyboard_restore_error"] = restore_error
