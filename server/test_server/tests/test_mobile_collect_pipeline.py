@@ -621,6 +621,8 @@ def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:
     from core.mobile.collect.candidate_policy import CandidatePolicyRegistry
 
     policy = CandidatePolicyRegistry.resolve("wechat_copy_link")
+    assert "停留在“全部”结果页" in policy.navigation_instructions()
+    assert "不得切换到账号" in policy.navigation_instructions()
     base = {
         "tap_x": 100,
         "tap_y": 200,

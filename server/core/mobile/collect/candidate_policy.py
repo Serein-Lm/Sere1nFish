@@ -13,6 +13,8 @@ class CandidatePolicy(Protocol):
 
     def analysis_instructions(self, *, target_name: str, aliases: list[str]) -> str: ...
 
+    def navigation_instructions(self) -> str: ...
+
     def accepts_detail(
         self,
         candidate: dict,
@@ -29,6 +31,9 @@ class DefaultCandidatePolicy:
     allow_mobile_detail_fallback: bool = True
 
     def analysis_instructions(self, *, target_name: str, aliases: list[str]) -> str:
+        return ""
+
+    def navigation_instructions(self) -> str:
         return ""
 
     def accepts_detail(
@@ -61,6 +66,12 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
             f"{aliases_text}。仅行业相近、正文可能提及或搜索词命中不足以证明主体一致。"
             "content_kind 必须按画面真实类型填写；只有文章填写 is_article_result=true，"
             "并在 target_evidence 中写出画面上可见的主体对应依据。"
+        )
+
+    def navigation_instructions(self) -> str:
+        return (
+            "搜索后必须停留在“全部”结果页，看到与关键词对应的文章列表后立即完成；"
+            "不得切换到账号、视频、直播、商品或其他分类"
         )
 
     def accepts_detail(

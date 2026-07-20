@@ -40,6 +40,10 @@ from core.mobile.collect.contacts import (
     grade_with_contacts,
 )
 from core.mobile.collect.candidate_policy import CandidatePolicyRegistry
+from core.mobile.collect.search_navigation import (
+    SearchNavigationRegistry,
+    SearchNavigationResult,
+)
 from api.services.source_documents import ingest_source_url
 
 logger = get_logger("mobile_collect")
@@ -141,6 +145,27 @@ async def _run_search_navigation(
     return True
 
 
+async def _run_registered_search_navigation(
+    device_id: str,
+    *,
+    strategy: str,
+    app_name: str,
+    app_instance: str,
+    keyword: str,
+) -> SearchNavigationResult | None:
+    """Use a registered deterministic navigator before visual-agent fallback."""
+    navigator = SearchNavigationRegistry.create(strategy)
+    if navigator is None:
+        return None
+    return await asyncio.to_thread(
+        navigator.navigate,
+        device_id,
+        app_name=app_name,
+        app_instance=app_instance,
+        keyword=keyword,
+    )
+
+
 def _image_signature(image_base64: str) -> list[int] | None:
     """把截图降采样为 24x24 灰度像素列表, 用于廉价视觉比对(判断页面是否还在动)。"""
     import base64 as _b64
@@ -212,6 +237,142 @@ class _CollectStage(Stage):
     name = "collect"
     concurrency = 1
     retry = RetryPolicy(max_attempts=2, base_delay=3.0, jitter=False)
+
+    async def _navigate_to_search_results(
+        self,
+        ctx,
+        *,
+        keyword: str,
+        item_id: str,
+        candidate_policy,
+    ) -> bool:
+        """Prefer a registered navigator and retain the visual agent as fallback."""
+        st = ctx.state
+        stop: asyncio.Event = st["stop_event"]
+        device_id = st["device_id"]
+        app_name = st["app_name"]
+        project_id = st["project_id"]
+        run_task_id = st["run_task_id"]
+        direct_launch = bool(st.get("direct_launch_app"))
+        navigation_result = None
+
+        if direct_launch:
+            navigation_result = await _run_registered_search_navigation(
+                device_id,
+                strategy=str(st.get("source_link_strategy") or "none"),
+                app_name=app_name,
+                app_instance=str(st.get("app_instance") or "primary"),
+                keyword=keyword,
+            )
+            if navigation_result is not None:
+                st["direct_app_ready"] = False
+                obs_log(
+                    (
+                        "确定性搜索导航完成"
+                        if navigation_result.ok
+                        else f"确定性搜索导航失败: {navigation_result.error}"
+                    ),
+                    project_id=project_id or "",
+                    task_id=run_task_id,
+                    source=_OBS_SOURCE,
+                    level="info" if navigation_result.ok else "warning",
+                    event=(
+                        "collect_nav_deterministic"
+                        if navigation_result.ok
+                        else "collect_nav_deterministic_fallback"
+                    ),
+                    data={
+                        "keyword": keyword,
+                        "strategy": navigation_result.strategy,
+                        "elapsed_ms": navigation_result.elapsed_ms,
+                        "error": navigation_result.error or "",
+                        **navigation_result.metadata,
+                    },
+                )
+        if stop.is_set():
+            return False
+        if navigation_result is not None and navigation_result.ok:
+            return True
+
+        if direct_launch and not bool(st.get("direct_app_ready")):
+            launch_result = await asyncio.to_thread(
+                _do_launch_app,
+                device_id,
+                app_name,
+                str(st.get("app_instance") or "primary"),
+            )
+            if not launch_result.ok:
+                raise RuntimeError(
+                    f"ADB 启动应用失败: {app_name}: "
+                    f"{launch_result.error or '未进入前台'}"
+                )
+            obs_log(
+                f"ADB 已启动{app_name}",
+                project_id=project_id or "",
+                task_id=run_task_id,
+                source=_OBS_SOURCE,
+                level="info",
+                event="collect_app_launched",
+                data={
+                    "app_name": app_name,
+                    "package_name": launch_result.package_name,
+                    "app_instance": launch_result.selected_instance,
+                    "chooser_handled": launch_result.chooser_handled,
+                },
+            )
+            st["direct_app_ready"] = True
+
+        if direct_launch:
+            goal = (
+                f"{app_name}当前已在前台；保持在{app_name}内，"
+                f"根据当前页面定位搜索入口并搜索“{keyword}”"
+                if keyword
+                else f"{app_name}当前已在前台；确认当前页面可操作"
+            )
+        else:
+            goal = (
+                f"打开{app_name}并搜索{keyword}"
+                if keyword
+                else f"打开{app_name}"
+            )
+        if st["search_hint"]:
+            goal = f"{goal};{st['search_hint']}"
+        navigation_hint = candidate_policy.navigation_instructions()
+        if navigation_hint:
+            goal = f"{goal};{navigation_hint}"
+
+        nav_plan_id = f"{run_task_id}-nav-{item_id}"
+        try:
+            navigated = await _run_search_navigation(
+                device_id,
+                goal,
+                project_id=project_id,
+                owner=st["owner"],
+                plan_id=nav_plan_id,
+                stop_event=stop,
+                preplanned=direct_launch,
+            )
+            if navigated:
+                return True
+            if stop.is_set():
+                return False
+            raise RuntimeError(
+                f"手机搜索导航未完成: {app_name} {keyword}".strip()
+            )
+        except Exception as exc:  # noqa: BLE001
+            if direct_launch:
+                st["direct_app_ready"] = False
+            ctx.logger.warning(f"[collect] 导航失败 kw={keyword!r}: {exc}")
+            obs_log(
+                f"采集导航失败: {exc}",
+                project_id=project_id or "",
+                task_id=run_task_id,
+                source=_OBS_SOURCE,
+                level="warning",
+                event="collect_nav_error",
+                data={"keyword": keyword, "goal": goal, "error": str(exc)},
+            )
+            raise
 
     async def _capture_save(self, ctx, keyword: str, note: str):
         """截图并落库, 返回 (base64, screenshot_id, url)。"""
@@ -608,74 +769,14 @@ class _CollectStage(Stage):
             str(st.get("source_link_strategy") or "none")
         )
 
-        direct_launch = bool(st.get("direct_launch_app"))
-        if direct_launch and not bool(st.get("direct_app_ready")):
-            launch_result = await asyncio.to_thread(
-                _do_launch_app,
-                device_id,
-                app_name,
-                str(st.get("app_instance") or "primary"),
-            )
-            if not launch_result.ok:
-                raise RuntimeError(
-                    f"ADB 启动应用失败: {app_name}: "
-                    f"{launch_result.error or '未进入前台'}"
-                )
-            obs_log(
-                f"ADB 已启动{app_name}",
-                project_id=project_id or "",
-                task_id=run_task_id,
-                source=_OBS_SOURCE,
-                level="info",
-                event="collect_app_launched",
-                data={
-                    "app_name": app_name,
-                    "package_name": launch_result.package_name,
-                    "app_instance": launch_result.selected_instance,
-                    "chooser_handled": launch_result.chooser_handled,
-                },
-            )
-            st["direct_app_ready"] = True
-        if direct_launch:
-            goal = (
-                f"{app_name}当前已在前台；保持在{app_name}内，"
-                f"根据当前页面定位搜索入口并搜索“{keyword}”"
-                if keyword
-                else f"{app_name}当前已在前台；确认当前页面可操作"
-            )
-        else:
-            goal = f"打开{app_name}并搜索{keyword}" if keyword else f"打开{app_name}"
-        if st["search_hint"]:
-            goal = f"{goal};{st['search_hint']}"
-        nav_plan_id = f"{run_task_id}-nav-{item.item_id}"
-        try:
-            navigated = await _run_search_navigation(
-                device_id,
-                goal,
-                project_id=project_id,
-                owner=st["owner"],
-                plan_id=nav_plan_id,
-                stop_event=stop,
-                preplanned=direct_launch,
-            )
-            if not navigated:
-                if stop.is_set():
-                    return
-                raise RuntimeError(f"手机搜索导航未完成: {app_name} {keyword}".strip())
-        except Exception as exc:  # noqa: BLE001
-            if direct_launch:
-                st["direct_app_ready"] = False
-            ctx.logger.warning(f"[collect] 导航失败 kw={keyword!r}: {exc}")
-            obs_log(
-                f"采集导航失败: {exc}",
-                project_id=project_id or "",
-                task_id=run_task_id,
-                source=_OBS_SOURCE,
-                level="warning",
-                event="collect_nav_error",
-                data={"keyword": keyword, "goal": goal, "error": str(exc)},
-            )
-            raise
+        navigated = await self._navigate_to_search_results(
+            ctx,
+            keyword=keyword,
+            item_id=item.item_id,
+            candidate_policy=candidate_policy,
+        )
+        if not navigated:
+            return
 
         swipe_times = int(st["swipe_times"])
         swipe_interval = float(st["swipe_interval"])
