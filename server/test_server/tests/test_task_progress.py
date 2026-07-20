@@ -50,3 +50,27 @@ async def test_resume_phases_are_marked_in_one_update() -> None:
     assert fields["resume.core_completed"] is True
     assert fields["resume.mobile_completed"] is True
     assert fields["resume.updated_at"] == fields["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_task_stage_updates_business_activity_clock() -> None:
+    from api.services.task_progress import update_task_stage
+
+    db = _Db()
+
+    updated = await update_task_stage(
+        db,  # type: ignore[arg-type]
+        task_id="task-1",
+        stage="scanning",
+        message="正在扫描",
+    )
+
+    assert updated is True
+    assert db.collection.query == {
+        "task_id": "task-1",
+        "status": {"$in": ["pending", "running"]},
+    }
+    fields = db.collection.update["$set"]
+    assert fields["progress.stage"] == "scanning"
+    assert fields["progress.message"] == "正在扫描"
+    assert fields["progress.last_activity_at"] == fields["updated_at"]

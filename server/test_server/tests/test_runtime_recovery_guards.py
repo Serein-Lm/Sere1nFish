@@ -1,10 +1,45 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
+
+
+def test_stalled_notification_is_bounded_and_heartbeat_aware() -> None:
+    from api.services.task_runtime_recovery import build_stalled_task_notification
+
+    now = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    stalled = [
+        {
+            "task_id": f"task-{index}",
+            "task_type": "company_scan",
+            "params": {"company_name": f"目标-{index}"},
+            "progress": {"stage": "scanning"},
+            "heartbeat_at": now - timedelta(seconds=10),
+        }
+        for index in range(10)
+    ]
+
+    level, content, context = build_stalled_task_notification(
+        stalled,
+        now=now,
+    )
+
+    assert level == "warning"
+    assert context == {"count": 10, "runtime_stale": 0, "heartbeat_alive": 10}
+    assert "目标-7" in content
+    assert "目标-8" not in content
+    assert "其余 2 个目标已合并" in content
+
+    stalled[0]["heartbeat_at"] = now - timedelta(minutes=5)
+    level, _content, context = build_stalled_task_notification(
+        stalled,
+        now=now,
+    )
+    assert level == "critical"
+    assert context["runtime_stale"] == 1
 
 
 @pytest.mark.asyncio

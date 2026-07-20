@@ -1398,10 +1398,14 @@ class CompanyScanPipeline:
         async def _on_started() -> None:
             if started_event is not None:
                 started_event.set()
-            await self._update_progress(
-                task_id,
-                "mobile_scanning",
-                "公众号任务已获得手机，正在采集...",
+            from api.services.task_progress import update_source_progress
+
+            await update_source_progress(
+                self.db,
+                task_id=task_id,
+                source="wechat",
+                status="running",
+                message="公众号任务已获得手机，正在采集",
             )
 
         return await run_company_wechat_collection(
@@ -1468,6 +1472,7 @@ class CompanyScanPipeline:
                 project_id=project_id,
                 company_name=company_name,
                 target_id=target_id,
+                parent_task_id=task_id,
                 page_size=max(1, min(int(page_size), 20)),
                 enable_visual_analysis=enable_visual_analysis,
                 enable_copywriting=enable_copywriting,
@@ -1522,8 +1527,21 @@ class CompanyScanPipeline:
     ) -> dict[str, Any]:
         """按全资子公司限流并发，单位内部继续并行资产与社媒流水线。"""
         from api.services.search_terms import build_channel_terms
+        from api.services.task_progress import update_source_progress
 
         semaphore = asyncio.Semaphore(max(1, entity_concurrency))
+        progress_lock = asyncio.Lock()
+        processed_entities = 0
+        total_entities = len(entities)
+        await update_source_progress(
+            self.db,
+            task_id=task_id,
+            source="wholly_owned_entities",
+            total=total_entities,
+            processed=0,
+            status="running",
+            message=f"开始采集 {total_entities} 家全资子公司",
+        )
 
         async def _scan(index: int, entity: dict[str, Any]) -> dict[str, Any]:
             async with semaphore:
@@ -1571,6 +1589,8 @@ class CompanyScanPipeline:
                             url_probe_concurrency=url_probe_concurrency,
                             url_scan_concurrency=url_scan_concurrency,
                             copywriting_concurrency=copywriting_concurrency,
+                            progress_task_id=task_id,
+                            progress_source=f"wholly_owned_{index}_url_scan",
                         )
                     )
                 xhs_keywords: list[str] = []
@@ -1629,8 +1649,36 @@ class CompanyScanPipeline:
                         scan_result["errors"].append(f"画像话术生成失败: {exc}")
                 return {**entity, "scan": scan_result}
 
+        async def _scan_with_progress(
+            index: int,
+            entity: dict[str, Any],
+        ) -> dict[str, Any]:
+            nonlocal processed_entities
+            try:
+                return await _scan(index, entity)
+            finally:
+                async with progress_lock:
+                    processed_entities += 1
+                    current = processed_entities
+                    await update_source_progress(
+                        self.db,
+                        task_id=task_id,
+                        source="wholly_owned_entities",
+                        total=total_entities,
+                        processed=current,
+                        status=(
+                            "completed"
+                            if current >= total_entities
+                            else "running"
+                        ),
+                        message=f"全资子公司已处理 {current}/{total_entities}",
+                    )
+
         scanned = await asyncio.gather(
-            *[_scan(index, entity) for index, entity in enumerate(entities)],
+            *[
+                _scan_with_progress(index, entity)
+                for index, entity in enumerate(entities)
+            ],
             return_exceptions=True,
         )
         output_entities: list[dict[str, Any]] = []
@@ -1669,6 +1717,17 @@ class CompanyScanPipeline:
             errors.extend(
                 f"{item.get('name')}: {message}" for message in scan.get("errors") or []
             )
+        await update_source_progress(
+            self.db,
+            task_id=task_id,
+            source="wholly_owned_entities",
+            total=total_entities,
+            processed=total_entities,
+            succeeded=summary["completed"],
+            failed=max(0, total_entities - summary["completed"]),
+            status="completed",
+            message=f"全资子公司采集完成 {summary['completed']}/{total_entities}",
+        )
         return {"entities": output_entities, "summary": summary, "errors": errors}
 
     # ══════════════════════════════════════
@@ -1694,6 +1753,8 @@ class CompanyScanPipeline:
         url_probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
         url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
+        progress_task_id: str = "",
+        progress_source: str = "",
     ) -> dict[str, Any]:
         from api.services.asset_intelligence import AssetIdentity, AssetIntelligenceService
 
@@ -1769,6 +1830,8 @@ class CompanyScanPipeline:
                         probe_concurrency=url_probe_concurrency,
                         scan_concurrency=url_scan_concurrency,
                         copywriting_concurrency=copywriting_concurrency,
+                        progress_task_id=progress_task_id,
+                        progress_source=progress_source,
                     )
                 )
         durable_asset_result = {
@@ -1796,6 +1859,8 @@ class CompanyScanPipeline:
         probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
         scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
+        progress_task_id: str = "",
+        progress_source: str = "",
     ) -> dict[str, Any]:
         from api.services.url_scan_pipeline import UrlScanPipeline
 
@@ -1813,7 +1878,8 @@ class CompanyScanPipeline:
             enable_copywriting=enable_copywriting,
             known_alive_urls=known_alive_urls,
             known_alive_metadata=known_alive_metadata,
-            parent_task_id=task_id,
+            parent_task_id=progress_task_id or task_id,
+            progress_source=progress_source,
             probe_concurrency=probe_concurrency,
             scan_concurrency=scan_concurrency,
             copywriting_concurrency=copywriting_concurrency,
@@ -2268,13 +2334,13 @@ class CompanyScanPipeline:
 
     async def _update_progress(self, task_id: str, stage: str, message: str):
         """更新任务进度"""
-        await self.db["tasks"].update_one(
-            {"task_id": task_id},
-            {"$set": {
-                "progress.stage": stage,
-                "progress.message": message,
-                "updated_at": datetime.now(timezone.utc),
-            }},
+        from api.services.task_progress import update_task_stage
+
+        await update_task_stage(
+            self.db,
+            task_id=task_id,
+            stage=stage,
+            message=message,
         )
 
     @staticmethod

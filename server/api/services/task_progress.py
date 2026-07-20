@@ -18,6 +18,31 @@ def _source_key(value: str) -> str:
     return key[:48] or "source"
 
 
+async def update_task_stage(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+    stage: str,
+    message: str,
+) -> bool:
+    """Update the main orchestration stage and its business-activity clock."""
+    if not task_id:
+        return False
+    now = datetime.now(timezone.utc)
+    result = await db[TASKS_COLLECTION].update_one(
+        {"task_id": task_id, "status": {"$in": ["pending", "running"]}},
+        {
+            "$set": {
+                "progress.stage": str(stage or "unknown")[:80],
+                "progress.message": str(message or "")[:500],
+                "progress.last_activity_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    return bool(result.matched_count)
+
+
 async def update_source_progress(
     db: AsyncIOMotorDatabase,
     *,

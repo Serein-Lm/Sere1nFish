@@ -378,6 +378,43 @@ async def test_mobile_wait_does_not_block_wholly_owned_followup(
 
 
 @pytest.mark.asyncio
+async def test_wechat_start_updates_source_without_overwriting_main_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import wechat_collection
+
+    db = _PipelineDb()
+    pipeline = CompanyScanPipeline(db, object())  # type: ignore[arg-type]
+    started = asyncio.Event()
+
+    async def run_wechat(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        await kwargs["on_started"]()
+        return {"total": 0, "new": 0, "changed": 0}
+
+    monkeypatch.setattr(
+        wechat_collection,
+        "run_company_wechat_collection",
+        run_wechat,
+    )
+
+    result = await pipeline._run_wechat_collection(
+        task_id="task-wechat-stage",
+        project_id="project-1",
+        target_id="target-1",
+        target_name="目标公司",
+        device_id="device-1",
+        started_event=started,
+    )
+
+    assert started.is_set()
+    assert result["total"] == 0
+    fields = db.collection.updates[-1]["$set"]
+    assert fields["progress.sources.wechat.status"] == "running"
+    assert fields["progress.sources.wechat.message"] == "公众号任务已获得手机，正在采集"
+    assert "progress.stage" not in fields
+
+
+@pytest.mark.asyncio
 async def test_wechat_checkpoint_wins_over_incomplete_mobile_resume_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -741,7 +778,7 @@ async def test_wholly_owned_entity_setup_failure_is_aggregated_without_notificat
 ) -> None:
     from api.services import notifications
 
-    pipeline = CompanyScanPipeline(object(), object())
+    pipeline = CompanyScanPipeline(_PipelineDb(), object())  # type: ignore[arg-type]
     captured: list[dict[str, Any]] = []
 
     def fail_before_subtasks(_values: list[str]) -> list[str]:
@@ -787,12 +824,57 @@ async def test_wholly_owned_entity_setup_failure_is_aggregated_without_notificat
 
 
 @pytest.mark.asyncio
+async def test_wholly_owned_url_scan_reports_progress_to_parent_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = CompanyScanPipeline(_PipelineDb(), object())  # type: ignore[arg-type]
+    calls: list[dict[str, Any]] = []
+
+    async def run_assets(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "kind": "asset_url",
+            "assets": {"alive": 0},
+            "url_scan": {"status": "completed"},
+        }
+
+    monkeypatch.setattr(pipeline, "_run_asset_and_url_scan", run_assets)
+
+    result = await pipeline._scan_wholly_owned_entities(
+        task_id="parent-task",
+        project_id="project-1",
+        entities=[{"name": "子公司", "target_id": "target-child"}],
+        enable_asset_discovery=True,
+        enable_url_scan=True,
+        enable_copywriting=False,
+        enable_xhs=False,
+        xhs_max_notes=20,
+        xhs_attention_threshold=60,
+        min_attention_score=40,
+        profile_copywriting_threshold=60,
+        fofa_size=200,
+        hunter_size=200,
+        asset_probe_concurrency=48,
+        incremental_scan=False,
+        url_probe_concurrency=64,
+        url_scan_concurrency=10,
+        copywriting_concurrency=6,
+        xhs_search_concurrency=1,
+        entity_concurrency=1,
+    )
+
+    assert result["summary"]["completed"] == 1
+    assert calls[0]["progress_task_id"] == "parent-task"
+    assert calls[0]["progress_source"] == "wholly_owned_0_url_scan"
+
+
+@pytest.mark.asyncio
 async def test_wholly_owned_entity_runs_profile_copywriting_after_xhs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services import notifications
 
-    pipeline = CompanyScanPipeline(object(), object())
+    pipeline = CompanyScanPipeline(_PipelineDb(), object())  # type: ignore[arg-type]
     captured: list[dict[str, Any]] = []
 
     async def run_xhs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -844,7 +926,7 @@ async def test_wholly_owned_entity_skips_xhs_when_disabled(
 ) -> None:
     from api.services import notifications
 
-    pipeline = CompanyScanPipeline(object(), object())
+    pipeline = CompanyScanPipeline(_PipelineDb(), object())  # type: ignore[arg-type]
 
     async def unexpected_xhs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("子公司 XHS 默认关闭时不应执行搜索")
@@ -893,7 +975,7 @@ async def test_wholly_owned_entity_respects_target_selection_skip(
 ) -> None:
     from api.services import notifications
 
-    pipeline = CompanyScanPipeline(object(), object())
+    pipeline = CompanyScanPipeline(_PipelineDb(), object())  # type: ignore[arg-type]
 
     async def unexpected_xhs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("被目标选择层跳过后不应执行 XHS 搜索")

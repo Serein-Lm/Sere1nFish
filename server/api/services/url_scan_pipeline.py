@@ -716,6 +716,7 @@ class UrlScanPipeline:
         known_alive_metadata: dict[str, dict[str, Any]] | None = None,
         parent_task_id: str = "",
         source: str = "web_tagging",
+        progress_source: str = "",
         source_context_by_url: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """
@@ -848,11 +849,13 @@ class UrlScanPipeline:
             task_result["skipped_urls"] = len(completed_before)
             task_result["remaining_urls"] = len(pending_alive)
             progress_task_id = str(parent_task_id or task_id)
-            progress_source = f"{source}_url_scan"
+            progress_source_name = str(
+                progress_source or f"{source}_url_scan"
+            )
             await update_source_progress(
                 self.db,
                 task_id=progress_task_id,
-                source=progress_source,
+                source=progress_source_name,
                 total=len(alive),
                 processed=len(completed_before),
                 skipped=len(completed_before),
@@ -928,7 +931,7 @@ class UrlScanPipeline:
                     await update_source_progress(
                         self.db,
                         task_id=progress_task_id,
-                        source=progress_source,
+                        source=progress_source_name,
                         total=len(alive),
                         processed=processed,
                         succeeded=progress_counts["succeeded"],
@@ -1098,7 +1101,7 @@ class UrlScanPipeline:
             await update_source_progress(
                 self.db,
                 task_id=progress_task_id,
-                source=progress_source,
+                source=progress_source_name,
                 total=len(alive),
                 processed=persisted_summary["processed"],
                 succeeded=persisted_summary["succeeded"],

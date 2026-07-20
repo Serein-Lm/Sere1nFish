@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from api.dao import device_reservations, mobile_collect, tasks
@@ -19,6 +20,65 @@ logger = get_logger("task_runtime_recovery")
 _STALL_CHECK_INTERVAL_SECONDS = 60
 _STALL_ALERT_AFTER_SECONDS = 30 * 60
 _STALL_ALERT_COOLDOWN_SECONDS = 2 * 60 * 60
+_RUNTIME_HEARTBEAT_STALE_SECONDS = 2 * 60
+_STALL_ALERT_VISIBLE_TASKS = 8
+
+
+def build_stalled_task_notification(
+    stalled: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    """Build one bounded alert and distinguish dead runtimes from slow work."""
+    current = now or datetime.now(timezone.utc)
+    heartbeat_before = current - timedelta(
+        seconds=_RUNTIME_HEARTBEAT_STALE_SECONDS
+    )
+
+    def _heartbeat_stale(item: dict[str, Any]) -> bool:
+        heartbeat = item.get("heartbeat_at")
+        if not isinstance(heartbeat, datetime):
+            return True
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        return heartbeat < heartbeat_before
+
+    runtime_stale = [item for item in stalled if _heartbeat_stale(item)]
+    lines = []
+    for item in stalled[:_STALL_ALERT_VISIBLE_TASKS]:
+        company = (
+            item.get("params", {}).get("company_name")
+            or item.get("task_type")
+            or "未知目标"
+        )
+        stage = item.get("progress", {}).get("stage") or "unknown"
+        lines.append(f"- {company}，阶段：{stage}")
+    hidden = max(0, len(stalled) - len(lines))
+    if hidden:
+        lines.append(f"- 其余 {hidden} 个目标已合并，不逐条展开")
+
+    if runtime_stale:
+        conclusion = f"{len(runtime_stale)} 个运行实例心跳异常，需要优先检查。"
+        level = "critical"
+    else:
+        conclusion = (
+            f"{len(stalled)} 个任务心跳正常，但业务进度超过 30 分钟未更新。"
+        )
+        level = "warning"
+    content = "\n".join(
+        [
+            "**结论**",
+            f"- {conclusion}",
+            "",
+            "**目标摘要**",
+            *lines,
+        ]
+    )
+    return level, content, {
+        "count": len(stalled),
+        "runtime_stale": len(runtime_stale),
+        "heartbeat_alive": len(stalled) - len(runtime_stale),
+    }
 
 
 def _runtime_params(task: dict[str, Any]) -> dict[str, Any]:
@@ -183,21 +243,14 @@ class TaskRuntimeMonitor:
                     continue
                 from api.services.notifications import notify_event
 
-                lines = [
-                    (
-                        f"- {item.get('task_id')} "
-                        f"{item.get('params', {}).get('company_name') or item.get('task_type')} "
-                        f"stage={item.get('progress', {}).get('stage') or 'unknown'}"
-                    )
-                    for item in stalled
-                ]
+                level, content, context = build_stalled_task_notification(stalled)
                 await notify_event(
                     event="task.runtime.stalled",
                     title="扫描任务长时间没有进度",
-                    content="\n".join(lines),
-                    level="critical",
+                    content=content,
+                    level=level,
                     source="task_runtime_monitor",
-                    context={"count": len(stalled)},
+                    context=context,
                 )
             except asyncio.CancelledError:
                 raise
