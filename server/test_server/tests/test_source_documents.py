@@ -250,11 +250,52 @@ def test_source_detail_can_select_immutable_version(monkeypatch):
 
 
 def test_source_analysis_normalizes_ratio_scores_to_percentage():
-    from api.services.source_documents.analysis import normalize_scores
+    from api.services.source_documents.analysis import clamp_score, normalize_scores
 
     assert normalize_scores(0.96, 1.0) == (96, 100)
     assert normalize_scores(82, 95) == (82, 95)
     assert normalize_scores("invalid", None) == (0, 0)
+    assert clamp_score(101.2) == 100
+    assert clamp_score("79.6") == 80
+    assert clamp_score("invalid") == 0
+
+
+def test_article_image_analysis_normalizes_model_importance(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import analysis
+    from api.services.source_documents.contracts import CapturedImage
+
+    async def _analyze(*args, **kwargs):
+        return [
+            {
+                "index": 3,
+                "description": "招标联系人截图",
+                "visible_text": "联系电话 13800138000",
+                "contacts": [],
+                "is_key_evidence": True,
+                "importance_score": 88.7,
+                "archive_reason": "包含联系方式",
+            }
+        ]
+
+    monkeypatch.setattr(analysis, "_analyze_image_batch", _analyze)
+    result, error = asyncio.run(
+        analysis.analyze_article_images(
+            [
+                CapturedImage(
+                    index=3,
+                    source_url="https://example.com/evidence.jpg",
+                    data=b"image",
+                    content_type="image/jpeg",
+                )
+            ]
+        )
+    )
+
+    assert error == ""
+    assert result[0]["importance_score"] == 89
+    assert result[0]["is_key_evidence"] is True
 
 
 def test_source_document_lock_serializes_waiters_and_cleans_registry():

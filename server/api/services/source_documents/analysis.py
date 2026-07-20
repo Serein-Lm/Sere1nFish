@@ -134,6 +134,15 @@ def normalize_scores(
     )
 
 
+def clamp_score(value: Any) -> int:
+    """把单个模型评分稳定收敛为 0-100 整数。"""
+    try:
+        score = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, round(score)))
+
+
 def _deterministic_fields(capture: CapturedDocument) -> dict[str, Any]:
     contacts = extract_contacts(capture.text)
     return {
@@ -344,7 +353,7 @@ async def analyze_article_images(
             "is_key_evidence": bool(
                 by_index.get(image.index, {}).get("is_key_evidence")
             ),
-            "importance_score": _clamp_score(
+            "importance_score": clamp_score(
                 by_index.get(image.index, {}).get("importance_score")
             ),
             "archive_reason": str(
