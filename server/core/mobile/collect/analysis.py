@@ -12,12 +12,14 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, create_model
 
 from Sere1nGraph.graph.agents.runtime import create_llm
+from Sere1nGraph.graph.prompts.loader import load_prompt
 from api.services.runtime_config import get_runtime_app_config
 from core.observability import observation_context
 
@@ -38,11 +40,40 @@ _SCORE_KEYS = {
     "score_reason",
     "tap_x",
     "tap_y",
+    "tap_left",
+    "tap_top",
+    "tap_right",
+    "tap_bottom",
     "source_url",
     "content_kind",
     "is_article_result",
     "target_evidence",
 }
+_DETAIL_VERIFICATION_PROMPT_SLUG = "mobile_collect/detail_verification"
+
+
+class DetailEntryVerification(BaseModel):
+    """Visual contract used to prove that a list tap opened the intended item."""
+
+    page_kind: Literal["article", "list", "video", "account", "loading", "other"] = (
+        "other"
+    )
+    visible_title: str = ""
+    visible_account: str = ""
+    candidate_match: int = Field(
+        default=0,
+        ge=0,
+        le=100,
+        description="当前详情与点击前候选为同一内容的置信分，必须使用 0-100 整数",
+    )
+    target_match: int = Field(
+        default=0,
+        ge=0,
+        le=100,
+        description="当前详情以目标主体为核心的对应分，必须使用 0-100 整数",
+    )
+    evidence: str = ""
+    reason: str = ""
 
 
 def _build_item_model(
@@ -106,6 +137,22 @@ def _build_item_model(
             int | None,
             Field(default=None, description="该条目可点击中心点的纵坐标(0-1000 归一化)"),
         )
+        item_field_defs["tap_left"] = (
+            int | None,
+            Field(default=None, description="该条目可点击区域左边界(0-1000 归一化)"),
+        )
+        item_field_defs["tap_top"] = (
+            int | None,
+            Field(default=None, description="该条目可点击区域上边界(0-1000 归一化)"),
+        )
+        item_field_defs["tap_right"] = (
+            int | None,
+            Field(default=None, description="该条目可点击区域右边界(0-1000 归一化)"),
+        )
+        item_field_defs["tap_bottom"] = (
+            int | None,
+            Field(default=None, description="该条目可点击区域下边界(0-1000 归一化)"),
+        )
     return create_model("CollectItem", **item_field_defs)  # type: ignore[call-overload]
 
 
@@ -138,6 +185,21 @@ def _split_record(data: dict[str, Any]) -> dict[str, Any]:
     reason = str(data.get("score_reason") or "")
     tap_x = data.get("tap_x")
     tap_y = data.get("tap_y")
+    bounds_values = (
+        data.get("tap_left"),
+        data.get("tap_top"),
+        data.get("tap_right"),
+        data.get("tap_bottom"),
+    )
+    tap_bounds: list[int] | None = None
+    if all(isinstance(value, int) for value in bounds_values):
+        left, top, right, bottom = (int(value) for value in bounds_values)
+        if 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000:
+            tap_bounds = [left, top, right, bottom]
+            # A model-supplied point can drift onto the gap between list rows.
+            # The center of the visible row bounds is stable across resolutions.
+            tap_x = (left + right) // 2
+            tap_y = (top + bottom) // 2
     raw_url = data.get("source_url")
     source_url = raw_url.strip() if isinstance(raw_url, str) and raw_url.strip() else None
     fields = {k: v for k, v in data.items() if k not in _SCORE_KEYS}
@@ -148,6 +210,7 @@ def _split_record(data: dict[str, Any]) -> dict[str, Any]:
         "score_reason": reason,
         "tap_x": tap_x if isinstance(tap_x, int) else None,
         "tap_y": tap_y if isinstance(tap_y, int) else None,
+        "tap_bounds": tap_bounds,
         "source_url": source_url,
         "content_kind": str(data.get("content_kind") or "other"),
         "is_article_result": bool(data.get("is_article_result")),
@@ -203,7 +266,9 @@ async def triage_screenshot(
         "- content_kind / is_article_result / target_evidence: 识别条目真实类型，并写出主体对应的"
         "画面证据；没有可见证据时 target_evidence 留空;\n"
         "- tap_x / tap_y: 该条目在屏幕上可点击中心点的坐标,使用 0-1000 归一化坐标系"
-        "(左上角为 0,0,右下角为 1000,1000)。\n"
+        "(左上角为 0,0,右下角为 1000,1000);\n"
+        "- tap_left / tap_top / tap_right / tap_bottom: 条目整行可点击区域的矩形边界，"
+        "同样使用 0-1000 坐标。边界必须贴合该条目，不能包含相邻条目、顶部标签或底部导航。\n"
         f"{policy_instructions}\n"
         "严格依据画面内容,不臆测;无法确定的字段留空。若画面无有效条目, items 返回空数组。"
     )
@@ -232,6 +297,56 @@ async def triage_screenshot(
         if _has_content(rec["fields"]):
             out.append(rec)
     return out
+
+
+async def verify_detail_entry(
+    image_base64: str,
+    *,
+    app_name: str,
+    keyword: str,
+    candidate_fields: dict[str, Any],
+    target_name: str = "",
+    target_aliases: list[str] | None = None,
+    policy_instructions: str = "",
+    project_id: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """Fail-closed visual check between a list candidate and the opened page."""
+    app_config = await get_runtime_app_config()
+    llm = _get_vision_llm(app_config)
+    structured = llm.with_structured_output(DetailEntryVerification)
+    expected = json.dumps(candidate_fields or {}, ensure_ascii=False, default=str)
+    aliases = "、".join(target_aliases or []) or "无"
+    system = load_prompt(_DETAIL_VERIFICATION_PROMPT_SLUG)
+    for placeholder, value in {
+        "{{app_name}}": app_name or "未知应用",
+        "{{keyword}}": keyword or "无",
+        "{{candidate_fields}}": expected,
+        "{{target_name}}": target_name or keyword or "无",
+        "{{target_aliases}}": aliases,
+        "{{policy_instructions}}": policy_instructions or "无额外策略",
+    }.items():
+        system = system.replace(placeholder, value)
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": "校验点击后页面并按 schema 输出。"},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+            },
+        ]
+    )
+    with observation_context(
+        project_id=project_id,
+        task_id=task_id,
+        phase="mobile_collect_detail_verify",
+        agent="collect",
+    ):
+        result = await structured.ainvoke([SystemMessage(content=system), message])
+    data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+    data["candidate_match"] = _clamp_score(data.get("candidate_match"))
+    data["target_match"] = _clamp_score(data.get("target_match"))
+    return data
 
 
 async def analyze_detail(

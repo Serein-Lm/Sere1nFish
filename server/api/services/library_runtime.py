@@ -58,6 +58,7 @@ CORE_PROMPT_SLUGS = {
     "hub/data",
     "hub/payload",
     "hub/persona",
+    "mobile_collect/detail_verification",
     "router/classify",
     "source_document/relevance_review",
     "source_document/source_document",

@@ -13,7 +13,6 @@ from api.db.collections import (
     FOFA_ASSETS_COLLECTION,
     FINDINGS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
-    SCHOLAR_CONTACTS_COLLECTION,
     SOURCE_DOCUMENT_LINKS_COLLECTION,
     TASKS_COLLECTION,
     XHS_NOTES_COLLECTION,
@@ -332,49 +331,13 @@ async def list_project_target_summaries(
         project_id=project_id,
         target_ids=target_ids,
     )
-    scholar_counts_job = db[SCHOLAR_CONTACTS_COLLECTION].aggregate(
-        [
-            {
-                "$match": {
-                    "project_id": project_id,
-                    "$or": [
-                        {"target_ids": {"$in": target_ids}},
-                        {"target_id": {"$in": target_ids}},
-                    ],
-                }
-            },
-            {
-                "$set": {
-                    "_resolved_target_ids": {
-                        "$setUnion": [
-                            {
-                                "$cond": [
-                                    {"$isArray": "$target_ids"},
-                                    "$target_ids",
-                                    [],
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$ne": [{"$ifNull": ["$target_id", ""]}, ""]},
-                                    ["$target_id"],
-                                    [],
-                                ]
-                            },
-                        ]
-                    }
-                }
-            },
-            {"$unwind": "$_resolved_target_ids"},
-            {"$match": {"_resolved_target_ids": {"$in": target_ids}}},
-            {
-                "$group": {
-                    "_id": "$_resolved_target_ids",
-                    "scholar_contact_count": {"$sum": 1},
-                }
-            },
-        ]
-    ).to_list(len(target_ids))
+    from api.dao import scholar_contact as scholar_dao
+
+    scholar_counts_job = scholar_dao.count_contacts_by_target(
+        db,
+        project_id=project_id,
+        target_ids=target_ids,
+    )
     task_ids = list(
         {
             str(task_id)
@@ -421,7 +384,6 @@ async def list_project_target_summaries(
     assets_by_target = _by_id(asset_counts)
     findings_by_target = _by_id(finding_counts)
     xhs_by_target = _by_id(xhs_counts)
-    scholars_by_target = _by_id(scholar_counts)
     project_docs_by_target = {
         str(item.get("_id") or ""): int(item.get("document_count") or 0)
         for item in project_document_counts
@@ -507,9 +469,7 @@ async def list_project_target_summaries(
                 bidding_counts.get(str(relation.get("target_id") or ""), 0)
             ),
             "scholar_contact_count": int(
-                scholars_by_target.get(str(relation.get("target_id") or ""), {}).get(
-                    "scholar_contact_count", 0
-                )
+                scholar_counts.get(str(relation.get("target_id") or ""), 0)
             ),
             "latest_task_status": next(
                 (

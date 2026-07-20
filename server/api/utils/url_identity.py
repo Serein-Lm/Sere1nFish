@@ -5,7 +5,12 @@ from __future__ import annotations
 from urllib.parse import urlsplit, urlunsplit
 
 
-def endpoint_identity(value: str, *, include_path: bool = True) -> str:
+def endpoint_identity(
+    value: str,
+    *,
+    include_path: bool = True,
+    include_query: bool = False,
+) -> str:
     """Return a scheme-independent endpoint identity.
 
     HTTP and HTTPS default ports represent the same logical target. Explicit
@@ -31,7 +36,10 @@ def endpoint_identity(value: str, *, include_path: bool = True) -> str:
     if not include_path:
         return authority
     path = "/" + "/".join(part for part in parsed.path.split("/") if part)
-    return authority + ("" if path == "/" else path.rstrip("/"))
+    identity = authority + ("" if path == "/" else path.rstrip("/"))
+    if include_query and parsed.query:
+        identity += f"?{parsed.query}"
+    return identity
 
 
 def prefer_https_url(current: str, candidate: str) -> str:

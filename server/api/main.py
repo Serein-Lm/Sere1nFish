@@ -257,6 +257,14 @@ async def lifespan(app: FastAPI):
         # 学者学术联系发现索引
         from api.dao import scholar_contact as scholar_contact_dao
         await scholar_contact_dao.ensure_indexes(db)
+        backfilled_scholar_contacts = (
+            await scholar_contact_dao.backfill_contact_article_urls(db)
+        )
+        if backfilled_scholar_contacts:
+            logger.info(
+                "补齐学者联系原文链接: %s",
+                backfilled_scholar_contacts,
+            )
         # 人设库 — 统一人物实体索引
         from api.dao import persons as persons_dao
         await persons_dao.ensure_indexes(db)

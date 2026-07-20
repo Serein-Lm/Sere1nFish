@@ -6,6 +6,50 @@ import pytest
 from bson import ObjectId
 
 
+def test_content_scan_keeps_distinct_query_documents_but_website_scan_merges_them() -> None:
+    from api.services.url_scan_pipeline import UrlScanPipeline
+
+    urls = "\n".join(
+        [
+            "http://example.com/detail?id=one",
+            "https://example.com/detail?id=one",
+            "https://example.com/detail?id=two",
+        ]
+    )
+
+    website_targets = UrlScanPipeline.parse_url_file(urls)
+    content_documents = UrlScanPipeline.parse_url_file(
+        urls,
+        include_query_in_identity=True,
+    )
+
+    assert website_targets == ["https://example.com/detail?id=one"]
+    assert content_documents == [
+        "https://example.com/detail?id=one",
+        "https://example.com/detail?id=two",
+    ]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"excluded": True},
+        {"site_category": "generic_open_source"},
+        {"site_category": "third_party"},
+        {"target_relation": "not_target"},
+    ],
+)
+def test_website_read_model_honors_legacy_nested_exclusion(data: dict[str, Any]) -> None:
+    from api.services.website_records import _is_excluded
+
+    assert _is_excluded(
+        {
+            "url": "https://third-party.example",
+            "data": {**data, "intro": {}},
+        }
+    )
+
+
 class _Cursor:
     def __init__(self, docs: list[dict[str, Any]]) -> None:
         self.docs = list(docs)

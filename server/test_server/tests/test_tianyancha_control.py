@@ -246,6 +246,45 @@ async def test_bidding_query_reads_all_pages_with_bounded_concurrency() -> None:
     assert result.total_reported == 45
     assert len(result.records) == 45
     assert result.pages_fetched == 3
+    assert result.raw_records_fetched == 45
+    assert result.duplicates_discarded == 0
+    assert result.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_bidding_query_reports_cross_page_duplicates_without_marking_truncated() -> None:
+    class _Client(TianyanchaClient):
+        def __init__(self) -> None:
+            super().__init__("test-key")
+
+        async def _request(self, _endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+            page = int(params["pageNum"])
+            start = (page - 1) * 20
+            indexes = list(range(start, min(start + 20, 41)))
+            if page == 3:
+                indexes = [39, 40]
+            return {
+                "error_code": 0,
+                "result": {
+                    "total": 42,
+                    "items": [
+                        {"uuid": f"bid-{index}", "title": f"公告 {index}"}
+                        for index in indexes
+                    ],
+                },
+            }
+
+    result = await _Client().search_all_bids(
+        "安徽广播电视台",
+        page_size=20,
+        max_records=100,
+        end_date=date(2026, 7, 17),
+    )
+
+    assert result.pages_fetched == 3
+    assert result.raw_records_fetched == 42
+    assert len(result.records) == 41
+    assert result.duplicates_discarded == 1
     assert result.truncated is False
 
 

@@ -183,7 +183,7 @@ function parseHashtags(content: string): React.ReactNode[] {
   if (!content) return []
   
   // 匹配 #xxx[话题]# 或 #xxx# 格式
-  const hashtagRegex = /#([^#\[\]]+)(?:\[话题\])?#/g
+  const hashtagRegex = /#([^#[\]]+)(?:\[话题\])?#/g
   const parts: React.ReactNode[] = []
   let lastIndex = 0
   let match: RegExpExecArray | null
@@ -259,6 +259,20 @@ function getRecordStatus(rec: WebTaggingRecord) {
 }
 
 const taggingColumns: ColumnsType<WebTaggingRecord> = [
+  {
+    title: '页面截图',
+    key: 'screenshot',
+    width: 128,
+    render: (_, rec) => rec.data?.screenshot_url ? (
+      <AuthenticatedImage
+        source={rec.data.screenshot_url}
+        alt={`${rec.data?.intro?.site_name || '网站'}页面缩略图`}
+        width={104}
+        height={64}
+        preview={false}
+      />
+    ) : <Text type="secondary">-</Text>,
+  },
   {
     title: 'URL',
     dataIndex: 'url',
@@ -459,24 +473,25 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
 }
 
 function MobileScreenshotImage({ screenshot, variant = 'thumb' }: { screenshot: MobileScreenshot; variant?: 'thumb' | 'preview' }) {
-  const [src, setSrc] = useState<string | null>(null)
-  const [failed, setFailed] = useState(false)
+  const [imageState, setImageState] = useState<{
+    source: string
+    src: string | null
+    failed: boolean
+  }>({ source: '', src: null, failed: false })
 
   useEffect(() => {
     const controller = new AbortController()
     let objectUrl: string | null = null
-    setSrc(null)
-    setFailed(false)
 
     fetchMobileScreenshotBlob(screenshot.url, controller.signal)
       .then((blob) => {
         objectUrl = URL.createObjectURL(blob)
-        setSrc(objectUrl)
+        setImageState({ source: screenshot.url, src: objectUrl, failed: false })
       })
       .catch((err) => {
         if (!controller.signal.aborted) {
           console.error('加载手机截图失败:', err)
-          setFailed(true)
+          setImageState({ source: screenshot.url, src: null, failed: true })
         }
       })
 
@@ -486,13 +501,14 @@ function MobileScreenshotImage({ screenshot, variant = 'thumb' }: { screenshot: 
     }
   }, [screenshot.url])
 
-  if (failed) {
+  const current = imageState.source === screenshot.url ? imageState : null
+  if (current?.failed) {
     return <div className={`mobile-shot-placeholder ${variant}`}>截图读取失败</div>
   }
-  if (!src) {
+  if (!current?.src) {
     return <div className={`mobile-shot-placeholder ${variant}`}><Spin size="small" /></div>
   }
-  return <img className={`mobile-shot-image ${variant}`} src={src} alt={screenshot.screenshot_id} />
+  return <img className={`mobile-shot-image ${variant}`} src={current.src} alt={screenshot.screenshot_id} />
 }
 
 export default function ProjectDetail() {
@@ -892,7 +908,7 @@ export default function ProjectDetail() {
         setFindingProfileOpen(false)
       })
       .finally(() => setFindingProfileLoading(false))
-  }, [searchParams])
+  }, [searchParams, setSearchParams])
 
   // 加载小红书笔记
   const fetchXhsNotes = async (pid: string, page = 1, pageSize = 10, targetId = xhsTargetId) => {
@@ -1093,6 +1109,8 @@ export default function ProjectDetail() {
       }
     }
     void loadActiveTab()
+    // Fetchers intentionally read the latest tab-local filters; the ref is the once-only boundary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, project?.id, projectId])
 
   const handleAddTagging = () => {
@@ -2431,7 +2449,7 @@ export default function ProjectDetail() {
                 if (projectId) fetchRecords(projectId, page, pageSize, websiteTargetId)
               },
             }}
-            scroll={{ x: 1180 }}
+            scroll={{ x: 1308 }}
             expandable={{
               expandedRowRender: (rec) => <ExpandedRecordContent record={rec} onViewCopywriting={handleViewFindingCopywriting} />,
               expandRowByClick: true,
@@ -3132,6 +3150,7 @@ export default function ProjectDetail() {
 
   const renderScholarsContent = () => {
     const buildArticleUrl = (r: ScholarContact): string | null => {
+      if (r.article_url) return r.article_url
       if (r.article_doi) return `https://doi.org/${encodeURIComponent(r.article_doi)}`
       if (r.article_pmcid) return `https://europepmc.org/article/PMC/${encodeURIComponent(r.article_pmcid.replace(/^PMC/i, ''))}`
       if (r.article_landing_page) return r.article_landing_page

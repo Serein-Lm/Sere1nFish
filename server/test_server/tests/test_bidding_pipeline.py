@@ -151,6 +151,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
                 records=[record],
                 total_reported=1,
                 pages_fetched=1,
+                raw_records_fetched=1,
                 publish_start="2026-01-18",
                 publish_end="2026-07-17",
             )
@@ -245,6 +246,8 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert result["visual_analysis"]["findings_count"] == 2
     assert result["visual_analysis"]["copywritings_count"] == 1
     assert result["pages_fetched"] == 1
+    assert result["raw_records_fetched"] == 1
+    assert result["duplicates_discarded"] == 0
     assert result["truncated"] is False
 
 

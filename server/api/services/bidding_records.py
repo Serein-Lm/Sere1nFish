@@ -18,6 +18,49 @@ _EXCLUDED_ROLES = {"customer_service", "support"}
 _EXCLUDED_TYPES = {"customer_service"}
 _EXCLUDED_PARTY_ROLES = {"publisher"}
 _ACTIONABLE_CHANNELS = {"email", "phone", "wechat"}
+_PUBLIC_RECORD_FIELDS = (
+    "record_id",
+    "provider",
+    "title",
+    "announcement_type",
+    "stage",
+    "published_on",
+    "province",
+    "purchaser",
+    "agency",
+    "amount",
+    "winner",
+    "enterprise_identity",
+    "provider_url",
+    "content_length",
+    "provider_payload_url",
+    "raw_content_url",
+    "detail_html_url",
+    "query_names",
+    "target_ids",
+    "updated_at",
+)
+_PUBLIC_CONTACT_FIELDS = (
+    "finding_id",
+    "channel",
+    "value",
+    "label",
+    "party_name",
+    "party_role",
+    "role",
+    "context",
+    "evidence",
+    "attention_score",
+)
+_PUBLIC_ATTACHMENT_FIELDS = (
+    "index",
+    "status",
+    "filename",
+    "label",
+    "url",
+    "content_type",
+    "size",
+)
 
 
 def is_actionable_bidding_contact(finding: dict[str, Any]) -> bool:
@@ -44,7 +87,12 @@ def _record_urls(record: dict[str, Any]) -> set[str]:
             record.get("detail_url"),
             record.get("provider_url"),
         )
-        if (identity := endpoint_identity(str(value or "")))
+        if (
+            identity := endpoint_identity(
+                str(value or ""),
+                include_query=True,
+            )
+        )
     }
 
 
@@ -62,6 +110,59 @@ def _overview(record: dict[str, Any]) -> str:
             boundary = max(value.rfind(mark, 120, 320) for mark in ("。", "；", ";"))
             return value[: boundary + 1 if boundary >= 120 else 320].rstrip() + "..."
     return ""
+
+
+def _compact_text(value: Any, *, limit: int) -> str:
+    text = _SPACE_RE.sub(" ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _public_bidding_record(
+    record: dict[str, Any],
+    *,
+    contacts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the project read model without leaking archived evidence payloads."""
+    public = {
+        field: record[field]
+        for field in _PUBLIC_RECORD_FIELDS
+        if field in record
+    }
+    public["attachments"] = [
+        {
+            field: attachment[field]
+            for field in _PUBLIC_ATTACHMENT_FIELDS
+            if field in attachment
+        }
+        for attachment in record.get("attachments") or []
+        if isinstance(attachment, dict)
+    ]
+    public["contacts"] = [
+        {
+            field: contact[field]
+            for field in _PUBLIC_CONTACT_FIELDS
+            if field in contact
+        }
+        for contact in contacts
+    ]
+    public["contact_count"] = len(contacts)
+    public["overview"] = _overview(record)
+    public["original_url"] = str(
+        record.get("resolved_detail_url")
+        or record.get("detail_url")
+        or record.get("provider_url")
+        or ""
+    )
+    public["max_contact_score"] = max(
+        int(item.get("attention_score") or 0)
+        for item in contacts
+    )
+    preview = record.get("content_preview") or record.get("detail_text_preview")
+    if preview:
+        public["content_preview"] = _compact_text(preview, limit=2_000)
+    return public
 
 
 async def list_project_bidding_records(
@@ -105,7 +206,8 @@ async def list_project_bidding_records(
         if record_id:
             by_record_id[record_id].append(finding)
         if key := endpoint_identity(
-            str(finding.get("source_url") or finding.get("url") or "")
+            str(finding.get("source_url") or finding.get("url") or ""),
+            include_query=True,
         ):
             by_endpoint[key].append(finding)
 
@@ -135,25 +237,7 @@ async def list_project_bidding_records(
         )
         if not ordered_contacts:
             continue
-        original_url = str(
-            record.get("resolved_detail_url")
-            or record.get("detail_url")
-            or record.get("provider_url")
-            or ""
-        )
-        output.append(
-            {
-                **record,
-                "contacts": ordered_contacts,
-                "contact_count": len(ordered_contacts),
-                "overview": _overview(record),
-                "original_url": original_url,
-                "max_contact_score": max(
-                    int(item.get("attention_score") or 0)
-                    for item in ordered_contacts
-                ),
-            }
-        )
+        output.append(_public_bidding_record(record, contacts=ordered_contacts))
     output.sort(
         key=lambda item: (
             int(item.get("max_contact_score") or 0),

@@ -70,6 +70,29 @@ class _FakePool:
         type(self).events.append(("release", device_key))
 
 
+async def _accepted_detail_entry(*_args, **_kwargs):
+    target_name = str(_kwargs.get("target_name") or "")
+    candidate_title = str(
+        (_kwargs.get("candidate_fields") or {}).get("title") or ""
+    ).strip()
+    visible_title = " ".join(
+        value for value in (target_name, candidate_title) if value
+    )
+    return {
+        "page_kind": "article",
+        "visible_title": visible_title or "手机列表标题",
+        "visible_account": "测试公众号",
+        "candidate_match": 95,
+        "target_match": 95,
+        "evidence": "标题与候选及目标一致",
+        "reason": "通过",
+    }
+
+
+async def _verification_frame(*_args, **_kwargs):
+    return "QUJD"
+
+
 def _patch_pipeline(monkeypatch, *, analyze_returns):
     from core.mobile.collect import pipeline as pl
 
@@ -698,9 +721,11 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
 
     stage = pl._CollectStage()
     monkeypatch.setattr(stage, "_capture_save", _capture)
+    monkeypatch.setattr(stage, "_capture_for_verification", _verification_frame)
     monkeypatch.setattr(pl, "_do_tap", lambda *args, **kwargs: None)
     monkeypatch.setattr(pl, "_do_back", lambda *args, **kwargs: None)
     monkeypatch.setattr(pl, "analyze_detail", _analyze_detail)
+    monkeypatch.setattr(pl, "verify_detail_entry", _accepted_detail_entry)
     monkeypatch.setattr(pl, "obs_log", lambda *args, **kwargs: "")
     monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(pl, "ingest_source_url", _source_archive_unavailable)
@@ -735,17 +760,24 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
 
 
 def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:
-    from core.mobile.collect.candidate_policy import CandidatePolicyRegistry
+    from core.mobile.collect.candidate_policy import (
+        CandidatePolicyRegistry,
+        candidate_tap_point,
+    )
 
     policy = CandidatePolicyRegistry.resolve("wechat_copy_link")
+    assert policy.max_details_per_screen == 1
+    assert policy.requires_detail_verification is True
     assert "停留在“全部”结果页" in policy.navigation_instructions()
     assert "不得切换到账号" in policy.navigation_instructions()
     base = {
         "tap_x": 100,
         "tap_y": 200,
+        "tap_bounds": [40, 160, 960, 360],
         "score": 90,
         "subject_match": 90,
         "target_evidence": "标题明确出现安徽广播电视台",
+        "fields": {"title": "安徽广播电视台招标公告", "account": "测试公众号"},
     }
     assert policy.accepts_detail(
         {**base, "content_kind": "article", "is_article_result": True},
@@ -762,6 +794,71 @@ def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:
         min_score=60,
         min_subject_match=70,
     )
+    edge = policy.review_detail(
+        {
+            **base,
+            "tap_bounds": [40, 700, 960, 850],
+            "content_kind": "article",
+            "is_article_result": True,
+        },
+        min_score=60,
+        min_subject_match=70,
+    )
+    assert edge.accepted is False
+    assert "屏幕边缘" in edge.reason
+    ambiguous_alias = policy.review_detail(
+        {
+            **base,
+            "fields": {"title": "安徽广电集团征集公告", "account": "评标说"},
+            "content_kind": "article",
+            "is_article_result": True,
+        },
+        min_score=60,
+        min_subject_match=70,
+        target_name="安徽广播电视台",
+        aliases=["安徽广电"],
+    )
+    assert ambiguous_alias.accepted is False
+    assert "未直接证明目标主体" in ambiguous_alias.reason
+    rejected = policy.review_detail(
+        {**base, "content_kind": "video", "is_article_result": False},
+        min_score=60,
+        min_subject_match=70,
+    )
+    assert rejected.accepted is False
+    assert "不是图文文章结果" in rejected.reason
+    assert candidate_tap_point(
+        {"tap_x": 1, "tap_y": 1, "tap_bounds": [100, 200, 900, 400]}
+    ) == (500, 300)
+    mismatch = policy.review_opened_detail(
+        {
+            "page_kind": "article",
+            "visible_title": "另一篇文章",
+            "candidate_match": 20,
+            "target_match": 95,
+        },
+        candidate={"fields": {"title": "安徽广播电视台招标公告"}},
+        target_name="安徽广播电视台",
+        aliases=[],
+        min_subject_match=70,
+    )
+    assert mismatch.accepted is False
+    assert "候选不一致" in mismatch.reason
+    roundup = policy.review_opened_detail(
+        {
+            "page_kind": "article",
+            "visible_title": "安徽省暖通空调行业招标信息",
+            "visible_account": "安徽省暖通空调协会",
+            "candidate_match": 95,
+            "target_match": 100,
+        },
+        candidate={"fields": {"title": "安徽省暖通空调行业招标信息"}},
+        target_name="安徽广播电视台",
+        aliases=[],
+        min_subject_match=70,
+    )
+    assert roundup.accepted is False
+    assert "未直接出现目标主体" in roundup.reason
 
 
 def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
@@ -842,10 +939,12 @@ def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
 
     stage = pl._CollectStage()
     monkeypatch.setattr(stage, "_capture_save", _capture)
+    monkeypatch.setattr(stage, "_capture_for_verification", _verification_frame)
     monkeypatch.setattr(pl, "_do_tap", lambda *args, **kwargs: None)
     monkeypatch.setattr(pl, "_do_back", lambda *args, **kwargs: None)
     monkeypatch.setattr(pl, "_do_swipe", lambda *args, **kwargs: None)
     monkeypatch.setattr(pl, "analyze_detail", _analyze_detail)
+    monkeypatch.setattr(pl, "verify_detail_entry", _accepted_detail_entry)
     monkeypatch.setattr(pl, "ingest_source_url", _ingest)
     monkeypatch.setattr(pl, "obs_log", lambda *args, **kwargs: "")
     monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
@@ -949,9 +1048,11 @@ def test_deep_dive_observes_rejected_source_without_persisting(monkeypatch):
 
     stage = pl._CollectStage()
     monkeypatch.setattr(stage, "_capture_save", _capture)
+    monkeypatch.setattr(stage, "_capture_for_verification", _verification_frame)
     monkeypatch.setattr(pl, "_do_tap", lambda *args, **kwargs: None)
     monkeypatch.setattr(pl, "_do_back", lambda *args, **kwargs: None)
     monkeypatch.setattr(pl, "ingest_source_url", _ingest)
+    monkeypatch.setattr(pl, "verify_detail_entry", _accepted_detail_entry)
     monkeypatch.setattr(pl, "obs_log", _observe)
     monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(
@@ -987,3 +1088,113 @@ def test_deep_dive_observes_rejected_source_without_persisting(monkeypatch):
     assert rejected["data"]["subject_match"] == 25
     assert rejected["data"]["required_subject_match"] == 80
     assert rejected["data"]["reason"] == "正文仅偶然提及目标单位"
+
+
+def test_wechat_detail_mismatch_stops_before_link_extraction(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    observed: list[dict] = []
+    verification_calls = 0
+    top_resets: list[str] = []
+
+    class _Context:
+        logger = __import__("logging").getLogger("detail-mismatch-test")
+        state = {
+            "db": _FakeDB(),
+            "stop_event": asyncio.Event(),
+            "device_id": "devA",
+            "run_task_id": "run-mismatch",
+            "project_id": "projectA",
+            "task_def_id": "task-mismatch",
+            "target": {"canonical_name": "目标单位", "aliases": ["目标"]},
+            "dry_run": True,
+            "counters": {"documents": 0},
+            "detail_max_swipes": 0,
+            "swipe_interval": 0.01,
+            "extract_fields": [],
+            "app_name": "微信",
+            "source_link_strategy": "wechat_copy_link",
+            "min_subject_match": 80,
+            "detail_entry_reviews": [],
+        }
+
+        async def emit(self, *_args, **_kwargs):
+            raise AssertionError("误点内容不应进入持久化")
+
+    async def _capture(*_args, **_kwargs):
+        return "QUJD", "", ""
+
+    async def _mismatch(*_args, **_kwargs):
+        nonlocal verification_calls
+        verification_calls += 1
+        if verification_calls == 1:
+            return {
+                "page_kind": "article",
+                "visible_title": "",
+                "visible_account": "其他公众号",
+                "candidate_match": 0,
+                "target_match": 0,
+                "evidence": "当前停留在文章底部",
+                "reason": "标题不可见",
+            }
+        return {
+            "page_kind": "article",
+            "visible_title": "相邻列表文章",
+            "visible_account": "其他公众号",
+            "candidate_match": 15,
+            "target_match": 20,
+            "evidence": "标题不一致",
+            "reason": "点击到了相邻条目",
+        }
+
+    async def _no_sleep(_seconds):
+        return None
+
+    def _observe(message, **kwargs):
+        observed.append({"message": message, **kwargs})
+        return ""
+
+    stage = pl._CollectStage()
+    monkeypatch.setattr(stage, "_capture_save", _capture)
+    monkeypatch.setattr(stage, "_capture_for_verification", _verification_frame)
+    monkeypatch.setattr(pl, "_do_tap", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pl, "_do_back", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        pl,
+        "_do_scroll_to_top",
+        lambda device_id: top_resets.append(device_id),
+    )
+    monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(pl, "verify_detail_entry", _mismatch)
+    monkeypatch.setattr(pl, "obs_log", _observe)
+    monkeypatch.setattr(
+        pl,
+        "extract_source_link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("详情不一致时不得读取链接")
+        ),
+    )
+
+    accepted = asyncio.run(
+        stage._deep_dive(
+            _Context(),
+            "目标单位 招标",
+            {
+                "tap_x": 500,
+                "tap_y": 300,
+                "score": 90,
+                "subject_match": 95,
+                "fields": {"title": "目标单位招标公告"},
+            },
+        )
+    )
+
+    assert accepted is False
+    assert top_resets == ["devA"]
+    assert verification_calls == 2
+    assert _Context.state["detail_entry_reviews"][0]["accepted"] is False
+    assert _Context.state["detail_entry_reviews"][0]["verification_attempts"] == 2
+    review = next(
+        item for item in observed if item.get("event") == "collect_detail_entry_review"
+    )
+    assert "候选不一致" in review["data"]["reason"]

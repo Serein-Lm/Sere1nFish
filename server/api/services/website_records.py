@@ -103,9 +103,13 @@ def _record_sort_key(record: dict[str, Any]) -> tuple[int, int, float, datetime,
 
 
 def _is_excluded(record: dict[str, Any]) -> bool:
-    if record.get("excluded"):
-        return True
     data = record.get("data") or {}
+    if record.get("excluded") or data.get("excluded"):
+        return True
+    if data.get("site_category") in {"generic_open_source", "third_party"}:
+        return True
+    if data.get("target_relation") == "not_target":
+        return True
     intro = data.get("intro") or record.get("intro") or {}
     return bool(
         classify_generic_surface(

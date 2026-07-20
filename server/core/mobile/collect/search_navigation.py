@@ -158,25 +158,23 @@ class WechatArticleSearchNavigator:
 
     def _enter_search_activity(self, device, adb_device_id: str) -> str:
         """Normalize Launcher/result states to WeChat's focused search editor."""
-        activity = self._current_activity(adb_device_id)
-        if activity == self._SEARCH_ACTIVITY:
-            return activity
-        if activity == self._RESULT_ACTIVITY:
-            for _attempt in range(3):
+        activity = ""
+        for _attempt in range(8):
+            activity = self._current_activity(adb_device_id)
+            if activity == self._SEARCH_ACTIVITY:
+                return activity
+            if activity == self._LAUNCHER_ACTIVITY:
+                self._tap_normalized(
+                    device,
+                    adb_device_id,
+                    self._LAUNCHER_SEARCH_ENTRY,
+                )
+                return self._wait_for_activity(adb_device_id, self._SEARCH_ACTIVITY)
+            if activity.startswith(f"{self._PACKAGE}."):
                 device.back(delay=0.1)
                 self._sleep(0.3)
-                activity = self._current_activity(adb_device_id)
-                if activity == self._SEARCH_ACTIVITY:
-                    return activity
-                if activity != self._RESULT_ACTIVITY:
-                    break
-        elif activity == self._LAUNCHER_ACTIVITY:
-            self._tap_normalized(
-                device,
-                adb_device_id,
-                self._LAUNCHER_SEARCH_ENTRY,
-            )
-            return self._wait_for_activity(adb_device_id, self._SEARCH_ACTIVITY)
+                continue
+            break
         raise RuntimeError(
             "微信当前页面不支持确定性搜索导航: "
             f"{activity.rsplit('.', 1)[-1] if activity else 'unknown'}"

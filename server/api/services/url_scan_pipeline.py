@@ -337,7 +337,11 @@ class UrlScanPipeline:
     # ══════════════════════════════════════
 
     @staticmethod
-    def parse_url_file(content: str) -> list[str]:
+    def parse_url_file(
+        content: str,
+        *,
+        include_query_in_identity: bool = False,
+    ) -> list[str]:
         """
         解析 url.txt 内容，返回标准化的 URL 列表
 
@@ -355,7 +359,10 @@ class UrlScanPipeline:
         positions: dict[str, int] = {}
         deduped: list[str] = []
         for u in urls:
-            identity = endpoint_identity(u)
+            identity = endpoint_identity(
+                u,
+                include_query=include_query_in_identity,
+            )
             if identity not in positions:
                 positions[identity] = len(deduped)
                 deduped.append(u)
@@ -789,7 +796,18 @@ class UrlScanPipeline:
 
         try:
             # 1. 解析 URL
-            urls = self.parse_url_file(url_content)
+            include_query_in_identity = source != "web_tagging"
+
+            def _source_identity(value: str) -> str:
+                return endpoint_identity(
+                    value,
+                    include_query=include_query_in_identity,
+                )
+
+            urls = self.parse_url_file(
+                url_content,
+                include_query_in_identity=include_query_in_identity,
+            )
             task_result["total_urls"] = len(urls)
             await self._update_task(task_id, task_result)
             logger.info(f"[pipeline] task={task_id} 阶段1: 解析完成, URL数={len(urls)}")
@@ -838,14 +856,14 @@ class UrlScanPipeline:
                 if not normalized or not value:
                     continue
                 normalized_context[normalized] = value
-                normalized_context[endpoint_identity(normalized)] = value
+                normalized_context[_source_identity(normalized)] = value
             normalized_source_metadata: dict[str, dict[str, Any]] = {}
             for raw_url, metadata in (source_metadata_by_url or {}).items():
                 normalized = normalize_url(str(raw_url))
                 if not normalized or not isinstance(metadata, dict):
                     continue
                 normalized_source_metadata[normalized] = dict(metadata)
-                normalized_source_metadata[endpoint_identity(normalized)] = dict(metadata)
+                normalized_source_metadata[_source_identity(normalized)] = dict(metadata)
             alive = []
             for url in urls:
                 if url not in known_alive_set and url not in probed_by_url:
@@ -861,13 +879,13 @@ class UrlScanPipeline:
                 )
                 source_context = normalized_context.get(
                     url,
-                    normalized_context.get(endpoint_identity(url), ""),
+                    normalized_context.get(_source_identity(url), ""),
                 )
                 if source_context:
                     info["source_context"] = source_context
                 source_metadata = normalized_source_metadata.get(
                     url,
-                    normalized_source_metadata.get(endpoint_identity(url), {}),
+                    normalized_source_metadata.get(_source_identity(url), {}),
                 )
                 if source_metadata:
                     info.update(source_metadata)
@@ -1043,7 +1061,7 @@ class UrlScanPipeline:
                             normalized_source_metadata.get(
                                 normalize_url(str(result.get("url") or "")),
                                 normalized_source_metadata.get(
-                                    endpoint_identity(str(result.get("url") or "")),
+                                    _source_identity(str(result.get("url") or "")),
                                     {},
                                 ),
                             )

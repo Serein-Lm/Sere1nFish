@@ -187,6 +187,41 @@ def test_wechat_search_navigator_reuses_result_search_input(monkeypatch) -> None
     assert ("type", "AHTV 招标") in device.events
 
 
+def test_wechat_search_navigator_recovers_from_article_webview(monkeypatch) -> None:
+    from core.mobile.collect import search_navigation
+
+    device = _FakeDevice()
+    monkeypatch.setattr(
+        search_navigation,
+        "resolve_tap",
+        lambda x, y, **_kwargs: (x, y),
+    )
+    navigator = WechatArticleSearchNavigator(
+        manager_factory=lambda: _FakeManager(device),
+        launcher_factory=_FakeLauncher,
+        runner=_activity_runner(
+            [
+                "com.tencent.mm.plugin.webview.ui.tools.fts.TmplWebViewMMUI",
+                "com.tencent.mm.ui.LauncherUI",
+                "com.tencent.mm.plugin.fts.ui.FTSMainUI",
+                "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI",
+            ]
+        ),
+        sleep=lambda _seconds: None,
+    )
+
+    result = navigator.navigate(
+        "device-a",
+        app_name="微信",
+        app_instance="primary",
+        keyword="安徽广播电视台 招标",
+    )
+
+    assert result.ok is True
+    assert device.events[:2] == [("back",), ("tap", 830, 67)]
+    assert ("type", "安徽广播电视台 招标") in device.events
+
+
 def test_wechat_search_navigator_retries_enter_when_suggestion_does_not_submit(
     monkeypatch,
 ) -> None:

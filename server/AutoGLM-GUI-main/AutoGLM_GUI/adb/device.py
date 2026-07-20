@@ -40,6 +40,8 @@ KEY_EVENTS: dict[str, str] = {
     "power": "KEYCODE_POWER",
     "wake": "KEYCODE_WAKEUP",
     "sleep": "KEYCODE_SLEEP",
+    "move_home": "KEYCODE_MOVE_HOME",
+    "page_top": "KEYCODE_MOVE_HOME",
 }
 
 

@@ -26,6 +26,7 @@ from core.mobile.collect.analysis import (
     analyze_screenshot,
     triage_screenshot,
     analyze_detail,
+    verify_detail_entry,
 )
 from core.mobile.collect.source_links import extract_source_link
 
@@ -39,7 +40,10 @@ from core.mobile.collect.contacts import (
     build_contact_findings,
     grade_with_contacts,
 )
-from core.mobile.collect.candidate_policy import CandidatePolicyRegistry
+from core.mobile.collect.candidate_policy import (
+    CandidatePolicyRegistry,
+    candidate_tap_point,
+)
 from core.mobile.collect.search_navigation import (
     SearchNavigationRegistry,
     SearchNavigationResult,
@@ -93,6 +97,19 @@ def _do_back(device_id: str) -> None:
     mgr = MobileDeviceManager()
     dev = mgr.get_device(device_id)
     dev.back(delay=0.1)
+
+
+def _do_scroll_to_top(device_id: str) -> None:
+    """Normalize a remembered detail-page scroll position before verification."""
+    mgr = MobileDeviceManager()
+    dev = mgr.get_device(device_id)
+    adb_id = mgr.resolve_adb_device_id(device_id)
+    dev.press_key("move_home", delay=0.1)
+    sx, sy, ex, ey = resolve_swipe(
+        500, 260, 500, 860, device_id=adb_id, coord_space="normalized_1000"
+    )
+    for _ in range(4):
+        dev.swipe(sx, sy, ex, ey, 220, delay=0.05)
 
 
 def _do_launch_app(
@@ -375,11 +392,13 @@ class _CollectStage(Stage):
             raise
 
     async def _capture_save(self, ctx, keyword: str, note: str):
-        """截图并落库, 返回 (base64, screenshot_id, url)。"""
+        """截图并按运行模式留档，返回 (base64, screenshot_id, url)。"""
         st = ctx.state
         mgr = MobileDeviceManager()
         cap = await capture_ready_screen(st["device_id"], manager=mgr)
         shot = cap.screenshot
+        if st.get("dry_run"):
+            return shot.base64_data, "", ""
         saved = await ma_dao.save_screenshot(
             st["db"],
             image_base64=shot.base64_data,
@@ -392,6 +411,15 @@ class _CollectStage(Stage):
             note=note,
         )
         return shot.base64_data, saved["screenshot_id"], saved["url"]
+
+    async def _capture_for_verification(self, ctx) -> str:
+        """Capture an unpersisted frame so rejected detail pages leave no artifact."""
+        st = ctx.state
+        cap = await capture_ready_screen(
+            st["device_id"],
+            manager=MobileDeviceManager(),
+        )
+        return cap.screenshot.base64_data
 
     async def _analyze_list(self, ctx, keyword: str, image_base64: str):
         """列表页分诊: 有字段用 triage(带坐标+分数), 无字段退化整屏摘要。"""
@@ -438,10 +466,10 @@ class _CollectStage(Stage):
         stop: asyncio.Event = st["stop_event"]
         device_id = st["device_id"]
         run_task_id = st["run_task_id"]
-        tap_x = candidate.get("tap_x")
-        tap_y = candidate.get("tap_y")
-        if not isinstance(tap_x, int) or not isinstance(tap_y, int):
+        tap_point = candidate_tap_point(candidate)
+        if tap_point is None:
             return False
+        tap_x, tap_y = tap_point
 
         obs_log(
             f"点进详情深采 score={candidate.get('score')}",
@@ -468,6 +496,8 @@ class _CollectStage(Stage):
             shot_ids: list[str] = []
             shot_urls: list[str] = []
             source_url: str | None = None
+            source_link_strategy = str(st.get("source_link_strategy") or "none")
+            candidate_policy = CandidatePolicyRegistry.resolve(source_link_strategy)
 
             async def _persist_pending_handoff(reason: str = "") -> None:
                 """Keep the extracted URL retryable without scrolling the phone."""
@@ -495,6 +525,70 @@ class _CollectStage(Stage):
                         "detail": True,
                     },
                 )
+            if candidate_policy.requires_detail_verification:
+                target_name = str((collect_target or {}).get("canonical_name") or "")
+                target_aliases = list((collect_target or {}).get("aliases") or [])
+                verification_attempts: list[dict[str, Any]] = []
+
+                async def _verify_current_frame() -> dict[str, Any]:
+                    frame = await self._capture_for_verification(ctx)
+                    result = await verify_detail_entry(
+                        frame,
+                        app_name=st["app_name"],
+                        keyword=keyword,
+                        candidate_fields=dict(candidate.get("fields") or {}),
+                        target_name=target_name,
+                        target_aliases=target_aliases,
+                        policy_instructions=(
+                            candidate_policy.detail_verification_instructions()
+                        ),
+                        project_id=st["project_id"],
+                        task_id=run_task_id,
+                    )
+                    verification_attempts.append(result)
+                    return result
+
+                verification = await _verify_current_frame()
+                if (
+                    candidate_policy.retry_detail_verification_at_top
+                    and verification.get("page_kind") == "article"
+                    and not str(verification.get("visible_title") or "").strip()
+                ):
+                    await asyncio.to_thread(_do_scroll_to_top, device_id)
+                    await asyncio.sleep(0.8)
+                    verification = await _verify_current_frame()
+                detail_decision = candidate_policy.review_opened_detail(
+                    verification,
+                    candidate=candidate,
+                    target_name=target_name,
+                    aliases=target_aliases,
+                    min_subject_match=int(st.get("min_subject_match", 70)),
+                )
+                detail_review = {
+                    **verification,
+                    "keyword": keyword,
+                    "accepted": detail_decision.accepted,
+                    "reason": detail_decision.reason,
+                    "model_reason": str(verification.get("reason") or ""),
+                    "verification_attempts": len(verification_attempts),
+                    "tap": [tap_x, tap_y],
+                    "candidate_fields": candidate.get("fields") or {},
+                }
+                reviews = st.setdefault("detail_entry_reviews", [])
+                if len(reviews) < int(st.get("detail_entry_review_limit") or 100):
+                    reviews.append(detail_review)
+                obs_log(
+                    "点击后详情一致性校验完成",
+                    project_id=st["project_id"] or "",
+                    task_id=run_task_id,
+                    source=_OBS_SOURCE,
+                    level="info" if detail_decision.accepted else "warning",
+                    event="collect_detail_entry_review",
+                    data=detail_review,
+                )
+                if not detail_decision.accepted:
+                    return False
+
             b64, sid, url = await self._capture_save(
                 ctx, keyword, note=f"detail kw={keyword} score={candidate.get('score')}"
             )
@@ -503,8 +597,6 @@ class _CollectStage(Stage):
             shot_urls.append(url)
             prev_sig = _image_signature(b64)
 
-            source_link_strategy = str(st.get("source_link_strategy") or "none")
-            candidate_policy = CandidatePolicyRegistry.resolve(source_link_strategy)
             if source_link_strategy != "none" and not stop.is_set():
                 link_result = await asyncio.to_thread(
                     extract_source_link, device_id, source_link_strategy
@@ -880,22 +972,62 @@ class _CollectStage(Stage):
 
                 # 详情选采: 主体强对应 + 高分且有坐标的前 N 条点进深采(不什么都点)
                 if deep_collect and detail_max_items > 0 and not stop.is_set():
-                    candidates = [
-                        (
-                            collect_dao.stable_record_id(
-                                task_def_id,
-                                r["fields"],
-                                dedup_key_fields,
-                            ),
-                            r,
+                    candidates = []
+                    candidate_reviews = []
+                    for candidate in records:
+                        candidate_key = collect_dao.stable_record_id(
+                            task_def_id,
+                            candidate["fields"],
+                            dedup_key_fields,
                         )
-                        for r in records
-                        if candidate_policy.accepts_detail(
-                            r,
+                        decision = candidate_policy.review_detail(
+                            candidate,
                             min_score=min_score_to_detail,
                             min_subject_match=min_subject_match,
+                            target_name=str(
+                                (collect_target or {}).get("canonical_name") or ""
+                            ),
+                            aliases=list((collect_target or {}).get("aliases") or []),
                         )
-                    ]
+                        review = {
+                            "keyword": keyword,
+                            "screen": i,
+                            "candidate_key": candidate_key,
+                            "accepted": decision.accepted,
+                            "reason": decision.reason,
+                            "content_kind": candidate.get("content_kind"),
+                            "is_article_result": candidate.get("is_article_result"),
+                            "subject_match": candidate.get("subject_match"),
+                            "score": candidate.get("score"),
+                            "target_evidence": candidate.get("target_evidence") or "",
+                            "tap": list(candidate_tap_point(candidate) or ()),
+                            "tap_bounds": candidate.get("tap_bounds"),
+                            "fields": candidate.get("fields") or {},
+                        }
+                        candidate_reviews.append(review)
+                        if decision.accepted:
+                            candidates.append((candidate_key, candidate))
+                    if candidate_reviews:
+                        obs_log(
+                            "列表候选点击前审核完成",
+                            project_id=project_id or "",
+                            task_id=run_task_id,
+                            source=_OBS_SOURCE,
+                            level="info",
+                            event="collect_candidate_review",
+                            data={
+                                "keyword": keyword,
+                                "screen": i,
+                                "items": candidate_reviews,
+                            },
+                        )
+                        if st.get("dry_run"):
+                            audit = st["candidate_reviews"]
+                            remaining = max(
+                                0,
+                                int(st.get("candidate_review_limit") or 0) - len(audit),
+                            )
+                            audit.extend(candidate_reviews[:remaining])
                     candidates.sort(
                         key=lambda item: (
                             item[1].get("subject_match") or 0,
@@ -926,17 +1058,25 @@ class _CollectStage(Stage):
                                 - int(st.get("details_attempted") or 0),
                             ),
                         )
+                    screen_details_attempted = 0
                     for candidate_key, cand in (
                         item
                         for item in candidates
                         if item[0] not in detailed_keys
                     ):
+                        if (
+                            candidate_policy.max_details_per_screen > 0
+                            and screen_details_attempted
+                            >= candidate_policy.max_details_per_screen
+                        ):
+                            break
                         if remaining_details <= 0 or remaining_reviews <= 0:
                             break
                         if stop.is_set():
                             break
                         detailed_keys.add(candidate_key)
                         details_attempted += 1
+                        screen_details_attempted += 1
                         st["details_attempted"] = int(
                             st.get("details_attempted") or 0
                         ) + 1
@@ -1290,6 +1430,8 @@ async def run_collect_task(
         "max_score": 0,
     }
     preview: list[dict[str, Any]] = []
+    candidate_reviews: list[dict[str, Any]] = []
+    detail_entry_reviews: list[dict[str, Any]] = []
 
     target: dict[str, Any] | None = None
     try:
@@ -1419,6 +1561,10 @@ async def run_collect_task(
         "dry_run": dry_run,
         "preview": preview,
         "preview_limit": preview_limit,
+        "candidate_reviews": candidate_reviews,
+        "candidate_review_limit": max(20, min(int(preview_limit or 50) * 4, 500)),
+        "detail_entry_reviews": detail_entry_reviews,
+        "detail_entry_review_limit": max(20, min(int(preview_limit or 50) * 2, 200)),
         "keywords_used": keywords,
         "keyword_resolution": keyword_resolution,
         "parent_task_id": str(task_def.get("parent_task_id") or ""),
@@ -1529,6 +1675,8 @@ async def run_collect_task(
             "stopped": stop_event.is_set(),
             "dry_run": dry_run,
             "preview_count": len(preview),
+            "candidate_review_count": len(candidate_reviews),
+            "detail_entry_review_count": len(detail_entry_reviews),
             "timed_out": timed_out,
             **counters,
         },
@@ -1537,6 +1685,8 @@ async def run_collect_task(
         "stopped": stop_event.is_set(),
         "timed_out": timed_out,
         "preview": preview,
+        "candidate_reviews": candidate_reviews,
+        "detail_entry_reviews": detail_entry_reviews,
         "keywords_used": keywords,
         "keyword_resolution": keyword_resolution,
         **counters,

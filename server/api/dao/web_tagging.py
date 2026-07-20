@@ -164,6 +164,9 @@ async def list_web_tagging_identities(
         "excluded": 1,
         "intro": 1,
         "data.intro": 1,
+        "data.excluded": 1,
+        "data.site_category": 1,
+        "data.target_relation": 1,
     }
     return [
         doc

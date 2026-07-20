@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from api.models.web_tagging_schema import WebTaggingOutput
 from api.services.url_scan_pipeline import UrlScanPipeline
-from api.services.bidding_records import is_actionable_bidding_contact
+from api.services.bidding_records import (
+    _public_bidding_record,
+    _record_urls,
+    is_actionable_bidding_contact,
+)
 
 
 def _tagging_payload() -> dict:
@@ -78,3 +82,61 @@ def test_bidding_contact_view_rejects_platform_links_and_support_contacts() -> N
     assert not is_actionable_bidding_contact(
         {"channel": "phone", "value": "400-000-0000", "party_role": "publisher"}
     )
+
+
+def test_bidding_contact_fallback_keeps_article_query_identity() -> None:
+    first = _record_urls(
+        {
+            "detail_url": "https://example.com/site/detail?articleId=first",
+        }
+    )
+    second = _record_urls(
+        {
+            "detail_url": "http://example.com/site/detail?articleId=second",
+        }
+    )
+
+    assert first == {"example.com/site/detail?articleId=first"}
+    assert second == {"example.com/site/detail?articleId=second"}
+    assert first.isdisjoint(second)
+
+
+def test_bidding_read_model_excludes_heavy_archived_evidence() -> None:
+    record = {
+        "record_id": "bid-1",
+        "title": "采购公告",
+        "content_preview": "正文" * 2_000,
+        "detail_text_preview": "重复正文" * 2_000,
+        "provider_payload": {"large": "payload"},
+        "attachments": [
+            {
+                "index": 0,
+                "status": "ready",
+                "filename": "公告.pdf",
+                "url": "/api/v1/storage/objects/attachment/content",
+                "text_preview": "附件全文" * 2_000,
+            }
+        ],
+        "resolved_detail_url": "https://example.com/bid/1",
+    }
+    contacts = [
+        {
+            "finding_id": "finding-1",
+            "channel": "phone",
+            "value": "0551-12345678",
+            "context": "采购人联系方式",
+            "attention_score": 80,
+            "raw_result": {"large": "payload"},
+        }
+    ]
+
+    public = _public_bidding_record(record, contacts=contacts)
+
+    assert public["original_url"] == "https://example.com/bid/1"
+    assert public["contact_count"] == 1
+    assert public["contacts"][0]["value"] == "0551-12345678"
+    assert "raw_result" not in public["contacts"][0]
+    assert "provider_payload" not in public
+    assert "detail_text_preview" not in public
+    assert len(public["content_preview"]) <= 2_003
+    assert "text_preview" not in public["attachments"][0]

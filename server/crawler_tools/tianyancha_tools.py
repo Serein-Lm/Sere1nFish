@@ -161,6 +161,8 @@ class BiddingSearchResult:
     page_num: int = 1
     page_size: int = 20
     pages_fetched: int = 0
+    raw_records_fetched: int = 0
+    duplicates_discarded: int = 0
     truncated: bool = False
     bid_type: str = "2"
     publish_start: str = ""
@@ -573,6 +575,7 @@ class TianyanchaClient:
             page_num=safe_page,
             page_size=safe_size,
             pages_fetched=1,
+            raw_records_fetched=len(result.get("items") or []),
             bid_type=str(bid_type or "2"),
             publish_start=publish_start.isoformat(),
             publish_end=publish_end.isoformat(),
@@ -604,6 +607,7 @@ class TianyanchaClient:
         pages_to_fetch = min(total_pages, max(1, math.ceil(safe_limit / safe_size)))
         resolved_end_date = end_date or date.fromisoformat(first.publish_end)
         records_by_id = {record.record_id: record for record in first.records}
+        raw_records_fetched = len(first.records)
         pages_fetched = 1
         next_page = 2
         batch_size = max(1, min(int(page_concurrency), 6))
@@ -628,17 +632,21 @@ class TianyanchaClient:
             pages_fetched += len(pages)
             next_page += len(pages)
             for page in pages:
+                raw_records_fetched += len(page.records)
                 for record in page.records:
                     records_by_id.setdefault(record.record_id, record)
 
-        records = list(records_by_id.values())[:safe_limit]
+        unique_records = list(records_by_id.values())
+        records = unique_records[:safe_limit]
         return BiddingSearchResult(
             records=records,
             total_reported=first.total_reported,
             page_num=1,
             page_size=safe_size,
             pages_fetched=pages_fetched,
-            truncated=first.total_reported > len(records),
+            raw_records_fetched=raw_records_fetched,
+            duplicates_discarded=max(0, raw_records_fetched - len(unique_records)),
+            truncated=pages_to_fetch < total_pages or len(unique_records) > safe_limit,
             bid_type=first.bid_type,
             publish_start=first.publish_start,
             publish_end=first.publish_end,

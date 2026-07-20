@@ -25,6 +25,7 @@ export interface ScholarContact {
   article_doi?: string | null
   article_pmcid?: string | null
   article_landing_page?: string | null
+  article_url?: string | null
   article_year?: string | null
   email_kind?: 'personal' | 'institutional' | ''
   // 人物↔单位一致性验证

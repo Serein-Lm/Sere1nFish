@@ -301,7 +301,7 @@ export default function PromptsManagement() {
     }
   }
 
-  const setTreeEditorValues = (prompt: Prompt | null) => {
+  const setTreeEditorValues = useCallback((prompt: Prompt | null) => {
     if (!prompt) {
       treeForm.resetFields()
       treeForm.setFieldsValue({
@@ -335,7 +335,7 @@ export default function PromptsManagement() {
       temperature: prompt.temperature ?? 0.7,
       max_tokens: prompt.max_tokens ?? 4096,
     })
-  }
+  }, [categories, treeForm])
 
   const startTreeCreate = () => {
     setSelectedTreePrompt(null)
@@ -366,7 +366,7 @@ export default function PromptsManagement() {
       const payload = buildPromptPayload(values)
       let saved: Prompt
       if (selectedTreePrompt) {
-        const { slug: _slug, ...updatePayload } = payload
+        const updatePayload = { ...payload, slug: undefined }
         saved = await updatePrompt(selectedTreePrompt.prompt_id, updatePayload as Parameters<typeof updatePrompt>[1])
         message.success('提示词已更新')
       } else {
@@ -402,7 +402,7 @@ export default function PromptsManagement() {
     if (activeTab === 'tree' && !selectedTreePrompt && !treeForm.getFieldValue('slug')) {
       setTreeEditorValues(null)
     }
-  }, [activeTab, categories, selectedTreePrompt, treeForm])
+  }, [activeTab, selectedTreePrompt, setTreeEditorValues, treeForm])
 
   const handleSubmit = async () => {
     try {
@@ -410,7 +410,7 @@ export default function PromptsManagement() {
       setSubmitting(true)
       const payload = buildPromptPayload(values)
       if (editing) {
-        const { slug: _slug, ...updatePayload } = payload
+        const updatePayload = { ...payload, slug: undefined }
         await updatePrompt(editing.prompt_id, updatePayload as Parameters<typeof updatePrompt>[1])
         message.success('提示词已更新')
       } else {
@@ -588,7 +588,7 @@ export default function PromptsManagement() {
           <span className="library-tree-leaf">
             <FileMarkdownOutlined />
             <span>{prompt.name}</span>
-            <Tag color={promptStatusMeta(prompt.status).color} bordered={false}>
+            <Tag color={promptStatusMeta(prompt.status).color} variant="filled">
               {promptStatusMeta(prompt.status).label}
             </Tag>
           </span>
@@ -648,7 +648,7 @@ export default function PromptsManagement() {
       width: 120,
       render: (cat: string) => {
         const found = PRESET_CATEGORIES.find((c) => c.value === cat)
-        return <Tag bordered={false}>{found ? found.label : cat}</Tag>
+        return <Tag variant="filled">{found ? found.label : cat}</Tag>
       },
     },
     {
@@ -666,7 +666,7 @@ export default function PromptsManagement() {
       dataIndex: 'model_hint',
       key: 'model_hint',
       width: 140,
-      render: (v?: string) => v ? <Tag bordered={false} color="blue">{v}</Tag> : '-',
+      render: (v?: string) => v ? <Tag variant="filled" color="blue">{v}</Tag> : '-',
     },
     {
       title: '标签',
@@ -675,7 +675,7 @@ export default function PromptsManagement() {
       width: 180,
       render: (tagList: string[]) =>
         tagList?.slice(0, 3).map((t) => (
-          <Tag key={t} bordered={false} style={{ marginBottom: 2 }}>
+          <Tag key={t} variant="filled" style={{ marginBottom: 2 }}>
             {t}
           </Tag>
         )),
@@ -1242,7 +1242,7 @@ export default function PromptsManagement() {
         footer={null}
         width={900}
         style={{ maxWidth: '95vw' }}
-        destroyOnClose
+        destroyOnHidden
       >
         <div className="prompt-preview-modal">
           {promptEditorContent ? <XMarkdown content={promptEditorContent} /> : <Empty description="暂无内容" />}
@@ -1254,9 +1254,9 @@ export default function PromptsManagement() {
         title={detail?.name ?? '提示词详情'}
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={700}
+        size={700}
         rootClassName="prompt-drawer"
-        destroyOnClose
+        destroyOnHidden
       >
         {detailLoading || !detail ? (
           <Spin>
@@ -1265,7 +1265,7 @@ export default function PromptsManagement() {
         ) : (
           <div className="prompt-detail">
             <div className="prompt-detail-meta">
-              <Tag bordered={false}>{detail.category}</Tag>
+              <Tag variant="filled">{detail.category}</Tag>
               <Tag color={promptStatusMeta(detail.status).color}>{promptStatusMeta(detail.status).label}</Tag>
               {detail.model_hint && <Tag color="blue">{detail.model_hint}</Tag>}
               <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1286,7 +1286,7 @@ export default function PromptsManagement() {
                 <div className="prompt-detail-label">标签</div>
                 <Space wrap>
                   {detail.tags.map((t) => (
-                    <Tag key={t} bordered={false}>
+                    <Tag key={t} variant="filled">
                       #{t}
                     </Tag>
                   ))}
@@ -1307,7 +1307,7 @@ export default function PromptsManagement() {
                 <div className="prompt-detail-label">变量</div>
                 <Space wrap>
                   {detail.variables.map((v) => (
-                    <Tag key={v} color="geekblue" bordered={false}>
+                    <Tag key={v} color="geekblue" variant="filled">
                       {`{${v}}`}
                     </Tag>
                   ))}
@@ -1403,7 +1403,7 @@ export default function PromptsManagement() {
         cancelText="取消"
         width={780}
         style={{ maxWidth: '95vw' }}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" className="prompt-form">
           <Row gutter={16}>
@@ -1488,7 +1488,7 @@ export default function PromptsManagement() {
             </Button>
           </Space>
         }
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={reviewForm} layout="vertical">
           <Form.Item name="comment" label="审核意见">
@@ -1514,7 +1514,7 @@ export default function PromptsManagement() {
         open={categoryModalOpen}
         onCancel={() => setCategoryModalOpen(false)}
         onOk={handleCreateCategory}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={categoryForm} layout="vertical">
           <Form.Item name="name" label="分类名称" rules={[{ required: true }]}>
@@ -1538,7 +1538,7 @@ export default function PromptsManagement() {
         open={tagModalOpen}
         onCancel={() => setTagModalOpen(false)}
         onOk={handleCreateTag}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={tagForm} layout="vertical">
           <Form.Item name="name" label="标签名" rules={[{ required: true }]}>
