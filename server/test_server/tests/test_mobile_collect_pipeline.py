@@ -357,6 +357,123 @@ def test_detail_limit_is_shared_across_keyword_screens(monkeypatch):
     assert dives == ["A", "B"]
 
 
+def test_rejected_detail_candidate_does_not_consume_accept_limit(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    stage = pl._CollectStage()
+    dives: list[str] = []
+
+    async def navigate(*_args, **_kwargs):
+        return True
+
+    async def capture(*_args, **_kwargs):
+        return "QUJD", "shot", "/shot"
+
+    async def analyze(*_args, **_kwargs):
+        return [
+            {
+                "fields": {"title": "汇总文章", "account": "account"},
+                "score": 95,
+                "subject_match": 95,
+                "tap_x": 100,
+                "tap_y": 200,
+            },
+            {
+                "fields": {"title": "目标专文", "account": "account"},
+                "score": 90,
+                "subject_match": 90,
+                "tap_x": 100,
+                "tap_y": 300,
+            },
+        ]
+
+    async def deep_dive(_ctx, _keyword, candidate, _target):
+        title = candidate["fields"]["title"]
+        dives.append(title)
+        return title == "目标专文"
+
+    class _Context:
+        worker_id = 0
+        logger = __import__("logging").getLogger("detail-review-limit-test")
+        state = {
+            "stop_event": asyncio.Event(),
+            "device_id": "device",
+            "app_name": "微信",
+            "project_id": "project",
+            "run_task_id": "run",
+            "deep_collect": True,
+            "detail_max_items": 1,
+            "detail_max_total_items": 1,
+            "detail_review_max_items": 2,
+            "detail_review_max_total_items": 2,
+            "details_attempted": 0,
+            "details_accepted": 0,
+            "min_score_to_detail": 60,
+            "min_subject_match": 70,
+            "no_new_stop_threshold": 1,
+            "task_def_id": "definition",
+            "dedup_key_fields": ["title", "account"],
+            "direct_launch_app": False,
+            "search_hint": "",
+            "owner": "test",
+            "swipe_times": 0,
+            "swipe_interval": 0.01,
+            "parent_task_id": "",
+            "keyword_total": 1,
+            "keywords_completed": 0,
+        }
+
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    context = _Context()
+    monkeypatch.setattr(pl, "_run_search_navigation", navigate)
+    monkeypatch.setattr(stage, "_capture_save", capture)
+    monkeypatch.setattr(stage, "_analyze_list", analyze)
+    monkeypatch.setattr(stage, "_deep_dive", deep_dive)
+    monkeypatch.setattr(pl, "obs_log", lambda *_args, **_kwargs: "")
+
+    asyncio.run(
+        stage.handle(
+            type("Item", (), {"payload": {"keyword": "目标"}, "item_id": "1"})(),
+            context,
+        )
+    )
+
+    assert dives == ["汇总文章", "目标专文"]
+    assert context.state["details_attempted"] == 2
+    assert context.state["details_accepted"] == 1
+
+
+def test_persist_stage_respects_authoritative_empty_source_contacts():
+    from core.mobile.collect.pipeline import _resolve_payload_contacts
+
+    payload = {
+        "fields": {
+            "title": "行业汇总",
+            "content": "发布方联系电话 13800138000",
+        },
+        "contacts": [],
+    }
+
+    assert _resolve_payload_contacts(payload, "https://example.com/article") == []
+
+
+def test_persist_stage_extracts_contacts_when_upstream_did_not_decide():
+    from core.mobile.collect.pipeline import _resolve_payload_contacts
+
+    payload = {
+        "fields": {
+            "title": "手机逐屏结果",
+            "content": "项目联系人 13800138000",
+        }
+    }
+
+    contacts = _resolve_payload_contacts(payload, None)
+
+    assert contacts[0]["value"] == "13800138000"
+
+
 def test_detail_total_limit_is_shared_across_keywords(monkeypatch):
     from core.mobile.collect import pipeline as pl
 

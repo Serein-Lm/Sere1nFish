@@ -192,15 +192,235 @@ def test_contextual_analysis_fingerprint_tracks_prompt_content(monkeypatch):
     assert first != second
 
 
-def test_source_document_prompt_accepts_direct_target_evidence_in_roundups():
+def test_source_document_prompts_reject_multi_entity_roundups():
     from Sere1nGraph.graph.prompts.loader import load_prompt
-    from api.services.source_documents.analysis import ARTICLE_ANALYSIS_PROMPT_SLUG
+    from api.services.source_documents.analysis import (
+        ARTICLE_ANALYSIS_PROMPT_SLUG,
+        RELEVANCE_REVIEW_PROMPT_SLUG,
+    )
 
-    prompt = load_prompt(ARTICLE_ANALYSIS_PROMPT_SLUG)
+    extraction_prompt = load_prompt(ARTICLE_ANALYSIS_PROMPT_SLUG)
+    review_prompt = load_prompt(RELEVANCE_REVIEW_PROMPT_SLUG)
 
-    assert "目标不需要是整篇文章的唯一主体" in prompt
-    assert "行业招投标汇总中清晰完整的目标项目" in prompt
-    assert "只偶然提及目标" in prompt
+    assert "multi_entity_roundup" in extraction_prompt
+    assert "不得超过 39" in extraction_prompt
+    assert "目标只是其中一个条目" in review_prompt
+    assert "此类必须 `reject`" in review_prompt
+    assert "独立相关性审核员" in review_prompt
+
+
+def test_article_scope_caps_prevent_single_roundup_item_from_passing():
+    from api.services.source_documents.analysis import apply_article_scope_cap
+
+    assert apply_article_scope_cap(98, "target_focused") == 98
+    assert apply_article_scope_cap(98, "multi_entity_roundup") == 39
+    assert apply_article_scope_cap(98, "incidental") == 20
+    assert apply_article_scope_cap(98, "unknown") == 69
+
+
+def test_relevance_review_requires_contact_attribution_agreement():
+    from api.services.source_documents.analysis import apply_relevance_review
+
+    capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+    draft = {
+        "fields": {"summary": "目标项目联系人"},
+        "score": 95,
+        "subject_match": 96,
+        "article_scope": "target_focused",
+        "target_contact_values": ["13800138000"],
+    }
+    review = {
+        "decision": "accept",
+        "article_scope": "target_focused",
+        "score": 92,
+        "subject_match": 94,
+        "summary": "文章主要介绍目标项目。",
+        "target_contact_values": [],
+        "reason": "正文聚焦目标，但未确认联系方式归属。",
+    }
+
+    result = apply_relevance_review(capture, draft, review)
+
+    assert result["review_decision"] == "accept"
+    assert result["score"] == 92
+    assert result["subject_match"] == 94
+    assert result["target_contacts"] == []
+    assert result["fields"]["contact"] == ""
+
+
+def test_target_contact_filter_can_restore_dual_agent_declared_wechat_name():
+    from core.mobile.collect.contacts import extract_contacts
+    from api.services.source_documents.analysis import filter_target_contacts
+
+    text = "申请方式：微信：添加官方微信号 AHTV文体中心，备注拍客申请。"
+
+    contacts = filter_target_contacts(
+        extract_contacts(text),
+        ["AHTV文体中心"],
+        text=text,
+    )
+
+    assert contacts == [
+        {
+            "channel": "wechat",
+            "value": "AHTV文体中心",
+            "label": "微信号: AHTV文体中心",
+            "context": text,
+            "contexts": [text],
+            "source": "text",
+            "attribution": "dual_agent_declared",
+        }
+    ]
+
+
+def test_relevance_review_conservatively_merges_two_agents():
+    from api.services.source_documents.analysis import apply_relevance_review
+
+    capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+    draft = {
+        "fields": {"summary": "错误的整篇摘要"},
+        "score": 95,
+        "subject_match": 95,
+        "article_scope": "target_focused",
+        "target_contact_values": ["13800138000"],
+    }
+    review = {
+        "decision": "reject",
+        "article_scope": "multi_entity_roundup",
+        "score": 70,
+        "subject_match": 39,
+        "summary": "目标仅出现在行业汇总的一个条目中。",
+        "target_contact_values": [],
+        "reason": "文章主体为多个单位的行业汇总。",
+    }
+
+    result = apply_relevance_review(capture, draft, review)
+
+    assert result["review_decision"] == "reject"
+    assert result["article_scope"] == "multi_entity_roundup"
+    assert result["score"] == 70
+    assert result["subject_match"] == 39
+    assert result["fields"]["summary"] == "目标仅出现在行业汇总的一个条目中。"
+    assert result["target_contacts"] == []
+
+
+def test_article_analysis_runs_independent_relevance_reviewer(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import analysis
+
+    calls: list[str] = []
+
+    async def extract(*_args, **_kwargs):
+        calls.append("extract")
+        return {
+            "fields": {"summary": "初稿", "content": "正文"},
+            "score": 96,
+            "subject_match": 95,
+            "article_scope": "target_focused",
+            "target_contact_values": ["13800138000"],
+        }
+
+    async def review(*_args, draft_analysis, **_kwargs):
+        assert draft_analysis["fields"]["summary"] == "初稿"
+        calls.append("review")
+        return {
+            "decision": "accept",
+            "article_scope": "target_focused",
+            "score": 92,
+            "subject_match": 93,
+            "summary": "审核后的目标专属摘要",
+            "target_contact_values": ["13800138000"],
+            "reason": "全文聚焦目标项目。",
+        }
+
+    monkeypatch.setattr(analysis, "analyze_article_fields", extract)
+    monkeypatch.setattr(analysis, "review_article_relevance", review)
+
+    result = asyncio.run(
+        analysis.analyze_and_review_article(
+            _capture(raw_html=b"raw", rendered_html=b"dom"),
+            fields=[],
+            target_name="目标单位",
+            keyword="目标单位 招标",
+            required_subject_match=70,
+        )
+    )
+
+    assert calls == ["extract", "review"]
+    assert result["review_decision"] == "accept"
+    assert result["subject_match"] == 93
+    assert result["fields"]["summary"] == "审核后的目标专属摘要"
+    assert result["target_contacts"][0]["value"] == "13800138000"
+
+
+def test_target_review_gate_requires_accept_decision_and_threshold():
+    from api.services.source_documents.service import _passes_target_review
+
+    assert _passes_target_review(
+        {"review_decision": "accept", "subject_match": 90}, 70
+    )
+    assert not _passes_target_review(
+        {"review_decision": "reject", "subject_match": 90}, 70
+    )
+    assert not _passes_target_review(
+        {"review_decision": "accept", "subject_match": 69}, 70
+    )
+    assert not _passes_target_review({"subject_match": 100}, 70)
+
+
+def test_rejected_relevance_review_stops_before_source_persistence(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+
+    class _Provider:
+        async def capture(self, *_args, **_kwargs):
+            return capture
+
+    async def get_version(*_args, **_kwargs):
+        return None
+
+    async def reject(*_args, **_kwargs):
+        return {
+            "fields": {"summary": "目标仅为汇总中的一个条目"},
+            "score": 60,
+            "subject_match": 39,
+            "score_reason": "文章主体为多个单位的行业汇总。",
+            "article_scope": "multi_entity_roundup",
+            "review_decision": "reject",
+            "target_contact_values": [],
+            "target_contacts": [],
+        }
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("审核拒绝后不得写入来源版本或 Target 关联")
+
+    monkeypatch.setattr(service, "get_source_document_provider", lambda _url: _Provider())
+    monkeypatch.setattr(service.source_dao, "get_version", get_version)
+    monkeypatch.setattr(service, "analyze_and_review_article", reject)
+    monkeypatch.setattr(service.source_dao, "begin_version", forbidden)
+    monkeypatch.setattr(service.source_dao, "upsert_document", forbidden)
+    monkeypatch.setattr(service.source_dao, "link_document", forbidden)
+
+    result = asyncio.run(
+        service.ingest_source_url(
+            object(),
+            url=capture.canonical_url,
+            project_id="project-1",
+            target={"target_id": "target-1", "canonical_name": "目标单位"},
+            run_task_id="run-1",
+            keyword="目标单位 招标",
+            min_subject_match=70,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["rejected"] is True
+    assert result["review_decision"] == "reject"
+    assert result["article_scope"] == "multi_entity_roundup"
 
 
 def test_source_detail_can_select_immutable_version(monkeypatch):

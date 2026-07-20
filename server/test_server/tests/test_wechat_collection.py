@@ -43,6 +43,8 @@ def test_company_wechat_definition_enforces_phone_work_limits() -> None:
     assert patch["include_direct_children"] is False
     assert patch["max_resolved_keywords"] == 6
     assert patch["detail_max_items"] == 2
+    assert patch["detail_review_max_items"] == 3
+    assert patch["detail_review_max_total_items"] == 8
     assert patch["swipe_times"] == 3
     assert patch["max_runtime_seconds"] == 1800
     assert patch["notify_on"] == "none"
@@ -369,6 +371,8 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["include_direct_children"] is False
     assert overrides["max_resolved_keywords"] == 6
     assert overrides["detail_max_items"] == 2
+    assert overrides["detail_review_max_items"] == 3
+    assert overrides["detail_review_max_total_items"] == 8
     assert overrides["max_runtime_seconds"] == 1800
     assert overrides["parent_task_id"] == "scan-1"
     assert overrides["target_id"] == "target-1"

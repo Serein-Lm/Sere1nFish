@@ -431,8 +431,8 @@ class _CollectStage(Stage):
         keyword: str,
         candidate: dict,
         collect_target: dict[str, Any] | None = None,
-    ) -> None:
-        """点进一条详情 → 截图 → 综合结构化 → 返回。"""
+    ) -> bool:
+        """点进一条详情并返回是否通过审核且已交给持久化阶段。"""
         st = ctx.state
         collect_target = collect_target or st.get("target")
         stop: asyncio.Event = st["stop_event"]
@@ -441,7 +441,7 @@ class _CollectStage(Stage):
         tap_x = candidate.get("tap_x")
         tap_y = candidate.get("tap_y")
         if not isinstance(tap_x, int) or not isinstance(tap_y, int):
-            return
+            return False
 
         obs_log(
             f"点进详情深采 score={candidate.get('score')}",
@@ -462,7 +462,7 @@ class _CollectStage(Stage):
             await asyncio.to_thread(_do_tap, device_id, tap_x, tap_y)
             await asyncio.sleep(1.5)
             if stop.is_set():
-                return
+                return False
             detail_max_swipes = int(st.get("detail_max_swipes", 8))
             shots_b64: list[str] = []
             shot_ids: list[str] = []
@@ -550,7 +550,7 @@ class _CollectStage(Stage):
                 and not source_url
                 and not candidate_policy.allow_mobile_detail_fallback
             ):
-                return
+                return False
 
             # 已获得真实 URL 时交给来源文档浏览器池。微信文章策略无论成功或失败
             # 都立即释放手机；失败仅保留待重试 URL，不回退逐屏深采。
@@ -632,11 +632,11 @@ class _CollectStage(Stage):
                                 "screenshots": source_result.get("screenshot_count"),
                             },
                         )
-                        return
+                        return True
                     if not candidate_policy.allow_mobile_detail_fallback:
                         if source_result.get("rejected"):
                             obs_log(
-                                "公众号原文与目标直接证据不足，已丢弃本次关联",
+                                "公众号原文未通过独立相关性审核，已丢弃本次关联",
                                 project_id=st["project_id"] or "",
                                 task_id=run_task_id,
                                 source=_OBS_SOURCE,
@@ -648,6 +648,10 @@ class _CollectStage(Stage):
                                     "document_id": source_result.get("document_id"),
                                     "version_id": source_result.get("version_id"),
                                     "subject_match": source_result.get("subject_match"),
+                                    "article_scope": source_result.get("article_scope"),
+                                    "review_decision": source_result.get(
+                                        "review_decision"
+                                    ),
                                     "required_subject_match": source_result.get(
                                         "required_subject_match"
                                     ),
@@ -659,7 +663,7 @@ class _CollectStage(Stage):
                             await _persist_pending_handoff(
                                 str(source_result.get("reason") or "浏览器归档暂未完成")
                             )
-                        return
+                        return False
                 except Exception as exc:  # noqa: BLE001
                     ctx.logger.warning(
                         f"[collect] 来源文档浏览器读取失败，回退手机深采: {exc}"
@@ -675,7 +679,7 @@ class _CollectStage(Stage):
                     )
                     if not candidate_policy.allow_mobile_detail_fallback:
                         await _persist_pending_handoff(str(exc))
-                        return
+                        return False
 
             # 详情页滑动到底: 逐屏截图, 需连续两屏几乎一致才判定到底(避免单帧误判提前退出)
             reached_bottom = False
@@ -748,6 +752,7 @@ class _CollectStage(Stage):
                         "detail": True,
                     },
                 )
+                return True
         except Exception as exc:  # noqa: BLE001
             ctx.logger.warning(f"[collect] 详情深采失败 kw={keyword!r}: {exc}")
             obs_log(
@@ -765,6 +770,7 @@ class _CollectStage(Stage):
                 await asyncio.sleep(0.8)
             except Exception:  # noqa: BLE001
                 pass
+        return False
 
     async def handle(self, item: Item, ctx) -> None:
         st = ctx.state
@@ -781,6 +787,13 @@ class _CollectStage(Stage):
         deep_collect = bool(st.get("deep_collect"))
         detail_max_items = int(st.get("detail_max_items", 5))
         detail_max_total_items = int(st.get("detail_max_total_items", 0))
+        detail_review_max_items = int(
+            st.get("detail_review_max_items") or detail_max_items
+        )
+        detail_review_max_total_items = int(
+            st.get("detail_review_max_total_items")
+            or detail_max_total_items
+        )
         min_score_to_detail = int(st.get("min_score_to_detail", 60))
         min_subject_match = int(st.get("min_subject_match", 70))
         no_new_stop_threshold = int(st.get("no_new_stop_threshold", 2))
@@ -806,6 +819,7 @@ class _CollectStage(Stage):
         seen_keys: set[str] = set()
         detailed_keys: set[str] = st.setdefault("detailed_record_keys", set())
         details_attempted = 0
+        details_accepted = 0
         no_new_streak = 0
         for i in range(swipe_times + 1):
             if stop.is_set():
@@ -889,13 +903,26 @@ class _CollectStage(Stage):
                         ),
                         reverse=True,
                     )
-                    remaining_details = max(0, detail_max_items - details_attempted)
+                    remaining_details = max(0, detail_max_items - details_accepted)
                     if detail_max_total_items > 0:
                         remaining_details = min(
                             remaining_details,
                             max(
                                 0,
                                 detail_max_total_items
+                                - int(st.get("details_accepted") or 0),
+                            ),
+                        )
+                    remaining_reviews = max(
+                        0,
+                        detail_review_max_items - details_attempted,
+                    )
+                    if detail_review_max_total_items > 0:
+                        remaining_reviews = min(
+                            remaining_reviews,
+                            max(
+                                0,
+                                detail_review_max_total_items
                                 - int(st.get("details_attempted") or 0),
                             ),
                         )
@@ -904,7 +931,7 @@ class _CollectStage(Stage):
                         for item in candidates
                         if item[0] not in detailed_keys
                     ):
-                        if remaining_details <= 0:
+                        if remaining_details <= 0 or remaining_reviews <= 0:
                             break
                         if stop.is_set():
                             break
@@ -913,8 +940,19 @@ class _CollectStage(Stage):
                         st["details_attempted"] = int(
                             st.get("details_attempted") or 0
                         ) + 1
-                        remaining_details -= 1
-                        await self._deep_dive(ctx, keyword, cand, collect_target)
+                        remaining_reviews -= 1
+                        accepted = await self._deep_dive(
+                            ctx,
+                            keyword,
+                            cand,
+                            collect_target,
+                        )
+                        if accepted:
+                            details_accepted += 1
+                            st["details_accepted"] = int(
+                                st.get("details_accepted") or 0
+                            ) + 1
+                            remaining_details -= 1
 
                 # 到底检测: 连续若干屏无新去重键 → 判定已滑到底, 提前停止
                 if new_this_screen == 0:
@@ -953,6 +991,7 @@ class _CollectStage(Stage):
                             "current_keyword": keyword,
                             "screen": i + 1,
                             "details_attempted": int(st.get("details_attempted") or 0),
+                            "details_accepted": int(st.get("details_accepted") or 0),
                         },
                     )
             except Exception as exc:  # noqa: BLE001
@@ -1003,8 +1042,19 @@ class _CollectStage(Stage):
                 extra={
                     "current_keyword": keyword,
                     "details_attempted": int(st.get("details_attempted") or 0),
+                    "details_accepted": int(st.get("details_accepted") or 0),
                 },
             )
+
+
+def _resolve_payload_contacts(
+    payload: dict[str, Any],
+    source_url: str | None,
+) -> list[dict[str, Any]]:
+    """尊重上游对联系方式的权威判定，包括明确返回空列表的情况。"""
+    if "contacts" in payload:
+        return [dict(item) for item in payload.get("contacts") or []]
+    return extract_contacts(record_text_blob(payload["fields"], source_url))
 
 
 class _PersistStage(Stage):
@@ -1022,8 +1072,7 @@ class _PersistStage(Stage):
         source_url = payload.get("source_url")
 
         # 分级规则: 有联系方式才能给高分, 没有的一定压到低分带
-        blob = record_text_blob(payload["fields"], source_url)
-        contacts = list(payload.get("contacts") or extract_contacts(blob))
+        contacts = _resolve_payload_contacts(payload, source_url)
         score = grade_with_contacts(raw_score, bool(contacts))
 
         min_persist = int(st.get("min_score_to_persist", 0) or 0)
@@ -1348,6 +1397,12 @@ async def run_collect_task(
         "detail_max_total_items": int(
             task_def.get("detail_max_total_items", 0) or 0
         ),
+        "detail_review_max_items": int(
+            task_def.get("detail_review_max_items", 0) or 0
+        ),
+        "detail_review_max_total_items": int(
+            task_def.get("detail_review_max_total_items", 0) or 0
+        ),
         "detail_max_swipes": int(task_def.get("detail_max_swipes", 12) or 12),
         "min_score_to_detail": int(task_def.get("min_score_to_detail", 60) or 0),
         "notification_min_score": max(
@@ -1370,6 +1425,7 @@ async def run_collect_task(
         "keyword_total": len(keywords),
         "keywords_completed": 0,
         "details_attempted": 0,
+        "details_accepted": 0,
         "detailed_record_keys": set(),
     }
 

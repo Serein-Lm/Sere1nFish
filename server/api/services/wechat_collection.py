@@ -46,6 +46,8 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "swipe_times": 3,
             "detail_max_items": 2,
             "detail_max_total_items": 2,
+            "detail_review_max_items": 3,
+            "detail_review_max_total_items": 8,
             "detail_max_swipes": 6,
             "max_runtime_seconds": 1800,
         }
@@ -88,7 +90,12 @@ def _wechat_definition_patch(task_def: dict[str, Any]) -> dict[str, Any]:
         != defaults["max_resolved_keywords"]
     ):
         patch["max_resolved_keywords"] = defaults["max_resolved_keywords"]
-    for field in ("detail_max_items", "detail_max_total_items"):
+    for field in (
+        "detail_max_items",
+        "detail_max_total_items",
+        "detail_review_max_items",
+        "detail_review_max_total_items",
+    ):
         if is_auto_definition and int(task_def.get(field) or 0) != defaults[field]:
             patch[field] = defaults[field]
     for field in ("swipe_times", "detail_max_swipes", "max_runtime_seconds"):

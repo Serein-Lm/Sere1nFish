@@ -87,6 +87,18 @@ class CollectTaskDef(BaseModel):
         le=200,
         description="单次任务最多深采条数;0 表示仅受每关键词上限约束",
     )
+    detail_review_max_items: int = Field(
+        default=0,
+        ge=0,
+        le=50,
+        description="每个关键词最多审核的详情候选数;0 表示与 detail_max_items 相同",
+    )
+    detail_review_max_total_items: int = Field(
+        default=0,
+        ge=0,
+        le=500,
+        description="单次任务最多审核的详情候选数;0 表示与详情总上限相同",
+    )
     detail_max_swipes: int = Field(
         default=12, ge=0, le=20, description="详情页最多滑动几屏以滑到底(视觉到底检测提前停止)"
     )
@@ -137,6 +149,8 @@ class CollectTaskUpdate(BaseModel):
     )
     detail_max_items: int | None = Field(default=None, ge=0, le=20)
     detail_max_total_items: int | None = Field(default=None, ge=0, le=200)
+    detail_review_max_items: int | None = Field(default=None, ge=0, le=50)
+    detail_review_max_total_items: int | None = Field(default=None, ge=0, le=500)
     detail_max_swipes: int | None = Field(default=None, ge=0, le=20)
     min_score_to_detail: int | None = Field(default=None, ge=0, le=100)
     min_subject_match: int | None = Field(default=None, ge=0, le=100)

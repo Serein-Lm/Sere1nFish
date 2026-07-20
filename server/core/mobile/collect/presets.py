@@ -85,6 +85,8 @@ PRESETS: list[dict[str, Any]] = [
             "deep_collect": True,
             "source_link_strategy": "wechat_copy_link",
             "detail_max_items": 5,
+            "detail_review_max_items": 5,
+            "detail_review_max_total_items": 0,
             "detail_max_swipes": 12,
             "min_score_to_detail": 60,
             "min_subject_match": 70,

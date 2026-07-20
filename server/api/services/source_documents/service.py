@@ -21,9 +21,10 @@ from api.storage import get_object_storage
 from core.mobile.collect.contacts import extract_contacts
 
 from .analysis import (
-    analyze_article_fields,
+    analyze_and_review_article,
     analyze_article_images,
     article_analysis_prompt_fingerprint,
+    filter_target_contacts,
     stable_content_hash,
 )
 from .contracts import CapturedDocument, CapturedImage, CapturedScreenshot
@@ -33,7 +34,7 @@ from .urls import canonicalize_source_url
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
-_CONTEXT_ANALYSIS_SCHEMA_VERSION = 4
+_CONTEXT_ANALYSIS_SCHEMA_VERSION = 5
 _MEDIA_POLICY_VERSION = 2
 _SOURCE_FIELD_KEYS = {
     "title",
@@ -113,6 +114,11 @@ def _complete_contextual_analysis(
     image_analysis: list[dict[str, Any]],
 ) -> dict[str, Any]:
     fields = dict(analysis.get("fields") or {})
+    target_contacts = filter_target_contacts(
+        contacts,
+        list(analysis.get("target_contact_values") or []),
+        text=capture.text,
+    )
     fields.update(
         {
             "title": capture.title,
@@ -120,7 +126,7 @@ def _complete_contextual_analysis(
             "publish_time": capture.publish_time,
             "content": capture.text,
             "contact": "、".join(
-                str(item.get("label") or "") for item in contacts
+                str(item.get("label") or "") for item in target_contacts
             ),
             "image_context": [
                 item.get("description")
@@ -129,7 +135,7 @@ def _complete_contextual_analysis(
             ],
         }
     )
-    return {**analysis, "fields": fields}
+    return {**analysis, "fields": fields, "target_contacts": target_contacts}
 
 
 def _version_image_analysis(version: dict[str, Any]) -> list[dict[str, Any]]:
@@ -273,6 +279,13 @@ def _subject_match(analysis: dict[str, Any], fallback: int | None) -> int:
         return 0
 
 
+def _passes_target_review(analysis: dict[str, Any], min_subject_match: int) -> bool:
+    return (
+        analysis.get("review_decision") == "accept"
+        and _subject_match(analysis, None) >= min_subject_match
+    )
+
+
 def _rejected_source_result(
     capture: CapturedDocument,
     analysis: dict[str, Any],
@@ -287,7 +300,7 @@ def _rejected_source_result(
     return {
         "ok": False,
         "rejected": True,
-        "reason": "文章未包含可充分归属于目标的直接证据",
+        "reason": "文章未通过独立目标相关性审核",
         "source_type": capture.source_type,
         "source_url": capture.canonical_url,
         "document_id": document_id,
@@ -299,6 +312,8 @@ def _rejected_source_result(
         "subject_match": subject_match,
         "required_subject_match": min_subject_match,
         "score_reason": analysis.get("score_reason") or "",
+        "review_decision": analysis.get("review_decision") or "reject",
+        "article_scope": analysis.get("article_scope") or "uncertain",
         "contacts": [],
         "browser_screenshot_ids": [],
         "browser_screenshot_urls": [],
@@ -508,7 +523,9 @@ def _result_from_version(
         "score": analysis.get("score"),
         "subject_match": analysis.get("subject_match"),
         "score_reason": analysis.get("score_reason") or "",
-        "contacts": version.get("contacts") or [],
+        "review_decision": analysis.get("review_decision") or "",
+        "article_scope": analysis.get("article_scope") or "uncertain",
+        "contacts": list(analysis.get("target_contacts") or []),
         "browser_screenshot_ids": [
             item.get("storage_object_id") for item in screenshots if item.get("storage_object_id")
         ],
@@ -588,11 +605,14 @@ async def ingest_source_url(
                         existing_link.get("latest_analysis") or {}
                     )
                 if contextual_analysis is None:
-                    contextual_analysis = await analyze_article_fields(
+                    contextual_analysis = await analyze_and_review_article(
                         capture,
                         fields=task_fields,
                         target_name=target_analysis_name,
                         keyword=keyword,
+                        required_subject_match=max(
+                            0, min(100, int(min_subject_match or 0))
+                        ),
                         project_id=project_id,
                         task_id=run_task_id,
                     )
@@ -602,9 +622,13 @@ async def ingest_source_url(
                     contacts=list(existing.get("contacts") or []),
                     image_analysis=_version_image_analysis(existing),
                 )
-                if _subject_match(
-                    contextual_analysis, discovery_subject_match
-                ) < max(0, min(100, int(min_subject_match or 0))):
+                required_subject_match = max(
+                    0, min(100, int(min_subject_match or 0))
+                )
+                if not _passes_target_review(
+                    contextual_analysis,
+                    required_subject_match,
+                ):
                     return _rejected_source_result(
                         capture,
                         contextual_analysis,
@@ -653,16 +677,17 @@ async def ingest_source_url(
 
         version_started = False
         try:
-            analysis = await analyze_article_fields(
+            required_subject_match = max(0, min(100, int(min_subject_match or 0)))
+            analysis = await analyze_and_review_article(
                 capture,
                 fields=task_fields,
                 target_name=target_analysis_name,
                 keyword=keyword,
+                required_subject_match=required_subject_match,
                 project_id=project_id,
                 task_id=run_task_id,
             )
-            required_subject_match = max(0, min(100, int(min_subject_match or 0)))
-            if _subject_match(analysis, discovery_subject_match) < required_subject_match:
+            if not _passes_target_review(analysis, required_subject_match):
                 return _rejected_source_result(
                     capture,
                     analysis,
@@ -725,7 +750,7 @@ async def ingest_source_url(
                 "canonical_url": capture.canonical_url,
             }
             content = {
-                "summary": analysis_fields.get("summary") or capture.text[:500],
+                "summary": capture.text[:500],
                 "text": capture.text,
                 "text_length": len(capture.text),
             }
