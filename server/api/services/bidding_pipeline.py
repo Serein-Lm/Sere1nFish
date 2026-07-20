@@ -575,6 +575,7 @@ class BiddingPipeline:
 
         persistence_records: list[dict[str, Any]] = []
         context_by_url: dict[str, str] = {}
+        metadata_by_url: dict[str, dict[str, Any]] = {}
         detail_urls: list[str] = []
         known_alive_detail_urls: list[str] = []
         archive_errors: list[str] = []
@@ -588,6 +589,9 @@ class BiddingPipeline:
             if resolved_detail:
                 detail_urls.append(resolved_detail)
                 context_by_url[resolved_detail] = context
+                metadata_by_url[resolved_detail] = {
+                    "bidding_record_id": record.record_id,
+                }
                 if archive.get("detail_html_object_id"):
                     known_alive_detail_urls.append(resolved_detail)
             archive_errors.extend(str(item) for item in archive.get("archive_errors") or [])
@@ -629,6 +633,11 @@ class BiddingPipeline:
                 target_id=target_id,
                 source="bidding",
                 source_context_by_url=context_by_url,
+                source_metadata_by_url=metadata_by_url,
+                target_context={
+                    "target_id": target_id,
+                    "canonical_name": company_name,
+                },
                 known_alive_urls=list(dict.fromkeys(known_alive_detail_urls)),
                 parent_task_id=parent_task_id or task_id,
                 progress_source="bidding_url_scan",

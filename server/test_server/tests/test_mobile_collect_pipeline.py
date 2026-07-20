@@ -584,6 +584,34 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
     assert emitted[0][1]["source_url"] == "https://mp.weixin.qq.com/s/runtime-link"
 
 
+def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:
+    from core.mobile.collect.candidate_policy import CandidatePolicyRegistry
+
+    policy = CandidatePolicyRegistry.resolve("wechat_copy_link")
+    base = {
+        "tap_x": 100,
+        "tap_y": 200,
+        "score": 90,
+        "subject_match": 90,
+        "target_evidence": "标题明确出现安徽广播电视台",
+    }
+    assert policy.accepts_detail(
+        {**base, "content_kind": "article", "is_article_result": True},
+        min_score=60,
+        min_subject_match=70,
+    )
+    assert not policy.accepts_detail(
+        {**base, "content_kind": "account", "is_article_result": False},
+        min_score=60,
+        min_subject_match=70,
+    )
+    assert not policy.accepts_detail(
+        {**base, "content_kind": "article", "is_article_result": True, "target_evidence": ""},
+        min_score=60,
+        min_subject_match=70,
+    )
+
+
 def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
     from core.mobile.collect import pipeline as pl
     from core.mobile.collect.source_links import SourceLinkResult

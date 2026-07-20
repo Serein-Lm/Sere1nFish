@@ -180,6 +180,7 @@ class RecordsListRequest(BaseModel):
     project_id: str | None = None
     target_id: str | None = None
     only_incremental: bool = Field(default=False, description="仅返回 new/changed 记录")
+    archived_only: bool = Field(default=False, description="仅返回已形成来源文档归档的记录")
     min_score: int | None = Field(
         default=None, ge=0, le=100, description="仅返回相关性分>=该值的记录"
     )

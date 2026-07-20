@@ -32,10 +32,19 @@ import './MainLayout.css'
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
 
+function cachedCurrentUser(): CurrentUser | null {
+  try {
+    const value = localStorage.getItem('userInfo')
+    return value ? JSON.parse(value) as CurrentUser : null
+  } catch {
+    return null
+  }
+}
+
 export default function MainLayout() {
   const [collapsed, setCollapsed] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null)
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(cachedCurrentUser)
   const navigate = useNavigate()
   const location = useLocation()
   const { theme, toggleTheme } = useTheme()
@@ -55,6 +64,7 @@ export default function MainLayout() {
 
   // 加载用户信息
   useEffect(() => {
+    if (currentUser) return
     const loadUserInfo = async () => {
       try {
         const user = await getCurrentUser()
@@ -70,7 +80,7 @@ export default function MainLayout() {
       }
     }
     loadUserInfo()
-  }, [])
+  }, [currentUser])
 
   const menuItems: MenuProps['items'] = useMemo(() => {
     const items: MenuProps['items'] = [

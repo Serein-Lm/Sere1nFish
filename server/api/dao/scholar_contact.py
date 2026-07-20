@@ -40,11 +40,15 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     arts = db[SCHOLAR_ARTICLES_COLLECTION]
     await arts.create_index("doc_id", unique=True)
     await arts.create_index([("project_id", 1), ("unit", 1)])
+    await arts.create_index([("project_id", 1), ("target_id", 1)])
+    await arts.create_index([("project_id", 1), ("target_ids", 1)])
     await arts.create_index("updated_at")
 
     cons = db[SCHOLAR_CONTACTS_COLLECTION]
     await cons.create_index("doc_id", unique=True)
     await cons.create_index([("project_id", 1), ("unit", 1)])
+    await cons.create_index([("project_id", 1), ("target_id", 1)])
+    await cons.create_index([("project_id", 1), ("target_ids", 1)])
     await cons.create_index([("project_id", 1), ("is_corresponding", 1)])
     await cons.create_index("email")
     await cons.create_index("updated_at")
@@ -58,6 +62,7 @@ async def upsert_articles_batch(
     direction: str,
     articles: list[dict[str, Any]],
     task_id: str = "",
+    target_id: str = "",
 ) -> dict[str, int]:
     """批量增量入库文章（articles 为 scholar_tools.Article asdict 列表）。"""
     if not articles:
@@ -77,6 +82,7 @@ async def upsert_articles_batch(
         set_fields = {
             "doc_id": doc_id,
             "project_id": project_id,
+            "target_id": target_id,
             "article_id": article_id,
             "title": a.get("title", ""),
             "year": a.get("year"),
@@ -103,8 +109,13 @@ async def upsert_articles_batch(
             "$set": set_fields,
             "$setOnInsert": set_on_insert,
         }
+        additions: dict[str, Any] = {}
         if task_id:
-            update["$addToSet"] = {"task_ids": task_id}
+            additions["task_ids"] = task_id
+        if target_id:
+            additions["target_ids"] = target_id
+        if additions:
+            update["$addToSet"] = additions
         result = await coll.update_one({"doc_id": doc_id}, update, upsert=True)
         if result.upserted_id is not None:
             inserted += 1
@@ -122,6 +133,7 @@ async def upsert_contacts_batch(
     direction: str,
     contacts: list[dict[str, Any]],
     task_id: str = "",
+    target_id: str = "",
 ) -> dict[str, int]:
     """批量增量入库联系渠道（contacts 为 scholar_tools.Contact asdict 列表）。"""
     if not contacts:
@@ -142,6 +154,7 @@ async def upsert_contacts_batch(
         set_fields = {
             "doc_id": doc_id,
             "project_id": project_id,
+            "target_id": target_id,
             "email": email,
             "article_id": article_id,
             "source_key": c.get("source_key", ""),
@@ -164,8 +177,13 @@ async def upsert_contacts_batch(
             "$setOnInsert": set_on_insert,
             "$max": {"is_corresponding": bool(c.get("is_corresponding"))},
         }
+        additions: dict[str, Any] = {}
         if task_id:
-            update["$addToSet"] = {"task_ids": task_id}
+            additions["task_ids"] = task_id
+        if target_id:
+            additions["target_ids"] = target_id
+        if additions:
+            update["$addToSet"] = additions
         result = await coll.update_one({"doc_id": doc_id}, update, upsert=True)
         if result.upserted_id is not None:
             inserted += 1
@@ -180,6 +198,7 @@ async def query_contacts(
     project_id: str,
     *,
     unit: str = "",
+    target_id: str = "",
     only_corresponding: bool = False,
     only_verified: bool = False,
     limit: int = 20,
@@ -188,6 +207,11 @@ async def query_contacts(
     query: dict[str, Any] = {"project_id": project_id}
     if unit:
         query["unit"] = unit
+    if target_id:
+        query["$or"] = [
+            {"target_ids": target_id},
+            {"target_id": target_id},
+        ]
     if only_corresponding:
         query["is_corresponding"] = True
     if only_verified:

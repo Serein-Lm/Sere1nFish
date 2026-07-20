@@ -1,6 +1,9 @@
 import { API_CONFIG } from '../config/api'
 import { redirectToLogin } from '../utils/authNavigation'
 
+const pendingGetRequests = new Map<string, Promise<unknown>>()
+const GET_DEDUP_GRACE_MS = 500
+
 export function getToken(): string | null {
   return localStorage.getItem('token')
 }
@@ -10,10 +13,11 @@ export function clearToken(): void {
   localStorage.removeItem('userInfo')
 }
 
-export async function apiFetch<T>(
+export function apiFetch<T>(
   path: string,
   init: RequestInit = {}
 ): Promise<T> {
+  const method = String(init.method || 'GET').toUpperCase()
   const headers = new Headers(init.headers)
   headers.set('Content-Type', 'application/json')
 
@@ -22,28 +26,49 @@ export async function apiFetch<T>(
     headers.set('Authorization', `Bearer ${token}`)
   }
 
-  const response = await fetch(`${API_CONFIG.BASE_URL}${path}`, {
-    ...init,
-    headers,
-  })
+  const execute = async (): Promise<T> => {
+    const response = await fetch(`${API_CONFIG.BASE_URL}${path}`, {
+      ...init,
+      headers,
+    })
 
-  if (response.status === 401) {
-    clearToken()
-    redirectToLogin()
-    throw new Error('Unauthorized')
+    if (response.status === 401) {
+      clearToken()
+      redirectToLogin()
+      throw new Error('Unauthorized')
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw new Error(text || `HTTP error! status: ${response.status}`)
+    }
+
+    const contentType = response.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      return (await response.json()) as T
+    }
+
+    return (await response.text()) as T
   }
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw new Error(text || `HTTP error! status: ${response.status}`)
-  }
+  if (method !== 'GET' || init.signal || init.body) return execute()
 
-  const contentType = response.headers.get('content-type')
-  if (contentType?.includes('application/json')) {
-    return (await response.json()) as T
-  }
-
-  return (await response.text()) as T
+  const cacheKey = `${token || 'anonymous'}:${path}`
+  const pending = pendingGetRequests.get(cacheKey) as Promise<T> | undefined
+  if (pending) return pending
+  const request = execute()
+  pendingGetRequests.set(cacheKey, request)
+  void request.then(
+    () => {
+      globalThis.setTimeout(() => {
+        if (pendingGetRequests.get(cacheKey) === request) {
+          pendingGetRequests.delete(cacheKey)
+        }
+      }, GET_DEDUP_GRACE_MS)
+    },
+    () => pendingGetRequests.delete(cacheKey),
+  )
+  return request
 }
 
 function resolveAuthenticatedResourceUrl(pathOrUrl: string): string {

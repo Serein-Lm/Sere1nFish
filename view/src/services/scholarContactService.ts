@@ -59,7 +59,7 @@ export interface ScholarUnitSummary {
 /** 分页查询学者联系（邮箱 → 文章 → 来源） */
 export async function listScholarContacts(
   projectId: string,
-  params?: { page?: number; page_size?: number; unit?: string; only_corresponding?: boolean; only_verified?: boolean }
+  params?: { page?: number; page_size?: number; unit?: string; target_id?: string; only_corresponding?: boolean; only_verified?: boolean }
 ): Promise<PaginatedResponse<ScholarContact>> {
   return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/scholar-contacts`, {
     method: 'POST',
@@ -68,6 +68,7 @@ export async function listScholarContacts(
       page: params?.page ?? 1,
       page_size: params?.page_size ?? 20,
       unit: params?.unit ?? '',
+      target_id: params?.target_id ?? '',
       only_corresponding: params?.only_corresponding ?? false,
       only_verified: params?.only_verified ?? false,
     }),

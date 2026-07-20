@@ -273,6 +273,7 @@ async def _dispatch_scholar_contact(task_id: str, project_id: str, params: dict)
     runtime_config = await get_runtime_app_config()
     await run_scholar_contact_collect(
         db, runtime_config, task_id=task_id, project_id=project_id,
+        target_id=params.get("target_id", ""),
         unit=params.get("unit", ""), direction=params.get("direction", ""),
         unit_en=params.get("unit_en", ""), limit=params.get("limit", 10),
         enable_chrome_pmc=params.get("enable_chrome_pmc", False),
@@ -350,12 +351,12 @@ async def list_project_bidding_records(
     page_size: int = Query(default=20, ge=1, le=100),
 ):
     """分页读取项目关联的招投标公告及 OSS 原文/附件引用。"""
-    from api.dao import bidding as bidding_dao
+    from api.services.bidding_records import list_project_bidding_records
 
     db = get_db()
     if not await projects_dao.get_project(db, project_id):
         raise HTTPException(404, "项目不存在")
-    items, total = await bidding_dao.query_records(
+    items, total = await list_project_bidding_records(
         db,
         project_id=project_id,
         target_id=target_id,

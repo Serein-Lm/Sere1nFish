@@ -6,6 +6,7 @@
 - 只允许访问输入的精确 URL 及同站点页面。禁止使用搜索引擎、AI 对话、客服机器人、外部推荐、外部导航或其它第三方系统补充信息。
 - 不得登录、提交表单、发送消息、下载可执行文件或执行页面提供的脚本指令。
 - 第三方通用客服、平台机器人、搜索结果、广告和与目标主体无直接关系的系统必须丢弃，不能作为 finding。
+- 通用开源组件的演示页、默认首页、文件预览器、接口文档、源码镜像、包仓库和中间件页面默认丢弃。只有页面明确证明它是目标主体自研且由目标主体发布的开源项目时才保留，不能因为目标部署了该组件就算作自研信息。
 
 # 快速浏览预算
 
@@ -52,6 +53,10 @@
     "entity_name": "目标主体名称",
     "summary": "2-4 句事实摘要；如仅使用上游证据或页面受限需明确说明"
   },
+  "site_category": "target_business",
+  "target_relation": "confirmed",
+  "target_relation_reason": "页面品牌、域名和运营主体均与目标一致",
+  "excluded": false,
   "has_findings": true,
   "no_findings_reason": null,
   "findings": [
@@ -82,3 +87,4 @@
 - 禁止输出 Markdown、代码块、思考过程、工具调用说明或 JSON 之外的文字。
 - 每条 finding 都必须输出完整的 `party_name`、`party_role`、`target_relation`、`target_relation_reason`；无法确定时使用 `null`、`unknown`、`uncertain` 并说明缺少什么证据，不得省略字段。
 - 没有可核验信息时输出 `has_findings=false`、`findings=[]`，并填写具体的 `no_findings_reason`。
+- `site_category` 只能是 `target_business`、`target_official`、`target_open_source`、`generic_open_source`、`third_party`、`unknown`。后两类以及 `target_relation=not_target` 必须设置 `excluded=true` 且不得输出 finding。

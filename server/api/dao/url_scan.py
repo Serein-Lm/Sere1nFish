@@ -8,6 +8,7 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.db.collections import URL_SCAN_RESULTS_COLLECTION
+from api.utils.url_identity import endpoint_identity
 
 
 def _now() -> datetime:
@@ -41,6 +42,13 @@ async def upsert_terminal_result(
     has_findings: bool = False,
     short_circuited: bool = False,
     classification: str = "",
+    finding_count: int = 0,
+    high_risk_count: int = 0,
+    max_attention_score: int = 0,
+    intro: dict[str, Any] | None = None,
+    screenshot_object_id: str = "",
+    screenshot_url: str = "",
+    excluded: bool = False,
 ) -> dict[str, Any]:
     """Persist one final URL outcome without duplicating it on restart."""
     now = _now()
@@ -59,6 +67,14 @@ async def upsert_terminal_result(
         "has_findings": bool(has_findings),
         "short_circuited": bool(short_circuited),
         "classification": str(classification or ""),
+        "endpoint_key": endpoint_identity(url),
+        "finding_count": max(0, int(finding_count or 0)),
+        "high_risk_count": max(0, int(high_risk_count or 0)),
+        "max_attention_score": max(0, min(100, int(max_attention_score or 0))),
+        "intro": dict(intro or {}),
+        "screenshot_object_id": str(screenshot_object_id or ""),
+        "screenshot_url": str(screenshot_url or ""),
+        "excluded": bool(excluded),
         "updated_at": now,
         "completed_at": now,
     }

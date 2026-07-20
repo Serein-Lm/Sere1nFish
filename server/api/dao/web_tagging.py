@@ -79,7 +79,7 @@ async def insert_web_tagging_result(
 async def list_web_tagging_results(
     db: AsyncIOMotorDatabase,
     project_id: str,
-    limit: int = 50,
+    limit: int | None = 50,
     skip: int = 0,
     source: str = "",
     target_id: str = "",
@@ -125,11 +125,13 @@ async def list_web_tagging_results(
         }},
         # 有 findings 的在前，然后按最高分降序，最后按时间降序
         {"$sort": {"_has_findings": -1, "_max_score": -1, "created_at": -1}},
-        {"$skip": skip},
-        {"$limit": limit},
-        # 去掉临时字段
-        {"$project": {"_has_findings": 0, "_max_score": 0}},
     ]
+    if skip:
+        pipeline.append({"$skip": skip})
+    if limit is not None:
+        pipeline.append({"$limit": max(1, int(limit))})
+    # 去掉临时字段
+    pipeline.append({"$project": {"_has_findings": 0, "_max_score": 0}})
 
     items = [doc async for doc in db[WEB_TAGS_COLLECTION].aggregate(pipeline)]
     return items, total

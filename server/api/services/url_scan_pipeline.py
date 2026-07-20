@@ -16,7 +16,6 @@ URL 扫描 + 话术生成 Pipeline
 from __future__ import annotations
 
 import asyncio
-import uuid
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +38,7 @@ from api.services.info_collection.tuning import (
     MAX_URL_SCAN_CONCURRENCY,
 )
 from api.utils.json_extract import extract_json_object
+from api.utils.url_identity import endpoint_identity, prefer_https_url
 
 from core.logger import get_logger
 from core.stream import Stage, Item, RetryPolicy, DeadLetter
@@ -188,6 +188,7 @@ class _UrlScanStage(Stage):
                         "pipeline_id": ctx.pipeline.pipeline_id,
                         "item_id": item.item_id,
                         "attempt": item.attempt,
+                        "persist_legacy_result": False,
                     },
                 )
             )
@@ -325,13 +326,17 @@ class UrlScanPipeline:
             url = normalize_url(line)
             if url:
                 urls.append(url)
-        # 去重保序
-        seen = set()
-        deduped = []
+        # HTTP/HTTPS 的默认端口属于同一目标；保留 HTTPS 版本。
+        positions: dict[str, int] = {}
+        deduped: list[str] = []
         for u in urls:
-            if u not in seen:
-                seen.add(u)
+            identity = endpoint_identity(u)
+            if identity not in positions:
+                positions[identity] = len(deduped)
                 deduped.append(u)
+                continue
+            index = positions[identity]
+            deduped[index] = prefer_https_url(deduped[index], u)
         logger.debug(f"[parse] 原始行数={len(content.strip().splitlines())}, 有效URL={len(urls)}, 去重后={len(deduped)}")
         return deduped
 
@@ -583,7 +588,10 @@ class UrlScanPipeline:
 
             for f in raw_findings:
                 finding = {
-                    "finding_id": f.get("finding_id") or uuid.uuid4().hex[:12],
+                    # The pipeline assigns a deterministic ID after project/source
+                    # attribution is complete. Keeping this empty here prevents a
+                    # random parser ID from defeating idempotent rescans.
+                    "finding_id": f.get("finding_id") or "",
                     "url": url,
                     "domain": intro.get("domain", ""),
                     "site_name": intro.get("site_name"),
@@ -718,6 +726,8 @@ class UrlScanPipeline:
         source: str = "web_tagging",
         progress_source: str = "",
         source_context_by_url: dict[str, str] | None = None,
+        source_metadata_by_url: dict[str, dict[str, Any]] | None = None,
+        target_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         完整流水线：url.txt → 探活 → 扫描 → 提取 → 话术生成 → 存储。
@@ -796,11 +806,21 @@ class UrlScanPipeline:
                 for item in probed_alive
                 if (normalized := normalize_url(str(item.get("url") or "")))
             }
-            normalized_context = {
-                normalized: str(context)
-                for raw_url, context in (source_context_by_url or {}).items()
-                if (normalized := normalize_url(str(raw_url))) and str(context).strip()
-            }
+            normalized_context: dict[str, str] = {}
+            for raw_url, context in (source_context_by_url or {}).items():
+                normalized = normalize_url(str(raw_url))
+                value = str(context).strip()
+                if not normalized or not value:
+                    continue
+                normalized_context[normalized] = value
+                normalized_context[endpoint_identity(normalized)] = value
+            normalized_source_metadata: dict[str, dict[str, Any]] = {}
+            for raw_url, metadata in (source_metadata_by_url or {}).items():
+                normalized = normalize_url(str(raw_url))
+                if not normalized or not isinstance(metadata, dict):
+                    continue
+                normalized_source_metadata[normalized] = dict(metadata)
+                normalized_source_metadata[endpoint_identity(normalized)] = dict(metadata)
             alive = []
             for url in urls:
                 if url not in known_alive_set and url not in probed_by_url:
@@ -814,8 +834,20 @@ class UrlScanPipeline:
                     if url in known_alive_set
                     else dict(probed_by_url[url])
                 )
-                if normalized_context.get(url):
-                    info["source_context"] = normalized_context[url]
+                source_context = normalized_context.get(
+                    url,
+                    normalized_context.get(endpoint_identity(url), ""),
+                )
+                if source_context:
+                    info["source_context"] = source_context
+                source_metadata = normalized_source_metadata.get(
+                    url,
+                    normalized_source_metadata.get(endpoint_identity(url), {}),
+                )
+                if source_metadata:
+                    info.update(source_metadata)
+                if target_context:
+                    info["target_context"] = dict(target_context)
                 if target_id:
                     info["target_id"] = target_id
                 alive.append(info)
@@ -917,6 +949,23 @@ class UrlScanPipeline:
                     classification=str(
                         meta.get("classification") or data.get("classification") or ""
                     ),
+                    finding_count=len(data.get("findings") or []),
+                    high_risk_count=sum(
+                        1
+                        for finding in data.get("findings") or []
+                        if int(finding.get("attention_score") or 0) >= 70
+                    ),
+                    max_attention_score=max(
+                        (
+                            int(finding.get("attention_score") or 0)
+                            for finding in data.get("findings") or []
+                        ),
+                        default=0,
+                    ),
+                    intro=dict(data.get("intro") or {}),
+                    screenshot_object_id=str(data.get("screenshot_object_id") or ""),
+                    screenshot_url=str(data.get("screenshot_url") or ""),
+                    excluded=bool(data.get("excluded")),
                 )
                 async with progress_lock:
                     progress_counts["processed"] += 1
@@ -956,6 +1005,8 @@ class UrlScanPipeline:
                     f for f in url_findings
                     if f.get("attention_score", 0) >= min_attention_score
                 ]
+                result.setdefault("data", {})["findings"] = url_findings
+                result["data"]["has_findings"] = bool(url_findings)
                 unified = [
                     {
                         **f,
@@ -963,12 +1014,24 @@ class UrlScanPipeline:
                         "project_id": project_id,
                         "source": source,
                         **({"target_id": target_id} if target_id else {}),
+                        **dict(
+                            normalized_source_metadata.get(
+                                normalize_url(str(result.get("url") or "")),
+                                normalized_source_metadata.get(
+                                    endpoint_identity(str(result.get("url") or "")),
+                                    {},
+                                ),
+                            )
+                        ),
                     }
                     for f in url_findings
                 ]
                 if unified:
+                    for finding in unified:
+                        if not finding.get("finding_id"):
+                            finding["finding_id"] = findings_dao.stable_finding_id(finding)
                     all_findings.extend(unified)
-                    await findings_dao.insert_findings_batch(self.db, unified)
+                    await findings_dao.upsert_findings_batch(self.db, unified)
                     if enable_copywriting:
                         copywriting_candidates = sorted(
                             unified,

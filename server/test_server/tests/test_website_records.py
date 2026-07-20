@@ -112,7 +112,7 @@ async def test_website_records_join_url_scan_findings_and_legacy(
     )
 
     async def list_legacy(*_args: Any, **_kwargs: Any):
-        return [], 2
+        return [], 0
 
     monkeypatch.setattr(
         website_records.web_tagging_dao,
@@ -126,7 +126,7 @@ async def test_website_records_join_url_scan_findings_and_legacy(
         limit=10,
     )
 
-    assert total == 3
+    assert total == 1
     assert len(items) == 1
     assert items[0]["_id"] == scan_id
     assert items[0]["data"]["intro"]["site_name"] == "示例站点"
@@ -267,6 +267,14 @@ async def test_website_records_sort_sources_together_before_pagination_and_filte
         "https://legacy.example",
         "https://low.example",
     ]
+
+    first_page, first_page_total = await website_records.list_website_records(
+        db,
+        project_id=project_id,
+        limit=1,
+    )
+    assert len(first_page) == 1
+    assert first_page_total == total
 
     filtered, filtered_total = await website_records.list_website_records(
         db,

@@ -48,6 +48,9 @@ class ImageUnderstanding(BaseModel):
     description: str = ""
     visible_text: str = ""
     contacts: list[VisualContact] = Field(default_factory=list)
+    is_key_evidence: bool = False
+    importance_score: int = Field(default=0, ge=0, le=100)
+    archive_reason: str = ""
 
 
 class ImageUnderstandingBatch(BaseModel):
@@ -237,7 +240,10 @@ async def _analyze_image_batch(
             "text": (
                 "按图片前的 index 逐张识别：给出主要内容、所有清晰可见文字；如果图片中明确出现"
                 "手机号、座机、邮箱、微信号或 QQ，提取联系方式及其邻近上下文。看不清就留空，"
-                "不得猜测。每张输入图片必须返回一个同 index 的 item。"
+                "不得猜测。还要判断图片是否包含联系方式、关键人物/单位、业务流程、公告数据、"
+                "核心图表或其它文章关键证据；装饰图、头像、二维码外的品牌重复图、分隔图和无信息"
+                "配图不得标为关键。输出 is_key_evidence、0-100 importance_score 和简短 archive_reason。"
+                "每张输入图片必须返回一个同 index 的 item。"
             ),
         }
     ]
@@ -272,7 +278,7 @@ async def analyze_article_images(
     task_id: str = "",
     batch_size: int = 4,
 ) -> tuple[list[dict[str, Any]], str]:
-    """识别全部文章原图；单批失败不影响原图永久保存。"""
+    """识别全部文章原图；调用侧据识别结果只归档关键证据图片。"""
     if not images:
         return [], ""
     batches = [images[index : index + batch_size] for index in range(0, len(images), batch_size)]
@@ -301,6 +307,15 @@ async def analyze_article_images(
             "description": str(by_index.get(image.index, {}).get("description") or ""),
             "visible_text": str(by_index.get(image.index, {}).get("visible_text") or ""),
             "contacts": list(by_index.get(image.index, {}).get("contacts") or []),
+            "is_key_evidence": bool(
+                by_index.get(image.index, {}).get("is_key_evidence")
+            ),
+            "importance_score": _clamp_score(
+                by_index.get(image.index, {}).get("importance_score")
+            ),
+            "archive_reason": str(
+                by_index.get(image.index, {}).get("archive_reason") or ""
+            ),
         }
         for image in images
     ]

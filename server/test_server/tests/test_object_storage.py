@@ -97,6 +97,7 @@ async def test_oss_presign_does_not_override_content_type() -> None:
         expires_seconds=120,
         filename="object.png",
         content_type="image/png",
+        inline=True,
     )
 
     assert access.mode == "redirect"
@@ -105,7 +106,7 @@ async def test_oss_presign_does_not_override_content_type() -> None:
         "bucket": "bucket",
         "key": "object.png",
         "response_content_disposition": (
-            "attachment; filename=\"download.png\"; filename*=UTF-8''object.png"
+            "inline; filename=\"download.png\"; filename*=UTF-8''object.png"
         ),
     }
 

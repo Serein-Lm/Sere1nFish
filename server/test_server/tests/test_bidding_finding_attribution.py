@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from api.models.web_tagging_schema import WebTaggingOutput
 from api.services.url_scan_pipeline import UrlScanPipeline
+from api.services.bidding_records import is_actionable_bidding_contact
 
 
 def _tagging_payload() -> dict:
@@ -62,3 +63,18 @@ def test_url_scan_preserves_bidding_party_attribution_in_findings() -> None:
     assert findings[0]["party_role"] == "agency"
     assert findings[0]["target_relation"] == "not_target"
     assert "代理机构" in findings[0]["target_relation_reason"]
+
+
+def test_bidding_contact_view_rejects_platform_links_and_support_contacts() -> None:
+    assert is_actionable_bidding_contact(
+        {"channel": "phone", "value": "0551-12345678", "party_role": "agency"}
+    )
+    assert not is_actionable_bidding_contact(
+        {"channel": "link", "value": "https://example.com/download"}
+    )
+    assert not is_actionable_bidding_contact(
+        {"channel": "phone", "value": "400-000-0000", "role": "support"}
+    )
+    assert not is_actionable_bidding_contact(
+        {"channel": "phone", "value": "400-000-0000", "party_role": "publisher"}
+    )

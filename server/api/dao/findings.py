@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import UpdateOne
 
 from api.db.collections import FINDINGS_COLLECTION, COPYWRITINGS_COLLECTION, PROFILES_COLLECTION
+from api.utils.url_identity import endpoint_identity
 
 
 def _now() -> datetime:
@@ -36,6 +38,61 @@ async def insert_findings_batch(db: AsyncIOMotorDatabase, findings: list[dict[st
         f.setdefault("created_at", now)
     result = await db[FINDINGS_COLLECTION].insert_many(findings)
     return len(result.inserted_ids)
+
+
+def stable_finding_id(finding: dict[str, Any]) -> str:
+    """Build a stable identity for one project/source/evidence contact."""
+    parts = [
+        str(finding.get("project_id") or ""),
+        str(finding.get("target_id") or ""),
+        str(finding.get("source") or ""),
+        str(finding.get("bidding_record_id") or ""),
+        str(finding.get("source_document_id") or ""),
+        endpoint_identity(
+            str(finding.get("url") or finding.get("source_url") or "")
+        ),
+        str(finding.get("channel") or ""),
+        str(finding.get("value") or "").strip().casefold(),
+        str(finding.get("party_name") or "").strip().casefold(),
+        str(finding.get("type") or ""),
+    ]
+    digest = hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:24]
+    return "fnd_" + digest
+
+
+async def upsert_findings_batch(
+    db: AsyncIOMotorDatabase,
+    findings: list[dict[str, Any]],
+) -> int:
+    """Idempotently refresh findings while retaining task and evidence history."""
+    if not findings:
+        return 0
+    now = _now()
+    operations: list[UpdateOne] = []
+    for raw in findings:
+        finding = dict(raw)
+        finding_id = str(finding.get("finding_id") or stable_finding_id(finding))
+        finding["finding_id"] = finding_id
+        finding["updated_at"] = now
+        task_id = str(finding.get("task_id") or "")
+        evidence = str(finding.get("evidence") or "").strip()
+        add_to_set: dict[str, Any] = {}
+        if task_id:
+            add_to_set["task_ids"] = task_id
+        if evidence:
+            add_to_set["evidence_history"] = evidence[:4_000]
+        update: dict[str, Any] = {
+            "$set": finding,
+            "$setOnInsert": {"created_at": now},
+        }
+        if add_to_set:
+            update["$addToSet"] = add_to_set
+        operations.append(UpdateOne({"finding_id": finding_id}, update, upsert=True))
+    collection = db[FINDINGS_COLLECTION]
+    if not hasattr(collection, "bulk_write"):
+        return await insert_findings_batch(db, findings)
+    result = await collection.bulk_write(operations, ordered=False)
+    return int(result.upserted_count + result.modified_count)
 
 
 async def query_findings(

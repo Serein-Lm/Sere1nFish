@@ -277,6 +277,7 @@ async def list_records(payload: RecordsListRequest):
         project_id=payload.project_id,
         target_id=payload.target_id,
         only_incremental=payload.only_incremental,
+        archived_only=payload.archived_only,
         min_score=payload.min_score,
         skip=payload.skip,
         limit=payload.limit,

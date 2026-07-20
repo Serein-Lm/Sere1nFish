@@ -35,6 +35,7 @@ async def list_scholar_contacts(
     db = get_db()
     items, total = await scholar_dao.query_contacts(
         db, project_id, unit=body.unit,
+        target_id=body.target_id,
         only_corresponding=body.only_corresponding,
         only_verified=body.only_verified,
         limit=body.limit, skip=body.skip,

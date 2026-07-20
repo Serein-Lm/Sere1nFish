@@ -39,6 +39,7 @@ from core.mobile.collect.contacts import (
     build_contact_findings,
     grade_with_contacts,
 )
+from core.mobile.collect.candidate_policy import CandidatePolicyRegistry
 from api.services.source_documents import ingest_source_url
 
 logger = get_logger("mobile_collect")
@@ -196,11 +197,21 @@ class _CollectStage(Stage):
         st = ctx.state
         fields = st["extract_fields"]
         if fields:
+            target = st.get("target") or {}
+            policy = CandidatePolicyRegistry.resolve(
+                str(st.get("source_link_strategy") or "none")
+            )
             return await triage_screenshot(
                 image_base64,
                 fields=fields,
                 app_name=st["app_name"],
                 keyword=keyword,
+                target_name=str(target.get("canonical_name") or ""),
+                target_aliases=list(target.get("aliases") or []),
+                policy_instructions=policy.analysis_instructions(
+                    target_name=str(target.get("canonical_name") or keyword),
+                    aliases=list(target.get("aliases") or []),
+                ),
                 project_id=st["project_id"],
                 task_id=st["run_task_id"],
             )
@@ -256,6 +267,33 @@ class _CollectStage(Stage):
             shot_ids: list[str] = []
             shot_urls: list[str] = []
             source_url: str | None = None
+
+            async def _persist_pending_handoff(reason: str = "") -> None:
+                """Keep the extracted URL retryable without scrolling the phone."""
+                await ctx.emit(
+                    "persist",
+                    {
+                        "fields": candidate.get("fields") or {},
+                        "score": candidate.get("score"),
+                        "subject_match": candidate.get("subject_match"),
+                        "score_reason": candidate.get("score_reason") or "",
+                        "source_url": source_url,
+                        "source_type": "wechat_article",
+                        "source_archive_status": "pending",
+                        "source_archive_error": reason,
+                        "target_id": str((collect_target or {}).get("target_id") or ""),
+                        "target_name": str((collect_target or {}).get("canonical_name") or ""),
+                        "keyword": keyword,
+                        "screenshot_id": shot_ids[0] if shot_ids else "",
+                        "screenshot_url": shot_urls[0] if shot_urls else "",
+                        "screenshot_ids": shot_ids,
+                        "screenshot_urls": shot_urls,
+                        "discovery_screenshot_ids": shot_ids,
+                        "discovery_screenshot_urls": shot_urls,
+                        "discovery_fields": candidate.get("fields") or {},
+                        "detail": True,
+                    },
+                )
             b64, sid, url = await self._capture_save(
                 ctx, keyword, note=f"detail kw={keyword} score={candidate.get('score')}"
             )
@@ -265,6 +303,7 @@ class _CollectStage(Stage):
             prev_sig = _image_signature(b64)
 
             source_link_strategy = str(st.get("source_link_strategy") or "none")
+            candidate_policy = CandidatePolicyRegistry.resolve(source_link_strategy)
             if source_link_strategy != "none" and not stop.is_set():
                 link_result = await asyncio.to_thread(
                     extract_source_link, device_id, source_link_strategy
@@ -305,8 +344,15 @@ class _CollectStage(Stage):
                         },
                     )
 
-            # 已获得真实 URL 时交给来源文档浏览器池。成功后浏览器负责全文、原图、
-            # 截图与结构化，手机立即返回列表；失败才继续原有手机逐屏深采。
+            if (
+                source_link_strategy != "none"
+                and not source_url
+                and not candidate_policy.allow_mobile_detail_fallback
+            ):
+                return
+
+            # 已获得真实 URL 时交给来源文档浏览器池。微信文章策略无论成功或失败
+            # 都立即释放手机；失败仅保留待重试 URL，不回退逐屏深采。
             if source_url and not stop.is_set():
                 try:
                     source_result = await asyncio.wait_for(
@@ -326,6 +372,7 @@ class _CollectStage(Stage):
                                 "tap": [tap_x, tap_y],
                             },
                             persist=not bool(st.get("dry_run")),
+                            min_subject_match=int(st.get("min_subject_match", 70)),
                         ),
                         timeout=_SOURCE_DOCUMENT_INGEST_TIMEOUT_SECONDS,
                     )
@@ -385,6 +432,12 @@ class _CollectStage(Stage):
                             },
                         )
                         return
+                    if not candidate_policy.allow_mobile_detail_fallback:
+                        if not source_result.get("rejected"):
+                            await _persist_pending_handoff(
+                                str(source_result.get("reason") or "浏览器归档暂未完成")
+                            )
+                        return
                 except Exception as exc:  # noqa: BLE001
                     ctx.logger.warning(
                         f"[collect] 来源文档浏览器读取失败，回退手机深采: {exc}"
@@ -398,6 +451,9 @@ class _CollectStage(Stage):
                         event="collect_source_document_fallback",
                         data={"keyword": keyword, "url": source_url, "error": str(exc)},
                     )
+                    if not candidate_policy.allow_mobile_detail_fallback:
+                        await _persist_pending_handoff(str(exc))
+                        return
 
             # 详情页滑动到底: 逐屏截图, 需连续两屏几乎一致才判定到底(避免单帧误判提前退出)
             reached_bottom = False
@@ -508,6 +564,9 @@ class _CollectStage(Stage):
         no_new_stop_threshold = int(st.get("no_new_stop_threshold", 2))
         task_def_id = st["task_def_id"]
         dedup_key_fields = st["dedup_key_fields"]
+        candidate_policy = CandidatePolicyRegistry.resolve(
+            str(st.get("source_link_strategy") or "none")
+        )
 
         direct_launch = bool(st.get("direct_launch_app"))
         if direct_launch and not bool(st.get("direct_app_ready")):
@@ -595,7 +654,7 @@ class _CollectStage(Stage):
                 )
                 shots += 1
                 records = await self._analyze_list(ctx, keyword, b64)
-                # 列表全收: 每条(浅)结构化入库
+                # 普通来源保留列表候选；文章链接来源只持久化浏览器验证后的详情。
                 new_this_screen = 0
                 for rec in records:
                     key = collect_dao.stable_record_id(
@@ -604,23 +663,28 @@ class _CollectStage(Stage):
                     if key not in seen_keys:
                         new_this_screen += 1
                         seen_keys.add(key)
-                    await ctx.emit(
-                        "persist",
-                        {
-                            "fields": rec["fields"],
-                            "score": rec.get("score"),
-                            "subject_match": rec.get("subject_match"),
-                            "score_reason": rec.get("score_reason", ""),
-                            "source_url": rec.get("source_url"),
-                            "target_id": str((collect_target or {}).get("target_id") or ""),
-                            "target_name": str((collect_target or {}).get("canonical_name") or ""),
-                            "keyword": keyword,
-                            "screenshot_id": sid,
-                            "screenshot_url": url,
-                            "detail": False,
-                        },
-                    )
-                    emitted += 1
+                    if candidate_policy.persist_list_candidates:
+                        await ctx.emit(
+                            "persist",
+                            {
+                                "fields": rec["fields"],
+                                "score": rec.get("score"),
+                                "subject_match": rec.get("subject_match"),
+                                "score_reason": rec.get("score_reason", ""),
+                                "source_url": rec.get("source_url"),
+                                "target_id": str(
+                                    (collect_target or {}).get("target_id") or ""
+                                ),
+                                "target_name": str(
+                                    (collect_target or {}).get("canonical_name") or ""
+                                ),
+                                "keyword": keyword,
+                                "screenshot_id": sid,
+                                "screenshot_url": url,
+                                "detail": False,
+                            },
+                        )
+                        emitted += 1
 
                 obs_log(
                     f"列表分诊 kw={keyword or '-'} idx={i} 候选 {len(records)} 条",
@@ -650,10 +714,11 @@ class _CollectStage(Stage):
                             r,
                         )
                         for r in records
-                        if (r.get("subject_match") or 0) >= min_subject_match
-                        and (r.get("score") or 0) >= min_score_to_detail
-                        and isinstance(r.get("tap_x"), int)
-                        and isinstance(r.get("tap_y"), int)
+                        if candidate_policy.accepts_detail(
+                            r,
+                            min_score=min_score_to_detail,
+                            min_subject_match=min_subject_match,
+                        )
                     ]
                     candidates.sort(
                         key=lambda item: (

@@ -44,6 +44,22 @@ export interface BiddingRecord {
   archive_errors?: string[]
   query_names?: string[]
   target_ids?: string[]
+  contacts: Array<{
+    finding_id?: string
+    channel?: string
+    value: string
+    label?: string
+    party_name?: string
+    party_role?: string
+    role?: string
+    context?: string
+    evidence?: string
+    attention_score?: number
+  }>
+  contact_count: number
+  overview?: string
+  original_url?: string
+  max_contact_score?: number
   updated_at?: string
 }
 

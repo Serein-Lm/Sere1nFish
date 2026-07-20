@@ -1,6 +1,7 @@
 """Target 领域服务：统一解析公司/机构实体并建立项目关联。"""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -10,8 +11,12 @@ from api.dao import mobile_collect as mobile_collect_dao
 from api.dao import targets as targets_dao
 from api.db.collections import (
     FOFA_ASSETS_COLLECTION,
+    FINDINGS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
+    SCHOLAR_CONTACTS_COLLECTION,
     SOURCE_DOCUMENT_LINKS_COLLECTION,
+    TASKS_COLLECTION,
+    XHS_NOTES_COLLECTION,
 )
 
 
@@ -171,7 +176,7 @@ async def list_project_target_summaries(
     target_ids = [str(item.get("target_id") or "") for item in relations]
     if not target_ids:
         return []
-    counts = await db[SOURCE_DOCUMENT_LINKS_COLLECTION].aggregate(
+    document_counts_job = db[SOURCE_DOCUMENT_LINKS_COLLECTION].aggregate(
         [
             {"$match": {"target_id": {"$in": target_ids}}},
             {
@@ -191,8 +196,7 @@ async def list_project_target_summaries(
             },
         ]
     ).to_list(len(target_ids))
-    by_target = {str(item.get("_id") or ""): item for item in counts}
-    project_document_counts = await db[SOURCE_DOCUMENT_LINKS_COLLECTION].aggregate(
+    project_document_counts_job = db[SOURCE_DOCUMENT_LINKS_COLLECTION].aggregate(
         [
             {
                 "$match": {
@@ -209,11 +213,7 @@ async def list_project_target_summaries(
             {"$project": {"document_count": {"$size": "$document_ids"}}},
         ]
     ).to_list(len(target_ids))
-    project_docs_by_target = {
-        str(item.get("_id") or ""): int(item.get("document_count") or 0)
-        for item in project_document_counts
-    }
-    record_counts = await db[MOBILE_COLLECT_RECORDS_COLLECTION].aggregate(
+    record_counts_job = db[MOBILE_COLLECT_RECORDS_COLLECTION].aggregate(
         [
             {
                 "$match": {
@@ -224,11 +224,7 @@ async def list_project_target_summaries(
             {"$group": {"_id": "$target_id", "record_count": {"$sum": 1}}},
         ]
     ).to_list(len(target_ids))
-    records_by_target = {
-        str(item.get("_id") or ""): int(item.get("record_count") or 0)
-        for item in record_counts
-    }
-    asset_counts = await db[FOFA_ASSETS_COLLECTION].aggregate(
+    asset_counts_job = db[FOFA_ASSETS_COLLECTION].aggregate(
         [
             {
                 "$match": {
@@ -279,10 +275,156 @@ async def list_project_target_summaries(
             },
         ]
     ).to_list(len(target_ids))
-    assets_by_target = {
-        str(item.get("_id") or ""): item for item in asset_counts
+    finding_counts_job = db[FINDINGS_COLLECTION].aggregate(
+        [
+            {
+                "$match": {
+                    "project_id": project_id,
+                    "target_id": {"$in": target_ids},
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$target_id",
+                    "finding_count": {"$sum": 1},
+                    "high_score_finding_count": {
+                        "$sum": {
+                            "$cond": [
+                                {"$gte": [{"$ifNull": ["$attention_score", 0]}, 70]},
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                }
+            },
+        ]
+    ).to_list(len(target_ids))
+    from api.services.website_records import count_project_website_records_by_target
+
+    website_counts_job = count_project_website_records_by_target(
+        db,
+        project_id=project_id,
+        target_ids=target_ids,
+    )
+    xhs_counts_job = db[XHS_NOTES_COLLECTION].aggregate(
+        [
+            {
+                "$match": {
+                    "project_id": project_id,
+                    "target_id": {"$in": target_ids},
+                }
+            },
+            {"$group": {"_id": "$target_id", "xhs_count": {"$sum": 1}}},
+        ]
+    ).to_list(len(target_ids))
+    from api.services.bidding_records import count_project_bidding_records_by_target
+
+    bidding_counts_job = count_project_bidding_records_by_target(
+        db,
+        project_id=project_id,
+        target_ids=target_ids,
+    )
+    scholar_counts_job = db[SCHOLAR_CONTACTS_COLLECTION].aggregate(
+        [
+            {
+                "$match": {
+                    "project_id": project_id,
+                    "$or": [
+                        {"target_ids": {"$in": target_ids}},
+                        {"target_id": {"$in": target_ids}},
+                    ],
+                }
+            },
+            {
+                "$set": {
+                    "_resolved_target_ids": {
+                        "$setUnion": [
+                            {
+                                "$cond": [
+                                    {"$isArray": "$target_ids"},
+                                    "$target_ids",
+                                    [],
+                                ]
+                            },
+                            {
+                                "$cond": [
+                                    {"$ne": [{"$ifNull": ["$target_id", ""]}, ""]},
+                                    ["$target_id"],
+                                    [],
+                                ]
+                            },
+                        ]
+                    }
+                }
+            },
+            {"$unwind": "$_resolved_target_ids"},
+            {"$match": {"_resolved_target_ids": {"$in": target_ids}}},
+            {
+                "$group": {
+                    "_id": "$_resolved_target_ids",
+                    "scholar_contact_count": {"$sum": 1},
+                }
+            },
+        ]
+    ).to_list(len(target_ids))
+    task_ids = list(
+        {
+            str(task_id)
+            for relation in relations
+            for task_id in [
+                *(relation.get("run_task_ids") or []),
+                *(relation.get("task_def_ids") or []),
+            ]
+            if str(task_id or "").strip()
+        }
+    )
+    task_docs_job = db[TASKS_COLLECTION].find(
+        {"project_id": project_id, "task_id": {"$in": task_ids}},
+        {"_id": 0, "task_id": 1, "status": 1, "updated_at": 1, "created_at": 1},
+    ).to_list(max(1, len(task_ids)))
+    (
+        counts,
+        project_document_counts,
+        record_counts,
+        asset_counts,
+        finding_counts,
+        website_counts,
+        xhs_counts,
+        bidding_counts,
+        scholar_counts,
+        task_docs,
+    ) = await asyncio.gather(
+        document_counts_job,
+        project_document_counts_job,
+        record_counts_job,
+        asset_counts_job,
+        finding_counts_job,
+        website_counts_job,
+        xhs_counts_job,
+        bidding_counts_job,
+        scholar_counts_job,
+        task_docs_job,
+    )
+
+    def _by_id(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {str(item.get("_id") or ""): item for item in items}
+
+    by_target = _by_id(counts)
+    assets_by_target = _by_id(asset_counts)
+    findings_by_target = _by_id(finding_counts)
+    xhs_by_target = _by_id(xhs_counts)
+    scholars_by_target = _by_id(scholar_counts)
+    project_docs_by_target = {
+        str(item.get("_id") or ""): int(item.get("document_count") or 0)
+        for item in project_document_counts
     }
-    return [
+    records_by_target = {
+        str(item.get("_id") or ""): int(item.get("record_count") or 0)
+        for item in record_counts
+    }
+    tasks_by_id = {str(item.get("task_id") or ""): item for item in task_docs}
+    summaries = [
         {
             **relation,
             "document_count": int(
@@ -314,6 +456,65 @@ async def list_project_target_summaries(
                     "alive_asset_count", 0
                 )
             ),
+            "finding_count": int(
+                findings_by_target.get(str(relation.get("target_id") or ""), {}).get(
+                    "finding_count", 0
+                )
+            ),
+            "high_score_finding_count": int(
+                findings_by_target.get(str(relation.get("target_id") or ""), {}).get(
+                    "high_score_finding_count", 0
+                )
+            ),
+            "website_count": int(
+                website_counts.get(str(relation.get("target_id") or ""), 0)
+            ),
+            "xhs_count": int(
+                xhs_by_target.get(str(relation.get("target_id") or ""), {}).get(
+                    "xhs_count", 0
+                )
+            ),
+            "wechat_count": project_docs_by_target.get(
+                str(relation.get("target_id") or ""), 0
+            ),
+            "bidding_count": int(
+                bidding_counts.get(str(relation.get("target_id") or ""), 0)
+            ),
+            "scholar_contact_count": int(
+                scholars_by_target.get(str(relation.get("target_id") or ""), {}).get(
+                    "scholar_contact_count", 0
+                )
+            ),
+            "latest_task_status": next(
+                (
+                    str(tasks_by_id[task_id].get("status") or "")
+                    for task_id in reversed(
+                        [str(value) for value in relation.get("run_task_ids") or []]
+                    )
+                    if task_id in tasks_by_id
+                ),
+                "",
+            ),
+            "collection_complete": bool(relation.get("last_collected_at")),
         }
         for relation in relations
     ]
+    summaries.sort(
+        key=lambda item: (
+            bool(item.get("collection_complete")),
+            int(item.get("high_score_finding_count") or 0),
+            sum(
+                int(item.get(field) or 0)
+                for field in (
+                    "website_count",
+                    "xhs_count",
+                    "wechat_count",
+                    "bidding_count",
+                    "scholar_contact_count",
+                )
+            ),
+            str(item.get("target_name") or ""),
+        ),
+        reverse=True,
+    )
+    return summaries

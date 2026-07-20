@@ -42,6 +42,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await records.create_index([("project_id", 1), ("last_seen", -1)])
     await records.create_index([("target_id", 1), ("last_seen", -1)])
     await records.create_index("source_document_id", sparse=True)
+    await records.create_index(
+        [("project_id", 1), ("target_id", 1), ("source_document_id", 1)]
+    )
 
 
 # ── 任务定义 CRUD ──────────────────────────────────────
@@ -510,6 +513,7 @@ async def list_records(
     project_id: str | None = None,
     target_id: str | None = None,
     only_incremental: bool = False,
+    archived_only: bool = False,
     min_score: int | None = None,
     skip: int = 0,
     limit: int = 50,
@@ -523,6 +527,8 @@ async def list_records(
         query["target_id"] = target_id
     if only_incremental:
         query["$or"] = [{"is_new": True}, {"is_changed": True}]
+    if archived_only:
+        query["source_document_id"] = {"$exists": True, "$nin": ["", None]}
     if min_score is not None:
         query["score"] = {"$gte": min_score}
     total = await db[MOBILE_COLLECT_RECORDS_COLLECTION].count_documents(query)

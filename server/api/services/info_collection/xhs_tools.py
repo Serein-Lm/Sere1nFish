@@ -707,7 +707,7 @@ class XhsDetailTool:
         invalidate: bool = False,
         cooldown_seconds: int = 300,
     ) -> None:
-        if not self._db or not self._account_name:
+        if self._db is None or not self._account_name:
             return
         try:
             if self._result_recorder:
@@ -742,7 +742,7 @@ class XhsDetailTool:
         await wait_for_xhs_request_slot(purpose, config=self._runtime_config)
 
     async def _new_runtime_client(self) -> Any | None:
-        if not self._db:
+        if self._db is None:
             return None
 
         runtime_config = await self._load_runtime_config()

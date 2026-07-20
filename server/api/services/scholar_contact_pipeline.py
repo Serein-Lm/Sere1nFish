@@ -81,6 +81,7 @@ async def run_scholar_contact_collect(
     *,
     task_id: str,
     project_id: str,
+    target_id: str = "",
     unit: str,
     direction: str,
     unit_en: str = "",
@@ -163,13 +164,13 @@ async def run_scholar_contact_collect(
                     if art_docs:
                         ar = await scholar_dao.upsert_articles_batch(
                             db, project_id=project_id, unit=unit, direction="",
-                            articles=art_docs, task_id=task_id)
+                            articles=art_docs, task_id=task_id, target_id=target_id)
                         summary["articles_inserted"] += ar["inserted"]
                         summary["articles_updated"] += ar["updated"]
                     if con_docs:
                         cr = await scholar_dao.upsert_contacts_batch(
                             db, project_id=project_id, unit=unit, direction="",
-                            contacts=con_docs, task_id=task_id)
+                            contacts=con_docs, task_id=task_id, target_id=target_id)
                         summary["contacts_inserted"] += cr["inserted"]
                         summary["contacts_updated"] += cr["updated"]
                 await db["tasks"].update_one(
@@ -247,10 +248,12 @@ async def run_scholar_contact_collect(
                 art_res = await scholar_dao.upsert_articles_batch(
                     db, project_id=project_id, unit=unit, direction=direction,
                     articles=article_docs, task_id=task_id,
+                    target_id=target_id,
                 )
                 con_res = await scholar_dao.upsert_contacts_batch(
                     db, project_id=project_id, unit=unit, direction=direction,
                     contacts=contact_docs, task_id=task_id,
+                    target_id=target_id,
                 )
                 summary["articles_inserted"] = art_res["inserted"]
                 summary["articles_updated"] = art_res["updated"]

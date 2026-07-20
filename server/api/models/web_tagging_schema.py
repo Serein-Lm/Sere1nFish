@@ -55,6 +55,16 @@ TargetRelation = Literal[
 ]
 
 
+SiteCategory = Literal[
+    "target_business",
+    "target_official",
+    "target_open_source",
+    "generic_open_source",
+    "third_party",
+    "unknown",
+]
+
+
 class WebTaggingFinding(BaseModel):
     type: FindingType
     scope: InfoScope
@@ -85,6 +95,10 @@ class WebTaggingIntro(BaseModel):
 
 class WebTaggingOutput(BaseModel):
     intro: WebTaggingIntro
+    site_category: SiteCategory = "unknown"
+    target_relation: TargetRelation = "uncertain"
+    target_relation_reason: str = ""
+    excluded: bool = False
     has_findings: bool
     no_findings_reason: str | None = None
     findings: list[WebTaggingFinding]

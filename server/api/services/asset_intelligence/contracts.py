@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlsplit
 
+from api.utils.url_identity import endpoint_identity, prefer_https_url
+
 
 @dataclass(slots=True)
 class AssetIdentity:
@@ -73,9 +75,11 @@ class AssetCandidate:
 
     @property
     def endpoint_key(self) -> str:
-        return self.canonical_url
+        return endpoint_identity(self.canonical_url, include_path=False)
 
     def merge(self, other: "AssetCandidate") -> None:
+        preferred_url = prefer_https_url(self.canonical_url, other.canonical_url)
+        prefer_other_transport = preferred_url == other.canonical_url and preferred_url != self.canonical_url
         for field_name in (
             "host",
             "ip",
@@ -88,6 +92,10 @@ class AssetCandidate:
         ):
             if not getattr(self, field_name) and getattr(other, field_name):
                 setattr(self, field_name, getattr(other, field_name))
+        if prefer_other_transport:
+            self.link = other.link or other.canonical_url
+            self.protocol = other.protocol or "https"
+            self.port = other.port
         self.fingerprints = list(dict.fromkeys([*self.fingerprints, *other.fingerprints]))
         self.sources = list(dict.fromkeys([*self.sources, *other.sources]))
         self.source_queries = list(dict.fromkeys([*self.source_queries, *other.source_queries]))
@@ -108,6 +116,7 @@ class AssetCandidate:
             "title": self.title,
             "link": self.link or canonical,
             "canonical_url": canonical,
+            "endpoint_key": self.endpoint_key,
             "cert_domain": self.cert_domain,
             "fingerprints": self.fingerprints,
             "sources": self.sources,

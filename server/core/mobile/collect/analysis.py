@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, create_model
@@ -39,6 +39,9 @@ _SCORE_KEYS = {
     "tap_x",
     "tap_y",
     "source_url",
+    "content_kind",
+    "is_article_result",
+    "target_evidence",
 }
 
 
@@ -81,6 +84,18 @@ def _build_item_model(
             default=None,
             description="若画面中可见该条目的原文链接/URL(http/https)则填写,看不到就留空,不要臆造",
         ),
+    )
+    item_field_defs["content_kind"] = (
+        Literal["article", "account", "video", "live", "mini_program", "ad", "other"],
+        Field(default="other", description="列表条目的真实内容类型"),
+    )
+    item_field_defs["is_article_result"] = (
+        bool,
+        Field(default=False, description="只有明确可点击进入图文文章详情时为 true"),
+    )
+    item_field_defs["target_evidence"] = (
+        str,
+        Field(default="", description="画面中证明条目主体与目标一致的可见文本依据"),
     )
     if with_coords:
         item_field_defs["tap_x"] = (
@@ -134,6 +149,9 @@ def _split_record(data: dict[str, Any]) -> dict[str, Any]:
         "tap_x": tap_x if isinstance(tap_x, int) else None,
         "tap_y": tap_y if isinstance(tap_y, int) else None,
         "source_url": source_url,
+        "content_kind": str(data.get("content_kind") or "other"),
+        "is_article_result": bool(data.get("is_article_result")),
+        "target_evidence": str(data.get("target_evidence") or ""),
     }
 
 
@@ -156,6 +174,9 @@ async def triage_screenshot(
     fields: list[ExtractField],
     app_name: str,
     keyword: str,
+    target_name: str = "",
+    target_aliases: list[str] | None = None,
+    policy_instructions: str = "",
     project_id: str | None = None,
     task_id: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -167,7 +188,8 @@ async def triage_screenshot(
 
     system = (
         f"你是手机列表页信息分诊助手。当前应用: {app_name}, 搜索词: {keyword or '无'}。\n"
-        f"【目标主体】以搜索词「{keyword or '无'}」为唯一目标主体。逐条判断每个条目的主体"
+        f"【目标主体】正式名称为「{target_name or keyword or '无'}」，搜索词为「{keyword or '无'}」，"
+        f"可靠别名为「{'、'.join(target_aliases or []) or '无'}」。逐条判断每个条目的主体"
         "是否就是该目标主体,并用 subject_match 打出主体对应程度。只对真正属于/围绕目标主体的"
         "条目给高分;其他主体(其他公司/机构/无关话题)给低 subject_match,不要混入。\n"
         f"请识别当前列表页中所有可见条目,并为每个条目提取字段: {_fields_desc(fields)}。\n"
@@ -178,8 +200,11 @@ async def triage_screenshot(
         "与目标主体强相关、且含招标/中标/公告/联系方式等高价值信息的条目应给更高分;\n"
         "- score_reason: 简短打分理由,说明主体是谁、为何这样评级;\n"
         "- source_url: 若画面能看到该条目的原文链接/URL(http/https)则填入,看不到就留空,不要臆造;\n"
+        "- content_kind / is_article_result / target_evidence: 识别条目真实类型，并写出主体对应的"
+        "画面证据；没有可见证据时 target_evidence 留空;\n"
         "- tap_x / tap_y: 该条目在屏幕上可点击中心点的坐标,使用 0-1000 归一化坐标系"
         "(左上角为 0,0,右下角为 1000,1000)。\n"
+        f"{policy_instructions}\n"
         "严格依据画面内容,不臆测;无法确定的字段留空。若画面无有效条目, items 返回空数组。"
     )
     message = HumanMessage(

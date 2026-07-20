@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from core.logger import get_logger
 from core.observability import observation_context
+from api.services.site_relevance import classify_candidate_surface
 
 from .contracts import AssetCandidate, AssetIdentity
 
@@ -26,6 +27,7 @@ class AssetTriageDecision(BaseModel):
         "official_public_system",
         "infrastructure_or_unknown",
         "third_party_system",
+        "generic_open_source_surface",
         "unknown",
     ] = "unknown"
     relevance_score: int = Field(default=50, ge=0, le=100)
@@ -62,7 +64,23 @@ class AssetTriageService:
         prompt = load_prompt("asset_triage/asset_triage")
         llm = create_llm(self.app_config, streaming=False)
         structured = llm.with_structured_output(AssetTriageBatch)
-        indexed = list(enumerate(candidates))
+        indexed = [
+            (index, candidate)
+            for index, candidate in enumerate(candidates)
+            if not classify_candidate_surface(
+                url=candidate.canonical_url,
+                title=candidate.title,
+                fingerprints=candidate.fingerprints,
+            )
+        ]
+        deterministic_discarded = len(candidates) - len(indexed)
+        if not indexed:
+            logger.info(
+                "存活资产分诊完成 total=%s kept=0 discarded_generic=%s",
+                len(candidates),
+                deterministic_discarded,
+            )
+            return []
         batches = [
             indexed[offset : offset + max(1, batch_size)]
             for offset in range(0, len(indexed), max(1, batch_size))
@@ -174,7 +192,10 @@ class AssetTriageService:
         discarded = 0
         for index, candidate in indexed:
             decision = decisions.get(index)
-            if decision and decision.category == "third_party_system":
+            if decision and decision.category in {
+                "third_party_system",
+                "generic_open_source_surface",
+            }:
                 discarded += 1
                 continue
             score = decision.relevance_score if decision else 50
@@ -182,10 +203,10 @@ class AssetTriageService:
 
         ranked.sort(key=lambda item: (item[0], item[1]))
         logger.info(
-            "存活资产瞬时分诊完成 total=%s kept=%s discarded_third_party=%s failed_batches=%s",
+            "存活资产瞬时分诊完成 total=%s kept=%s discarded_irrelevant=%s failed_batches=%s",
             len(candidates),
             len(ranked),
-            discarded,
+            discarded + deterministic_discarded,
             failed_batches,
         )
         return [candidate for _score, _index, candidate in ranked]

@@ -244,6 +244,7 @@ export function listRecords(params: {
   project_id?: string
   target_id?: string
   only_incremental?: boolean
+  archived_only?: boolean
   skip?: number
   limit?: number
 }) {

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
@@ -86,6 +88,39 @@ async def read_storage_object(
     if access.path and access.path.is_file():
         return FileResponse(access.path)
     raise HTTPException(status_code=404, detail="存储对象不存在")
+
+
+@router.get("/objects/{object_id}/access")
+async def get_storage_object_access(object_id: str):
+    """Issue short-lived private read access without proxying image bytes."""
+    doc = await storage_dao.get_object(get_db(), object_id)
+    if not doc or doc.get("status") != "ready":
+        raise HTTPException(status_code=404, detail="存储对象不存在")
+    content_type = str(doc.get("content_type") or "application/octet-stream")
+    try:
+        service = await get_object_storage()
+        access = await service.read_access(
+            object_id,
+            content_type=content_type,
+            inline=content_type.startswith("image/"),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="存储对象不存在") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="存储对象暂时不可读取") from exc
+
+    expires_in = service.presign_ttl if access.mode == "redirect" else 300
+    url = access.url if access.mode == "redirect" else (
+        f"/api/v1/storage/objects/{object_id}/content"
+    )
+    return {
+        "object_id": object_id,
+        "mode": access.mode,
+        "url": url,
+        "content_type": content_type,
+        "expires_in": expires_in,
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=expires_in),
+    }
 
 
 @router.get("/status")

@@ -68,6 +68,7 @@ class StorageProvider(Protocol):
         expires_seconds: int,
         filename: str = "",
         content_type: str = "",
+        inline: bool = False,
     ) -> ReadAccess: ...
 
     async def healthcheck(self) -> dict[str, Any]: ...

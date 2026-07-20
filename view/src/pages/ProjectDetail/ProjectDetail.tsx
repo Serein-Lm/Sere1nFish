@@ -60,17 +60,13 @@ import {
   type CollectRecord,
 } from '../../services/mobileCollectService'
 import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
+import AuthenticatedImage from '../../components/AuthenticatedImage'
 import {
   listProjectTargets,
   openAuthenticatedArtifact,
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
-import {
-  listScholarArticles,
-  listScholarContacts,
-  type ScholarArticle,
-  type ScholarContact,
-} from '../../services/scholarContactService'
+import { listScholarContacts, type ScholarContact } from '../../services/scholarContactService'
 import { getConfigSection } from '../../services/configService'
 import {
   listProjectBiddingRecords,
@@ -108,6 +104,7 @@ const TASK_SOURCE_LABELS: Record<string, string> = {
 }
 
 const MAX_COMPANY_SCAN_BATCH_SIZE = 200
+const SHOW_MOBILE_OPERATIONS_TAB = false
 
 function parseCompanyNames(value: unknown): string[] {
   const seen = new Set<string>()
@@ -127,7 +124,7 @@ function boundedTaskTuning(value: unknown, fallback: number, maximum: number): n
   return Number.isFinite(parsed) ? Math.max(1, Math.min(Math.trunc(parsed), maximum)) : fallback
 }
 
-type TabKey = 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'bidding' | 'mobile' | 'scholars' | 'tasks' | 'stats'
+type TabKey = 'targets' | 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'bidding' | 'mobile' | 'scholars' | 'tasks' | 'stats'
 
 interface WechatDeviceOption {
   deviceId: string
@@ -414,14 +411,6 @@ const findingsColumns = (onViewCopywriting?: (finding: WebTaggingFinding) => voi
 function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggingRecord; onViewCopywriting?: (finding: WebTaggingFinding) => void }) {
   const findings = record.data?.findings ?? []
   const hasFindings = Boolean(record.data?.has_findings)
-  const openScreenshot = async () => {
-    if (!record.data?.screenshot_url) return
-    try {
-      await openAuthenticatedArtifact(record.data.screenshot_url)
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '打开页面截图失败')
-    }
-  }
 
   return (
     <div className="expanded-record-content">
@@ -433,18 +422,14 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
           <Descriptions.Item label="站点名称">{record.data?.intro?.site_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="主体名称">{record.data?.intro?.entity_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="页面截图">
-            <Button
-              type="text"
-              size="small"
-              icon={<PictureOutlined />}
-              disabled={!record.data?.screenshot_url}
-              onClick={(event) => {
-                event.stopPropagation()
-                void openScreenshot()
-              }}
-            >
-              查看
-            </Button>
+            {record.data?.screenshot_url ? (
+              <AuthenticatedImage
+                source={record.data.screenshot_url}
+                alt={`${record.data?.intro?.site_name || '网站'}页面截图`}
+                width={144}
+                height={88}
+              />
+            ) : <Text type="secondary">-</Text>}
           </Descriptions.Item>
           <Descriptions.Item label="摘要">{record.data?.intro?.summary || '-'}</Descriptions.Item>
         </Descriptions>
@@ -524,7 +509,8 @@ export default function ProjectDetail() {
   const [error, setError] = useState<string | null>(null)
 
   // Tab 状态
-  const [activeTab, setActiveTab] = useState<TabKey>('website')
+  const [activeTab, setActiveTab] = useState<TabKey>('targets')
+  const loadedTabsRef = useRef<Set<TabKey>>(new Set())
 
   // 看板状态
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
@@ -627,10 +613,7 @@ export default function ProjectDetail() {
   const [scholarContacts, setScholarContacts] = useState<ScholarContact[]>([])
   const [scholarContactsTotal, setScholarContactsTotal] = useState(0)
   const [scholarLoading, setScholarLoading] = useState(false)
-  const [scholarArticles, setScholarArticles] = useState<ScholarArticle[]>([])
-  const [scholarArticlesTotal, setScholarArticlesTotal] = useState(0)
-  const [scholarArticlesLoading, setScholarArticlesLoading] = useState(false)
-  const [scholarArticlesOnlyVerified, setScholarArticlesOnlyVerified] = useState(false)
+  const [scholarTargetId, setScholarTargetId] = useState('')
   const [scholarOnlyCorresponding, setScholarOnlyCorresponding] = useState(false)
   const [scholarOnlyVerified, setScholarOnlyVerified] = useState(false)
   const [biddingRecords, setBiddingRecords] = useState<BiddingRecord[]>([])
@@ -691,12 +674,15 @@ export default function ProjectDetail() {
           project_id: pid,
           target_id: selectedTargetId || undefined,
           only_incremental: onlyInc,
+          archived_only: true,
           limit: 100,
         }),
         listProjectTargets(pid),
       ])
       setProjectTargets(targetResult.items)
-      const sorted = [...res.items].sort((a, b) => {
+      const sorted = res.items.filter(
+        (record) => Boolean(record.source_document_id && record.source_url),
+      ).sort((a, b) => {
         const ca = extractContactsFromFields((a.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
         const cb = extractContactsFromFields((b.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
         if (ca !== cb) return cb - ca
@@ -716,6 +702,7 @@ export default function ProjectDetail() {
     pid: string,
     onlyCorresponding?: boolean,
     onlyVerified?: boolean,
+    targetId?: string,
   ) => {
     const onlyCorr = onlyCorresponding ?? scholarOnlyCorresponding
     const onlyVer = onlyVerified ?? scholarOnlyVerified
@@ -724,6 +711,7 @@ export default function ProjectDetail() {
       const res = await listScholarContacts(pid, {
         page: 1,
         page_size: 200,
+        target_id: (targetId ?? scholarTargetId) || undefined,
         only_corresponding: onlyCorr,
         only_verified: onlyVer,
       })
@@ -733,24 +721,6 @@ export default function ProjectDetail() {
       console.error('加载学者学术联系失败:', e)
     } finally {
       setScholarLoading(false)
-    }
-  }
-
-  const fetchScholarArticles = async (pid: string, onlyVerified?: boolean) => {
-    const verified = onlyVerified ?? scholarArticlesOnlyVerified
-    setScholarArticlesLoading(true)
-    try {
-      const res = await listScholarArticles(pid, {
-        page: 1,
-        page_size: 200,
-        only_verified: verified,
-      })
-      setScholarArticles(res.items)
-      setScholarArticlesTotal(res.total)
-    } catch (e) {
-      console.error('加载学者文章候选失败:', e)
-    } finally {
-      setScholarArticlesLoading(false)
     }
   }
 
@@ -782,12 +752,6 @@ export default function ProjectDetail() {
       setBiddingLoading(false)
     }
   }
-
-  useEffect(() => {
-    if (activeTab === 'bidding' && projectId) {
-      fetchBiddingRecords(projectId)
-    }
-  }, [activeTab, projectId])
 
   // 加载任务列表
   const fetchTasks = async (pid: string, page = 1, pageSize = 10) => {
@@ -1021,36 +985,25 @@ export default function ProjectDetail() {
 
       setLoading(true)
       setError(null)
+      setProject(null)
+      loadedTabsRef.current = new Set<TabKey>()
+      setActiveTab('targets')
       setXhsTargetId('')
       setWebsiteTargetId('')
+      setWechatTargetId('')
+      setBiddingTargetId('')
+      setScholarTargetId('')
       setWebsitePage(1)
       setWebsitePageSize(10)
       try {
-        const data = await getProject(projectId)
+        const [data, targetResult] = await Promise.all([
+          getProject(projectId),
+          listProjectTargets(projectId),
+        ])
         if (!cancelled) {
           setProject(data)
-          await Promise.all([fetchRecords(projectId, 1, 10, ''), fetchProjectTargets(projectId)])
-          // 加载任务列表
-          await fetchTasks(projectId)
-          // 加载看板数据
-          fetchDashboard(projectId)
-          // 加载项目统计
-          fetchProjectStats(projectId)
-          // 加载手机操作产物
-          fetchMobileArtifacts(projectId)
-          // 加载公众号采集记录
-          fetchWechatRecords(projectId)
-          // 加载学者学术联系
-          fetchScholarContacts(projectId)
-          fetchScholarArticles(projectId)
-          // 加载小红书数据
-          await Promise.all([fetchXhsNotes(projectId), fetchXhsProfiles(projectId)])
-          // 加载抖音数据
-          await Promise.all([
-            fetchDouyinSearchResults(projectId),
-            fetchDouyinTaggedResults(projectId),
-            fetchDouyinProfiles(projectId),
-          ])
+          setProjectTargets(targetResult.items)
+          loadedTabsRef.current.add('targets')
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : '加载失败'
@@ -1092,6 +1045,63 @@ export default function ProjectDetail() {
       mobileArtifactsReqRef.current += 1
     }
   }, [projectId])
+
+  useEffect(() => {
+    if (
+      !projectId
+      || !project
+      || project.id !== projectId
+      || loadedTabsRef.current.has(activeTab)
+    ) return
+    loadedTabsRef.current.add(activeTab)
+
+    const loadActiveTab = async () => {
+      switch (activeTab) {
+        case 'website':
+          await fetchRecords(projectId, 1, websitePageSize, websiteTargetId)
+          break
+        case 'xiaohongshu':
+          await Promise.all([
+            fetchXhsNotes(projectId, 1, 10, xhsTargetId),
+            fetchXhsProfiles(projectId, 1, 10, xhsTargetId),
+          ])
+          break
+        case 'douyin':
+          await Promise.all([
+            fetchDouyinSearchResults(projectId),
+            fetchDouyinTaggedResults(projectId),
+            fetchDouyinProfiles(projectId),
+          ])
+          break
+        case 'wechat':
+          await fetchWechatRecords(projectId, wechatOnlyIncremental, wechatTargetId)
+          break
+        case 'bidding':
+          await fetchBiddingRecords(projectId, 1, biddingPageSize, biddingTargetId)
+          break
+        case 'mobile':
+          await fetchMobileArtifacts(projectId)
+          break
+        case 'scholars':
+          await fetchScholarContacts(
+            projectId,
+            scholarOnlyCorresponding,
+            scholarOnlyVerified,
+            scholarTargetId,
+          )
+          break
+        case 'tasks':
+          await fetchTasks(projectId)
+          break
+        case 'stats':
+          await Promise.all([fetchDashboard(projectId), fetchProjectStats(projectId)])
+          break
+        default:
+          break
+      }
+    }
+    void loadActiveTab()
+  }, [activeTab, project?.id, projectId])
 
   const handleAddTagging = () => {
     taggingForm.resetFields()
@@ -3224,150 +3234,77 @@ export default function ProjectDetail() {
       },
     ]
 
-    const buildCandidateUrl = (article: ScholarArticle): string | null => {
-      if (article.doi) {
-        const doi = article.doi.trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
-        if (doi) return `https://doi.org/${encodeURI(doi)}`
-      }
-      if (article.pmcid) return `https://europepmc.org/article/PMC/${encodeURIComponent(article.pmcid.replace(/^PMC/i, ''))}`
-      return article.landing_page || null
-    }
-    const articleColumns: ColumnsType<ScholarArticle> = [
-      {
-        title: '对应度',
-        key: 'verified',
-        width: 100,
-        render: (_, article) => article.unit_verified ? (
-          <Tooltip title={article.match_evidence || '机构信息与目标单位匹配'}>
-            <Tag color="green">已验证</Tag>
-          </Tooltip>
-        ) : (
-          <Tooltip title={article.match_evidence || '数据源未提供足够的机构对应证据'}>
-            <Tag color="orange">待核验</Tag>
-          </Tooltip>
-        ),
-      },
-      {
-        title: '文章',
-        dataIndex: 'title',
-        key: 'title',
-        ellipsis: true,
-        render: (title: string, article) => {
-          const url = buildCandidateUrl(article)
-          return url ? (
-            <a href={url} target="_blank" rel="noreferrer" title={title}>{title || article.article_id}</a>
-          ) : (title || article.article_id)
-        },
-      },
-      { title: '单位', dataIndex: 'unit', key: 'unit', width: 220, ellipsis: true, render: (value) => value || '-' },
-      { title: '方向', dataIndex: 'direction', key: 'direction', width: 220, ellipsis: true, render: (value) => value || '-' },
-      { title: '年份', dataIndex: 'year', key: 'year', width: 80, render: (value) => value || '-' },
-      {
-        title: '来源',
-        dataIndex: 'source_keys',
-        key: 'source_keys',
-        width: 180,
-        render: (values: string[]) => <Space size={4} wrap>{(values || []).map((value) => <Tag key={value}>{value}</Tag>)}</Space>,
-      },
-    ]
-
     return (
-      <Tabs
-        size="small"
-        items={[
-          {
-            key: 'articles',
-            label: `文章候选 (${scholarArticlesTotal})`,
-            children: (
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-                  <Space>
-                    <Checkbox
-                      checked={scholarArticlesOnlyVerified}
-                      onChange={(event) => {
-                        setScholarArticlesOnlyVerified(event.target.checked)
-                        if (projectId) fetchScholarArticles(projectId, event.target.checked)
-                      }}
-                    >
-                      仅目标单位已验证
-                    </Checkbox>
-                    <Button
-                      size="small"
-                      icon={<SyncOutlined />}
-                      loading={scholarArticlesLoading}
-                      onClick={() => { if (projectId) fetchScholarArticles(projectId) }}
-                    >
-                      刷新
-                    </Button>
-                  </Space>
-                </div>
-                <Table<ScholarArticle>
-                  rowKey="doc_id"
-                  size="small"
-                  loading={scholarArticlesLoading}
-                  columns={articleColumns}
-                  dataSource={scholarArticles}
-                  locale={{ emptyText: <Empty description="暂无学者文章候选" /> }}
-                  pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 篇` }}
-                  scroll={{ x: 980 }}
-                />
-              </div>
-            ),
-          },
-          {
-            key: 'contacts',
-            label: `联系方式 (${scholarContactsTotal})`,
-            children: (
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-                  <Space>
-                    <Checkbox
-                      checked={scholarOnlyCorresponding}
-                      onChange={(event) => {
-                        setScholarOnlyCorresponding(event.target.checked)
-                        if (projectId) fetchScholarContacts(projectId, event.target.checked, scholarOnlyVerified)
-                      }}
-                    >
-                      仅通讯作者
-                    </Checkbox>
-                    <Checkbox
-                      checked={scholarOnlyVerified}
-                      onChange={(event) => {
-                        setScholarOnlyVerified(event.target.checked)
-                        if (projectId) fetchScholarContacts(projectId, scholarOnlyCorresponding, event.target.checked)
-                      }}
-                    >
-                      仅目标单位已验证
-                    </Checkbox>
-                    <Button
-                      size="small"
-                      icon={<SyncOutlined />}
-                      loading={scholarLoading}
-                      onClick={() => { if (projectId) fetchScholarContacts(projectId) }}
-                    >
-                      刷新
-                    </Button>
-                  </Space>
-                </div>
-                <Table<ScholarContact>
-                  rowKey="doc_id"
-                  size="small"
-                  loading={scholarLoading}
-                  columns={columns}
-                  dataSource={scholarContacts}
-                  locale={{ emptyText: <Empty description={`已扫描 ${scholarArticlesTotal} 篇候选文章，暂无公开学术联系方式`} /> }}
-                  pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 条` }}
-                  scroll={{ x: 980 }}
-                />
-              </div>
-            ),
-          },
-        ]}
-      />
+      <div>
+        <div className="project-data-toolbar">
+          <Text type="secondary">仅展示已提取公开联系方式的学者记录</Text>
+          <Space wrap>
+            <Select
+              value={scholarTargetId}
+              style={{ width: 300, maxWidth: '100%' }}
+              options={[
+                { value: '', label: `全部 Target (${projectTargets.length})` },
+                ...projectTargets.map((target) => ({ value: target.target_id, label: target.target_name })),
+              ]}
+              onChange={(value) => {
+                setScholarTargetId(value)
+                if (projectId) void fetchScholarContacts(
+                  projectId,
+                  scholarOnlyCorresponding,
+                  scholarOnlyVerified,
+                  value,
+                )
+              }}
+            />
+            <Checkbox
+              checked={scholarOnlyCorresponding}
+              onChange={(event) => {
+                setScholarOnlyCorresponding(event.target.checked)
+                if (projectId) void fetchScholarContacts(projectId, event.target.checked, scholarOnlyVerified, scholarTargetId)
+              }}
+            >
+              仅通讯作者
+            </Checkbox>
+            <Checkbox
+              checked={scholarOnlyVerified}
+              onChange={(event) => {
+                setScholarOnlyVerified(event.target.checked)
+                if (projectId) void fetchScholarContacts(projectId, scholarOnlyCorresponding, event.target.checked, scholarTargetId)
+              }}
+            >
+              仅目标单位已验证
+            </Checkbox>
+            <Button
+              size="small"
+              icon={<SyncOutlined />}
+              loading={scholarLoading}
+              onClick={() => { if (projectId) void fetchScholarContacts(projectId, scholarOnlyCorresponding, scholarOnlyVerified, scholarTargetId) }}
+            >
+              刷新
+            </Button>
+          </Space>
+        </div>
+        <Table<ScholarContact>
+          rowKey={(record) => `${record.doc_id}:${record.email}`}
+          size="small"
+          loading={scholarLoading}
+          columns={columns}
+          dataSource={scholarContacts}
+          locale={{ emptyText: <Empty description="暂无包含公开联系方式的学者记录" /> }}
+          pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 条` }}
+          scroll={{ x: 980 }}
+        />
+      </div>
     )
   }
 
   const renderBiddingContent = () => {
+    const contactChannelLabel = (channel?: string) => ({
+      phone: '电话',
+      email: '邮箱',
+      wechat: '微信',
+    }[String(channel || '').toLowerCase()] || channel || '联系')
+
     const openArtifact = async (path?: string) => {
       if (!path) return
       try {
@@ -3381,9 +3318,10 @@ export default function ProjectDetail() {
         title: '公告',
         dataIndex: 'title',
         key: 'title',
+        width: 260,
         ellipsis: true,
-        render: (title: string, record) => record.detail_url ? (
-          <a href={record.detail_url} target="_blank" rel="noreferrer" title={title}>{title || '未命名公告'}</a>
+        render: (title: string, record) => record.original_url ? (
+          <a href={record.original_url} target="_blank" rel="noreferrer" title={title}>{title || '未命名公告'}</a>
         ) : (title || '未命名公告'),
       },
       {
@@ -3393,6 +3331,31 @@ export default function ProjectDetail() {
         width: 210,
         ellipsis: true,
         render: (value: string) => value || '-',
+      },
+      {
+        title: '大致介绍',
+        dataIndex: 'overview',
+        key: 'overview',
+        width: 300,
+        ellipsis: true,
+        render: (value: string) => value || '-',
+      },
+      {
+        title: '联系方式',
+        key: 'contacts',
+        width: 280,
+        render: (_, record) => (
+          <Space orientation="vertical" size={2}>
+            {(record.contacts || []).slice(0, 3).map((contact, index) => (
+              <Space key={`${contact.channel || ''}:${contact.value}:${index}`} size={4} wrap>
+                <Tag color="blue">{contactChannelLabel(contact.channel)}</Tag>
+                {renderFindingValue(contact.value, { copyable: true, maxWidth: 180 })}
+                {contact.party_name ? <Text type="secondary">{contact.party_name}</Text> : null}
+              </Space>
+            ))}
+            {(record.contacts || []).length > 3 ? <Text type="secondary">另有 {record.contacts.length - 3} 条</Text> : null}
+          </Space>
+        ),
       },
       {
         title: '阶段',
@@ -3428,7 +3391,7 @@ export default function ProjectDetail() {
         render: (_, record) => (
           <Space size={2}>
             <Tooltip title="打开公告原文">
-              <Button type="text" size="small" icon={<LinkOutlined />} disabled={!record.detail_url} href={record.detail_url} target="_blank" />
+              <Button type="text" size="small" icon={<LinkOutlined />} disabled={!record.original_url} href={record.original_url} target="_blank" />
             </Tooltip>
             <Tooltip title="查看供应商原始记录">
               <Button type="text" size="small" icon={<FileSearchOutlined />} disabled={!record.provider_payload_url} onClick={() => openArtifact(record.provider_payload_url)} />
@@ -3479,7 +3442,7 @@ export default function ProjectDetail() {
           columns={columns}
           dataSource={biddingRecords}
           locale={{ emptyText: <Empty description="暂无招投标公告" /> }}
-          scroll={{ x: 900 }}
+          scroll={{ x: 1440 }}
           expandable={{
             expandedRowRender: (record) => (
               <div style={{ display: 'grid', gap: 10 }}>
@@ -3492,8 +3455,32 @@ export default function ProjectDetail() {
                   <Descriptions.Item label="更新时间">{formatDate(record.updated_at)}</Descriptions.Item>
                 </Descriptions>
                 <Descriptions size="small" bordered column={1}>
+                  <Descriptions.Item label="大致介绍">
+                    <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                      {record.overview || '-'}
+                    </Typography.Paragraph>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="公开联系方式">
+                    <div className="bidding-contact-list">
+                      {(record.contacts || []).map((contact, index) => (
+                        <div className="bidding-contact-item" key={`${contact.channel || ''}:${contact.value}:${index}`}>
+                          <Space size={6} wrap>
+                            <Tag color="blue">{contactChannelLabel(contact.channel)}</Tag>
+                            {renderFindingValue(contact.value, { copyable: true, maxWidth: 420 })}
+                            {contact.party_name ? <Tag>{contact.party_name}</Tag> : null}
+                            {contact.attention_score != null ? (
+                              <Tag color={contact.attention_score >= 70 ? 'red' : 'orange'}>{contact.attention_score}</Tag>
+                            ) : null}
+                          </Space>
+                          {(contact.context || contact.evidence) ? (
+                            <Text type="secondary">{contact.context || contact.evidence}</Text>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </Descriptions.Item>
                   <Descriptions.Item label="公告原文">
-                    {record.detail_url ? <a href={record.detail_url} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{record.detail_url}</a> : '-'}
+                    {record.original_url ? <a href={record.original_url} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{record.original_url}</a> : '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="天眼查来源">
                     {record.provider_url ? <a href={record.provider_url} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{record.provider_url}</a> : '-'}
@@ -3588,15 +3575,161 @@ export default function ProjectDetail() {
     )
   }
 
+  const openTargetModule = (targetId: string, tab: TabKey) => {
+    if (!projectId) return
+    loadedTabsRef.current.add(tab)
+    setActiveTab(tab)
+    if (tab === 'website') {
+      setWebsiteTargetId(targetId)
+      setWebsitePage(1)
+      void fetchRecords(projectId, 1, websitePageSize, targetId)
+    } else if (tab === 'xiaohongshu') {
+      setXhsTargetId(targetId)
+      void Promise.all([
+        fetchXhsNotes(projectId, 1, 10, targetId),
+        fetchXhsProfiles(projectId, 1, 10, targetId),
+      ])
+    } else if (tab === 'wechat') {
+      setWechatTargetId(targetId)
+      void fetchWechatRecords(projectId, wechatOnlyIncremental, targetId)
+    } else if (tab === 'bidding') {
+      setBiddingTargetId(targetId)
+      void fetchBiddingRecords(projectId, 1, biddingPageSize, targetId)
+    } else if (tab === 'scholars') {
+      setScholarTargetId(targetId)
+      void fetchScholarContacts(projectId, scholarOnlyCorresponding, scholarOnlyVerified, targetId)
+    }
+  }
+
+  const renderTargetDashboard = () => {
+    const columns: ColumnsType<ProjectTargetSummary> = [
+      {
+        title: '公司 / 机构',
+        key: 'target',
+        width: 280,
+        render: (_, target) => (
+          <div className="target-company-cell">
+            <Space size={6} wrap>
+              <Text strong>{target.target_name}</Text>
+              {target.collection_complete ? <Tag color="success">采集完成</Tag> : <Tag>待完成</Tag>}
+              {target.parent_target_id || (target.relation_depth ?? 0) > 0
+                ? <Tag color="cyan">关联单位</Tag>
+                : null}
+            </Space>
+            {target.root_domain ? <Text type="secondary">{target.root_domain}</Text> : null}
+          </div>
+        ),
+      },
+      {
+        title: '高分 Finding',
+        dataIndex: 'high_score_finding_count',
+        key: 'high_score_finding_count',
+        width: 120,
+        sorter: (a, b) => (a.high_score_finding_count || 0) - (b.high_score_finding_count || 0),
+        render: (value: number) => <Tag color={value > 0 ? 'red' : 'default'}>{value || 0}</Tag>,
+      },
+      {
+        title: '模块数据',
+        key: 'modules',
+        render: (_, target) => (
+          <Space size={[4, 4]} wrap>
+            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'website') }}>
+              网站 {target.website_count || 0}
+            </Button>
+            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'xiaohongshu') }}>
+              小红书 {target.xhs_count || 0}
+            </Button>
+            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'wechat') }}>
+              公众号 {target.wechat_count || 0}
+            </Button>
+            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'bidding') }}>
+              招投标 {target.bidding_count || 0}
+            </Button>
+            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'scholars') }}>
+              学者联系 {target.scholar_contact_count || 0}
+            </Button>
+          </Space>
+        ),
+      },
+      {
+        title: '资产',
+        key: 'assets',
+        width: 130,
+        render: (_, target) => <Text>{target.alive_asset_count || 0} / {target.asset_count || 0} 存活</Text>,
+      },
+      {
+        title: '最近任务',
+        dataIndex: 'latest_task_status',
+        key: 'latest_task_status',
+        width: 110,
+        render: (status: string) => {
+          const statusMap: Record<string, { color: string; text: string }> = {
+            completed: { color: 'success', text: '已完成' },
+            running: { color: 'processing', text: '运行中' },
+            pending: { color: 'default', text: '等待中' },
+            error: { color: 'error', text: '失败' },
+            failed: { color: 'error', text: '失败' },
+          }
+          const item = statusMap[status]
+          return item ? <Tag color={item.color}>{item.text}</Tag> : <Text type="secondary">-</Text>
+        },
+      },
+    ]
+    return (
+      <div>
+        <div className="project-data-toolbar">
+          <Text type="secondary">按 Target 汇总项目资产；点击模块数量直接查看该主体的数据。</Text>
+          <Button size="small" icon={<SyncOutlined />} onClick={() => { if (projectId) void fetchProjectTargets(projectId) }}>
+            刷新
+          </Button>
+        </div>
+        <Table<ProjectTargetSummary>
+          rowKey="project_target_id"
+          size="small"
+          columns={columns}
+          dataSource={projectTargets}
+          locale={{ emptyText: <Empty description="项目尚未关联 Target" /> }}
+          pagination={{ pageSize: 20, showTotal: (total) => `共 ${total} 个 Target` }}
+          scroll={{ x: 1040 }}
+          onRow={(target) => ({
+            onClick: () => openTargetModule(target.target_id, 'website'),
+            style: { cursor: 'pointer' },
+          })}
+        />
+      </div>
+    )
+  }
+
+  const targetModuleTotals = projectTargets.reduce(
+    (totals, target) => ({
+      website: totals.website + (target.website_count || 0),
+      wechat: totals.wechat + (target.wechat_count || 0),
+      bidding: totals.bidding + (target.bidding_count || 0),
+      scholars: totals.scholars + (target.scholar_contact_count || 0),
+    }),
+    { website: 0, wechat: 0, bidding: 0, scholars: 0 },
+  )
+
   // Tab 配置
   const tabItems = [
+    {
+      key: 'targets' as TabKey,
+      label: (
+        <Space>
+          <AimOutlined />
+          Target 看板
+          <Tag>{projectTargets.length}</Tag>
+        </Space>
+      ),
+      children: renderTargetDashboard(),
+    },
     {
       key: 'website' as TabKey,
       label: (
         <Space>
           <GlobalOutlined />
           网站
-          <Tag>{taggingTotal}</Tag>
+          <Tag>{loadedTabsRef.current.has('website') ? taggingTotal : targetModuleTotals.website}</Tag>
         </Space>
       ),
       children: renderWebsiteContent(),
@@ -3627,7 +3760,7 @@ export default function ProjectDetail() {
         <Space>
           <FileTextOutlined />
           公众号
-          <Tag>{wechatRecordsTotal}</Tag>
+          <Tag>{loadedTabsRef.current.has('wechat') ? wechatRecordsTotal : targetModuleTotals.wechat}</Tag>
         </Space>
       ),
       children: renderWechatContent(),
@@ -3638,29 +3771,28 @@ export default function ProjectDetail() {
         <Space>
           <FileSearchOutlined />
           招投标
-          <Tag>{dashboardData?.data_counts?.bidding_records ?? biddingRecordsTotal}</Tag>
+          <Tag>{loadedTabsRef.current.has('bidding') ? biddingRecordsTotal : targetModuleTotals.bidding}</Tag>
         </Space>
       ),
       children: renderBiddingContent(),
     },
-    {
+    ...(SHOW_MOBILE_OPERATIONS_TAB ? [{
       key: 'mobile' as TabKey,
       label: (
         <Space>
           <MobileOutlined />
           手机操作
-          <Tag>{mobileOperationsTotal + mobileScreenshotsTotal + mobileProfilesTotal + mobileObservationsTotal}</Tag>
         </Space>
       ),
       children: renderMobileContent(),
-    },
+    }] : []),
     {
       key: 'scholars' as TabKey,
       label: (
         <Space>
           <TeamOutlined />
           学者联系
-          <Tag>{scholarArticlesTotal}篇 / {scholarContactsTotal}联系</Tag>
+          <Tag>{loadedTabsRef.current.has('scholars') ? scholarContactsTotal : targetModuleTotals.scholars}</Tag>
         </Space>
       ),
       children: renderScholarsContent(),
@@ -4009,27 +4141,34 @@ export default function ProjectDetail() {
               </div>
             </div>
 
-            <div className="project-detail-section-title slide-up stagger-2">
-              <Space><FileTextOutlined /> 基本信息</Space>
-            </div>
-            <div className="project-info-container slide-up stagger-2">
-              <Descriptions
-                bordered
-                column={{ xxl: 2, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }}
-                className="project-detail-descriptions"
-              >
-                <Descriptions.Item label="项目 ID">{project.id}</Descriptions.Item>
-                <Descriptions.Item label="创建时间">
-                  {formatDate(project.created_at)}
-                </Descriptions.Item>
-                <Descriptions.Item label="更新时间">
-                  {formatDate(project.updated_at)}
-                </Descriptions.Item>
-                <Descriptions.Item label="描述">
-                  {project.description || <Text type="secondary">暂无项目描述信息</Text>}
-                </Descriptions.Item>
-              </Descriptions>
-            </div>
+            <Collapse
+              className="project-basic-collapse slide-up stagger-2"
+              size="small"
+              items={[{
+                key: 'project-basic-info',
+                label: <Space><FileTextOutlined /> 基本信息</Space>,
+                children: (
+                  <div className="project-info-container">
+                    <Descriptions
+                      bordered
+                      column={{ xxl: 2, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }}
+                      className="project-detail-descriptions"
+                    >
+                      <Descriptions.Item label="项目 ID">{project.id}</Descriptions.Item>
+                      <Descriptions.Item label="创建时间">
+                        {formatDate(project.created_at)}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="更新时间">
+                        {formatDate(project.updated_at)}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="描述">
+                        {project.description || <Text type="secondary">暂无项目描述信息</Text>}
+                      </Descriptions.Item>
+                    </Descriptions>
+                  </div>
+                ),
+              }]}
+            />
 
             {/* 简易看板 */}
             {renderMiniDashboard()}

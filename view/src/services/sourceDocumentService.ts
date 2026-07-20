@@ -117,6 +117,15 @@ export interface ProjectTargetSummary {
   record_count: number
   asset_count: number
   alive_asset_count: number
+  finding_count: number
+  high_score_finding_count: number
+  website_count: number
+  xhs_count: number
+  wechat_count: number
+  bidding_count: number
+  scholar_contact_count: number
+  latest_task_status?: string
+  collection_complete?: boolean
   linked_project_count: number
   last_document_at?: string
 }

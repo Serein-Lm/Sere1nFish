@@ -100,3 +100,42 @@ async def test_xhs_cookie_lookup_does_not_evaluate_database_truthiness(
     assert first["type"] == "progress"
     assert second["message"] == "正在申请 Chrome 容器..."
     assert called is True
+
+
+@pytest.mark.asyncio
+async def test_xhs_detail_tool_does_not_evaluate_database_truthiness() -> None:
+    from types import SimpleNamespace
+
+    from api.services.info_collection.xhs_tools import XhsDetailTool
+
+    class Database:
+        def __bool__(self) -> bool:
+            raise NotImplementedError("database truthiness is forbidden")
+
+    recorded: list[tuple[Any, str]] = []
+
+    async def load_config() -> dict[str, Any]:
+        return {"proxy_pool": {"request_timeout": 10}}
+
+    async def select_account(_db: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(account_name="account-a", cookie_string="cookie-a")
+
+    async def select_proxy(_config: dict[str, Any]) -> Any:
+        return SimpleNamespace(proxy_url=None)
+
+    async def record_result(db: Any, account_name: str, **_kwargs: Any) -> None:
+        recorded.append((db, account_name))
+
+    tool = XhsDetailTool(
+        db=Database(),
+        runtime_config_loader=load_config,
+        account_selector=select_account,
+        proxy_selector=select_proxy,
+        result_recorder=record_result,
+        client_factory=lambda *_args, **_kwargs: object(),
+    )
+
+    client = await tool._new_runtime_client()
+
+    assert client is not None
+    assert recorded and recorded[0][1] == "account-a"

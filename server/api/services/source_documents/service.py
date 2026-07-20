@@ -32,7 +32,8 @@ from .urls import canonicalize_source_url
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
-_CONTEXT_ANALYSIS_SCHEMA_VERSION = 2
+_CONTEXT_ANALYSIS_SCHEMA_VERSION = 3
+_MEDIA_POLICY_VERSION = 2
 _SOURCE_FIELD_KEYS = {
     "title",
     "account",
@@ -130,6 +131,8 @@ def _complete_contextual_analysis(
 
 
 def _version_image_analysis(version: dict[str, Any]) -> list[dict[str, Any]]:
+    if version.get("image_analysis"):
+        return [dict(item) for item in version.get("image_analysis") or []]
     return [
         dict(image.get("analysis") or {})
         for image in version.get("images") or []
@@ -141,7 +144,11 @@ def _capture_has_more_complete_images(
     version: dict[str, Any],
     capture: CapturedDocument,
 ) -> bool:
-    existing_urls = {
+    if int(version.get("media_policy_version") or 0) < _MEDIA_POLICY_VERSION:
+        return True
+    existing_urls = set(
+        (version.get("capture_metadata") or {}).get("analyzed_image_urls") or []
+    ) or {
         str(image.get("source_url") or "")
         for image in version.get("images") or []
         if image.get("source_url")
@@ -232,6 +239,72 @@ def _merge_contacts(
     return list(merged.values())
 
 
+def _select_archive_images(
+    images: list[CapturedImage],
+    analysis: list[dict[str, Any]],
+    *,
+    limit: int = 12,
+) -> list[CapturedImage]:
+    """Archive only contact-bearing or high-value images after analyzing all."""
+    by_index = {int(item.get("index", -1)): item for item in analysis}
+    ranked: list[tuple[int, int, CapturedImage]] = []
+    for image in images:
+        item = by_index.get(image.index, {})
+        visible_contacts = extract_contacts(str(item.get("visible_text") or ""))
+        has_contacts = bool(visible_contacts or item.get("contacts"))
+        importance = int(item.get("importance_score") or 0)
+        if not has_contacts and not item.get("is_key_evidence") and importance < 70:
+            continue
+        rank = (200 if has_contacts else 0) + importance
+        ranked.append((-rank, image.index, image))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [image for _rank, _index, image in ranked[: max(1, limit)]]
+
+
+def _subject_match(analysis: dict[str, Any], fallback: int | None) -> int:
+    value = analysis.get("subject_match")
+    if value is None:
+        value = fallback
+    try:
+        return max(0, min(100, int(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rejected_source_result(
+    capture: CapturedDocument,
+    analysis: dict[str, Any],
+    *,
+    document_id: str,
+    version_id: str,
+    target: dict[str, Any] | None,
+    min_subject_match: int,
+    fallback_subject_match: int | None,
+) -> dict[str, Any]:
+    subject_match = _subject_match(analysis, fallback_subject_match)
+    return {
+        "ok": False,
+        "rejected": True,
+        "reason": "文章主体与目标不匹配",
+        "source_type": capture.source_type,
+        "source_url": capture.canonical_url,
+        "document_id": document_id,
+        "version_id": version_id,
+        "target_id": str((target or {}).get("target_id") or ""),
+        "target_name": str((target or {}).get("canonical_name") or ""),
+        "fields": analysis.get("fields") or {},
+        "score": analysis.get("score"),
+        "subject_match": subject_match,
+        "required_subject_match": min_subject_match,
+        "score_reason": analysis.get("score_reason") or "",
+        "contacts": [],
+        "browser_screenshot_ids": [],
+        "browser_screenshot_urls": [],
+        "image_count": 0,
+        "screenshot_count": 0,
+    }
+
+
 async def _store_capture_artifacts(
     capture: CapturedDocument,
     *,
@@ -239,6 +312,7 @@ async def _store_capture_artifacts(
     version_id: str,
     target_id: str,
     project_id: str,
+    images_to_archive: list[CapturedImage] | None = None,
 ) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
     storage = await get_object_storage()
     relative_path = f"{capture.source_type}/{document_id}/{version_id}"
@@ -345,7 +419,7 @@ async def _store_capture_artifacts(
     results = await asyncio.gather(
         raw_task,
         dom_task,
-        *(_store_image(image) for image in capture.images),
+        *(_store_image(image) for image in (images_to_archive or [])),
         *(
             _store_screenshot(screenshot)
             for screenshot in capture.screenshots
@@ -353,7 +427,7 @@ async def _store_capture_artifacts(
     )
     raw = results[0]
     dom = results[1]
-    image_count = len(capture.images)
+    image_count = len(images_to_archive or [])
     images = list(results[2 : 2 + image_count])
     screenshots = list(results[2 + image_count :])
     return (
@@ -456,6 +530,7 @@ async def ingest_source_url(
     discovery_subject_match: int | None = None,
     discovery_context: dict[str, Any] | None = None,
     persist: bool = True,
+    min_subject_match: int = 0,
 ) -> dict[str, Any]:
     """读取、结构化并永久保存一个来源 URL；同内容版本不会重复上传。"""
     canonical_url = canonicalize_source_url(url)
@@ -463,6 +538,14 @@ async def ingest_source_url(
     provider = get_source_document_provider(canonical_url)
     target_id = str((target or {}).get("target_id") or "")
     target_name = str((target or {}).get("canonical_name") or "")
+    target_aliases = [
+        str(value).strip()
+        for value in (target or {}).get("aliases") or []
+        if str(value).strip() and str(value).strip() != target_name
+    ][:8]
+    target_analysis_name = target_name
+    if target_aliases:
+        target_analysis_name += f"（可靠别名：{'、'.join(target_aliases)}）"
     task_fields = list(extract_fields or [])
 
     async with _hold_document_lock(document_id):
@@ -506,7 +589,7 @@ async def ingest_source_url(
                     contextual_analysis = await analyze_article_fields(
                         capture,
                         fields=task_fields,
-                        target_name=target_name,
+                        target_name=target_analysis_name,
                         keyword=keyword,
                         project_id=project_id,
                         task_id=run_task_id,
@@ -517,6 +600,18 @@ async def ingest_source_url(
                     contacts=list(existing.get("contacts") or []),
                     image_analysis=_version_image_analysis(existing),
                 )
+                if _subject_match(
+                    contextual_analysis, discovery_subject_match
+                ) < max(0, min(100, int(min_subject_match or 0))):
+                    return _rejected_source_result(
+                        capture,
+                        contextual_analysis,
+                        document_id=document_id,
+                        version_id=version_id,
+                        target=target,
+                        min_subject_match=min_subject_match,
+                        fallback_subject_match=discovery_subject_match,
+                    )
                 document = await source_dao.upsert_document(
                     db,
                     document_id=document_id,
@@ -554,47 +649,58 @@ async def ingest_source_url(
                     analysis_override=contextual_analysis,
                 )
 
-        if persist:
-            await source_dao.begin_version(
-                db,
-                version_id=version_id,
-                document_id=document_id,
-                content_hash=content_hash,
-                source_type=capture.source_type,
-            )
+        version_started = False
         try:
-            structure_task = analyze_article_fields(
+            analysis = await analyze_article_fields(
                 capture,
                 fields=task_fields,
-                target_name=target_name,
+                target_name=target_analysis_name,
                 keyword=keyword,
                 project_id=project_id,
                 task_id=run_task_id,
             )
-            images_task = analyze_article_images(
+            required_subject_match = max(0, min(100, int(min_subject_match or 0)))
+            if _subject_match(analysis, discovery_subject_match) < required_subject_match:
+                return _rejected_source_result(
+                    capture,
+                    analysis,
+                    document_id=document_id,
+                    version_id=version_id,
+                    target=target,
+                    min_subject_match=required_subject_match,
+                    fallback_subject_match=discovery_subject_match,
+                )
+            if persist:
+                await source_dao.begin_version(
+                    db,
+                    version_id=version_id,
+                    document_id=document_id,
+                    content_hash=content_hash,
+                    source_type=capture.source_type,
+                )
+                version_started = True
+            image_result = await analyze_article_images(
                 capture.images,
                 project_id=project_id,
                 task_id=run_task_id,
             )
+            image_analysis, image_analysis_error = image_result
+            images_to_archive = _select_archive_images(
+                capture.images,
+                image_analysis,
+            )
             if persist:
-                artifacts_task = _store_capture_artifacts(
+                artifacts, images, screenshots = await _store_capture_artifacts(
                     capture,
                     document_id=document_id,
                     version_id=version_id,
                     target_id=target_id,
                     project_id=project_id,
+                    images_to_archive=images_to_archive,
                 )
-                analysis, image_result, artifact_result = await asyncio.gather(
-                    structure_task, images_task, artifacts_task
-                )
-                artifacts, images, screenshots = artifact_result
             else:
-                analysis, image_result = await asyncio.gather(
-                    structure_task, images_task
-                )
                 artifacts, images, screenshots = {}, [], []
 
-            image_analysis, image_analysis_error = image_result
             analysis_by_index = {
                 int(item.get("index", -1)): item for item in image_analysis
             }
@@ -640,13 +746,19 @@ async def ingest_source_url(
                 "evidence": {
                     "contacts": contacts,
                     "media": {
-                        "images": images if persist else image_analysis,
+                        "images": image_analysis,
+                        "archived_images": images,
                         "screenshots": screenshots,
                         "image_analysis_error": image_analysis_error,
                     },
                 },
                 "provenance": {
-                    "capture_metadata": capture.metadata,
+                    "capture_metadata": {
+                        **capture.metadata,
+                        "analyzed_image_urls": [
+                            image.source_url for image in capture.images if image.source_url
+                        ],
+                    },
                     "artifacts": artifacts,
                 },
             }
@@ -700,10 +812,17 @@ async def ingest_source_url(
                 "contacts": contacts,
                 "analysis": source_analysis,
                 "images": images,
+                "image_analysis": image_analysis,
+                "media_policy_version": _MEDIA_POLICY_VERSION,
                 "screenshots": screenshots,
                 "artifacts": artifacts,
                 "storage_object_ids": storage_object_ids,
-                "capture_metadata": capture.metadata,
+                "capture_metadata": {
+                    **capture.metadata,
+                    "analyzed_image_urls": [
+                        image.source_url for image in capture.images if image.source_url
+                    ],
+                },
                 "image_analysis_error": image_analysis_error,
             }
             version = await source_dao.mark_version_ready(
@@ -744,7 +863,7 @@ async def ingest_source_url(
                 analysis_override=analysis,
             )
         except Exception as exc:
-            if persist:
+            if persist and version_started:
                 await source_dao.mark_version_error(db, version_id, str(exc))
             raise
 

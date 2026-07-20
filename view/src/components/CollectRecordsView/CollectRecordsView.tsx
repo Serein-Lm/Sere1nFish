@@ -15,7 +15,8 @@ import Divider from 'antd/es/divider'
 import type { ColumnsType } from 'antd/es/table'
 import { CodeOutlined, DatabaseOutlined, EyeOutlined, FileTextOutlined, PictureOutlined } from '@ant-design/icons'
 
-import { fetchScreenshotObjectUrl, type CollectRecord } from '../../services/mobileCollectService'
+import { type CollectRecord } from '../../services/mobileCollectService'
+import AuthenticatedImage from '../AuthenticatedImage'
 import {
   getSourceDocument,
   openAuthenticatedArtifact,
@@ -83,37 +84,15 @@ export function CollectShotImage({
   height?: number
   preview?: boolean
 }) {
-  const [src, setSrc] = useState<string>('')
-  useEffect(() => {
-    let objectUrl = ''
-    let alive = true
-    fetchScreenshotObjectUrl(url)
-      .then((u) => {
-        if (alive) {
-          objectUrl = u
-          setSrc(u)
-        } else {
-          URL.revokeObjectURL(u)
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [url])
-  if (!src) {
-    return (
-      <div className="collect-shot-loading" style={{ width, height: height ?? width }}>
-        <Spin size="small" />
-      </div>
-    )
-  }
-  if (!preview) {
-    return <img src={src} alt="collect" style={{ width, borderRadius: 4 }} />
-  }
   return (
-    <Image src={src} alt="collect" width={width} height={height} className="collect-shot-thumb" preview={{ cover: <EyeOutlined /> }} />
+    <AuthenticatedImage
+      source={url}
+      alt="采集截图"
+      width={width}
+      height={height ?? width}
+      preview={preview}
+      className="collect-shot-thumb"
+    />
   )
 }
 

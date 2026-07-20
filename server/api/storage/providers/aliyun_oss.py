@@ -12,11 +12,12 @@ from urllib.parse import quote
 from api.storage.types import ObjectHead, PutResult, ReadAccess
 
 
-def _content_disposition(filename: str) -> str:
+def _content_disposition(filename: str, *, inline: bool = False) -> str:
     if not filename:
         return ""
     fallback = "download" + Path(filename).suffix
-    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+    disposition = "inline" if inline else "attachment"
+    return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
 class AliyunOSSProvider:
@@ -190,12 +191,18 @@ class AliyunOSSProvider:
         expires_seconds: int,
         filename: str = "",
         content_type: str = "",
+        inline: bool = False,
     ) -> ReadAccess:
-        request = self._oss.GetObjectRequest(
-            bucket=self.bucket,
-            key=key,
-            response_content_disposition=_content_disposition(filename) or None,
-        )
+        request_kwargs = {
+            "bucket": self.bucket,
+            "key": key,
+            "response_content_disposition": (
+                _content_disposition(filename, inline=inline) or None
+            ),
+        }
+        # OSS rejects response-content-type overrides for these private objects.
+        # The object already carries the content type recorded at upload time.
+        request = self._oss.GetObjectRequest(**request_kwargs)
         result = await asyncio.to_thread(
             self._public_client.presign,
             request,

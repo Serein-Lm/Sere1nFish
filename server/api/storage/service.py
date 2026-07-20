@@ -260,6 +260,7 @@ class ObjectStorageService:
         filename: str = "",
         content_type: str = "",
         expires_seconds: int | None = None,
+        inline: bool = False,
     ) -> ReadAccess:
         doc, provider = await self._ready_provider(object_id)
         return await provider.read_access(
@@ -267,6 +268,7 @@ class ObjectStorageService:
             expires_seconds=expires_seconds or self.presign_ttl,
             filename=filename or str(doc.get("filename") or ""),
             content_type=content_type or str(doc.get("content_type") or ""),
+            inline=inline,
         )
 
     async def delete(self, object_id: str) -> None:

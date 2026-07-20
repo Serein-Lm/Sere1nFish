@@ -247,3 +247,29 @@ def test_artifact_object_id_is_content_addressed_for_safe_retry():
 
     assert first == same
     assert first != retry
+
+
+def test_image_archive_policy_keeps_only_contact_and_key_evidence():
+    from api.services.source_documents.contracts import CapturedImage
+    from api.services.source_documents.service import _select_archive_images
+
+    images = [
+        CapturedImage(
+            index=index,
+            source_url=f"https://example.com/{index}.jpg",
+            data=b"x",
+            content_type="image/jpeg",
+        )
+        for index in range(4)
+    ]
+    selected = _select_archive_images(
+        images,
+        [
+            {"index": 0, "importance_score": 10, "visible_text": "装饰图片"},
+            {"index": 1, "importance_score": 20, "visible_text": "电话 13800138000"},
+            {"index": 2, "importance_score": 90, "is_key_evidence": True},
+            {"index": 3, "importance_score": 69, "visible_text": "普通配图"},
+        ],
+    )
+
+    assert [image.index for image in selected] == [1, 2]

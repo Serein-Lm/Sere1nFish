@@ -901,6 +901,7 @@ class CompanyScanPipeline:
                     self._run_scholar_collection(
                         task_id=task_id,
                         project_id=project_id,
+                        target_id=target_id,
                         unit=normalized_name,
                         direction=scholar_resolution.direction,
                         direction_source=scholar_resolution.source,
@@ -1425,6 +1426,7 @@ class CompanyScanPipeline:
         *,
         task_id: str,
         project_id: str,
+        target_id: str,
         unit: str,
         direction: str,
         direction_source: str = "manual",
@@ -1438,6 +1440,7 @@ class CompanyScanPipeline:
             self.app_config,
             task_id=task_id,
             project_id=project_id,
+            target_id=target_id,
             unit=unit,
             direction=str(direction or "").strip(),
             unit_en=str(unit_en or "").strip(),
@@ -1832,6 +1835,12 @@ class CompanyScanPipeline:
                         copywriting_concurrency=copywriting_concurrency,
                         progress_task_id=progress_task_id,
                         progress_source=progress_source,
+                        target_context={
+                            "target_id": str(identity.get("target_id") or ""),
+                            "canonical_name": str(identity.get("normalized_name") or ""),
+                            "aliases": list(identity.get("aliases") or [])[:12],
+                            "root_domains": root_domains,
+                        },
                     )
                 )
         durable_asset_result = {
@@ -1861,6 +1870,7 @@ class CompanyScanPipeline:
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         progress_task_id: str = "",
         progress_source: str = "",
+        target_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from api.services.url_scan_pipeline import UrlScanPipeline
 
@@ -1883,6 +1893,7 @@ class CompanyScanPipeline:
             probe_concurrency=probe_concurrency,
             scan_concurrency=scan_concurrency,
             copywriting_concurrency=copywriting_concurrency,
+            target_context=target_context,
         )
         if scan_result.get("status") == "error":
             raise RuntimeError(str(scan_result.get("error") or "URL 深度扫描失败"))

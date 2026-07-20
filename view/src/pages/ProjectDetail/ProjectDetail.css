@@ -31,7 +31,23 @@
 }
 
 .project-info-container {
-  margin-bottom: 32px;
+  margin-bottom: 0;
+}
+
+.project-basic-collapse {
+  margin-bottom: 8px;
+  border-color: var(--border-color);
+  background: transparent;
+}
+
+.project-basic-collapse > .ant-collapse-item > .ant-collapse-header {
+  align-items: center;
+  padding: 10px 12px;
+  font-weight: 600;
+}
+
+.project-basic-collapse .ant-collapse-content-box {
+  padding: 8px 12px 12px;
 }
 
 .project-detail-descriptions {
@@ -360,7 +376,33 @@
 
 /* Tab 样式 */
 .project-detail-tabs {
-  margin-top: 24px;
+  margin-top: 8px;
+}
+
+.project-data-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.target-company-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.bidding-contact-list {
+  display: grid;
+  gap: 10px;
+}
+
+.bidding-contact-item {
+  display: grid;
+  gap: 3px;
 }
 
 .detail-tabs .ant-tabs-nav-wrap {
