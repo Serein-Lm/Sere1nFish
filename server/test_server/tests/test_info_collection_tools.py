@@ -462,6 +462,46 @@ def test_url_scan_timeout_is_terminal_without_second_agent_attempt():
     asyncio.run(_run())
 
 
+def test_wrapped_agent_timeout_is_terminal_without_second_agent_attempt():
+    async def _run():
+        class _WrappedTimeoutTool:
+            def __init__(self):
+                self.calls = 0
+
+            async def scan(self, _request):
+                self.calls += 1
+                raise RuntimeError(
+                    "Agent 执行失败（重试 1 次）: TimeoutError:"
+                )
+
+        tool = _WrappedTimeoutTool()
+        stage = _UrlScanStage(
+            concurrency=1,
+            project_id="project-1",
+            task_id="task-1",
+        )
+        ctx = _FakeContext({
+            "url_scan_tool": tool,
+            "scan_results": [],
+            "project_id": "project-1",
+            "task_id": "task-1",
+        })
+        item = type("Item", (), {
+            "payload": {"url": "https://slow.example"},
+            "meta": {},
+            "item_id": "wrapped-timeout-1",
+            "attempt": 0,
+        })()
+
+        ok, error = await stage._process_with_retry(item, ctx)
+
+        assert ok is False
+        assert isinstance(error, RuntimeError)
+        assert tool.calls == 1
+
+    asyncio.run(_run())
+
+
 def test_url_scan_restart_skips_same_task_terminal_urls(monkeypatch):
     async def _run():
         tool = _FakeScanTool()

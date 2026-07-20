@@ -250,6 +250,39 @@ def test_request_stop_unknown_is_idempotent():
     assert pl.is_running("never-started") is False
 
 
+def test_parent_progress_marks_stopped_collection_partial(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+    from api.services import task_progress
+
+    captured = {}
+
+    async def update(_db, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(task_progress, "update_source_progress", update)
+    stop_event = asyncio.Event()
+    stop_event.set()
+    asyncio.run(
+        pl._update_parent_terminal_progress(
+            object(),
+            {
+                "parent_task_id": "parent-1",
+                "keywords_completed": 4,
+                "keyword_total": 6,
+                "stop_event": stop_event,
+            },
+            timed_out=False,
+            all_failed=False,
+            failed_keywords=0,
+        )
+    )
+
+    assert captured["task_id"] == "parent-1"
+    assert captured["status"] == "partial"
+    assert captured["processed"] == 4
+    assert "保留 4/6" in captured["message"]
+
+
 def test_detail_limit_is_shared_across_keyword_screens(monkeypatch):
     from core.mobile.collect import pipeline as pl
 

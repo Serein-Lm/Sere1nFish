@@ -313,7 +313,11 @@ async def run_company_wechat_collection(
     )
     return {
         "kind": "wechat",
-        "status": "partial" if result.get("timed_out") else "completed",
+        "status": (
+            "partial"
+            if result.get("timed_out") or result.get("stopped")
+            else "completed"
+        ),
         "task_def_id": task_def_id,
         "device_id": str(task_def.get("device_id") or ""),
         "total": int(result.get("total") or 0),

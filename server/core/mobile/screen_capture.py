@@ -29,6 +29,10 @@ class CaptureResult:
         }
 
 
+class ScreenCaptureUnavailableError(RuntimeError):
+    """Raised when the device never returns a usable frame within the retry budget."""
+
+
 def _decode_image(shot: Screenshot) -> Image.Image | None:
     if not shot.base64_data:
         return None
@@ -65,8 +69,8 @@ async def capture_ready_screen(
     device_id: str,
     *,
     manager: MobileDeviceManager | None = None,
-    timeout: int = 10,
-    attempts: int = 4,
+    timeout: int = 6,
+    attempts: int = 2,
     delay: float = 0.45,
     wake: bool = True,
 ) -> CaptureResult:
@@ -77,31 +81,29 @@ async def capture_ready_screen(
         wake_result = await wake_device(device_id, stay_on=True)
         await asyncio.sleep(min(delay, 0.5))
 
-    last: Screenshot | None = None
+    last_error: Exception | None = None
     blank_frames = 0
     total = max(1, attempts)
     for index in range(total):
-        shot = await asyncio.to_thread(mgr.capture, device_id, timeout)
-        last = shot
-        if not is_probably_blank_screen(shot):
-            return CaptureResult(
-                screenshot=shot,
-                attempts=index + 1,
-                blank_frames=blank_frames,
-                wake=wake_result,
-            )
-        blank_frames += 1
+        try:
+            shot = await asyncio.to_thread(mgr.capture, device_id, timeout)
+            if not is_probably_blank_screen(shot):
+                return CaptureResult(
+                    screenshot=shot,
+                    attempts=index + 1,
+                    blank_frames=blank_frames,
+                    wake=wake_result,
+                )
+            blank_frames += 1
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
         if index < total - 1:
             await asyncio.sleep(delay)
 
-    if last is None:
-        last = await asyncio.to_thread(mgr.capture, device_id, timeout)
-    return CaptureResult(
-        screenshot=last,
-        attempts=total,
-        blank_frames=blank_frames,
-        wake=wake_result,
-    )
+    detail = f": {last_error}" if last_error else ""
+    raise ScreenCaptureUnavailableError(
+        f"设备 {device_id} 在 {total} 次尝试内未返回有效截图{detail}"
+    ) from last_error
 
 
 async def wake_device(device_id: str, *, stay_on: bool = True) -> dict[str, Any]:

@@ -112,7 +112,10 @@ class MobileDeviceManager:
         screenshot_error: str | None = None
         try:
             screenshot = device.get_screenshot(timeout=5)
-            screenshot_ready = bool(screenshot.base64_data)
+            capture_failed = bool(getattr(screenshot, "capture_failed", False))
+            screenshot_ready = bool(screenshot.base64_data) and not capture_failed
+            if capture_failed:
+                screenshot_error = "设备未返回有效截图"
         except Exception as exc:
             capture_failed = True
             screenshot_error = str(exc)

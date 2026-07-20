@@ -164,6 +164,46 @@ def _similar(sig_a: list[int] | None, sig_b: list[int] | None, threshold: float 
     return diff < threshold
 
 
+async def _update_parent_terminal_progress(
+    db: AsyncIOMotorDatabase,
+    state: dict[str, Any],
+    *,
+    timed_out: bool,
+    all_failed: bool,
+    failed_keywords: int,
+) -> None:
+    """Publish one terminal parent status for completed, stopped, or failed mobile work."""
+    parent_task_id = str(state.get("parent_task_id") or "")
+    if not parent_task_id:
+        return
+    from api.services.task_progress import update_source_progress
+
+    completed = int(state.get("keywords_completed") or 0)
+    total = int(state.get("keyword_total") or 0)
+    stopped = bool(state["stop_event"].is_set())
+    partial = timed_out or stopped or completed < total
+    status = "error" if all_failed else ("partial" if partial else "completed")
+    if all_failed:
+        message = f"公众号采集失败，已完成 {completed}/{total} 个关键词"
+    elif timed_out:
+        message = f"公众号达到运行时限，已完成 {completed}/{total} 个关键词"
+    elif stopped:
+        message = f"公众号已停止，保留 {completed}/{total} 个关键词结果"
+    else:
+        message = f"公众号关键词已完成 {completed}/{total}"
+    await update_source_progress(
+        db,
+        task_id=parent_task_id,
+        source="wechat",
+        total=total,
+        processed=completed,
+        succeeded=completed,
+        failed=max(0, int(failed_keywords or 0)),
+        status=status,
+        message=message,
+    )
+
+
 # ── Stages ─────────────────────────────────────────────
 
 class _CollectStage(Stage):
@@ -1280,7 +1320,15 @@ async def run_collect_task(
         collect_received = int(getattr(collect_metrics, "received", 0) or 0)
         collect_succeeded = int(getattr(collect_metrics, "succeeded", 0) or 0)
         counters["failed"] = collect_failed
-        if collect_received and collect_succeeded == 0:
+        all_failed = bool(collect_received and collect_succeeded == 0)
+        await _update_parent_terminal_progress(
+            db,
+            state,
+            timed_out=timed_out,
+            all_failed=all_failed,
+            failed_keywords=collect_failed,
+        )
+        if all_failed:
             raise RuntimeError(
                 f"手机采集全部失败: {collect_failed}/{collect_received} 个关键词进入失败队列"
             )

@@ -378,6 +378,41 @@ async def test_company_wechat_collection_injects_internal_defaults(
 
 
 @pytest.mark.asyncio
+async def test_company_wechat_collection_marks_stopped_run_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import wechat_collection
+
+    async def resolve(*_args: Any, **_kwargs: Any):
+        return {"task_def_id": "wechat-a", "device_id": "device-a"}
+
+    async def run_definition(*_args: Any, **_kwargs: Any):
+        return {
+            "total": 0,
+            "new": 0,
+            "changed": 0,
+            "stopped": True,
+            "timed_out": False,
+            "keywords_used": ["目标公司 招标"],
+        }
+
+    monkeypatch.setattr(wechat_collection, "resolve_wechat_task_definition", resolve)
+    monkeypatch.setattr(wechat_collection, "run_mobile_collect_definition", run_definition)
+
+    result = await wechat_collection.run_company_wechat_collection(
+        object(),
+        task_id="scan-1",
+        project_id="project-1",
+        target_id="target-1",
+        target_name="目标公司",
+        device_id="device-a",
+    )
+
+    assert result["status"] == "partial"
+    assert result["stopped"] is True
+
+
+@pytest.mark.asyncio
 async def test_mobile_collect_rejects_link_deep_collect_without_extract_fields() -> None:
     from core.mobile.collect.pipeline import run_collect_task
 

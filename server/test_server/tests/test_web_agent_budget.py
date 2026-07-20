@@ -31,6 +31,18 @@ def test_web_agent_message_allows_https_retry_and_login_modal_recovery() -> None
     assert "一旦获得至少一个真实值" in message
 
 
+def test_web_agent_message_prefers_complete_upstream_evidence() -> None:
+    message = _build_web_scan_message(
+        "https://example.com/bid",
+        tool_limit=5,
+        source_context="公告联系人：张三，电话 0551-12345678",
+    )
+
+    assert "证据已经足以确认" in message
+    assert "不要调用浏览器工具" in message
+    assert "0551-12345678" in message
+
+
 def test_web_tagging_prompt_no_longer_limits_browsing_to_two_calls() -> None:
     prompt = load_prompt("web_tagging/web_tagging")
 

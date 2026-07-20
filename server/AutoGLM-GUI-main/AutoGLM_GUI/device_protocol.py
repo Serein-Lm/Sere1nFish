@@ -32,6 +32,7 @@ class Screenshot:
     width: int
     height: int
     is_sensitive: bool = False
+    capture_failed: bool = False
 
 
 @dataclass

@@ -122,9 +122,34 @@ class _ScanFailureCollector(DeadLetter):
                 )
 
 
+def _is_terminal_analysis_timeout(error: BaseException) -> bool:
+    """Recognize direct and TaskGroup-wrapped Agent budget timeouts."""
+    pending = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, (TimeoutError, asyncio.TimeoutError)):
+            return True
+        message = f"{type(current).__name__}: {current}".casefold()
+        if "agent 执行失败" in message and (
+            "timeouterror" in message or "超时(" in message or "超时（" in message
+        ):
+            return True
+        nested = getattr(current, "exceptions", None)
+        if nested:
+            pending.extend(item for item in nested if isinstance(item, BaseException))
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return False
+
+
 def _retry_url_scan_error(error: BaseException) -> bool:
     """Analysis timeouts consume the entire budget and are terminal."""
-    return not isinstance(error, (TimeoutError, asyncio.TimeoutError))
+    return not _is_terminal_analysis_timeout(error)
 
 
 class _UrlScanStage(Stage):

@@ -57,6 +57,7 @@ class ADBDevice(DeviceProtocol):
                 width=result.width,
                 height=result.height,
                 is_sensitive=result.is_sensitive,
+                capture_failed=bool(getattr(result, "capture_failed", False)),
             )
 
     # === Input Operations ===
