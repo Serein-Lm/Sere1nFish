@@ -68,6 +68,7 @@ class FindingsQueryRequest(PageRequest):
     project_id: str = Field(description="项目 ID")
     source: str = Field(default="", description="数据源过滤")
     task_id: str = Field(default="", description="任务 ID 过滤")
+    target_id: str = Field(default="", description="Target ID 过滤")
     type: str = Field(default="", description="类型过滤")
     min_score: int = Field(default=0, ge=0, description="最低分数")
     sort: str = Field(default="score_desc", description="排序: score_desc / score_asc / time_desc")

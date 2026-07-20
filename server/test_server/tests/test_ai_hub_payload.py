@@ -43,6 +43,14 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
     data = next(item for item in catalog["agents"] if item["name"] == "data")
     assert "get_project_data_catalog" in data["tools"]
     assert "read_project_dataset" in data["tools"]
+    assert catalog["audit"]["project_dataset_interfaces"] == len(
+        catalog["project_datasets"]
+    )
+    assert catalog["audit"]["target_filterable_datasets"] >= 9
+    bidding = next(
+        item for item in catalog["project_datasets"] if item["source"] == "bidding_records"
+    )
+    assert bidding["filters"] == ["offset", "target_id"]
 
 
 def test_project_dataset_registry_covers_project_detail_data_surfaces() -> None:
@@ -90,12 +98,24 @@ def test_project_dataset_registry_covers_project_detail_data_surfaces() -> None:
         "artifacts",
     }
     bounded = _bounded_value(
-        {"title": "ok", "client_secret": "hidden", "nested": {"access_token": "hidden"}}
+        {
+            "title": "ok",
+            "client_secret": "hidden",
+            "nested": {
+                "access_token": "hidden",
+                "server_token": "hidden",
+                "provider_api_key": "hidden",
+            },
+        }
     )
     assert bounded == {
         "title": "ok",
         "client_secret": "<redacted>",
-        "nested": {"access_token": "<redacted>"},
+        "nested": {
+            "access_token": "<redacted>",
+            "server_token": "<redacted>",
+            "provider_api_key": "<redacted>",
+        },
     }
     protected = _bounded_value(
         {
@@ -215,6 +235,274 @@ def test_payload_prompt_has_bounded_research_recovery() -> None:
     content = (PROMPTS_DIR / "hub" / "payload.md").read_text(encoding="utf-8")
     assert "检索预算与失败恢复" in content
     assert "生成 Word" in content
+    assert "next_offset" in content
+
+
+@pytest.mark.asyncio
+async def test_project_dataset_adapters_reuse_clean_project_read_models(monkeypatch) -> None:
+    from api.dao import fofa_assets, mobile_collect, scholar_contact
+    from api.services import bidding_records, targets, website_records
+    from api.services.project_data_reader import (
+        PROJECT_DATASETS,
+        ProjectDataAccess,
+        ProjectDatasetQuery,
+    )
+
+    calls: dict[str, dict] = {}
+
+    async def fake_website(_db, **kwargs):
+        calls["website"] = kwargs
+        return ([{"url": "https://official.example"}], 1)
+
+    async def fake_bidding(_db, **kwargs):
+        calls["bidding"] = kwargs
+        return ([{"record_id": "bid_1", "contacts": [{"value": "a@example.com"}]}], 1)
+
+    async def fake_targets(_db, project_id, *, compact=False):
+        calls["targets"] = {"project_id": project_id, "compact": compact}
+        return [{"target_id": "target_1", "website_count": 3}]
+
+    async def fake_contacts(_db, project_id, **kwargs):
+        calls["scholar"] = {"project_id": project_id, **kwargs}
+        return ([{"email": "author@example.com", "article_url": "https://doi.org/10.1/x"}], 1)
+
+    async def fake_wechat(_db, **kwargs):
+        calls["wechat"] = kwargs
+        return ([{"source_document_id": "doc_1"}], 1)
+
+    async def fake_assets(_db, project_id, **kwargs):
+        calls["assets"] = {"project_id": project_id, **kwargs}
+        return [{"asset_id": "asset_1"}]
+
+    async def fake_asset_count(_db, project_id, **kwargs):
+        calls["asset_count"] = {"project_id": project_id, **kwargs}
+        return 31
+
+    monkeypatch.setattr(website_records, "list_website_records", fake_website)
+    monkeypatch.setattr(bidding_records, "list_project_bidding_records", fake_bidding)
+    monkeypatch.setattr(targets, "list_project_target_summaries", fake_targets)
+    monkeypatch.setattr(scholar_contact, "query_contacts", fake_contacts)
+    monkeypatch.setattr(mobile_collect, "list_records", fake_wechat)
+    monkeypatch.setattr(fofa_assets, "query_assets", fake_assets)
+    monkeypatch.setattr(fofa_assets, "count_assets", fake_asset_count)
+
+    target_query = ProjectDatasetQuery.build(
+        limit=10,
+        offset=20,
+        target_id="target_1",
+    )
+    scored_query = ProjectDatasetQuery.build(
+        limit=10,
+        offset=20,
+        target_id="target_1",
+        min_score=70,
+    )
+    access = ProjectDataAccess(owner="admin", is_admin=True)
+    db = object()
+
+    await PROJECT_DATASETS["web_tagging"].load(db, "project_1", target_query, access)
+    await PROJECT_DATASETS["bidding_records"].load(db, "project_1", target_query, access)
+    await PROJECT_DATASETS["targets"].load(db, "project_1", target_query, access)
+    await PROJECT_DATASETS["scholar_contacts"].load(db, "project_1", target_query, access)
+    await PROJECT_DATASETS["wechat_records"].load(db, "project_1", scored_query, access)
+    assets = await PROJECT_DATASETS["assets"].load(
+        db, "project_1", target_query, access
+    )
+
+    assert calls["website"] == {
+        "project_id": "project_1",
+        "target_id": "target_1",
+        "skip": 20,
+        "limit": 10,
+    }
+    assert calls["bidding"]["target_id"] == "target_1"
+    assert calls["targets"] == {"project_id": "project_1", "compact": True}
+    assert calls["scholar"]["target_id"] == "target_1"
+    assert calls["wechat"]["archived_only"] is True
+    assert calls["wechat"]["min_score"] == 70
+    assert calls["assets"] == {
+        "project_id": "project_1",
+        "target_id": "target_1",
+        "limit": 10,
+        "skip": 20,
+    }
+    assert assets.total == 31
+
+
+@pytest.mark.asyncio
+async def test_read_project_dataset_returns_stable_pagination_metadata(monkeypatch) -> None:
+    from api.dao import projects
+    from api.services.project_data_reader import (
+        PROJECT_DATASETS,
+        ProjectDatasetAdapter,
+        ProjectDatasetResult,
+        read_project_dataset,
+    )
+
+    observed = {}
+
+    async def fake_project(_db, project_id):
+        return {"id": project_id, "name": "测试项目"}
+
+    async def unused_loader(_db, _project_id, _limit, _access):
+        raise AssertionError("query_loader should be used")
+
+    async def query_loader(_db, project_id, query, _access):
+        observed.update(project_id=project_id, query=query)
+        return ProjectDatasetResult([{"value": "row-3"}], total=5)
+
+    monkeypatch.setattr(projects, "get_project", fake_project)
+    monkeypatch.setitem(
+        PROJECT_DATASETS,
+        "test_dataset",
+        ProjectDatasetAdapter(
+            "test_dataset",
+            "测试数据",
+            "测试分页",
+            unused_loader,
+            query_loader=query_loader,
+            filters=("target_id", "min_score"),
+        ),
+    )
+
+    payload = await read_project_dataset(
+        object(),
+        "project_1",
+        "test_dataset",
+        limit=1,
+        offset=2,
+        target_id="target_1",
+        min_score=80,
+    )
+
+    assert observed["query"].offset == 2
+    assert observed["query"].target_id == "target_1"
+    assert payload["returned"] == 1
+    assert payload["has_more"] is True
+    assert payload["next_offset"] == 3
+    assert payload["filters"] == {"target_id": "target_1", "min_score": 80}
+
+
+def test_findings_tool_forwards_target_and_offset(monkeypatch) -> None:
+    from api.dao import findings as findings_dao
+    from api.db import mongodb
+    from Sere1nGraph.graph.tools.analysis_tools import query_findings
+
+    observed: dict[str, object] = {}
+
+    async def fake_query(_db, project_id, **kwargs):
+        observed.update(project_id=project_id, **kwargs)
+        return ([{"finding_id": "finding_3", "label": "第三条"}], 5)
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(findings_dao, "query_findings", fake_query)
+
+    result = query_findings.invoke(
+        {
+            "project_id": "project_1",
+            "target_id": "target_1",
+            "min_score": 70,
+            "limit": 1,
+            "offset": 2,
+        }
+    )
+
+    assert observed["target_id"] == "target_1"
+    assert observed["skip"] == 2
+    assert observed["min_score"] == 70
+    assert "下一页 offset=3" in result
+
+
+@pytest.mark.asyncio
+async def test_project_dashboard_uses_clean_dataset_counts(monkeypatch) -> None:
+    from Sere1nGraph.graph import observability
+    from api.dao import findings as findings_dao
+    from api.dao import mobile_collect, scholar_contact
+    from api.db.collections import (
+        PROJECT_TARGETS_COLLECTION,
+        SOURCE_DOCUMENT_LINKS_COLLECTION,
+        URL_SCAN_RESULTS_COLLECTION,
+    )
+    from api.services import analytics, bidding_records, website_records
+
+    calls: dict[str, dict] = {}
+
+    class Cursor:
+        def sort(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        async def to_list(self, *_args, **_kwargs):
+            return []
+
+    class Collection:
+        def __init__(self, name):
+            self.name = name
+
+        async def count_documents(self, _query):
+            return {
+                SOURCE_DOCUMENT_LINKS_COLLECTION: 6,
+                PROJECT_TARGETS_COLLECTION: 2,
+                URL_SCAN_RESULTS_COLLECTION: 1,
+            }.get(self.name, 0)
+
+        def aggregate(self, _pipeline):
+            return Cursor()
+
+        def find(self, *_args, **_kwargs):
+            return Cursor()
+
+    class Database:
+        def __getitem__(self, name):
+            return Collection(name)
+
+    async def fake_summary(_db, _project_id):
+        return {"total": 0, "score_distribution": {}}
+
+    async def fake_website(_db, **kwargs):
+        calls["website"] = kwargs
+        return ([{"url": "https://official.example"}], 7)
+
+    async def fake_bidding(_db, **kwargs):
+        calls["bidding"] = kwargs
+        return ([{"record_id": "bid_1"}], 5)
+
+    async def fake_wechat(_db, **kwargs):
+        calls["wechat"] = kwargs
+        return ([{"record_id": "wechat_1"}], 4)
+
+    async def fake_scholar(_db, project_id, **kwargs):
+        calls["scholar"] = {"project_id": project_id, **kwargs}
+        return ([{"email": "author@example.com"}], 3)
+
+    monkeypatch.setattr(findings_dao, "get_findings_summary", fake_summary)
+    monkeypatch.setattr(website_records, "list_website_records", fake_website)
+    monkeypatch.setattr(bidding_records, "list_project_bidding_records", fake_bidding)
+    monkeypatch.setattr(mobile_collect, "list_records", fake_wechat)
+    monkeypatch.setattr(scholar_contact, "query_contacts", fake_scholar)
+    monkeypatch.setattr(
+        observability,
+        "get_global_tracker",
+        lambda: (_ for _ in ()).throw(RuntimeError("tracker disabled in unit test")),
+    )
+
+    dashboard = await analytics.resolve_project_dashboard(Database(), "project_1")
+
+    expected_counts = {
+        "web_tagging": 7,
+        "bidding_records": 5,
+        "wechat_records": 4,
+        "scholar_contacts": 3,
+        "source_documents": 6,
+        "targets": 2,
+    }
+    for key, value in expected_counts.items():
+        assert dashboard["data_counts"][key] == value
+    assert calls["wechat"]["archived_only"] is True
+    assert calls["website"]["limit"] == 1
+    assert calls["bidding"]["limit"] == 1
 
 
 @pytest.mark.asyncio

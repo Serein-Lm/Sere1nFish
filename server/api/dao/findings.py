@@ -100,6 +100,7 @@ async def query_findings(
     project_id: str,
     source: str = "",
     task_id: str = "",
+    target_id: str = "",
     finding_type: str = "",
     min_score: int = 0,
     sort: str = "score_desc",
@@ -114,6 +115,8 @@ async def query_findings(
         query["source"] = source
     if task_id:
         query["task_id"] = task_id
+    if target_id:
+        query["target_id"] = target_id
     if finding_type:
         query["type"] = finding_type
     if min_score > 0:

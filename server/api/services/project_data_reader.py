@@ -29,8 +29,38 @@ class ProjectDataAccess:
     is_admin: bool = False
 
 
+@dataclass(frozen=True)
+class ProjectDatasetQuery:
+    """Shared pagination and filtering contract for every Hub dataset."""
+
+    limit: int = 20
+    offset: int = 0
+    target_id: str = ""
+    min_score: int = 0
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        target_id: str = "",
+        min_score: int = 0,
+    ) -> "ProjectDatasetQuery":
+        return cls(
+            limit=max(1, min(int(limit or 20), 50)),
+            offset=max(0, min(int(offset or 0), 10_000)),
+            target_id=str(target_id or "").strip(),
+            min_score=max(0, min(int(min_score or 0), 100)),
+        )
+
+
 DatasetLoader = Callable[
     [AsyncIOMotorDatabase, str, int, ProjectDataAccess],
+    Awaitable[ProjectDatasetResult],
+]
+DatasetQueryLoader = Callable[
+    [AsyncIOMotorDatabase, str, ProjectDatasetQuery, ProjectDataAccess],
     Awaitable[ProjectDatasetResult],
 ]
 
@@ -41,6 +71,34 @@ class ProjectDatasetAdapter:
     label: str
     description: str
     loader: DatasetLoader
+    query_loader: DatasetQueryLoader | None = None
+    filters: tuple[str, ...] = ()
+
+    async def load(
+        self,
+        db: AsyncIOMotorDatabase,
+        project_id: str,
+        query: ProjectDatasetQuery,
+        access: ProjectDataAccess,
+    ) -> ProjectDatasetResult:
+        requested_filters = {
+            "target_id" for value in [query.target_id] if value
+        } | ({"min_score"} if query.min_score else set())
+        unsupported = requested_filters - set(self.filters)
+        if unsupported:
+            raise ValueError(
+                f"数据源 {self.key!r} 不支持过滤条件: {', '.join(sorted(unsupported))}"
+            )
+        if self.query_loader is not None:
+            return await self.query_loader(db, project_id, query, access)
+
+        fetch_limit = min(10_050, query.offset + query.limit)
+        result = await self.loader(db, project_id, fetch_limit, access)
+        return ProjectDatasetResult(
+            items=result.items[query.offset : query.offset + query.limit],
+            total=result.total,
+            total_exact=result.total_exact,
+        )
 
 
 def _list_result(items: list[dict[str, Any]], limit: int) -> ProjectDatasetResult:
@@ -283,6 +341,156 @@ async def _artifacts(db, project_id, limit, access: ProjectDataAccess):
     return _list_result(items, limit)
 
 
+async def _query_website_records(db, project_id, query, _access):
+    from api.services.website_records import list_website_records
+
+    items, total = await list_website_records(
+        db,
+        project_id=project_id,
+        target_id=query.target_id,
+        skip=query.offset,
+        limit=query.limit,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_assets(db, project_id, query, _access):
+    from api.dao import fofa_assets
+
+    items, total = await asyncio.gather(
+        fofa_assets.query_assets(
+            db,
+            project_id,
+            target_id=query.target_id,
+            limit=query.limit,
+            skip=query.offset,
+        ),
+        fofa_assets.count_assets(
+            db,
+            project_id,
+            target_id=query.target_id,
+        ),
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_xhs_notes(db, project_id, query, _access):
+    from api.dao import xhs
+
+    items, total = await xhs.list_notes(
+        db,
+        project_id=project_id,
+        target_id=query.target_id or None,
+        limit=query.limit,
+        skip=query.offset,
+        sort_by="relevance",
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_xhs_profiles(db, project_id, query, _access):
+    from api.dao import xhs
+
+    items, total = await xhs.list_profiles(
+        db,
+        project_id,
+        target_id=query.target_id or None,
+        limit=query.limit,
+        skip=query.offset,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_wechat_records(db, project_id, query, _access):
+    from api.dao import mobile_collect
+
+    items, total = await mobile_collect.list_records(
+        db,
+        project_id=project_id,
+        target_id=query.target_id or None,
+        archived_only=True,
+        min_score=query.min_score if query.min_score > 0 else None,
+        skip=query.offset,
+        limit=query.limit,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_source_documents(db, project_id, query, _access):
+    from api.dao import source_documents
+
+    if query.target_id:
+        items, total = await source_documents.list_target_documents(
+            db,
+            query.target_id,
+            project_id=project_id,
+            skip=query.offset,
+            limit=query.limit,
+        )
+    else:
+        items, total = await source_documents.list_project_documents(
+            db,
+            project_id,
+            skip=query.offset,
+            limit=query.limit,
+        )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_targets(db, project_id, query, _access):
+    from api.services.targets import list_project_target_summaries
+
+    items = await list_project_target_summaries(db, project_id, compact=True)
+    if query.target_id:
+        items = [item for item in items if item.get("target_id") == query.target_id]
+    total = len(items)
+    return ProjectDatasetResult(
+        items[query.offset : query.offset + query.limit],
+        total,
+    )
+
+
+async def _query_scholar_contacts(db, project_id, query, _access):
+    from api.dao import scholar_contact
+
+    items, total = await scholar_contact.query_contacts(
+        db,
+        project_id,
+        target_id=query.target_id,
+        limit=query.limit,
+        skip=query.offset,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_bidding_records(db, project_id, query, _access):
+    from api.services.bidding_records import list_project_bidding_records
+
+    items, total = await list_project_bidding_records(
+        db,
+        project_id=project_id,
+        target_id=query.target_id,
+        limit=query.limit,
+        skip=query.offset,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_findings(db, project_id, query, _access):
+    from api.dao import findings
+
+    items, total = await findings.query_findings(
+        db,
+        project_id,
+        target_id=query.target_id,
+        min_score=query.min_score,
+        limit=query.limit,
+        skip=query.offset,
+        sort="score_desc",
+    )
+    return ProjectDatasetResult(items, total)
+
+
 def _record_adapter(key: str, label: str, description: str) -> ProjectDatasetAdapter:
     return ProjectDatasetAdapter(key, label, description, _project_record_loader(key))
 
@@ -291,7 +499,12 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
     adapter.key: adapter
     for adapter in (
         ProjectDatasetAdapter(
-            "web_tagging", "网站打标", "网站结构化分析和发现", _web_tagging
+            "web_tagging",
+            "网站",
+            "已排除第三方/通用开源页面并合并 HTTP/HTTPS 的网站分析结果",
+            _web_tagging,
+            query_loader=_query_website_records,
+            filters=("target_id",),
         ),
         _record_adapter("url_scan_tasks", "旧版 URL 任务", "兼容保留的 URL 扫描任务"),
         _record_adapter("url_scan_results", "旧版 URL 结果", "兼容保留的 URL 扫描结果"),
@@ -300,7 +513,12 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
             "url_scan_copywritings", "旧版 URL 话术", "兼容保留的 URL 扫描话术"
         ),
         ProjectDatasetAdapter(
-            "assets", "资产情报", "FOFA/Hunter 资产与存活状态", _assets
+            "assets",
+            "资产情报",
+            "FOFA/Hunter 资产与存活状态",
+            _assets,
+            query_loader=_query_assets,
+            filters=("target_id",),
         ),
         _record_adapter("company_meta", "公司元信息", "规范化公司名、别名和根域名"),
         _record_adapter("company_scans", "综合公司扫描", "公司全流程扫描的阶段结果"),
@@ -311,13 +529,23 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
             _xhs_search_tasks,
         ),
         ProjectDatasetAdapter(
-            "xhs_notes", "小红书笔记", "笔记命中与关注度", _xhs_notes
+            "xhs_notes",
+            "小红书笔记",
+            "笔记命中与关注度",
+            _xhs_notes,
+            query_loader=_query_xhs_notes,
+            filters=("target_id",),
         ),
         ProjectDatasetAdapter(
             "xhs_note_details", "小红书正文", "笔记正文和结构化研判", _xhs_note_details
         ),
         ProjectDatasetAdapter(
-            "xhs_profiles", "小红书画像", "用户身份与公司研判", _xhs_profiles
+            "xhs_profiles",
+            "小红书画像",
+            "用户身份与公司研判",
+            _xhs_profiles,
+            query_loader=_query_xhs_profiles,
+            filters=("target_id",),
         ),
         ProjectDatasetAdapter(
             "douyin_search", "抖音搜索", "视频搜索命中", _douyin_search
@@ -330,9 +558,11 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
         ),
         ProjectDatasetAdapter(
             "wechat_records",
-            "公众号采集",
-            "公众号文章采集和联系方式上下文",
+            "公众号文章",
+            "已通过主体审核并完成浏览器原文归档的公众号文章和联系方式上下文",
             _wechat_records,
+            query_loader=_query_wechat_records,
+            filters=("target_id", "min_score"),
         ),
         ProjectDatasetAdapter(
             "mobile_collect_tasks",
@@ -343,17 +573,26 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
         ProjectDatasetAdapter(
             "source_documents",
             "来源原文",
-            "永久保存的文章原文、图片分析和版本",
+            "永久保存的文章原文、图片分析、稳定文档 ID 和版本证据",
             _source_documents,
+            query_loader=_query_source_documents,
+            filters=("target_id",),
         ),
         ProjectDatasetAdapter(
             "bidding_records",
             "招投标公告",
-            "法定主体招投标正文、详情页、附件和视觉分析引用",
+            "仅含有效参与方联系方式、公告简介、原文和附件引用的招投标记录",
             _bidding_records,
+            query_loader=_query_bidding_records,
+            filters=("target_id",),
         ),
         ProjectDatasetAdapter(
-            "targets", "Target", "项目关联公司、根域名和采集目标", _targets
+            "targets",
+            "Target 看板",
+            "项目 Target、任务完整度、高分 Finding 和各模块数据量",
+            _targets,
+            query_loader=_query_targets,
+            filters=("target_id",),
         ),
         ProjectDatasetAdapter(
             "mobile_profiles", "手机画像", "联系人画像快照", _mobile_profiles
@@ -379,17 +618,29 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
         ProjectDatasetAdapter(
             "scholar_contacts",
             "学者联系",
-            "邮箱、单位和对应作者信息",
+            "仅含公开邮箱与可访问原文的学者、单位和对应作者信息",
             _scholar_contacts,
+            query_loader=_query_scholar_contacts,
+            filters=("target_id",),
         ),
         ProjectDatasetAdapter(
-            "scholar_articles", "学术文章", "学者联系关联文章", _scholar_articles
+            "scholar_articles",
+            "学术文章原始索引",
+            "采集过程文章索引；有效联系分析应优先读取 scholar_contacts",
+            _scholar_articles,
         ),
         ProjectDatasetAdapter("tasks", "任务", "项目任务状态与进度", _tasks),
         ProjectDatasetAdapter(
             "task_logs", "任务日志", "任务运行日志与异常", _task_logs
         ),
-        ProjectDatasetAdapter("findings", "Findings", "统一发现与关注度", _findings),
+        ProjectDatasetAdapter(
+            "findings",
+            "Findings",
+            "统一发现与关注度",
+            _findings,
+            query_loader=_query_findings,
+            filters=("target_id", "min_score"),
+        ),
         _record_adapter("copywritings", "统一话术", "Finding 关联话术、载荷和异议处理"),
         _record_adapter("profiles", "统一画像", "Finding 关联的结构化目标画像"),
         _record_adapter(
@@ -445,8 +696,9 @@ def _is_sensitive_key(key: Any) -> bool:
     normalized = str(key or "").strip().lower()
     return (
         normalized in _SENSITIVE_KEYS
-        or normalized.endswith("_password")
-        or normalized.endswith("_secret")
+        or normalized.endswith(
+            ("_password", "_secret", "_token", "_api_key", "_private_key")
+        )
     )
 
 
@@ -565,9 +817,14 @@ def _bounded_items(
     return output, truncated or len(output) < len(items)
 
 
-def dataset_catalog() -> list[dict[str, str]]:
+def dataset_catalog() -> list[dict[str, Any]]:
     return [
-        {"source": adapter.key, "label": adapter.label, "description": adapter.description}
+        {
+            "source": adapter.key,
+            "label": adapter.label,
+            "description": adapter.description,
+            "filters": ["offset", *adapter.filters],
+        }
         for adapter in PROJECT_DATASETS.values()
     ]
 
@@ -586,8 +843,9 @@ async def inspect_project_datasets(
         raise LookupError(f"项目不存在: {project_id}")
     adapters = list(PROJECT_DATASETS.values())
     access = ProjectDataAccess(owner=owner, is_admin=is_admin)
+    query = ProjectDatasetQuery.build(limit=1)
     results = await asyncio.gather(
-        *(adapter.loader(db, project_id, 1, access) for adapter in adapters),
+        *(adapter.load(db, project_id, query, access) for adapter in adapters),
         return_exceptions=True,
     )
     sources: list[dict[str, Any]] = []
@@ -596,6 +854,7 @@ async def inspect_project_datasets(
             "source": adapter.key,
             "label": adapter.label,
             "description": adapter.description,
+            "filters": ["offset", *adapter.filters],
         }
         if isinstance(result, Exception):
             item.update(ok=False, count=0, error=str(result)[:300])
@@ -620,6 +879,9 @@ async def read_project_dataset(
     source: str,
     *,
     limit: int = 20,
+    offset: int = 0,
+    target_id: str = "",
+    min_score: int = 0,
     owner: str = "",
     is_admin: bool = False,
 ) -> dict[str, Any]:
@@ -634,10 +896,20 @@ async def read_project_dataset(
         raise ValueError(
             f"未知项目数据源 {source_key!r}；可用值：{', '.join(PROJECT_DATASETS)}"
         )
-    bounded_limit = max(1, min(int(limit or 20), 50))
+    query = ProjectDatasetQuery.build(
+        limit=limit,
+        offset=offset,
+        target_id=target_id,
+        min_score=min_score,
+    )
     access = ProjectDataAccess(owner=owner, is_admin=is_admin)
-    result = await adapter.loader(db, project_id, bounded_limit, access)
+    result = await adapter.load(db, project_id, query, access)
     items, truncated = _bounded_items(result.items)
+    consumed = len(items)
+    if result.total_exact:
+        has_more = query.offset + consumed < result.total
+    else:
+        has_more = consumed >= query.limit or len(result.items) > consumed
     return {
         "project_id": project_id,
         "project_name": project.get("name") or "",
@@ -646,7 +918,15 @@ async def read_project_dataset(
         "description": adapter.description,
         "total": result.total,
         "total_exact": result.total_exact,
+        "offset": query.offset,
+        "limit": query.limit,
         "returned": len(items),
+        "has_more": has_more,
+        "next_offset": query.offset + consumed if has_more else None,
+        "filters": {
+            "target_id": query.target_id or None,
+            "min_score": query.min_score or None,
+        },
         "truncated": truncated,
         "items": items,
     }

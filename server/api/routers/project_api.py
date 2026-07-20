@@ -774,7 +774,8 @@ async def query_findings(project_id: str, body: FindingsQueryRequest | None = No
     db = get_db()
     findings, total = await findings_dao.query_findings(
         db, project_id,
-        source=body.source, task_id=body.task_id, finding_type=body.type,
+        source=body.source, task_id=body.task_id, target_id=body.target_id,
+        finding_type=body.type,
         min_score=body.min_score, sort=body.sort, limit=body.limit, skip=body.skip,
     )
 

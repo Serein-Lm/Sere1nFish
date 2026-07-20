@@ -234,6 +234,7 @@ async def query_assets(
     root_domain: str = "",
     target_id: str = "",
     limit: int = 500,
+    skip: int = 0,
 ) -> list[dict[str, Any]]:
     """查询项目下的 FOFA 资产。"""
     query: dict[str, Any] = {"project_id": project_id}
@@ -241,7 +242,13 @@ async def query_assets(
         query["root_domain"] = root_domain
     if target_id:
         query["$or"] = [{"target_ids": target_id}, {"target_id": target_id}]
-    cursor = db[FOFA_ASSETS_COLLECTION].find(query, {"_id": 0}).sort("updated_at", -1).limit(limit)
+    cursor = (
+        db[FOFA_ASSETS_COLLECTION]
+        .find(query, {"_id": 0})
+        .sort("updated_at", -1)
+        .skip(max(0, int(skip or 0)))
+        .limit(max(1, int(limit or 500)))
+    )
     return [doc async for doc in cursor]
 
 

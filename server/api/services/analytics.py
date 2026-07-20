@@ -9,15 +9,15 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import findings as findings_dao
+from api.dao import mobile_collect as mobile_collect_dao
+from api.dao import scholar_contact as scholar_contact_dao
 from api.db.collections import (
     TASKS_COLLECTION,
     XHS_NOTES_COLLECTION,
     XHS_PROFILES_COLLECTION,
-    WEB_TAGS_COLLECTION,
     DOUYIN_SEARCH_RESULTS_COLLECTION,
     DOUYIN_TAGGED_RESULTS_COLLECTION,
     DOUYIN_PROFILES_COLLECTION,
@@ -26,8 +26,10 @@ from api.db.collections import (
     MOBILE_PROFILE_OBSERVATIONS_COLLECTION,
     URL_SCAN_RESULTS_COLLECTION,
     FINDINGS_COLLECTION,
-    BIDDING_RECORDS_COLLECTION,
+    PROJECT_TARGETS_COLLECTION,
+    SOURCE_DOCUMENT_LINKS_COLLECTION,
 )
+from api.services import bidding_records, website_records
 
 
 async def resolve_project_dashboard(
@@ -43,39 +45,23 @@ async def resolve_project_dashboard(
         {"$group": {"_id": "$status", "count": {"$sum": 1}}},
     ]
     pid = {"project_id": project_id}
-    try:
-        web_pid = {
-            "project_id": {"$in": [project_id, ObjectId(project_id)]},
-            "$or": [
-                {"source": "web_tagging"},
-                {"source": {"$exists": False}},
-                {"source": None},
-            ],
-        }
-    except Exception:
-        web_pid = {
-            **pid,
-            "$or": [
-                {"source": "web_tagging"},
-                {"source": {"$exists": False}},
-                {"source": None},
-            ],
-        }
-
     (
         findings_summary,
         tasks_status_docs,
         c_xhs_notes,
         c_xhs_profiles,
-        c_web,
+        website_result,
         c_dy_search,
         c_dy_tagged,
         c_dy_profiles,
         c_cw,
         c_mobile_profiles,
         c_mobile_profile_observations,
-        c_bidding_records,
-        c_url_web,
+        bidding_result,
+        wechat_result,
+        scholar_result,
+        c_source_documents,
+        c_targets,
         top_findings,
         safe_count,
     ) = await asyncio.gather(
@@ -83,7 +69,11 @@ async def resolve_project_dashboard(
         db[TASKS_COLLECTION].aggregate(tasks_agg).to_list(100),
         db[XHS_NOTES_COLLECTION].count_documents(pid),
         db[XHS_PROFILES_COLLECTION].count_documents(pid),
-        db[WEB_TAGS_COLLECTION].count_documents(web_pid),
+        website_records.list_website_records(
+            db,
+            project_id=project_id,
+            limit=1,
+        ),
         db[DOUYIN_SEARCH_RESULTS_COLLECTION].count_documents(pid),
         db[DOUYIN_TAGGED_RESULTS_COLLECTION].count_documents(pid),
         db[DOUYIN_PROFILES_COLLECTION].count_documents(pid),
@@ -98,10 +88,24 @@ async def resolve_project_dashboard(
             }
         ),
         db[MOBILE_PROFILE_OBSERVATIONS_COLLECTION].count_documents(pid),
-        db[BIDDING_RECORDS_COLLECTION].count_documents({"project_ids": project_id}),
-        db[URL_SCAN_RESULTS_COLLECTION].count_documents(
-            {"project_id": project_id, "source": "web_tagging"}
+        bidding_records.list_project_bidding_records(
+            db,
+            project_id=project_id,
+            limit=1,
         ),
+        mobile_collect_dao.list_records(
+            db,
+            project_id=project_id,
+            archived_only=True,
+            limit=1,
+        ),
+        scholar_contact_dao.query_contacts(
+            db,
+            project_id,
+            limit=1,
+        ),
+        db[SOURCE_DOCUMENT_LINKS_COLLECTION].count_documents(pid),
+        db[PROJECT_TARGETS_COLLECTION].count_documents(pid),
         db[FINDINGS_COLLECTION].find(
             pid,
             {"_id": 0, "finding_id": 1, "source": 1, "type": 1, "label": 1, "value": 1, "attention_score": 1},
@@ -115,14 +119,18 @@ async def resolve_project_dashboard(
     data_counts = {
         "xhs_notes": c_xhs_notes,
         "xhs_profiles": c_xhs_profiles,
-        "web_tagging": c_web + c_url_web,
+        "web_tagging": website_result[1],
         "douyin_search": c_dy_search,
         "douyin_tagged": c_dy_tagged,
         "douyin_profiles": c_dy_profiles,
         "copywritings": c_cw,
         "mobile_profiles": c_mobile_profiles,
         "mobile_profile_observations": c_mobile_profile_observations,
-        "bidding_records": c_bidding_records,
+        "wechat_records": wechat_result[1],
+        "source_documents": c_source_documents,
+        "scholar_contacts": scholar_result[1],
+        "bidding_records": bidding_result[1],
+        "targets": c_targets,
     }
 
     token_stats: dict[str, Any] = {}

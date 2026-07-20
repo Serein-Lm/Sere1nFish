@@ -54,7 +54,7 @@ export interface EventData {
   status?: NodeStatus
   content?: string
   error?: string
-  meta?: Record<string, any>
+  meta?: Record<string, unknown>
   duration?: number
   section?: string  // 用于 final 事件，标识输出段落
 }
@@ -94,7 +94,7 @@ export interface ExecutionNode {
   startTime: number
   endTime?: number
   duration?: number
-  meta?: Record<string, any>
+  meta?: Record<string, unknown>
 }
 
 /**
@@ -199,12 +199,14 @@ export function handleSSEEvent(state: ExecutionState, event: SSEEvent): void {
         let section = state.finalSections.find(s => s.section === sectionId)
         
         if (!section) {
-          section = {
+          const sectionTitle = data.meta?.sectionTitle
+          const createdSection: FinalSection = {
             section: sectionId,
-            title: data.meta?.sectionTitle,
+            title: typeof sectionTitle === 'string' ? sectionTitle : undefined,
             content: '',
           }
-          state.finalSections.push(section)
+          state.finalSections.push(createdSection)
+          section = createdSection
         }
         
         section.content += data.content || ''
@@ -524,11 +526,19 @@ export interface HubToolCatalog {
     mcp_servers?: string[]
   }>
   tools: Array<{ name: string; description: string; kind: string; agents: string[] }>
+  project_datasets: Array<{
+    source: string
+    label: string
+    description: string
+    filters: string[]
+  }>
   mcp: Array<{ name: string; purpose: string; configured: boolean; agents: string[] }>
   audit: {
     query_interfaces: number
     registered_query_interfaces: number
     missing_query_interfaces: string[]
+    project_dataset_interfaces: number
+    target_filterable_datasets: number
     complete: boolean
   }
 }

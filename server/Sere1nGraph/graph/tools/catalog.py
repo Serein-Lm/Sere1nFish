@@ -49,6 +49,9 @@ def _tool_groups() -> dict[str, list[Any]]:
 
 def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
     groups = _tool_groups()
+    from api.services.project_data_reader import dataset_catalog
+
+    project_datasets = dataset_catalog()
     assignments: dict[str, list[str]] = {
         agent: sorted({_name(tool) for tool in tools}) for agent, tools in groups.items()
     }
@@ -114,6 +117,7 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
             },
         ],
         "tools": sorted(all_tools.values(), key=lambda item: item["name"]),
+        "project_datasets": project_datasets,
         "mcp": [
             {
                 "name": "chrome-devtools",
@@ -126,6 +130,10 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
             "query_interfaces": len(query_names),
             "registered_query_interfaces": len(query_names) - len(missing_queries),
             "missing_query_interfaces": missing_queries,
+            "project_dataset_interfaces": len(project_datasets),
+            "target_filterable_datasets": sum(
+                "target_id" in item.get("filters", []) for item in project_datasets
+            ),
             "complete": not missing_queries,
         },
     }

@@ -196,20 +196,23 @@ def get_findings_summary(project_id: str) -> str:
 @tool(
     "query_findings",
     description=(
-        "分页查询某项目的 findings 明细（只读），可按来源、类型、最低关注度筛选并排序。"
+        "分页查询某项目的 findings 明细（只读），可按 Target、来源、类型、最低关注度筛选并排序。"
         "用于定位高价值目标或特定来源的发现。参数：project_id（必填）；"
+        "target_id（可选，按项目 Target 精确过滤）；"
         "source（可选，如 web_tagging/xhs/douyin/mobile）；finding_type（可选）；"
         "min_score（可选，0-100）；sort（score_desc/score_asc/time_desc，默认 score_desc）；"
-        "limit（默认 10，上限 50）。"
+        "limit（默认 10，上限 50）；offset（默认 0，用于分页）。"
     ),
 )
 def query_findings(
     project_id: str,
+    target_id: str = "",
     source: str = "",
     finding_type: str = "",
     min_score: int = 0,
     sort: str = "score_desc",
     limit: int = 10,
+    offset: int = 0,
 ) -> str:
     """分页查询 findings 明细并返回带跳转引用的摘要。"""
     project_id = (project_id or "").strip()
@@ -223,11 +226,13 @@ def query_findings(
         return await findings_dao.query_findings(
             get_db(),
             project_id=project_id,
+            target_id=(target_id or "").strip(),
             source=source,
             finding_type=finding_type,
             min_score=max(0, min(int(min_score or 0), 100)),
             sort=sort or "score_desc",
             limit=max(1, min(int(limit or 10), 50)),
+            skip=max(0, min(int(offset or 0), 10_000)),
         )
 
     try:
@@ -238,7 +243,11 @@ def query_findings(
     if not items:
         return f"项目 {project_id} 未查询到符合条件的 findings。"
 
-    lines = [f"项目 {project_id} 命中 {total} 条，返回前 {len(items)} 条："]
+    bounded_offset = max(0, min(int(offset or 0), 10_000))
+    lines = [
+        f"项目 {project_id} 命中 {total} 条，"
+        f"返回第 {bounded_offset + 1}-{bounded_offset + len(items)} 条："
+    ]
     for idx, f in enumerate(items, 1):
         label = f.get("label") or f.get("value") or f.get("finding_id") or ""
         score = f.get("attention_score")
@@ -254,6 +263,9 @@ def query_findings(
         if ref:
             seg += f" {ref}"
         lines.append(seg)
+    next_offset = bounded_offset + len(items)
+    if next_offset < total:
+        lines.append(f"- 仍有更多结果；下一页 offset={next_offset}。")
     return "\n".join(lines)
 
 

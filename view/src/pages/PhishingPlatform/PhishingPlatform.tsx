@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useCallback, useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Bubble, Sender, Welcome, ThoughtChain, Prompts } from '@ant-design/x'
 import type { BubbleListProps, SenderProps, PromptsProps } from '@ant-design/x'
@@ -74,6 +74,9 @@ import DataReferencePicker, { type DataReference } from './DataReferencePicker'
 import './PhishingPlatform.css'
 
 const Switch = Sender.Switch
+type SenderSlotConfig = NonNullable<
+  Parameters<NonNullable<SenderProps['onSubmit']>>[1]
+>
 const isNarrowViewport = () => typeof window !== 'undefined'
   && window.matchMedia('(max-width: 768px)').matches
 const AIHubInput = (props: React.ComponentProps<typeof Input.TextArea>) => (
@@ -517,7 +520,7 @@ export default function PhishingPlatform() {
   }, [searchParams, setSearchParams])
 
   // 加载会话列表
-  const loadConversations = async () => {
+  const loadConversations = useCallback(async () => {
     setConvLoading(true)
     try {
       const res = await listConversations()
@@ -527,11 +530,11 @@ export default function PhishingPlatform() {
     } finally {
       setConvLoading(false)
     }
-  }
+  }, [])
 
-  const loadArtifactList = async (
+  const loadArtifactList = useCallback(async (
     conversationId?: string | null,
-    scope: 'conversation' | 'all' = artifactScope,
+    scope: 'conversation' | 'all' = 'conversation',
   ) => {
     setArtifactsLoading(true)
     try {
@@ -546,7 +549,7 @@ export default function PhishingPlatform() {
     } finally {
       setArtifactsLoading(false)
     }
-  }
+  }, [])
 
   const openCapabilities = async () => {
     setCapabilitiesOpen(true)
@@ -565,7 +568,7 @@ export default function PhishingPlatform() {
   useEffect(() => {
     loadConversations()
     loadArtifactList()
-  }, [])
+  }, [loadArtifactList, loadConversations])
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 768px)')
@@ -736,7 +739,7 @@ export default function PhishingPlatform() {
   // 文件引用点击
   const fileItemClick: MenuProps['onClick'] = (item) => {
     const { icon, label } = FileInfo[item.key]
-    senderRef.current?.insert?.([
+    const slots: SenderSlotConfig = [
       {
         type: 'tag',
         key: `${item.key}_${Date.now()}`,
@@ -750,7 +753,8 @@ export default function PhishingPlatform() {
           value: item.key,
         },
       },
-    ] as any)
+    ]
+    senderRef.current?.insert?.(slots)
   }
 
 
@@ -862,7 +866,11 @@ export default function PhishingPlatform() {
     }
   }
 
-  const handleSend = async (value: string, _?: any, skill?: SenderProps['skill']) => {
+  const handleSend = async (
+    value: string,
+    _slots?: SenderSlotConfig,
+    skill?: SenderProps['skill'],
+  ) => {
     if (!value.trim() || isRequesting) return
 
     const refsSnapshot = dataRefs
@@ -1485,10 +1493,10 @@ export default function PhishingPlatform() {
             <Alert
               type={toolCatalog.audit.complete ? 'success' : 'warning'}
               showIcon
-              message={toolCatalog.audit.complete
-                ? `${toolCatalog.audit.registered_query_interfaces} 个查询接口已全部录入`
+              title={toolCatalog.audit.complete
+                ? `${toolCatalog.audit.registered_query_interfaces} 个查询工具、${toolCatalog.audit.project_dataset_interfaces} 个项目数据源已全部录入`
                 : `缺少 ${toolCatalog.audit.missing_query_interfaces.length} 个查询接口`}
-              description={toolCatalog.audit.missing_query_interfaces.join('、') || '数据、人设、Artifact 查询接口均已分配给对应 Agent。'}
+              description={toolCatalog.audit.missing_query_interfaces.join('、') || `${toolCatalog.audit.target_filterable_datasets} 个数据源支持按 Target 精确查询；所有数据源支持 offset 分页。`}
             />
             {toolCatalog.mcp.map(server => (
               <div className="capability-mcp-row" key={server.name}>
@@ -1501,26 +1509,55 @@ export default function PhishingPlatform() {
               </div>
             ))}
             <Collapse
-              items={toolCatalog.agents.map(agent => ({
-                key: agent.name,
-                label: (
-                  <Flex justify="space-between" align="center">
-                    <span>{agent.name}</span>
-                    <Tag>{agent.tools.length} 个工具</Tag>
-                  </Flex>
-                ),
-                children: (
-                  <Flex vertical gap={10}>
-                    <div><Tag color="blue">Prompt</Tag>{agent.prompt}</div>
-                    {agent.mcp_servers?.map(server => (
-                      <Tag key={server} color="green">MCP: {server}</Tag>
-                    ))}
-                    <Flex gap={6} wrap="wrap">
-                      {agent.tools.map(tool => <Tag key={tool}>{tool}</Tag>)}
+              items={[
+                ...toolCatalog.agents.map(agent => ({
+                  key: agent.name,
+                  label: (
+                    <Flex justify="space-between" align="center">
+                      <span>{agent.name}</span>
+                      <Tag>{agent.tools.length} 个工具</Tag>
                     </Flex>
-                  </Flex>
-                ),
-              }))}
+                  ),
+                  children: (
+                    <Flex vertical gap={10}>
+                      <div><Tag color="blue">Prompt</Tag>{agent.prompt}</div>
+                      {agent.mcp_servers?.map(server => (
+                        <Tag key={server} color="green">MCP: {server}</Tag>
+                      ))}
+                      <Flex gap={6} wrap="wrap">
+                        {agent.tools.map(tool => <Tag key={tool}>{tool}</Tag>)}
+                      </Flex>
+                    </Flex>
+                  ),
+                })),
+                {
+                  key: 'project-datasets',
+                  label: (
+                    <Flex justify="space-between" align="center">
+                      <span>项目数据查询接口</span>
+                      <Tag>{toolCatalog.project_datasets.length} 个数据源</Tag>
+                    </Flex>
+                  ),
+                  children: (
+                    <Flex vertical gap={12}>
+                      {toolCatalog.project_datasets.map(dataset => (
+                        <div key={dataset.source}>
+                          <Flex gap={6} wrap="wrap" align="center">
+                            <strong>{dataset.label}</strong>
+                            <Tag color="blue">{dataset.source}</Tag>
+                            {dataset.filters.map(filter => (
+                              <Tag key={filter}>{filter}</Tag>
+                            ))}
+                          </Flex>
+                          <div style={{ color: 'var(--ant-color-text-secondary)', marginTop: 4 }}>
+                            {dataset.description}
+                          </div>
+                        </div>
+                      ))}
+                    </Flex>
+                  ),
+                },
+              ]}
             />
           </Flex>
         ) : (

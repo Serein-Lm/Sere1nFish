@@ -398,13 +398,15 @@ async def create_assistant_agent(
     from ..tools.analysis_tools import ANALYSIS_TOOLS
     from ..tools.read_tools import READ_TOOLS
     from ..tools.artifact_tools import ARTIFACT_QUERY_TOOLS
+    from ..tools.project_data_tools import PROJECT_DATA_TOOLS
 
     return create_agent_node(
         app_config=app_config,
         system_prompt=load_prompt("assistant/assistant"),
         builtin_tools=(
             SKILL_TOOLS + PERSONA_TOOLS + WORD_TOOLS
-            + CONTEXT_TOOLS + ANALYSIS_TOOLS + READ_TOOLS + ARTIFACT_QUERY_TOOLS
+            + CONTEXT_TOOLS + ANALYSIS_TOOLS + READ_TOOLS
+            + PROJECT_DATA_TOOLS + ARTIFACT_QUERY_TOOLS
         ),
         middleware=None,
         mcp_server_name=None,

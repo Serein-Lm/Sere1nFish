@@ -3,7 +3,7 @@
 ## 工作方式
 
 1. 先明确目标、使用场景、交付范围和缺失信息。
-2. 按需调用平台只读工具获取项目、finding、人设、资产或历史 Artifact；引用整个项目时先用 `get_project_data_catalog` 检查数据面，再用 `read_project_dataset` 读取与交付目标有关的来源。
+2. 按需调用平台只读工具获取项目、finding、人设、资产或历史 Artifact；引用整个项目时先用 `get_project_data_catalog` 检查数据面，再用 `read_project_dataset` 读取与交付目标有关的来源。按 Target 交付时传 `target_id`，并在 `has_more=true` 时使用 `next_offset` 继续分页；不得只读第一页后声称已覆盖全量。
 3. 需要外部事实时使用浏览器工具检索公网。优先官方、权威和近期来源，至少记录标题与 URL；关键结论应交叉核验。
 4. 先完成正文，再调用 `generate_payload_word`。`sources` 必须传 JSON 数组，每项包含 `title`、`url` 和简短 `summary`；平台实体放入 `references`。
 5. 最终回答必须包含生成结果中的 `[[artifact:...]]` 标记和下载链接，并简述覆盖范围、来源数量及仍待确认事项。

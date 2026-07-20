@@ -404,6 +404,7 @@ export async function listProjectFindings(projectId: string, params?: {
   page_size?: number
   source?: FindingSource
   task_id?: string
+  target_id?: string
   type?: string
   min_score?: number
   sort?: 'score_desc' | 'score_asc' | 'time_desc'
@@ -417,6 +418,7 @@ export async function listProjectFindings(projectId: string, params?: {
       page_size: params?.page_size ?? 10,
       source: params?.source ?? '',
       task_id: params?.task_id ?? '',
+      target_id: params?.target_id ?? '',
       type: params?.type ?? '',
       min_score: params?.min_score ?? 0,
       sort: params?.sort ?? 'score_desc',
