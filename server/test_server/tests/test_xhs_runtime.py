@@ -183,7 +183,9 @@ def test_xhs_account_cooldown_rejoins_after_expiry(monkeypatch):
                 "is_valid": True,
                 "is_active": True,
                 "cooldown_until": now + timedelta(seconds=30),
-                "consecutive_failures": 1,
+                "consecutive_failures": 9,
+                "quarantined_at": now,
+                "quarantine_reason": "临时隔离",
                 "last_used_at": now - timedelta(hours=1),
             }
         ])
@@ -196,6 +198,10 @@ def test_xhs_account_cooldown_rejoins_after_expiry(monkeypatch):
 
         assert lease.account_name == "cooling"
         assert lease.source == "pool:least_recently_used"
+        assert db.collection.docs[0]["consecutive_failures"] == 9
+        assert db.collection.docs[0]["cooldown_until"] is None
+        assert db.collection.docs[0]["quarantined_at"] is None
+        assert db.collection.docs[0]["quarantine_reason"] is None
 
     asyncio.run(_run())
 
@@ -309,7 +315,7 @@ def test_xhs_account_invalidates_only_after_failure_threshold(monkeypatch):
     asyncio.run(_run())
 
 
-def test_xhs_account_cools_after_first_failure_and_quarantines_after_second(monkeypatch):
+def test_xhs_account_isolated_after_first_failure(monkeypatch):
     async def _run():
         from api.services import xhs_runtime
 
@@ -339,19 +345,10 @@ def test_xhs_account_cools_after_first_failure_and_quarantines_after_second(monk
         )
 
         assert db.collection.docs[0]["consecutive_failures"] == 1
-        assert not db.collection.docs[0].get("quarantined_at")
+        assert db.collection.docs[0]["quarantined_at"] == now
+        assert "达到阈值 1" in db.collection.docs[0]["quarantine_reason"]
         with pytest.raises(RuntimeError):
             await xhs_runtime.select_xhs_account(db, purpose="search")
-
-        await xhs_runtime.record_xhs_account_result(
-            db,
-            "risk",
-            success=False,
-            error="访问频繁",
-            cooldown_seconds=60,
-        )
-        assert db.collection.docs[0]["consecutive_failures"] == 2
-        assert db.collection.docs[0]["quarantined_at"] == now
 
     asyncio.run(_run())
 

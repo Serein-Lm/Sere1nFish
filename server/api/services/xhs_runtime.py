@@ -36,7 +36,7 @@ DEFAULT_XHS_SEARCH_PAGE_SIZE = 20
 DEFAULT_XHS_SEARCH_MAX_PAGES_PER_KEYWORD = 1
 DEFAULT_XHS_REQUEST_INTERVAL_MIN_SECONDS = 4.0
 DEFAULT_XHS_REQUEST_INTERVAL_MAX_SECONDS = 8.0
-DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES = 2
+DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES = 1
 
 
 @dataclass
@@ -263,7 +263,6 @@ def _account_selection_query(
     *,
     now: datetime,
     include_unverified: bool,
-    max_consecutive_failures: int,
     exclude_accounts: list[str],
 ) -> dict[str, Any]:
     query: dict[str, Any] = {
@@ -284,15 +283,6 @@ def _account_selection_query(
         query["is_valid"] = {"$ne": False}
     else:
         query["is_valid"] = True
-    if max_consecutive_failures > 0:
-        query["$and"].append(
-            {
-                "$or": [
-                    {"consecutive_failures": {"$exists": False}},
-                    {"consecutive_failures": {"$lt": max_consecutive_failures}},
-                ]
-            }
-        )
     return query
 
 
@@ -301,7 +291,6 @@ def _account_is_leaseable(
     *,
     now: datetime,
     include_unverified: bool,
-    max_consecutive_failures: int,
     exclude_accounts: list[str],
 ) -> bool:
     if not doc or not doc.get("cookie_string"):
@@ -318,10 +307,6 @@ def _account_is_leaseable(
     cooldown_until = _as_utc_datetime(doc.get("cooldown_until"))
     if cooldown_until and cooldown_until > now:
         return False
-    if max_consecutive_failures > 0:
-        failures = _as_int(doc.get("consecutive_failures"), 0)
-        if failures >= max_consecutive_failures:
-            return False
     return True
 
 
@@ -370,16 +355,11 @@ async def select_xhs_account(
 
     now = _now()
     include_unverified = _as_bool(pool.get("include_unverified"), default=True)
-    max_consecutive_failures = _as_int(
-        pool.get("max_consecutive_failures"),
-        DEFAULT_XHS_MAX_CONSECUTIVE_FAILURES,
-    )
     strategy = str(pool.get("strategy") or "least_recently_used")
 
     query = _account_selection_query(
         now=now,
         include_unverified=include_unverified,
-        max_consecutive_failures=max_consecutive_failures,
         exclude_accounts=exclude_accounts,
     )
 
@@ -392,7 +372,14 @@ async def select_xhs_account(
     doc = await db[XHS_COOKIES_COLLECTION].find_one_and_update(
         query,
         {
-            "$set": {"last_used_at": now, "last_selected_purpose": purpose, "updated_at": now},
+            "$set": {
+                "last_used_at": now,
+                "last_selected_purpose": purpose,
+                "cooldown_until": None,
+                "quarantined_at": None,
+                "quarantine_reason": None,
+                "updated_at": now,
+            },
             "$inc": {"lease_count": 1},
         },
         sort=sort,
@@ -412,7 +399,6 @@ async def select_xhs_account(
             active,
             now=now,
             include_unverified=include_unverified,
-            max_consecutive_failures=max_consecutive_failures,
             exclude_accounts=exclude_accounts,
         ):
             return XhsAccountLease(
@@ -422,7 +408,7 @@ async def select_xhs_account(
                 source="active:fallback",
             )
 
-    raise RuntimeError("没有可用的小红书账号：账号池为空、Cookie 无效、仍在冷却中或已达到连续失败阈值")
+    raise RuntimeError("没有可用的小红书账号：账号池为空、Cookie 无效或仍在冷却中")
 
 
 def classify_xhs_account_error(
@@ -706,14 +692,16 @@ async def get_xhs_runtime_status(db: AsyncIOMotorDatabase) -> dict[str, Any]:
     usable_query = _account_selection_query(
         now=now,
         include_unverified=include_unverified,
-        max_consecutive_failures=max_consecutive_failures,
         exclude_accounts=[],
     )
     usable = await db[XHS_COOKIES_COLLECTION].count_documents(usable_query)
     invalid = await db[XHS_COOKIES_COLLECTION].count_documents({"is_valid": False})
     cooled = await db[XHS_COOKIES_COLLECTION].count_documents({"cooldown_until": {"$gt": now}})
     quarantined_query: dict[str, Any] = (
-        {"consecutive_failures": {"$gte": max_consecutive_failures}}
+        {
+            "consecutive_failures": {"$gte": max_consecutive_failures},
+            "cooldown_until": {"$gt": now},
+        }
         if max_consecutive_failures > 0
         else {"_id": {"$exists": False}}
     )
