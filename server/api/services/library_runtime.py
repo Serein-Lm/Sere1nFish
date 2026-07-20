@@ -59,6 +59,7 @@ CORE_PROMPT_SLUGS = {
     "hub/payload",
     "hub/persona",
     "router/classify",
+    "source_document/source_document",
     "web_tagging/tagging_taxonomy",
     "web_tagging/web_tagging",
     "wechat_target_selection/wechat_target_selection",

@@ -159,6 +159,50 @@ def test_contextual_analysis_is_separate_from_source_version_fields():
     assert first != second
 
 
+def test_contextual_analysis_fingerprint_tracks_prompt_content(monkeypatch):
+    from api.models.mobile_collect import ExtractField
+    from api.services.source_documents import service
+
+    fields = [ExtractField(name="summary", description="摘要")]
+    monkeypatch.setattr(
+        service,
+        "article_analysis_prompt_fingerprint",
+        lambda: "prompt-version-one",
+    )
+    first = service._analysis_fingerprint(
+        version_id="version-1",
+        target_id="target-1",
+        target_name="公司甲",
+        keyword="招标",
+        fields=fields,
+    )
+    monkeypatch.setattr(
+        service,
+        "article_analysis_prompt_fingerprint",
+        lambda: "prompt-version-two",
+    )
+    second = service._analysis_fingerprint(
+        version_id="version-1",
+        target_id="target-1",
+        target_name="公司甲",
+        keyword="招标",
+        fields=fields,
+    )
+
+    assert first != second
+
+
+def test_source_document_prompt_accepts_direct_target_evidence_in_roundups():
+    from Sere1nGraph.graph.prompts.loader import load_prompt
+    from api.services.source_documents.analysis import ARTICLE_ANALYSIS_PROMPT_SLUG
+
+    prompt = load_prompt(ARTICLE_ANALYSIS_PROMPT_SLUG)
+
+    assert "目标不需要是整篇文章的唯一主体" in prompt
+    assert "行业招投标汇总中清晰完整的目标项目" in prompt
+    assert "只偶然提及目标" in prompt
+
+
 def test_source_detail_can_select_immutable_version(monkeypatch):
     import asyncio
 

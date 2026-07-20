@@ -634,7 +634,28 @@ class _CollectStage(Stage):
                         )
                         return
                     if not candidate_policy.allow_mobile_detail_fallback:
-                        if not source_result.get("rejected"):
+                        if source_result.get("rejected"):
+                            obs_log(
+                                "公众号原文与目标直接证据不足，已丢弃本次关联",
+                                project_id=st["project_id"] or "",
+                                task_id=run_task_id,
+                                source=_OBS_SOURCE,
+                                level="info",
+                                event="collect_source_document_rejected",
+                                data={
+                                    "keyword": keyword,
+                                    "url": source_result.get("source_url") or source_url,
+                                    "document_id": source_result.get("document_id"),
+                                    "version_id": source_result.get("version_id"),
+                                    "subject_match": source_result.get("subject_match"),
+                                    "required_subject_match": source_result.get(
+                                        "required_subject_match"
+                                    ),
+                                    "reason": source_result.get("score_reason")
+                                    or source_result.get("reason"),
+                                },
+                            )
+                        else:
                             await _persist_pending_handoff(
                                 str(source_result.get("reason") or "浏览器归档暂未完成")
                             )

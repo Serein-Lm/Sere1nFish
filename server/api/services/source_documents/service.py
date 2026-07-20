@@ -23,6 +23,7 @@ from core.mobile.collect.contacts import extract_contacts
 from .analysis import (
     analyze_article_fields,
     analyze_article_images,
+    article_analysis_prompt_fingerprint,
     stable_content_hash,
 )
 from .contracts import CapturedDocument, CapturedImage, CapturedScreenshot
@@ -32,7 +33,7 @@ from .urls import canonicalize_source_url
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
-_CONTEXT_ANALYSIS_SCHEMA_VERSION = 3
+_CONTEXT_ANALYSIS_SCHEMA_VERSION = 4
 _MEDIA_POLICY_VERSION = 2
 _SOURCE_FIELD_KEYS = {
     "title",
@@ -83,6 +84,7 @@ def _analysis_fingerprint(
 ) -> str:
     payload = {
         "schema_version": _CONTEXT_ANALYSIS_SCHEMA_VERSION,
+        "prompt_hash": article_analysis_prompt_fingerprint(),
         "version_id": version_id,
         "target_id": target_id,
         "target_name": target_name,
@@ -285,7 +287,7 @@ def _rejected_source_result(
     return {
         "ok": False,
         "rejected": True,
-        "reason": "文章主体与目标不匹配",
+        "reason": "文章未包含可充分归属于目标的直接证据",
         "source_type": capture.source_type,
         "source_url": capture.canonical_url,
         "document_id": document_id,

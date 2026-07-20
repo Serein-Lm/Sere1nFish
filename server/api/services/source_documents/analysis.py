@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, create_model
 
 from Sere1nGraph.graph.agents.runtime import create_llm
+from Sere1nGraph.graph.prompts.loader import load_prompt
 from api.models.mobile_collect import ExtractField
 from api.services.runtime_config import get_runtime_app_config
 from core.mobile.collect.contacts import extract_contacts
@@ -26,6 +27,7 @@ from .contracts import CapturedDocument, CapturedImage
 
 _STRUCTURE_TIMEOUT_SECONDS = 120
 _IMAGE_BATCH_TIMEOUT_SECONDS = 120
+ARTICLE_ANALYSIS_PROMPT_SLUG = "source_document/source_document"
 
 
 _PY_TYPE = {
@@ -93,7 +95,12 @@ def _article_output_model(fields: list[ExtractField]) -> type[BaseModel]:
             "summary": (str, Field(default="", description="完整文章的事实性摘要")),
             "subject_match": (
                 float,
-                Field(default=0, ge=0, le=100, description="文章主体与目标实体对应程度"),
+                Field(
+                    default=0,
+                    ge=0,
+                    le=100,
+                    description="正文中可直接归属于目标实体的实质证据充分程度",
+                ),
             ),
             "relevance_score": (
                 float,
@@ -139,6 +146,30 @@ def _deterministic_fields(capture: CapturedDocument) -> dict[str, Any]:
     }
 
 
+def article_analysis_prompt_fingerprint() -> str:
+    """返回当前数据库 Prompt 快照的内容指纹，用于失效旧分析缓存。"""
+    template = load_prompt(ARTICLE_ANALYSIS_PROMPT_SLUG)
+    return hashlib.sha256(template.encode("utf-8")).hexdigest()
+
+
+def _render_article_analysis_prompt(
+    *,
+    target_name: str,
+    keyword: str,
+    field_desc: str,
+) -> tuple[str, str]:
+    template = load_prompt(ARTICLE_ANALYSIS_PROMPT_SLUG)
+    prompt_hash = hashlib.sha256(template.encode("utf-8")).hexdigest()
+    rendered = template
+    for placeholder, value in {
+        "{{target_name}}": target_name or "未指定",
+        "{{keyword}}": keyword or "未指定",
+        "{{field_desc}}": field_desc or "文章关键信息",
+    }.items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered, prompt_hash
+
+
 async def analyze_article_fields(
     capture: CapturedDocument,
     *,
@@ -150,6 +181,7 @@ async def analyze_article_fields(
 ) -> dict[str, Any]:
     """按采集任务 schema 归纳全文；失败时返回完整的确定性基础字段。"""
     fallback = _deterministic_fields(capture)
+    prompt_hash = ""
     try:
         app_config = await get_runtime_app_config()
         model_name = app_config.runtime.models.default
@@ -158,12 +190,10 @@ async def analyze_article_fields(
         field_desc = "、".join(
             f"{item.name}({item.description or item.type})" for item in fields
         ) or "文章关键信息"
-        system = (
-            "你是公开文章结构化分析器。只能依据给出的完整正文归纳，不得补充文章外事实。"
-            f"本次目标实体：{target_name or '未指定'}；搜索词：{keyword or '未指定'}。"
-            f"需要提取：{field_desc}。subject_match 判断文章主体是否真的是目标实体，"
-            "不能因为同属一个行业或只提到目标就给高分；relevance_score 同时考虑目标对应和信息价值。"
-            "两个分数必须输出0到100的百分制数字（例如95），禁止输出0到1的小数比例。"
+        system, prompt_hash = _render_article_analysis_prompt(
+            target_name=target_name,
+            keyword=keyword,
+            field_desc=field_desc,
         )
         message = HumanMessage(
             content=(
@@ -202,6 +232,8 @@ async def analyze_article_fields(
             "subject_match": subject_match,
             "score_reason": str(parsed.get("score_reason") or ""),
             "analysis_model": model_name,
+            "analysis_prompt_slug": ARTICLE_ANALYSIS_PROMPT_SLUG,
+            "analysis_prompt_hash": prompt_hash,
         }
     except Exception as exc:  # noqa: BLE001
         return {
@@ -210,6 +242,8 @@ async def analyze_article_fields(
             "subject_match": 0,
             "score_reason": "全文结构化模型不可用，已保留确定性提取结果",
             "analysis_error": str(exc),
+            "analysis_prompt_slug": ARTICLE_ANALYSIS_PROMPT_SLUG,
+            "analysis_prompt_hash": prompt_hash,
         }
 
 

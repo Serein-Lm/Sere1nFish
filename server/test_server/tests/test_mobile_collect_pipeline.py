@@ -769,3 +769,104 @@ def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
     assert payload["discovery_fields"] == candidate["fields"]
     assert payload["screenshot_ids"] == ["phone-shot", "browser-shot-1"]
     assert _Context.state["counters"]["documents"] == 1
+
+
+def test_deep_dive_observes_rejected_source_without_persisting(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+    from core.mobile.collect.source_links import SourceLinkResult
+
+    emitted: list[tuple[str, dict]] = []
+    observed: list[dict] = []
+
+    class _Logger:
+        def warning(self, message):
+            raise AssertionError(message)
+
+    class _Context:
+        logger = _Logger()
+        state = {
+            "db": _FakeDB(),
+            "stop_event": asyncio.Event(),
+            "device_id": "devA",
+            "run_task_id": "run-rejected",
+            "project_id": "projectA",
+            "task_def_id": "task-rejected",
+            "target": {
+                "target_id": "target-a",
+                "canonical_name": "目标单位",
+            },
+            "dry_run": False,
+            "counters": {"documents": 0},
+            "detail_max_swipes": 0,
+            "swipe_interval": 0.01,
+            "extract_fields": [],
+            "app_name": "微信",
+            "source_link_strategy": "wechat_copy_link",
+            "min_subject_match": 80,
+        }
+
+        async def emit(self, stage, payload):
+            emitted.append((stage, payload))
+
+    async def _capture(ctx, keyword, note):
+        return "QUJD", "phone-shot", "https://oss.example/phone-shot.png"
+
+    async def _ingest(db, **kwargs):
+        return {
+            "ok": False,
+            "rejected": True,
+            "source_url": kwargs["url"],
+            "document_id": "source-doc-rejected",
+            "version_id": "source-version-rejected",
+            "subject_match": 25,
+            "required_subject_match": kwargs["min_subject_match"],
+            "score_reason": "正文仅偶然提及目标单位",
+        }
+
+    async def _no_sleep(_seconds):
+        return None
+
+    def _observe(message, **kwargs):
+        observed.append({"message": message, **kwargs})
+        return ""
+
+    stage = pl._CollectStage()
+    monkeypatch.setattr(stage, "_capture_save", _capture)
+    monkeypatch.setattr(pl, "_do_tap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pl, "_do_back", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pl, "ingest_source_url", _ingest)
+    monkeypatch.setattr(pl, "obs_log", _observe)
+    monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(
+        pl,
+        "extract_source_link",
+        lambda device_id, strategy: SourceLinkResult(
+            strategy=strategy,
+            ok=True,
+            url="https://mp.weixin.qq.com/s/rejected-link",
+        ),
+    )
+
+    asyncio.new_event_loop().run_until_complete(
+        stage._deep_dive(
+            _Context(),
+            "目标单位 招标",
+            {
+                "tap_x": 100,
+                "tap_y": 200,
+                "score": 80,
+                "subject_match": 90,
+                "fields": {"title": "候选文章"},
+            },
+        )
+    )
+
+    assert emitted == []
+    rejected = next(
+        item
+        for item in observed
+        if item.get("event") == "collect_source_document_rejected"
+    )
+    assert rejected["data"]["subject_match"] == 25
+    assert rejected["data"]["required_subject_match"] == 80
+    assert rejected["data"]["reason"] == "正文仅偶然提及目标单位"
