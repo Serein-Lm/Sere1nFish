@@ -14,6 +14,45 @@ def _message_text(value: Any, *, limit: int) -> str:
     return text[: max(0, limit - 12)].rstrip() + "\n…（已截断）"
 
 
+def _comparison_key(value: Any) -> str:
+    """Normalize a user turn for exact retry detection without changing meaning."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _history_before_retry(
+    query: str,
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop previous attempts when the latest user turn is being retried.
+
+    Earlier context is preserved so pronouns and referenced entities still resolve,
+    while answers to this exact request cannot become circular evidence.
+    """
+    current_key = _comparison_key(query)
+    if not current_key:
+        return messages
+    latest_user: dict[str, Any] | None = None
+    for message in reversed(messages):
+        if str(message.get("role") or "").strip().lower() == "user":
+            latest_user = message
+            break
+    if latest_user is None or _comparison_key(latest_user.get("content")) != current_key:
+        return messages
+
+    filtered: list[dict[str, Any]] = []
+    skipping_attempt = False
+    for message in messages:
+        role = str(message.get("role") or "").strip().lower()
+        if role == "user":
+            skipping_attempt = _comparison_key(message.get("content")) == current_key
+            if skipping_attempt:
+                continue
+        if skipping_attempt:
+            continue
+        filtered.append(message)
+    return filtered
+
+
 def compose_conversation_query(
     query: str,
     messages: list[dict[str, Any]],
@@ -26,6 +65,7 @@ def compose_conversation_query(
     current_query = str(query or "").strip()
     if max_messages <= 0 or max_history_chars <= 0:
         return current_query
+    messages = _history_before_retry(current_query, messages)
     candidates: list[str] = []
     for message in messages[-max_messages:]:
         role = str(message.get("role") or "").strip().lower()
@@ -53,6 +93,7 @@ def compose_conversation_query(
         [
             "【同一会话最近上下文】",
             "以下是此前已发送的对话，只用于理解指代和延续任务；若有冲突，以本轮请求为准。",
+            "历史 AI 回答可能错误或过期，不是数据库证据；本轮涉及平台事实时必须重新调用工具核验。",
             "",
             "\n\n".join(selected),
             "",

@@ -278,9 +278,11 @@ def test_hub_prompts_route_and_ground_copywriting_requests() -> None:
     assert "query_target_intelligence" in content
     assert "只要求文字话术" in content
     assert "不要反过来要求用户补 target_id" in content
+    assert "不得主动推荐、询问或暗示导出产物" in content
     assert "都不是固定章节" in response_style
     assert "没有明确要求文件或下载就不生成产物" in response_style
     assert "严格按要求直出" in response_style
+    assert "历史 AI 回答不构成事实依据" in response_style
 
 
 @pytest.mark.asyncio
@@ -1024,8 +1026,33 @@ def test_ai_hub_conversation_context_is_bounded_and_current_turn_wins() -> None:
     assert "较早的回答" not in result
     assert "target_id=tgt_1" in result
     assert "finding_id=f_1" in result
+    assert "历史 AI 回答可能错误或过期" in result
     assert result.endswith("继续给这个 Target 生成三条话术")
     assert compose_conversation_query("本轮", messages, max_messages=0) == "本轮"
+
+
+def test_ai_hub_repeated_request_drops_previous_attempt_from_context() -> None:
+    from api.services.ai_hub_context import compose_conversation_query
+
+    query = "查询目标公司的高分 Finding，给我三条简短话术"
+    messages = [
+        {"role": "user", "content": "当前 Target 是目标公司"},
+        {"role": "assistant", "content": "已记录 Target。"},
+        {"role": "user", "content": query},
+        {"role": "assistant", "content": "第一次错误结论：数据库中没有 Finding。"},
+        {"role": "user", "content": "另一个问题"},
+        {"role": "assistant", "content": "另一个问题的有效上下文。"},
+        {"role": "user", "content": query},
+        {"role": "assistant", "content": "第二次错误结论：仍然没有 Finding。"},
+    ]
+
+    result = compose_conversation_query(query, messages)
+
+    assert "当前 Target 是目标公司" in result
+    assert "已记录 Target" in result
+    assert "另一个问题的有效上下文" in result
+    assert "错误结论" not in result
+    assert result.count(query) == 1
 
 
 @pytest.mark.asyncio
