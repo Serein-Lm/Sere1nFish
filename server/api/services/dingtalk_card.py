@@ -285,20 +285,12 @@ class DingTalkCardRenderer:
         max_items: int = 1,
     ) -> list[dict[str, Any]]:
         """Render one compact status row for the Card's progress surface."""
-        if max_items <= 0:
+        if final or max_items <= 0:
             return []
 
         stages = [item for item in self.items if item.node_type != "tool"]
         if not stages:
-            label = "处理完成" if final else "正在处理 · 理解需求"
-            return [{"name": label, "progress": 100 if final else 0}]
-
-        if final:
-            failed = sum(item.status == "failed" for item in stages)
-            label = f"处理完成 · {len(stages)} 个阶段"
-            if failed:
-                label += f" · {failed} 个异常"
-            return [{"name": label, "progress": 100}]
+            return [{"name": "正在处理 · 理解需求", "progress": 0}]
 
         current = next(
             (

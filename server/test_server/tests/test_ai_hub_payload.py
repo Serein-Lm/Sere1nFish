@@ -883,7 +883,7 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
     assert all("生成文档产物" not in item["name"] for item in preparations)
 
     completed = renderer.render_preparations(final=True)
-    assert completed == [{"name": "处理完成 · 2 个阶段", "progress": 100}]
+    assert completed == []
 
 
 @pytest.mark.asyncio

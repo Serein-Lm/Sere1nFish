@@ -36,6 +36,10 @@ def test_responsive_dingtalk_card_template_is_compact_and_importable() -> None:
     assert exported["type"] == "im"
     assert exported["mode"] == "card"
     assert len(statuses) == 2
+    container = next(
+        item for item in components if item["componentName"] == "AICardContainer"
+    )
+    assert container["props"]["enableGradientBorder"] is False
 
     for status in statuses:
         content = next(
@@ -43,25 +47,36 @@ def test_responsive_dingtalk_card_template_is_compact_and_importable() -> None:
             for child in status["children"]
             if child["componentName"] == "AICardContent"
         )
-        assert [child["componentName"] for child in content["children"]] == [
-            "BaseText",
-            "Divider",
-            "Loop",
-            "Divider",
-            "MarkdownBlock",
-        ]
-        progress_loop = content["children"][2]
-        assert progress_loop["props"]["width"] == 100
-        assert progress_loop["props"]["childWidth"] == "match_parent"
-        assert not any(
-            item["componentName"] == "ProgressBar"
-            for item in _components(progress_loop)
-        )
+        query = content["children"][0]
+        assert query["componentName"] == "BaseText"
+        assert query["props"]["enableIcon"] is False
+        if status["props"]["status"] == 2:
+            assert [child["componentName"] for child in content["children"]] == [
+                "BaseText",
+                "Loop",
+                "Divider",
+                "MarkdownBlock",
+            ]
+            progress_loop = content["children"][1]
+            assert progress_loop["props"]["width"] == 100
+            assert progress_loop["props"]["childWidth"] == "match_parent"
+            assert not any(
+                item["componentName"] == "ProgressBar"
+                for item in _components(progress_loop)
+            )
+        else:
+            assert [child["componentName"] for child in content["children"]] == [
+                "BaseText",
+                "Divider",
+                "MarkdownBlock",
+            ]
         assert not any(
             item["componentName"] == "Chart" for item in _components(content)
         )
 
     assert "@subdata{&#039;progress&#039;}" not in exported["widgetInfo"]
+    assert "<DDAnimationView" not in exported["widgetInfo"]
+    assert "icon_question_fill" not in exported["widgetInfo"]
     assert "data.cardData.preparations" in exported["widgetInfo"]
     assert "data.cardData.content" in exported["widgetInfo"]
     assert "data.cardData.query" in exported["widgetInfo"]
