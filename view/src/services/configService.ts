@@ -254,6 +254,7 @@ export interface DingTalkBot {
   client_secret?: string
   has_client_secret: boolean
   ai_card_streaming: boolean
+  ai_card_template_id?: string
   public_base_url?: string
   reconnect_seconds: number
   stream_state: string
@@ -272,6 +273,7 @@ export interface DingTalkBotConfig {
   client_id?: string
   client_secret?: string
   ai_card_streaming?: boolean
+  ai_card_template_id?: string
   public_base_url?: string
   reconnect_seconds?: number
 }

@@ -29,9 +29,34 @@ def _run_coro_sync(coro):
     except Exception:  # noqa: BLE001
         motor_loop = None
 
-    if motor_loop is not None and motor_loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(coro, motor_loop)
-        return future.result()
+    if motor_loop is not None and not motor_loop.is_closed():
+        if motor_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, motor_loop)
+            return future.result()
+
+        # Motor may already be bound to a loop before a CLI/test starts it.
+        # Running the coroutine through asyncio.run() would create another loop
+        # and fail with "Future attached to a different loop".
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return motor_loop.run_until_complete(coro)
+
+        result: dict[str, Any] = {}
+
+        def _motor_worker() -> None:
+            try:
+                asyncio.set_event_loop(motor_loop)
+                result["value"] = motor_loop.run_until_complete(coro)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        thread = threading.Thread(target=_motor_worker, daemon=True)
+        thread.start()
+        thread.join()
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
 
     # 回退：当前线程无运行中的 loop -> 直接 asyncio.run
     try:

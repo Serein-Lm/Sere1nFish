@@ -40,7 +40,10 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
     assert "get_artifact_content" in payload["tools"]
     content = next(item for item in catalog["agents"] if item["name"] == "content")
     assert "generate_document_artifact" in content["tools"]
+    assert "query_target_intelligence" in content["tools"]
+    assert "get_finding_copywriting" in content["tools"]
     data = next(item for item in catalog["agents"] if item["name"] == "data")
+    assert "query_target_intelligence" in data["tools"]
     assert "get_project_data_catalog" in data["tools"]
     assert "read_project_dataset" in data["tools"]
     assert catalog["audit"]["project_dataset_interfaces"] == len(
@@ -223,10 +226,33 @@ def test_recent_conversation_tool_filters_current_owner(monkeypatch) -> None:
 
 
 def test_hub_prompts_are_repository_seeds() -> None:
-    from Sere1nGraph.graph.prompts.loader import PROMPTS_DIR
+    from Sere1nGraph.graph.prompts.loader import PROMPTS_DIR, load_prompt
 
-    expected = {"classify", "data", "persona", "content", "payload"}
+    expected = {
+        "classify",
+        "data",
+        "persona",
+        "content",
+        "payload",
+        "response_style",
+    }
     assert expected == {path.stem for path in (PROMPTS_DIR / "hub").glob("*.md")}
+    for prompt_name in ("data", "persona", "content", "payload"):
+        expanded = load_prompt(f"hub/{prompt_name}")
+        assert "统一回答展示协议" in expanded
+        assert "{{ include:" not in expanded
+
+
+def test_default_model_roles_separate_text_and_multimodal_workloads() -> None:
+    from Sere1nGraph.graph.config.models import ModelsConfig
+
+    models = ModelsConfig()
+    assert models.default == "qwen3.7-max"
+    assert models.mobile_planner_model == "qwen3.7-max"
+    assert models.mobile_chat_model == "qwen3.7-max"
+    assert models.vision == "qwen3.7-plus"
+    assert models.mobile_executor_model == "qwen3.7-plus"
+    assert models.mobile_screen_model == "qwen3.7-plus"
 
 
 def test_payload_prompt_has_bounded_research_recovery() -> None:
@@ -236,6 +262,18 @@ def test_payload_prompt_has_bounded_research_recovery() -> None:
     assert "检索预算与失败恢复" in content
     assert "生成 Word" in content
     assert "next_offset" in content
+
+
+def test_hub_prompts_route_and_ground_copywriting_requests() -> None:
+    from Sere1nGraph.graph.prompts.loader import PROMPTS_DIR
+
+    classify = (PROMPTS_DIR / "hub" / "classify.md").read_text(encoding="utf-8")
+    content = (PROMPTS_DIR / "hub" / "content.md").read_text(encoding="utf-8")
+
+    assert "必须选择 `content`" in classify
+    assert "即使请求很短" in classify
+    assert "query_target_intelligence" in content
+    assert "只要求文字话术" in content
 
 
 @pytest.mark.asyncio
@@ -413,6 +451,48 @@ def test_findings_tool_forwards_target_and_offset(monkeypatch) -> None:
     assert "下一页 offset=3" in result
 
 
+def test_target_intelligence_tool_returns_findings_and_existing_copywriting(
+    monkeypatch,
+) -> None:
+    from api.dao import findings as findings_dao
+    from api.dao import targets as targets_dao
+    from api.db import mongodb
+    from Sere1nGraph.graph.tools.analysis_tools import query_target_intelligence
+
+    async def fake_target(_db, target_id):
+        assert target_id == "target_1"
+        return {"target_id": target_id, "canonical_name": "目标公司"}
+
+    async def fake_query(_db, target_id, **kwargs):
+        assert target_id == "target_1"
+        assert kwargs["project_id"] == "project_1"
+        return ([{
+            "finding_id": "finding_1",
+            "label": "公开邮箱",
+            "attention_score": 88,
+            "context": "联系人上下文",
+            "copywriting": {"scripts": ["已有沟通话术"]},
+        }], 1)
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(targets_dao, "get_target", fake_target)
+    monkeypatch.setattr(
+        findings_dao,
+        "query_target_findings_with_copywriting",
+        fake_query,
+    )
+
+    result = query_target_intelligence.invoke({
+        "target_id": "target_1",
+        "project_id": "project_1",
+    })
+
+    assert "Target：目标公司" in result
+    assert "公开邮箱" in result
+    assert "已有沟通话术" in result
+    assert "finding_1" in result
+
+
 @pytest.mark.asyncio
 async def test_project_dashboard_uses_clean_dataset_counts(monkeypatch) -> None:
     from Sere1nGraph.graph import observability
@@ -555,6 +635,24 @@ async def test_mcp_tool_budget_does_not_call_adapter_after_limit() -> None:
     assert "调用预算已用完" in blocked
 
 
+def test_sync_tool_bridge_uses_motor_loop_before_it_starts(monkeypatch) -> None:
+    from api.db import mongodb
+    from Sere1nGraph.graph.tools.builtin import _run_coro_sync
+
+    motor_loop = asyncio.new_event_loop()
+    bound_future = motor_loop.create_future()
+    motor_loop.call_soon(bound_future.set_result, "ok")
+
+    async def await_bound_future() -> str:
+        return await bound_future
+
+    monkeypatch.setattr(mongodb, "get_io_loop", lambda: motor_loop)
+    try:
+        assert _run_coro_sync(await_bound_future()) == "ok"
+    finally:
+        motor_loop.close()
+
+
 def test_conversation_persistence_ignores_workflow_summary() -> None:
     from Sere1nGraph.graph.workflow.events import final
     from api.routers.agent import _extract_final_text
@@ -638,7 +736,7 @@ def test_artifact_download_content_type_is_format_aware() -> None:
     )
 
 
-def test_dingtalk_card_renders_progress_and_downloadable_artifacts() -> None:
+def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> None:
     from api.services.dingtalk_card import DingTalkCardRenderer, build_artifact_buttons
 
     renderer = DingTalkCardRenderer()
@@ -665,13 +763,25 @@ def test_dingtalk_card_renders_progress_and_downloadable_artifacts() -> None:
     renderer.consume({
         "event": "content",
         "path": "graph.router.content",
-        "data": {"content": "正在整理可下载文档。"},
+        "data": {"content": "内部分析不应进入卡片正文。"},
     })
 
     running = renderer.render_running()
-    assert "执行进度" in running
+    assert "正在处理" in running
     assert "生成文档产物" in running
     assert "调用 1 个工具" in running
+    assert "内部分析" not in running
+
+    renderer.consume({
+        "event": "content",
+        "path": "graph.router.synthesize",
+        "data": {"content": "这是需要展示的关键结果。\n"},
+    })
+    streaming = renderer.render_streaming()
+    assert streaming.startswith("### 回答")
+    assert "这是需要展示的关键结果" in streaming
+    assert "内部分析" not in streaming
+    assert not streaming.endswith("\n")
 
     artifacts = [
         {
@@ -695,11 +805,19 @@ def test_dingtalk_card_renders_progress_and_downloadable_artifacts() -> None:
         artifacts,
         base_url="https://fish.example.com/",
     )
-    assert "交付产物" in final
+    assert "### 产物" in final
     assert "Word" in final and "JSON" in final
     assert "https://fish.example.com/phishing?ref_artifact=art_word" in final
     assert "[[artifact:" not in final
     assert "下载链接：/api/" not in final
+
+    template_final = renderer.render_final(
+        "结论明确。",
+        [],
+        include_execution_summary=False,
+    )
+    assert template_final == "### 回答\n\n结论明确。"
+    assert "执行摘要" not in template_final
 
     buttons = build_artifact_buttons(
         artifacts,
@@ -710,6 +828,280 @@ def test_dingtalk_card_renders_progress_and_downloadable_artifacts() -> None:
         "打开/下载 JSON",
     ]
     assert build_artifact_buttons(artifacts, base_url="javascript:alert(1)") == []
+
+    preparations = renderer.render_preparations()
+    assert [item["name"] for item in preparations] == ["AI 中枢", "分析查询"]
+    assert preparations[-1]["progress"] == 100
+    assert all("生成文档产物" not in item["name"] for item in preparations)
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_template_card_separates_progress_and_streaming_content() -> None:
+    from api.services.dingtalk_ai_card import create_ai_card_session
+
+    class FakeReplier:
+        def __init__(self, _client, _incoming) -> None:
+            self.created: tuple[str, dict[str, str]] | None = None
+            self.updates: list[tuple[dict[str, str], dict]] = []
+            self.streaming: list[dict] = []
+
+        async def async_create_and_deliver_card(self, template_id, card_data):
+            self.created = (template_id, card_data)
+            return "card_instance_1"
+
+        async def async_put_card_data(self, _instance_id, *, card_data, **kwargs):
+            self.updates.append((card_data, kwargs))
+
+        async def async_streaming(self, _instance_id, **kwargs):
+            self.streaming.append(kwargs)
+
+    replier = FakeReplier(None, None)
+
+    class FakeSDK:
+        @staticmethod
+        def AICardReplier(_client, _incoming):
+            return replier
+
+    class FakeHandler:
+        dingtalk_client = object()
+
+    session = await create_ai_card_session(
+        FakeHandler(),
+        object(),
+        query="分析安徽广播电视台",
+        template_id="template-id.schema",
+        sdk=FakeSDK,
+    )
+    assert session is not None
+    assert session.has_progress_panel is True
+    assert replier.created is not None
+    template_id, initial = replier.created
+    assert template_id == "template-id.schema"
+    assert initial["query"] == "分析安徽广播电视台"
+    assert initial["content"] == ""
+    assert initial["preparations"].startswith("[")
+    assert replier.streaming[0]["content_value"] == ""
+    assert replier.streaming[0]["finished"] is False
+
+    await session.update_progress([{"name": "查询 Target", "progress": 50}])
+    await session.stream("关键结果\n")
+    await session.finish("最终结果\n", buttons=[])
+
+    assert "查询 Target" in replier.updates[0][0]["preparations"]
+    assert replier.updates[0][1]["cardUpdateOptions"]["updateCardDataByKey"] is True
+    assert replier.streaming[-2]["content_value"] == "关键结果"
+    assert replier.streaming[-2]["finished"] is False
+    assert replier.streaming[-1]["content_value"] == "最终结果"
+    assert replier.streaming[-1]["finished"] is True
+    assert replier.streaming[-1]["failed"] is False
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_template_card_falls_back_when_sdk_only_logs_http_error(
+    monkeypatch,
+) -> None:
+    from api.services import dingtalk_ai_card
+
+    class SilentLogger:
+        @staticmethod
+        def error(_message, *_args, **_kwargs) -> None:
+            return None
+
+        @staticmethod
+        def warning(_message, *_args, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(dingtalk_ai_card, "logger", SilentLogger())
+
+    class FakeReplier:
+        logger = SilentLogger()
+
+        async def async_create_and_deliver_card(self, _template_id, _card_data):
+            self.logger.error("createAndDeliver HTTP 400: invalid template")
+            return "invalid_card_instance"
+
+    class FakeSDK:
+        @staticmethod
+        def AICardReplier(_client, _incoming):
+            return FakeReplier()
+
+    class LegacyCard:
+        card_instance_id = "legacy_card"
+
+        def __init__(self) -> None:
+            self.streamed: list[str] = []
+
+        def ai_streaming(self, markdown: str, _append: bool) -> None:
+            self.streamed.append(markdown)
+
+        def ai_finish(self, **_kwargs) -> None:
+            return None
+
+    legacy = LegacyCard()
+
+    class FakeHandler:
+        dingtalk_client = object()
+
+        @staticmethod
+        def ai_markdown_card_start(_incoming, _title):
+            return legacy
+
+    session = await dingtalk_ai_card.create_ai_card_session(
+        FakeHandler(),
+        object(),
+        query="测试",
+        template_id="template-id.schema",
+        sdk=FakeSDK,
+    )
+
+    assert session is not None
+    assert session.has_progress_panel is False
+    await session.stream("已回退")
+    assert legacy.streamed == ["已回退"]
+
+
+def test_ai_hub_conversation_context_is_bounded_and_current_turn_wins() -> None:
+    from api.services.ai_hub_context import compose_conversation_query
+
+    messages = [
+        {"role": "user", "content": "最早的问题"},
+        {"role": "assistant", "content": "较早的回答"},
+        {"role": "user", "content": "最近的问题 target_id=tgt_1"},
+        {"role": "assistant", "content": "最近的回答 finding_id=f_1"},
+    ]
+    result = compose_conversation_query(
+        "继续给这个 Target 生成三条话术",
+        messages,
+        max_messages=2,
+        max_history_chars=500,
+    )
+
+    assert "最早的问题" not in result
+    assert "较早的回答" not in result
+    assert "target_id=tgt_1" in result
+    assert "finding_id=f_1" in result
+    assert result.endswith("继续给这个 Target 生成三条话术")
+    assert compose_conversation_query("本轮", messages, max_messages=0) == "本轮"
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monkeypatch) -> None:
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db import mongodb
+    from api.services import dingtalk_bridge, runtime_config
+    from Sere1nGraph.graph.workflow import executor
+
+    db = object()
+    appended: list[dict] = []
+    executed: dict[str, str] = {}
+
+    async def fake_runtime_config():
+        return object()
+
+    async def fake_ensure(_db, **_kwargs):
+        return {"conversation_id": "dingtalk:conversation"}
+
+    async def fake_recent(_db, _conversation_id, **_kwargs):
+        return [
+            {"role": "user", "content": "查询 target_id=tgt_1"},
+            {"role": "assistant", "content": "找到 finding_id=f_1"},
+        ]
+
+    async def fake_append(_db, **kwargs):
+        appended.append(kwargs)
+        return kwargs
+
+    async def fake_execute_stream(*, query, **_kwargs):
+        executed["query"] = query
+        yield {
+            "event": "final",
+            "data": {"section": "result", "content": "已生成三条话术"},
+        }
+
+    monkeypatch.setattr(runtime_config, "get_runtime_app_config", fake_runtime_config)
+    monkeypatch.setattr(mongodb, "get_db", lambda: db)
+    monkeypatch.setattr(ai_hub_dao, "ensure_conversation", fake_ensure)
+    monkeypatch.setattr(ai_hub_dao, "list_recent_messages", fake_recent)
+    monkeypatch.setattr(ai_hub_dao, "append_message", fake_append)
+    monkeypatch.setattr(executor, "execute_stream", fake_execute_stream)
+
+    final_text, artifacts = await dingtalk_bridge.run_hub_query(
+        "继续给这个 Target 生成三条话术",
+        owner="dingtalk:user_1",
+        conversation_id="dingtalk:conversation",
+        channel="dingtalk_stream",
+    )
+
+    assert "target_id=tgt_1" in executed["query"]
+    assert "finding_id=f_1" in executed["query"]
+    assert executed["query"].endswith("继续给这个 Target 生成三条话术")
+    assert [message["role"] for message in appended] == ["user", "assistant"]
+    assert appended[0]["content"] == "继续给这个 Target 生成三条话术"
+    assert appended[1]["content"] == "已生成三条话术"
+    assert final_text == "已生成三条话术"
+    assert artifacts == []
+
+
+def test_dingtalk_card_live_content_never_slides_or_leaks_reasoning() -> None:
+    from api.services.dingtalk_card import DingTalkCardRenderer
+
+    renderer = DingTalkCardRenderer()
+    renderer.consume({
+        "event": "content",
+        "path": "graph.router.browser",
+        "data": {"content": "检索和工具思考过程"},
+    })
+    assert renderer.render_streaming() == ""
+
+    renderer.consume({
+        "event": "content",
+        "path": "graph.router.synthesize",
+        "data": {"content": "A" * 600},
+    })
+    first = renderer.render_streaming(max_chars=420)
+    renderer.consume({
+        "event": "content",
+        "path": "graph.router.synthesize",
+        "data": {"content": "B" * 600},
+    })
+    second = renderer.render_streaming(max_chars=420)
+
+    assert first == second
+    assert first.startswith("### 回答\n\n")
+    assert "检索和工具思考过程" not in first
+    assert first.endswith("…（内容较长，已截断）")
+
+
+def test_dingtalk_card_hides_incomplete_entity_marker_during_streaming() -> None:
+    from api.services.dingtalk_card import DingTalkCardRenderer
+
+    renderer = DingTalkCardRenderer()
+    renderer.consume({
+        "event": "content",
+        "path": "graph.router.synthesize",
+        "data": {"content": "报告已生成 [[artifact:art_1|"},
+    })
+    assert "[[artifact:" not in renderer.render_streaming()
+
+    renderer.consume({
+        "event": "content",
+        "path": "graph.router.synthesize",
+        "data": {"content": "分析报告]]"},
+    })
+    assert "**产物：分析报告**" in renderer.render_streaming()
+
+
+def test_dingtalk_output_removes_internal_reference_markers() -> None:
+    from api.services.dingtalk_card import clean_hub_markdown
+
+    rendered = clean_hub_markdown(
+        "安徽广播电视台 [[ref:tgt_5a60afa2993789479f2f]]: 382 资产\n"
+        "[[ref:target:tgt_1|北京广播电视台]]：422 资产"
+    )
+
+    assert "[[ref:" not in rendered
+    assert "安徽广播电视台: 382 资产" in rendered
+    assert "北京广播电视台：422 资产" in rendered
 
 
 @pytest.mark.asyncio
@@ -756,6 +1148,93 @@ def test_dingtalk_stream_requires_complete_credentials() -> None:
     assert enabled({"enabled": True, "stream_enabled": True, "client_id": "id", "client_secret": "secret"})
     assert not enabled({"enabled": True, "stream_enabled": True, "client_id": "id"})
     assert not enabled({"enabled": True, "stream_enabled": False, "client_id": "id", "client_secret": "secret"})
+
+
+def test_dingtalk_card_template_id_is_normalized_and_validated() -> None:
+    from api.services.dingtalk_configuration import normalize_card_template_id
+
+    assert normalize_card_template_id("  template-id.schema  ") == "template-id.schema"
+    assert normalize_card_template_id("") == ""
+    with pytest.raises(ValueError, match="模板 ID 格式不正确"):
+        normalize_card_template_id("https://example.test/template")
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_stream_updates_card_only_for_synthesized_answer(monkeypatch) -> None:
+    from api.services import dingtalk_bridge
+    from api.services import dingtalk_stream as stream_module
+    from crawler_tools import dingtalk_bot
+
+    class FakeCard:
+        card_instance_id = "card_1"
+
+        def __init__(self) -> None:
+            self.streamed: list[str] = []
+            self.finished = ""
+
+        def ai_streaming(self, markdown: str, append: bool = False) -> None:
+            assert append is False
+            self.streamed.append(markdown)
+
+        def ai_finish(self, *, markdown: str, button_list: list[dict]) -> None:
+            assert button_list == []
+            self.finished = markdown
+
+    card = FakeCard()
+
+    class FakeHandler:
+        @staticmethod
+        def ai_markdown_card_start(_incoming, _title):
+            return card
+
+    class FakeIncoming:
+        sender_staff_id = "user_1"
+        sender_id = "sender_1"
+        conversation_id = "conversation_1"
+        session_webhook = "https://example.test/session"
+
+    async def fake_run_hub_query(_query: str, **kwargs):
+        on_event = kwargs["on_event"]
+        for event in [
+            {
+                "event": "content",
+                "path": "graph.router.browser",
+                "data": {"content": "内部检索思考"},
+            },
+            {
+                "event": "content",
+                "path": "graph.router.synthesize",
+                "data": {"content": "关键结论一。"},
+            },
+            {
+                "event": "content",
+                "path": "graph.router.synthesize",
+                "data": {"content": "关键结论二。"},
+            },
+        ]:
+            await on_event(event)
+        return "关键结论一。关键结论二。", []
+
+    async def fake_reply(*_args, **_kwargs):
+        return dingtalk_bot.SendResult(success=True, message="ok")
+
+    monkeypatch.setattr(dingtalk_bridge, "run_hub_query", fake_run_hub_query)
+    monkeypatch.setattr(dingtalk_bot, "reply_to_session_webhook", fake_reply)
+    monkeypatch.setattr(stream_module, "_STREAM_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(stream_module, "_STREAM_MIN_DELTA", 0)
+
+    adapter = stream_module.DingTalkStreamAdapter(
+        "default",
+        {"ai_card_streaming": True},
+    )
+    await adapter._process_message(FakeHandler(), FakeIncoming(), "测试问题")
+
+    assert len(card.streamed) == 2
+    assert all(content.startswith("### 回答") for content in card.streamed)
+    assert all("内部检索思考" not in content for content in card.streamed)
+    assert len(card.streamed[1]) > len(card.streamed[0])
+    assert card.finished.startswith("### 回答")
+    assert "执行摘要" in card.finished
 
 
 def test_dingtalk_client_secret_is_encrypted_field() -> None:

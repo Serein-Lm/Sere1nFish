@@ -141,6 +141,69 @@ async def get_finding(db: AsyncIOMotorDatabase, finding_id: str) -> dict[str, An
     return await db[FINDINGS_COLLECTION].find_one({"finding_id": finding_id}, {"_id": 0})
 
 
+async def query_target_findings_with_copywriting(
+    db: AsyncIOMotorDatabase,
+    target_id: str,
+    *,
+    project_id: str = "",
+    min_score: int = 0,
+    limit: int = 20,
+    skip: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Query one Target's findings and join existing copywriting by finding id."""
+    target_id = str(target_id or "").strip()
+    if not target_id:
+        return [], 0
+
+    query: dict[str, Any] = {
+        "$or": [
+            {"target_id": target_id},
+            {"target_ids": target_id},
+        ]
+    }
+    if project_id:
+        query["project_id"] = str(project_id).strip()
+    if min_score > 0:
+        query["attention_score"] = {"$gte": min_score}
+
+    bounded_limit = max(1, min(int(limit or 20), 50))
+    bounded_skip = max(0, min(int(skip or 0), 10_000))
+    total = await db[FINDINGS_COLLECTION].count_documents(query)
+    findings = await (
+        db[FINDINGS_COLLECTION]
+        .find(query, {"_id": 0})
+        .sort([("attention_score", -1), ("created_at", -1)])
+        .skip(bounded_skip)
+        .limit(bounded_limit)
+        .to_list(bounded_limit)
+    )
+
+    finding_ids = [
+        str(item.get("finding_id") or "") for item in findings if item.get("finding_id")
+    ]
+    copywriting_by_finding: dict[str, dict[str, Any]] = {}
+    if finding_ids:
+        cursor = (
+            db[COPYWRITINGS_COLLECTION]
+            .find({"finding_id": {"$in": finding_ids}}, {"_id": 0})
+            .sort("created_at", -1)
+        )
+        async for item in cursor:
+            finding_id = str(item.get("finding_id") or "")
+            if finding_id and finding_id not in copywriting_by_finding:
+                copywriting_by_finding[finding_id] = item
+
+    return [
+        {
+            **item,
+            "copywriting": copywriting_by_finding.get(
+                str(item.get("finding_id") or "")
+            ),
+        }
+        for item in findings
+    ], total
+
+
 def mobile_profile_finding_id(project_id: str, contact_id: str) -> str:
     """Stable finding id for one mobile contact profile within a project."""
     raw = f"mobile:{project_id}:{contact_id}".encode("utf-8")

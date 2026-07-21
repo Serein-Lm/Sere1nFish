@@ -193,6 +193,7 @@ export default function ConfigManagement() {
       client_secret: value?.client_secret || '',
       has_client_secret: Boolean(value?.client_secret || value?.has_client_secret),
       ai_card_streaming: value?.ai_card_streaming ?? true,
+      ai_card_template_id: value?.ai_card_template_id || '',
       public_base_url: value?.public_base_url || '',
       reconnect_seconds: value?.reconnect_seconds || 5,
       stream_state: value?.stream_state || 'stopped',
@@ -550,7 +551,7 @@ export default function ConfigManagement() {
     dingtalkForm.resetFields()
     dingtalkForm.setFieldsValue({
       stream_enabled: false,
-      ai_card_streaming: true,
+      ai_card_streaming: false,
       reconnect_seconds: 5,
     })
     setDingtalkModalOpen(true)
@@ -568,6 +569,7 @@ export default function ConfigManagement() {
       client_id: bot.client_id,
       client_secret: '',
       ai_card_streaming: bot.ai_card_streaming,
+      ai_card_template_id: bot.ai_card_template_id,
       public_base_url: bot.public_base_url,
       reconnect_seconds: bot.reconnect_seconds || 5,
     })
@@ -588,6 +590,9 @@ export default function ConfigManagement() {
       if (values.client_id !== undefined) payload.client_id = values.client_id
       if (values.client_secret) payload.client_secret = values.client_secret
       payload.ai_card_streaming = Boolean(values.ai_card_streaming)
+      if (values.ai_card_template_id !== undefined) {
+        payload.ai_card_template_id = values.ai_card_template_id
+      }
       if (values.public_base_url !== undefined) payload.public_base_url = values.public_base_url
       if (values.reconnect_seconds !== undefined) payload.reconnect_seconds = values.reconnect_seconds
       await setDingTalkBot(botName, payload)
@@ -1098,6 +1103,7 @@ export default function ConfigManagement() {
                         <Tag color={bot.enabled ? 'success' : 'default'} style={{ marginLeft: 8 }}>
                           {bot.enabled ? '已启用' : '已禁用'}
                         </Tag>
+                        {bot.has_token && <Tag color="blue">群 Webhook</Tag>}
                         {bot.stream_enabled && (
                           <Tag color={bot.stream_connected ? 'processing' : bot.stream_state === 'reconnecting' ? 'warning' : 'default'}>
                             Stream {bot.stream_connected ? '已连接' : bot.stream_state === 'reconnecting' ? '重连中' : '未连接'}
@@ -1320,23 +1326,23 @@ export default function ConfigManagement() {
           <Form.Item name="base_url" label="Base URL">
             <Input placeholder="https://api.openai.com/v1" />
           </Form.Item>
-          <Form.Item name="default_model" label="默认模型">
-            <Input placeholder="gpt-4" />
+          <Form.Item name="default_model" label="默认文本模型" extra="用于 AI 中枢、数据分析、内容生成等纯文本任务">
+            <Input placeholder="qwen3.7-max" />
           </Form.Item>
           <Form.Item name="vision_model" label="视觉模型">
-            <Input placeholder="gpt-4o" />
+            <Input placeholder="qwen3.7-plus" />
           </Form.Item>
           <Form.Item name="mobile_planner_model" label="手机规划模型" extra="留空则回退到默认模型">
-            <Input placeholder="如 qwen3-max" />
+            <Input placeholder="qwen3.7-max" />
           </Form.Item>
           <Form.Item name="mobile_executor_model" label="手机执行模型" extra="留空则回退到视觉模型">
-            <Input placeholder="如 qwen-vl-max" />
+            <Input placeholder="qwen3.7-plus" />
           </Form.Item>
           <Form.Item name="mobile_screen_model" label="手机读屏模型" extra="留空则回退到手机执行模型">
-            <Input placeholder="如 qwen-vl-max" />
+            <Input placeholder="qwen3.7-plus" />
           </Form.Item>
           <Form.Item name="mobile_chat_model" label="手机聊天模型" extra="留空则回退到默认模型">
-            <Input placeholder="如 qwen3-max" />
+            <Input placeholder="qwen3.7-max" />
           </Form.Item>
         </Form>
       </Modal>
@@ -1406,7 +1412,8 @@ export default function ConfigManagement() {
       {/* 钉钉机器人配置 Modal */}
       <Modal title={editingBot ? `编辑钉钉机器人 - ${editingBot}` : '添加钉钉机器人'}
         open={dingtalkModalOpen} onOk={handleDingTalkSubmit} onCancel={() => setDingtalkModalOpen(false)}
-        confirmLoading={dingtalkSubmitting} destroyOnHidden width={640}>
+        confirmLoading={dingtalkSubmitting} destroyOnHidden width={640} style={{ top: 24 }}
+        styles={{ body: { maxHeight: 'calc(100dvh - 180px)', overflowY: 'auto', paddingRight: 4 } }}>
         <Form form={dingtalkForm} layout="vertical">
           {!editingBot && (
             <Form.Item name="bot_name" label="机器人名称" rules={[{ required: true, message: '请输入机器人名称' }]}>
@@ -1417,13 +1424,35 @@ export default function ConfigManagement() {
             type="info"
             showIcon
             style={{ marginBottom: 16 }}
-            title="Stream Mode 用于 AI 对话，Webhook 用于主动通知，两套配置可独立使用。"
+            title="先按机器人凭据选择接入方式"
             description={
               <span>
-                在钉钉开发者后台创建企业内部应用并添加机器人，消息接收模式选择 Stream Mode，
-                然后填写应用的 Client ID 与 Client Secret。无需配置公网回调 URL。
+                有 Client ID/Client Secret 的企业应用机器人可加入群聊并使用 Stream AI 对话；
+                只有 oapi.dingtalk.com/robot/send 地址的是单向 Webhook 机器人。两种方式可以同时配置。
               </span>
             }
+          />
+          <Divider titlePlacement="start" plain>群聊自定义机器人 Webhook</Divider>
+          <Form.Item name="access_token" label="Webhook URL / Access Token"
+            extra={editingBot ? '留空则不修改；建议直接粘贴群机器人提供的完整 Webhook URL' : '直接粘贴完整 Webhook URL，系统会自动提取 access_token'}>
+            <Input.Password placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+          </Form.Item>
+          <Form.Item name="secret" label="加签密钥 (Secret)"
+            extra="推荐使用群机器人安全设置中的加签密钥，以 SEC 开头；未启用加签时留空">
+            <Input.Password placeholder="SECxxxxxxxx（推荐）" />
+          </Form.Item>
+          <Form.Item name="keyword" label="自定义关键词"
+            extra="仅当群机器人启用了关键词安全校验时填写；系统会自动将关键词加入通知正文">
+            <Input placeholder="如：安全资讯、告警（可选）" />
+          </Form.Item>
+
+          <Divider titlePlacement="start" plain>企业应用机器人 Stream（可选）</Divider>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            title="仅企业内部应用机器人使用"
+            description="需要在群里 @机器人向 AI 中枢提问时，填写企业应用凭据并开启 Stream；该机器人发布后可以加入群聊，但它与上面的单向 Webhook 机器人使用不同凭据。"
           />
           <Form.Item name="stream_enabled" label="启用 Stream Mode" valuePropName="checked">
             <Switch />
@@ -1456,8 +1485,19 @@ export default function ConfigManagement() {
                 >
                   <Input.Password placeholder="应用凭证中的 Client Secret / AppSecret" />
                 </Form.Item>
-                <Form.Item name="ai_card_streaming" label="AI Card 流式回答" valuePropName="checked">
+                <Form.Item name="ai_card_streaming" label="AI Card 流式回答（企业应用机器人）" valuePropName="checked">
                   <Switch />
+                </Form.Item>
+                <Form.Item
+                  name="ai_card_template_id"
+                  label="AI Card 模板 ID"
+                  extra="填写以 .schema 结尾的 TemplateId，不是 MiniappId；模板需包含 content、query、preparations、charts、config 变量，留空时回退内置模板"
+                  rules={[{
+                    pattern: /^[A-Za-z0-9][A-Za-z0-9._-]{1,255}$/,
+                    message: '模板 ID 格式不正确',
+                  }]}
+                >
+                  <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.schema" />
                 </Form.Item>
                 <Form.Item name="public_base_url" label="公网访问地址（可选）"
                   extra="用于在钉钉 AI Card 中生成“在 AI 中枢打开”按钮；用户登录后才能下载 Artifact，例如 https://your-domain.com">
@@ -1469,21 +1509,9 @@ export default function ConfigManagement() {
               </>
             ) : null}
           </Form.Item>
-          <Divider titlePlacement="start" plain>主动通知 Webhook（可选）</Divider>
-          <Form.Item name="access_token" label="Webhook URL / Access Token"
-            extra={editingBot ? '留空则不修改；可粘贴完整 Webhook URL' : '可粘贴完整 Webhook URL 或仅输入 access_token'}>
-            <Input.Password placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
-          </Form.Item>
-          <Form.Item name="secret" label="签名密钥 (Secret)"
-            extra="安全设置中的加签密钥，以 SEC 开头">
-            <Input.Password placeholder="SECxxxxxxxx（可选）" />
-          </Form.Item>
-          <Form.Item name="keyword" label="关键词"
-            extra="安全设置中的自定义关键词，消息中必须包含此关键词">
-            <Input placeholder="如：安全资讯、告警（可选）" />
-          </Form.Item>
+          <Divider titlePlacement="start" plain>旧 HTTP 回调兼容</Divider>
           <Form.Item name="outgoing_app_secret" label="旧回调 App Secret（可选）"
-            extra="仅兼容 /api/v1/dingtalk/callback 回调模式；使用 Stream Mode 时无需填写">
+            extra="仅兼容历史 /api/v1/dingtalk/callback 入站模式；不是群 Webhook 的加签 Secret，当前场景留空">
             <Input.Password placeholder="旧 Outgoing 回调验签密钥" />
           </Form.Item>
         </Form>

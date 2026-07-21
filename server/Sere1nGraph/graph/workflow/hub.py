@@ -67,70 +67,11 @@ def _compose_specialist_query(original_query: str, focused_query: str) -> str:
     )
 
 
-def _data_tools() -> list[Any]:
-    from ..tools.read_tools import READ_TOOLS
-    from ..tools.analysis_tools import ANALYSIS_TOOLS
-    from ..tools.artifact_tools import ARTIFACT_QUERY_TOOLS
-    from ..tools.project_data_tools import PROJECT_DATA_TOOLS
+def _specialist_tools(source: HubTarget) -> list[Any]:
+    """Resolve tools from the same registry used by the auditable API catalog."""
+    from ..tools.catalog import get_hub_tool_groups
 
-    return (
-        list(READ_TOOLS)
-        + list(ANALYSIS_TOOLS)
-        + list(PROJECT_DATA_TOOLS)
-        + list(ARTIFACT_QUERY_TOOLS)
-    )
-
-
-def _persona_tools() -> list[Any]:
-    from ..tools.persona_tools import PERSONA_TOOLS
-    from ..tools.context_tools import CONTEXT_TOOLS
-    from ..tools.read_tools import (
-        list_contact_profiles,
-        get_contact_profile,
-        list_mobile_operations,
-    )
-
-    return list(PERSONA_TOOLS) + list(CONTEXT_TOOLS) + [
-        list_contact_profiles,
-        get_contact_profile,
-        list_mobile_operations,
-    ]
-
-
-def _content_tools() -> list[Any]:
-    from ..tools.skill_tools import SKILL_TOOLS
-    from ..tools.word_tools import WORD_TOOLS
-    from ..tools.persona_tools import PERSONA_TOOLS
-    from ..tools.artifact_tools import ARTIFACT_QUERY_TOOLS
-
-    return (
-        list(SKILL_TOOLS)
-        + list(WORD_TOOLS)
-        + list(PERSONA_TOOLS)
-        + list(ARTIFACT_QUERY_TOOLS)
-    )
-
-
-def _payload_tools() -> list[Any]:
-    from ..tools.analysis_tools import ANALYSIS_TOOLS
-    from ..tools.artifact_tools import ARTIFACT_QUERY_TOOLS
-    from ..tools.context_tools import CONTEXT_TOOLS
-    from ..tools.persona_tools import PERSONA_TOOLS
-    from ..tools.project_data_tools import PROJECT_DATA_TOOLS
-    from ..tools.read_tools import READ_TOOLS
-    from ..tools.skill_tools import SKILL_TOOLS
-    from ..tools.word_tools import PAYLOAD_WORD_TOOLS
-
-    return (
-        list(READ_TOOLS)
-        + list(ANALYSIS_TOOLS)
-        + list(PERSONA_TOOLS)
-        + list(CONTEXT_TOOLS)
-        + list(PROJECT_DATA_TOOLS)
-        + list(ARTIFACT_QUERY_TOOLS)
-        + list(SKILL_TOOLS)
-        + list(PAYLOAD_WORD_TOOLS)
-    )
+    return list(get_hub_tool_groups()[source])
 
 
 async def build_hub_graph(app_config: Any):
@@ -141,15 +82,25 @@ async def build_hub_graph(app_config: Any):
 
     router_llm = create_llm(app_config)
     classify_prompt = load_prompt("hub/classify")
+    response_style = load_prompt("hub/response_style")
 
     data_agent = await create_hub_specialist_agent(
-        app_config, system_prompt=load_prompt("hub/data"), tools=_data_tools(), output_mode="sse"
+        app_config,
+        system_prompt=load_prompt("hub/data"),
+        tools=_specialist_tools("data"),
+        output_mode="sse",
     )
     persona_agent = await create_hub_specialist_agent(
-        app_config, system_prompt=load_prompt("hub/persona"), tools=_persona_tools(), output_mode="sse"
+        app_config,
+        system_prompt=load_prompt("hub/persona"),
+        tools=_specialist_tools("persona"),
+        output_mode="sse",
     )
     content_agent = await create_hub_specialist_agent(
-        app_config, system_prompt=load_prompt("hub/content"), tools=_content_tools(), output_mode="sse"
+        app_config,
+        system_prompt=load_prompt("hub/content"),
+        tools=_specialist_tools("content"),
+        output_mode="sse",
     )
 
     async def classify_query(state: HubState) -> dict:
@@ -223,7 +174,7 @@ async def build_hub_graph(app_config: Any):
             payload_agent = await create_hub_specialist_agent(
                 worker_config,
                 system_prompt=load_prompt("hub/payload"),
-                tools=_payload_tools(),
+                tools=_specialist_tools("payload"),
                 mcp_server_name="chrome-devtools",
                 output_mode="sse",
                 summary_trigger_tokens=16_000,
@@ -281,7 +232,8 @@ async def build_hub_graph(app_config: Any):
                             "- 合并关键信息，去重、保持条理\n"
                             "- 完整保留结果中的 [[ref:...]] 跳转标记，不要改写或删除\n"
                             "- 完整保留结果中的 [[artifact:...]] 产物标记和下载链接\n"
-                            "- 用简洁中文给出结论与建议"
+                            "- 用简洁中文给出结论与建议\n\n"
+                            f"{response_style}"
                         ),
                     },
                     {"role": "user", "content": "\n\n".join(formatted)},

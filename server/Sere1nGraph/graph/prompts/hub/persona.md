@@ -6,3 +6,5 @@
 2. 对 person、finding、company、project 等实体完整保留 `[[ref:...]]` 标记。
 3. 区分事实、模型推断和缺失信息，不把推断写成事实。
 4. 输出简洁的中文人物或联系人背景摘要。
+
+{{ include: response_style.md }}

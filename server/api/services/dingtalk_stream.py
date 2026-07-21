@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote_plus
 
+from api.services.dingtalk_ai_card import create_ai_card_session
 from api.services.dingtalk_card import DingTalkCardRenderer, build_artifact_buttons
 from core.background import spawn_background
 from core.logger import get_logger
@@ -173,49 +174,60 @@ class DingTalkStreamAdapter:
         card = None
         card_streaming = bool(self.config.get("ai_card_streaming", True))
         if card_streaming:
-            try:
-                card = await asyncio.to_thread(
-                    handler.ai_markdown_card_start,
-                    incoming,
-                    "AI 中枢",
-                )
-                if not getattr(card, "card_instance_id", None):
-                    card = None
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"创建钉钉 AI Card 失败，回退 Markdown: {exc}")
-                card = None
+            card = await create_ai_card_session(
+                handler,
+                incoming,
+                query=query,
+                template_id=str(self.config.get("ai_card_template_id") or ""),
+            )
 
-        last_sent_length = 0
+        last_sent_content = ""
         last_sent_at = 0.0
+        last_preparations = ""
 
         async def _on_event(event: dict[str, Any]) -> None:
-            nonlocal card, last_sent_length, last_sent_at
-            previous_live_length = renderer.live_length
+            nonlocal card, last_sent_content, last_sent_at, last_preparations
             renderer.consume(event)
-            if renderer.live_length < previous_live_length:
-                last_sent_length = 0
             if card is None:
                 return
 
-            now = time.monotonic()
             event_type = str(event.get("event") or "")
-            if event_type == "content":
-                if (
-                    renderer.live_length - last_sent_length < _STREAM_MIN_DELTA
-                    and now - last_sent_at < _STREAM_INTERVAL_SECONDS
-                ):
-                    return
-            elif event_type != "error" and now - last_sent_at < _STREAM_INTERVAL_SECONDS:
+            if event_type in {"start", "end", "error"}:
+                preparations = renderer.render_preparations()
+                serialized = json.dumps(preparations, ensure_ascii=False, sort_keys=True)
+                if serialized != last_preparations:
+                    try:
+                        await card.update_progress(preparations)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"更新钉钉 AI Card 进度失败，后续回退 Markdown: {exc}")
+                        card = None
+                        return
+                    last_preparations = serialized
+
+            # The primary content variable only receives the synthesized answer.
+            # Specialist reasoning remains available in the folded progress area.
+            if event_type != "content" or not renderer.answer_started:
                 return
 
-            preview = renderer.render_running(max_chars=_MAX_CARD_CHARS)
+            preview = renderer.render_streaming(max_chars=_MAX_CARD_CHARS)
+            if not preview or preview == last_sent_content:
+                return
+
+            now = time.monotonic()
+            visible_delta = abs(len(preview) - len(last_sent_content))
+            if (
+                visible_delta < _STREAM_MIN_DELTA
+                and now - last_sent_at < _STREAM_INTERVAL_SECONDS
+            ):
+                return
+
             try:
-                await asyncio.to_thread(card.ai_streaming, preview, False)
+                await card.stream(preview)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"更新钉钉 AI Card 失败，后续回退 Markdown: {exc}")
                 card = None
                 return
-            last_sent_length = renderer.live_length
+            last_sent_content = preview
             last_sent_at = now
 
         sender_id = str(
@@ -248,13 +260,15 @@ class DingTalkStreamAdapter:
                 artifacts,
                 base_url=str(self.config.get("public_base_url") or ""),
                 max_chars=_MAX_CARD_CHARS,
+                include_execution_summary=(
+                    card is None or not card.has_progress_panel
+                ),
             )
             if card is not None:
                 buttons = self._artifact_buttons(artifacts)
                 try:
-                    await asyncio.to_thread(
-                        lambda: card.ai_finish(markdown=final_markdown, button_list=buttons)
-                    )
+                    await card.update_progress(renderer.render_preparations(final=True))
+                    await card.finish(final_markdown, buttons=buttons)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"结束钉钉 AI Card 失败，回退 Markdown: {exc}")
                     await _send_markdown("AI 中枢回复", final_markdown)
@@ -265,9 +279,7 @@ class DingTalkStreamAdapter:
             error_text = f"处理问题时发生错误：{exc}"[:1000]
             if card is not None:
                 try:
-                    await asyncio.to_thread(
-                        lambda: card.ai_finish(markdown=error_text, button_list=[])
-                    )
+                    await card.fail(error_text)
                 except Exception:
                     with contextlib.suppress(Exception):
                         await _send_markdown("AI 中枢", error_text)

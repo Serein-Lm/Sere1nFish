@@ -93,6 +93,7 @@ async def handle_inbound(payload: dict[str, Any], timestamp: str, sign: str) -> 
 
 async def _run_and_reply(parsed: dict[str, Any]) -> None:
     """后台：调用 AI 中枢生成回答，并回推到来源会话。"""
+    from api.services.dingtalk_card import clean_hub_markdown
     from crawler_tools.dingtalk_bot import reply_to_session_webhook
 
     query = parsed["query"]
@@ -109,6 +110,7 @@ async def _run_and_reply(parsed: dict[str, Any]) -> None:
         )
         if not final_text:
             final_text = "（本次未生成文本内容）"
+        final_text = clean_hub_markdown(final_text)
         if len(final_text) > _REPLY_MAX_CHARS:
             final_text = final_text[:_REPLY_MAX_CHARS] + "\n\n…（内容过长已截断）"
 
@@ -147,11 +149,38 @@ async def run_hub_query(
     adapters may consume events for cards without depending on graph internals.
     """
     from api.services.artifact_context import artifact_context
+    from api.services.ai_hub_context import compose_conversation_query
     from api.services.runtime_config import get_runtime_app_config
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db.mongodb import get_db
     from core.observability import observation_context
     from Sere1nGraph.graph.workflow.executor import execute_stream
 
     app_config = await get_runtime_app_config()
+    db = get_db()
+    execution_query = query
+    if conversation_id:
+        await ai_hub_dao.ensure_conversation(
+            db,
+            conversation_id=conversation_id,
+            title=str(query or "")[:40],
+            owner=owner,
+        )
+        history = await ai_hub_dao.list_recent_messages(
+            db,
+            conversation_id,
+            limit=12,
+        )
+        execution_query = compose_conversation_query(query, history)
+        await ai_hub_dao.append_message(
+            db,
+            conversation_id=conversation_id,
+            role="user",
+            content=query,
+            workflow=_HUB_WORKFLOW,
+            meta={"channel": channel},
+        )
+
     sections: dict[str, str] = {}
     artifact_run = None
     with observation_context(
@@ -167,7 +196,7 @@ async def run_hub_query(
     ) as artifact_run:
         async for event in execute_stream(
             workflow=_HUB_WORKFLOW,
-            query=query,
+            query=execution_query,
             app_config=app_config,
             options={},
         ):
@@ -179,4 +208,14 @@ async def run_hub_query(
 
     preferred = [value for key, value in sections.items() if key != "summary" and value]
     final_text = "\n\n".join(preferred or [value for value in sections.values() if value]).strip()
-    return final_text, list(artifact_run.created) if artifact_run else []
+    artifacts = list(artifact_run.created) if artifact_run else []
+    if conversation_id and final_text:
+        await ai_hub_dao.append_message(
+            db,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=final_text,
+            workflow=_HUB_WORKFLOW,
+            meta={"channel": channel, "artifacts": artifacts},
+        )
+    return final_text, artifacts

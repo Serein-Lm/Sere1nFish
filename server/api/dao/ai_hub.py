@@ -59,6 +59,33 @@ async def create_conversation(
     return doc
 
 
+async def ensure_conversation(
+    db: AsyncIOMotorDatabase,
+    *,
+    conversation_id: str,
+    title: str = "",
+    owner: str = "",
+) -> dict[str, Any]:
+    """Idempotently create a stable external-channel conversation."""
+    now = _now()
+    await db[AI_HUB_CONVERSATIONS_COLLECTION].update_one(
+        {"conversation_id": conversation_id},
+        {
+            "$setOnInsert": {
+                "conversation_id": conversation_id,
+                "title": (title or "外部会话").strip(),
+                "owner": owner,
+                "message_count": 0,
+                "last_message_at": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+        },
+        upsert=True,
+    )
+    return await get_conversation(db, conversation_id) or {}
+
+
 async def list_conversations(
     db: AsyncIOMotorDatabase,
     *,
@@ -157,3 +184,22 @@ async def list_messages(
         .limit(limit)
     )
     return [doc async for doc in cursor]
+
+
+async def list_recent_messages(
+    db: AsyncIOMotorDatabase,
+    conversation_id: str,
+    *,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Return the newest bounded message window in chronological order."""
+    bounded_limit = max(1, min(int(limit or 12), 50))
+    cursor = (
+        db[AI_HUB_MESSAGES_COLLECTION]
+        .find({"conversation_id": conversation_id}, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(bounded_limit)
+    )
+    messages = [doc async for doc in cursor]
+    messages.reverse()
+    return messages

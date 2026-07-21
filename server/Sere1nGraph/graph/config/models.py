@@ -20,12 +20,12 @@ class ModelsConfig:
     - `mobile_screen`: 手机读屏/界面描述模型；未配置时回退到 mobile_executor/vision
     - `mobile_chat`: 手机聊天状态解析/轻量回复模型；未配置时回退到 default
     """
-    default: str = "qwen3.7-plus"
+    default: str = "qwen3.7-max"
     vision: str = "qwen3.7-plus"
-    mobile_planner: Optional[str] = "qwen3.7-plus"
+    mobile_planner: Optional[str] = "qwen3.7-max"
     mobile_executor: Optional[str] = "qwen3.7-plus"
     mobile_screen: Optional[str] = "qwen3.7-plus"
-    mobile_chat: Optional[str] = "qwen3.7-plus"
+    mobile_chat: Optional[str] = "qwen3.7-max"
 
     @property
     def mobile_planner_model(self) -> str:

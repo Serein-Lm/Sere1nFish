@@ -101,6 +101,7 @@ class DingTalkConfigUpdate(BaseModel):
     client_id: str | None = None
     client_secret: str | None = None
     ai_card_streaming: bool | None = None
+    ai_card_template_id: str | None = None
     public_base_url: str | None = None
     reconnect_seconds: int | None = None
 
@@ -119,6 +120,7 @@ class DingTalkConfigOut(BaseModel):
     client_secret: str | None = None
     has_client_secret: bool = False
     ai_card_streaming: bool = True
+    ai_card_template_id: str | None = None
     public_base_url: str | None = None
     reconnect_seconds: int = 5
     stream_state: str = "stopped"
@@ -238,6 +240,7 @@ def _dingtalk_config_out(
         client_secret=_mask_api_key(client_secret) if mask else client_secret,
         has_client_secret=bool(client_secret),
         ai_card_streaming=bool(config.get("ai_card_streaming", True)),
+        ai_card_template_id=config.get("ai_card_template_id") or None,
         public_base_url=config.get("public_base_url") or None,
         reconnect_seconds=int(config.get("reconnect_seconds") or 5),
         stream_state=str(status.get("state") or "stopped"),

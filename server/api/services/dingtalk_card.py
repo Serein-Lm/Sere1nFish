@@ -15,10 +15,14 @@ from urllib.parse import quote, urlsplit
 
 
 _ARTIFACT_MARKER_RE = re.compile(r"\[\[artifact:[^|\]]+\|([^\]]+)\]\]")
-_REFERENCE_MARKER_RE = re.compile(r"\[\[ref:[^|\]]+\|([^\]]+)\]\]")
+_LABELED_REFERENCE_MARKER_RE = re.compile(r"\[\[ref:[^\]]*?\|([^\]]+)\]\]")
+_REFERENCE_MARKER_RE = re.compile(r"\[\[ref:[^\]]+\]\]")
 _RELATIVE_DOWNLOAD_RE = re.compile(
     r"(?m)^\s*下载链接[：:]\s*/api/v1/artifacts/[^\s]+\s*$"
 )
+_INCOMPLETE_MARKERS = ("[[artifact:", "[[ref:")
+_LIVE_TEXT_LIMIT = 20_000
+_TRUNCATED_SUFFIX = "\n\n…（内容较长，已截断）"
 
 _FORMAT_BY_SUFFIX = {
     ".doc": "Word",
@@ -68,10 +72,24 @@ def _clean_text(value: Any, *, limit: int = 300) -> str:
 def clean_hub_markdown(value: Any) -> str:
     """Render web-only entity markers as readable DingTalk Markdown."""
     text = str(value or "").strip()
+    marker_start = max(text.rfind(marker) for marker in _INCOMPLETE_MARKERS)
+    if marker_start >= 0 and "]]" not in text[marker_start:]:
+        text = text[:marker_start].rstrip()
     text = _ARTIFACT_MARKER_RE.sub(lambda match: f"**产物：{match.group(1)}**", text)
-    text = _REFERENCE_MARKER_RE.sub(lambda match: f"**{match.group(1)}**", text)
+    text = _LABELED_REFERENCE_MARKER_RE.sub(lambda match: match.group(1), text)
+    text = _REFERENCE_MARKER_RE.sub("", text)
     text = _RELATIVE_DOWNLOAD_RE.sub("", text)
+    text = re.sub(r"[ \t]+([，。；：:,.!?])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _fit_stable_prefix(text: str, available: int) -> str:
+    """Bound live content without sliding the visible window on every update."""
+    if len(text) <= available:
+        return text
+    keep = max(0, available - len(_TRUNCATED_SUFFIX))
+    return text[:keep].rstrip() + _TRUNCATED_SUFFIX
 
 
 def artifact_format(artifact: dict[str, Any]) -> str:
@@ -144,14 +162,19 @@ class DingTalkCardRenderer:
         self.started_at = time.monotonic()
         self.items: list[_ProgressItem] = []
         self.live_text = ""
+        self.live_truncated = False
         self.errors: list[str] = []
         self.tool_count = 0
         self.event_count = 0
-        self._synthesis_started = False
+        self._answer_started = False
 
     @property
     def live_length(self) -> int:
         return len(self.live_text)
+
+    @property
+    def answer_started(self) -> bool:
+        return self._answer_started
 
     def consume(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("event") or "")
@@ -205,16 +228,18 @@ class DingTalkCardRenderer:
 
         if event_type == "content":
             chunk = str(data.get("content") or "")
-            if not chunk:
+            if not chunk or not self._is_answer_path(path):
                 return
-            if ".synthesize" in path and not self._synthesis_started:
-                self.live_text = ""
-                self._synthesis_started = True
-            self.live_text = (self.live_text + chunk)[-20_000:]
+            self._answer_started = True
+            if len(self.live_text) >= _LIVE_TEXT_LIMIT:
+                self.live_truncated = True
+                return
+            remaining = _LIVE_TEXT_LIMIT - len(self.live_text)
+            self.live_text += chunk[:remaining]
+            self.live_truncated = len(chunk) > remaining
 
     def render_running(self, *, max_chars: int = 12_000) -> str:
         completed = sum(item.status == "done" for item in self.items)
-        failed = sum(item.status == "failed" for item in self.items)
         elapsed = max(0, int(time.monotonic() - self.started_at))
         current = next(
             (item for item in reversed(self.items) if item.status == "running"),
@@ -222,33 +247,44 @@ class DingTalkCardRenderer:
         )
 
         lines = [
-            "### AI 中枢正在执行",
+            "### 正在处理",
             "",
-            f"**当前阶段**：{current.label if current else '正在整理结果'}",
-            f"**执行概况**：已完成 {completed} 个阶段，调用 {self.tool_count} 个工具，耗时 {elapsed} 秒",
+            f"**当前阶段**：{current.label if current else '正在整理关键结果'}",
+            f"> 已完成 {completed} 个阶段 · 调用 {self.tool_count} 个工具 · {elapsed} 秒",
         ]
         if current and current.description:
-            lines.append(f"**阶段说明**：{current.description}")
+            lines.append(_clean_text(current.description, limit=100))
+        return "\n".join(lines).strip()[:max_chars]
 
-        visible = self.items[-8:]
-        if visible:
-            lines.extend(["", "#### 执行进度"])
-            status_labels = {"done": "完成", "failed": "失败", "running": "进行中"}
-            for item in visible:
-                lines.append(f"- [{status_labels[item.status]}] {item.label}")
+    def render_streaming(self, *, max_chars: int = 12_000) -> str:
+        """Render only the stable answer surface used for live Card updates."""
+        header = "### 回答\n\n"
+        answer = clean_hub_markdown(self.live_text)
+        if not answer:
+            return ""
+        available = max(300, max_chars - len(header))
+        answer = _fit_stable_prefix(answer, available)
+        return f"{header}{answer}"[:max_chars].rstrip("\n")
 
-        if failed and self.errors:
-            lines.extend(["", "#### 异常信息"])
-            lines.extend(f"- {message}" for message in self.errors)
+    def render_preparations(
+        self,
+        *,
+        final: bool = False,
+        max_items: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Render concise high-level progress for the template's folded section."""
+        stages = [item for item in self.items if item.node_type != "tool"][-max_items:]
+        if not stages:
+            return [{"name": "正在理解需求", "progress": 100 if final else 0}]
 
-        prefix = "\n".join(lines).strip()
-        live = clean_hub_markdown(self.live_text)
-        if not live:
-            live = "等待当前阶段返回可展示内容。"
-        available = max(200, max_chars - len(prefix) - 40)
-        if len(live) > available:
-            live = "…\n" + live[-available + 2 :]
-        return f"{prefix}\n\n#### 阶段输出\n{live}"[:max_chars]
+        preparations: list[dict[str, Any]] = []
+        for item in stages:
+            label = item.label
+            if item.status == "failed":
+                label = f"{label}（失败）"
+            progress = 100 if final or item.status in {"done", "failed"} else 50
+            preparations.append({"name": label, "progress": progress})
+        return preparations
 
     def render_final(
         self,
@@ -257,6 +293,7 @@ class DingTalkCardRenderer:
         *,
         base_url: str = "",
         max_chars: int = 12_000,
+        include_execution_summary: bool = True,
     ) -> str:
         answer = clean_hub_markdown(final_text) or "（本次未生成文本内容）"
         elapsed = max(0, int(time.monotonic() - self.started_at))
@@ -281,22 +318,27 @@ class DingTalkCardRenderer:
         if len(artifacts) > len(visible_artifacts):
             artifact_lines.append(f"另有 {len(artifacts) - len(visible_artifacts)} 个产物，请在 AI 中枢查看。")
 
-        footer = [
-            "---",
-            f"> 已完成 {completed} 个阶段，调用 {self.tool_count} 个工具，总耗时 {elapsed} 秒。",
-        ]
+        footer: list[str] = []
+        if include_execution_summary:
+            summary_parts = [f"{completed} 个阶段", f"{self.tool_count} 个工具", f"{elapsed} 秒"]
+            footer.extend(["---", f"> 执行摘要：{' · '.join(summary_parts)}"])
+            if self.errors:
+                footer.append(f"> 部分步骤异常：{self.errors[-1]}")
         if artifacts:
-            footer.extend(["", "### 交付产物", *artifact_lines])
+            if footer:
+                footer.append("")
+            footer.extend(["### 产物", *artifact_lines])
             if not base_url:
                 footer.extend(
                     ["", "> 已生成产物；管理员配置“公网访问地址”后，钉钉中会显示打开和下载入口。"]
                 )
         footer_text = "\n".join(footer)
-        header = "### 执行结果\n\n"
-        available = max(300, max_chars - len(header) - len(footer_text) - 2)
-        if len(answer) > available:
-            answer = answer[: max(0, available - 18)].rstrip() + "\n\n…（正文过长已截断）"
-        return f"{header}{answer}\n\n{footer_text}"[:max_chars]
+        header = "### 回答\n\n"
+        footer_spacing = 2 if footer_text else 0
+        available = max(300, max_chars - len(header) - len(footer_text) - footer_spacing)
+        answer = _fit_stable_prefix(answer, available)
+        suffix = f"\n\n{footer_text}" if footer_text else ""
+        return f"{header}{answer}{suffix}"[:max_chars]
 
     def _latest_running(self, path: str) -> _ProgressItem | None:
         return next(
@@ -306,4 +348,13 @@ class DingTalkCardRenderer:
                 if item.path == path and item.status == "running"
             ),
             None,
+        )
+
+    @staticmethod
+    def _is_answer_path(path: str) -> bool:
+        """Keep specialist reasoning out of the Card's primary answer surface."""
+        return (
+            ".synthesize" in path
+            or ".finalize" in path
+            or path.startswith("graph.agents.")
         )

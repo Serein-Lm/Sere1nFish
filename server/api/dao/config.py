@@ -572,6 +572,7 @@ async def set_dingtalk_config(
     client_id: str | None = None,
     client_secret: str | None = None,
     ai_card_streaming: bool | None = None,
+    ai_card_template_id: str | None = None,
     public_base_url: str | None = None,
     reconnect_seconds: int | None = None,
 ) -> dict[str, Any]:
@@ -611,6 +612,8 @@ async def set_dingtalk_config(
         config["client_secret"] = client_secret
     if ai_card_streaming is not None:
         config["ai_card_streaming"] = ai_card_streaming
+    if ai_card_template_id is not None:
+        config["ai_card_template_id"] = ai_card_template_id
     if public_base_url is not None:
         config["public_base_url"] = public_base_url
     if reconnect_seconds is not None:

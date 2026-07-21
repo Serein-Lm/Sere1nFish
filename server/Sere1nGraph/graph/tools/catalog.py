@@ -12,7 +12,21 @@ def _description(tool: Any) -> str:
     return str(getattr(tool, "description", None) or getattr(tool, "__doc__", "") or "").strip()
 
 
-def _tool_groups() -> dict[str, list[Any]]:
+def _unique_tools(*groups: list[Any]) -> list[Any]:
+    """Merge tool groups by stable tool name while preserving declaration order."""
+    result: list[Any] = []
+    seen: set[str] = set()
+    for group in groups:
+        for tool in group:
+            name = _name(tool)
+            if name not in seen:
+                seen.add(name)
+                result.append(tool)
+    return result
+
+
+def get_hub_tool_groups() -> dict[str, list[Any]]:
+    """Return the single runtime and catalog source of specialist tool assignments."""
     from .analysis_tools import ANALYSIS_TOOLS
     from .artifact_tools import ARTIFACT_QUERY_TOOLS
     from .context_tools import CONTEXT_TOOLS
@@ -22,33 +36,60 @@ def _tool_groups() -> dict[str, list[Any]]:
     from .skill_tools import SKILL_TOOLS
     from .word_tools import PAYLOAD_WORD_TOOLS, WORD_TOOLS
 
-    data = (
-        list(READ_TOOLS)
-        + list(ANALYSIS_TOOLS)
-        + list(PROJECT_DATA_TOOLS)
-        + list(ARTIFACT_QUERY_TOOLS)
+    data = _unique_tools(
+        list(READ_TOOLS),
+        list(ANALYSIS_TOOLS),
+        list(PROJECT_DATA_TOOLS),
+        list(ARTIFACT_QUERY_TOOLS),
     )
-    persona = list(PERSONA_TOOLS) + list(CONTEXT_TOOLS) + [
-        tool
-        for tool in READ_TOOLS
-        if _name(tool) in {"list_contact_profiles", "get_contact_profile", "list_mobile_operations"}
-    ]
-    content = list(SKILL_TOOLS) + list(WORD_TOOLS) + list(PERSONA_TOOLS) + list(ARTIFACT_QUERY_TOOLS)
-    payload = (
-        list(READ_TOOLS)
-        + list(ANALYSIS_TOOLS)
-        + list(PERSONA_TOOLS)
-        + list(CONTEXT_TOOLS)
-        + list(PROJECT_DATA_TOOLS)
-        + list(ARTIFACT_QUERY_TOOLS)
-        + list(SKILL_TOOLS)
-        + list(PAYLOAD_WORD_TOOLS)
+    persona = _unique_tools(
+        list(PERSONA_TOOLS),
+        list(CONTEXT_TOOLS),
+        [
+            tool
+            for tool in READ_TOOLS
+            if _name(tool)
+            in {"list_contact_profiles", "get_contact_profile", "list_mobile_operations"}
+        ],
+    )
+    content_context_names = {
+        "get_finding_copywriting",
+        "get_finding_detail",
+        "get_finding_profile",
+        "get_project",
+        "get_project_data_catalog",
+        "query_findings",
+        "query_target_intelligence",
+        "read_project_dataset",
+    }
+    content = _unique_tools(
+        list(SKILL_TOOLS),
+        list(WORD_TOOLS),
+        list(PERSONA_TOOLS),
+        list(ARTIFACT_QUERY_TOOLS),
+        [
+            tool
+            for tool in (
+                list(READ_TOOLS) + list(ANALYSIS_TOOLS) + list(PROJECT_DATA_TOOLS)
+            )
+            if _name(tool) in content_context_names
+        ],
+    )
+    payload = _unique_tools(
+        list(READ_TOOLS),
+        list(ANALYSIS_TOOLS),
+        list(PERSONA_TOOLS),
+        list(CONTEXT_TOOLS),
+        list(PROJECT_DATA_TOOLS),
+        list(ARTIFACT_QUERY_TOOLS),
+        list(SKILL_TOOLS),
+        list(PAYLOAD_WORD_TOOLS),
     )
     return {"data": data, "persona": persona, "content": content, "payload": payload}
 
 
 def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
-    groups = _tool_groups()
+    groups = get_hub_tool_groups()
     from api.services.project_data_reader import dataset_catalog
 
     project_datasets = dataset_catalog()

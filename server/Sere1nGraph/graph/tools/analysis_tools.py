@@ -270,6 +270,120 @@ def query_findings(
 
 
 @tool(
+    "query_target_intelligence",
+    description=(
+        "按全局 target_id 查询该公司/机构关联的泄漏、Finding、来源证据和已有话术。"
+        "适合回答‘某个 Target 有哪些泄漏/联系方式/风险、已经有哪些话术’。"
+        "会跨项目聚合；如只看一个项目可传 project_id。参数：target_id（必填）；"
+        "project_id（可选）；min_score（0-100）；limit（默认10，上限30）；"
+        "offset（分页偏移）。返回 finding_id，需更完整证据时继续调用 get_finding_detail，"
+        "需要单条完整话术时继续调用 get_finding_copywriting。"
+    ),
+)
+def query_target_intelligence(
+    target_id: str,
+    project_id: str = "",
+    min_score: int = 0,
+    limit: int = 10,
+    offset: int = 0,
+) -> str:
+    """Query one Target's findings and existing copywriting across projects."""
+    target_id = str(target_id or "").strip()
+    if not target_id:
+        return "请提供 target_id。"
+
+    async def _load() -> tuple[dict[str, Any] | None, list[dict[str, Any]], int]:
+        from api.dao import findings as findings_dao
+        from api.dao import targets as targets_dao
+        from api.db.mongodb import get_db
+
+        db = get_db()
+        target, result = await asyncio.gather(
+            targets_dao.get_target(db, target_id),
+            findings_dao.query_target_findings_with_copywriting(
+                db,
+                target_id,
+                project_id=str(project_id or "").strip(),
+                min_score=max(0, min(int(min_score or 0), 100)),
+                limit=max(1, min(int(limit or 10), 30)),
+                skip=max(0, min(int(offset or 0), 10_000)),
+            ),
+        )
+        items, total = result
+        return target, items, total
+
+    try:
+        target, items, total = _run_coro_sync(_load())
+    except Exception as exc:  # noqa: BLE001
+        return f"查询 Target 情报失败：{exc}"
+
+    target_name = str(
+        (target or {}).get("canonical_name")
+        or (target or {}).get("display_name")
+        or (target or {}).get("name")
+        or target_id
+    )
+    if not items:
+        return f"Target {target_name}（{target_id}）暂无符合条件的 Finding。"
+
+    bounded_offset = max(0, min(int(offset or 0), 10_000))
+    lines = [
+        f"Target：{target_name}（target_id={target_id}）",
+        f"命中 {total} 条，返回第 {bounded_offset + 1}-{bounded_offset + len(items)} 条：",
+    ]
+    for index, finding in enumerate(items, start=1):
+        finding_id = str(finding.get("finding_id") or "")
+        label = str(finding.get("label") or finding.get("value") or finding_id or "未命名 Finding")
+        source_type = "／".join(
+            str(value) for value in (finding.get("source"), finding.get("type")) if value
+        )
+        score = finding.get("attention_score")
+        line = f"{index}. {label}"
+        if source_type:
+            line += f"（{source_type}）"
+        if score is not None:
+            line += f" 关注度 {score}"
+        ref = _refs.finding_ref(finding_id, label)
+        if ref:
+            line += f" {ref}"
+        lines.append(line)
+        if finding.get("attention_reason"):
+            lines.append(f"   - 关注原因：{str(finding['attention_reason'])[:300]}")
+        context = finding.get("context") or finding.get("evidence")
+        if context:
+            context_text = (
+                json.dumps(context, ensure_ascii=False, default=str)
+                if isinstance(context, (dict, list))
+                else str(context)
+            )
+            lines.append(f"   - 证据上下文：{context_text[:600]}")
+        if finding.get("url"):
+            lines.append(f"   - 来源：{finding['url']}")
+        copywriting = finding.get("copywriting")
+        if copywriting:
+            payload = {
+                key: copywriting.get(key)
+                for key in (
+                    "scenario",
+                    "scripts",
+                    "objections",
+                    "payload",
+                    "psychology_strategy",
+                )
+                if copywriting.get(key)
+            }
+            preview = json.dumps(payload or copywriting, ensure_ascii=False, default=str)
+            lines.append(f"   - 已有话术：{preview[:1_600]}")
+        else:
+            lines.append("   - 已有话术：无")
+
+    next_offset = bounded_offset + len(items)
+    if next_offset < total:
+        lines.append(f"仍有更多结果；下一页 offset={next_offset}。")
+    return "\n".join(lines)
+
+
+@tool(
     "get_global_stats",
     description=(
         "获取全局观测概览（只读）：全平台 Token 消耗汇总与已归因项目列表。"
@@ -317,5 +431,6 @@ ANALYSIS_TOOLS = [
     batch_get_project_dashboards,
     get_findings_summary,
     query_findings,
+    query_target_intelligence,
     get_global_stats,
 ]

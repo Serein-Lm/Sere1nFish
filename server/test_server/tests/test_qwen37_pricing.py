@@ -5,6 +5,18 @@ import pytest
 from Sere1nGraph.graph.observability.pricing import calc_cost
 
 
+def test_qwen37_max_uses_current_online_price() -> None:
+    assert calc_cost("qwen3.7-max", 100_000, 20_000) == pytest.approx(
+        (100_000 * 6.0 + 20_000 * 18.0) / 1_000_000
+    )
+
+
+def test_qwen37_max_snapshot_uses_catalog_price() -> None:
+    assert calc_cost("qwen3.7-max-2026-06-08", 100_000, 20_000) == pytest.approx(
+        (100_000 * 12.0 + 20_000 * 36.0) / 1_000_000
+    )
+
+
 def test_qwen37_plus_uses_discounted_online_price_through_256k() -> None:
     assert calc_cost("qwen3.7-plus", 200_000, 56_000) == pytest.approx(
         (200_000 * 1.6 + 56_000 * 6.4) / 1_000_000

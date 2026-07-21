@@ -37,6 +37,10 @@ USD_TO_CNY = 1.5  # 中转 API 汇率，官方 API 改为 ~7.2
 
 FLAT_PRICING: dict[str, tuple[float, float]] = {
     # (input_per_M, output_per_M)
+    # qwen3.7-max 主线模型使用当前限时在线价格；日期快照使用目录价。
+    "qwen3.7-max": (6.0, 18.0),
+    "qwen3.7-max-2026-05-20": (12.0, 36.0),
+    "qwen3.7-max-2026-06-08": (12.0, 36.0),
     "kimi-k2.5": (4.0, 21.0),
     "glm-4.7": (4.0, 21.0),
     "glm-5": (4.0, 21.0),
