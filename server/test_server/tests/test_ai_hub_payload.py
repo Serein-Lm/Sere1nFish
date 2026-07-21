@@ -794,8 +794,11 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
     renderer.consume({
         "event": "start",
         "path": "graph.router.classify",
-        "data": {"type": "node", "displayName": "分析查询"},
+        "data": {"type": "node", "displayName": "🎯 分析查询"},
     })
+    assert renderer.render_preparations() == [
+        {"name": "正在执行 · 分析查询", "progress": 50}
+    ]
     renderer.consume({
         "event": "end",
         "path": "graph.router.classify",
@@ -876,9 +879,11 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
     assert build_artifact_buttons(artifacts, base_url="javascript:alert(1)") == []
 
     preparations = renderer.render_preparations()
-    assert [item["name"] for item in preparations] == ["AI 中枢", "分析查询"]
-    assert preparations[-1]["progress"] == 100
+    assert preparations == [{"name": "正在整理关键结果", "progress": 90}]
     assert all("生成文档产物" not in item["name"] for item in preparations)
+
+    completed = renderer.render_preparations(final=True)
+    assert completed == [{"name": "处理完成 · 2 个阶段", "progress": 100}]
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ _REFERENCE_MARKER_RE = re.compile(r"\[\[ref:[^\]]+\]\]")
 _RELATIVE_DOWNLOAD_RE = re.compile(
     r"(?m)^\s*下载链接[：:]\s*/api/v1/artifacts/[^\s]+\s*$"
 )
+_PROGRESS_LABEL_PREFIX_RE = re.compile(r"^[^\w]+", re.UNICODE)
 _INCOMPLETE_MARKERS = ("[[artifact:", "[[ref:")
 _LIVE_TEXT_LIMIT = 20_000
 _TRUNCATED_SUFFIX = "\n\n…（内容较长，已截断）"
@@ -67,6 +68,12 @@ _FORMAT_BY_KIND = {
 def _clean_text(value: Any, *, limit: int = 300) -> str:
     text = " ".join(str(value or "").split())
     return text[:limit]
+
+
+def _clean_progress_label(value: Any) -> str:
+    """Remove decorative glyphs from compact Card progress labels."""
+    text = _clean_text(value, limit=80)
+    return _PROGRESS_LABEL_PREFIX_RE.sub("", text).strip() or "执行阶段"
 
 
 def clean_hub_markdown(value: Any) -> str:
@@ -275,21 +282,44 @@ class DingTalkCardRenderer:
         self,
         *,
         final: bool = False,
-        max_items: int = 8,
+        max_items: int = 1,
     ) -> list[dict[str, Any]]:
-        """Render concise high-level progress for the template's folded section."""
-        stages = [item for item in self.items if item.node_type != "tool"][-max_items:]
-        if not stages:
-            return [{"name": "正在理解需求", "progress": 100 if final else 0}]
+        """Render one compact status row for the Card's progress surface."""
+        if max_items <= 0:
+            return []
 
-        preparations: list[dict[str, Any]] = []
-        for item in stages:
-            label = item.label
-            if item.status == "failed":
-                label = f"{label}（失败）"
-            progress = 100 if final or item.status in {"done", "failed"} else 50
-            preparations.append({"name": label, "progress": progress})
-        return preparations
+        stages = [item for item in self.items if item.node_type != "tool"]
+        if not stages:
+            label = "处理完成" if final else "正在处理 · 理解需求"
+            return [{"name": label, "progress": 100 if final else 0}]
+
+        if final:
+            failed = sum(item.status == "failed" for item in stages)
+            label = f"处理完成 · {len(stages)} 个阶段"
+            if failed:
+                label += f" · {failed} 个异常"
+            return [{"name": label, "progress": 100}]
+
+        current = next(
+            (
+                item
+                for item in reversed(stages)
+                if item.status == "running" and item.path != "graph"
+            ),
+            None,
+        )
+        if current is not None:
+            return [
+                {
+                    "name": f"正在执行 · {_clean_progress_label(current.label)}",
+                    "progress": 50,
+                }
+            ]
+
+        if any(item.status == "failed" for item in stages):
+            return [{"name": "部分阶段异常 · 正在整理结果", "progress": 90}]
+
+        return [{"name": "正在整理关键结果", "progress": 90}]
 
     def render_final(
         self,

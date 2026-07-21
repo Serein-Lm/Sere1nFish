@@ -57,9 +57,44 @@ Sere1nFish 配置页只填写 `TemplateId`，即以 `.schema` 结尾的值。`Mi
 | `charts` | 预留结构化图表 | 当前留空 |
 | `config` | 模板布局配置 | 创建卡片时写入 |
 
-后端使用同一个卡片实例更新 `preparations` 和 `content`。`content` 每次发送稳定的完整前缀，不滚动截取末尾，也不写入专家 Agent 的工具调用和中间分析，避免卡片闪烁及正文来回跳动。执行摘要只保留在模板的折叠进度区，最终正文聚焦回答和产物。模板不可用时回退到钉钉 SDK 内置 Markdown AI Card；卡片整体不可用时回退普通 Markdown 消息。
+后端使用同一个卡片实例更新 `preparations` 和 `content`。`content` 每次发送稳定的完整前缀，不滚动截取末尾，也不写入专家 Agent 的工具调用和中间分析，避免卡片闪烁及正文来回跳动。执行状态只保留在模板的紧凑进度区，最终正文聚焦回答和产物。模板不可用时回退到钉钉 SDK 内置 Markdown AI Card；卡片整体不可用时回退普通 Markdown 消息。
 
-### 2.2 官方 examples 选型
+### 2.2 导入响应式模板
+
+仓库提供可直接导入钉钉 AI Card 平台的响应式模板：
+
+```text
+server/docs/dingtalk/Sere1nFish-AI-Card-Responsive.json
+```
+
+该版本保持 `query`、`preparations`、`content`、`charts` 和 `config` 变量兼容，主要调整如下：
+
+- 执行中只显示一行当前阶段，完成后收敛为一行阶段摘要。
+- 移除移动端容易被压缩成黑块的百分比进度条。
+- 状态行使用全宽自适应布局，不使用固定 `50 × 100` 网格。
+- 移除当前未使用的图表渲染区和多余分隔线，优先展示回答正文。
+- 问题最多显示三行，正文和复制操作保持钉钉原生能力。
+
+导入步骤：
+
+1. 在钉钉 AI Card 平台进入当前应用的模板管理。
+2. 导入上述 JSON 文件。
+3. 进入编辑器后执行一次保存并发布，让钉钉根据 `editorData` 重新编译运行时模板。
+4. 复制发布后生成的 `TemplateId`，它必须以 `.schema` 结尾。
+5. 在 Sere1nFish 的“配置管理 → 钉钉机器人”中替换“AI Card 模板 ID”并保存。
+6. 向机器人发送一条测试消息，分别在 PC 和手机端确认当前阶段只占一行、正文不横向溢出。
+
+如需基于钉钉平台再次导出的 JSON 重新生成响应式版本，执行：
+
+```bash
+node scripts/build_dingtalk_ai_card_template.mjs \
+  '<钉钉导出的模板.json>' \
+  server/docs/dingtalk/Sere1nFish-AI-Card-Responsive.json
+```
+
+钉钉在导入和发布后分配 TemplateId，仓库不能预先硬编码新值。在新模板发布并替换配置前，系统仍继续使用第 2.1 节记录的当前 TemplateId。
+
+### 2.3 官方 examples 选型
 
 官方示例目录见 [dingtalk-card-examples/examples](https://github.com/open-dingtalk/dingtalk-card-examples/tree/main/examples)。结合当前 AI 中枢场景，选型如下：
 

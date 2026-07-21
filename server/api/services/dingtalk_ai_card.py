@@ -222,7 +222,9 @@ async def create_ai_card_session(
                 {
                     _CONTENT_KEY: "",
                     "query": str(query or "")[:2_000],
-                    "preparations": [{"name": "正在理解需求", "progress": 0}],
+                    "preparations": [
+                        {"name": "正在处理 · 理解需求", "progress": 0}
+                    ],
                     "charts": [],
                     "config": {"autoLayout": True},
                 }
