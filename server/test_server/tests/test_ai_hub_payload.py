@@ -269,11 +269,18 @@ def test_hub_prompts_route_and_ground_copywriting_requests() -> None:
 
     classify = (PROMPTS_DIR / "hub" / "classify.md").read_text(encoding="utf-8")
     content = (PROMPTS_DIR / "hub" / "content.md").read_text(encoding="utf-8")
+    response_style = (PROMPTS_DIR / "hub" / "response_style.md").read_text(
+        encoding="utf-8"
+    )
 
     assert "必须选择 `content`" in classify
     assert "即使请求很短" in classify
     assert "query_target_intelligence" in content
     assert "只要求文字话术" in content
+    assert "不要反过来要求用户补 target_id" in content
+    assert "都不是固定章节" in response_style
+    assert "没有明确要求文件或下载就不生成产物" in response_style
+    assert "严格按要求直出" in response_style
 
 
 @pytest.mark.asyncio
@@ -491,6 +498,43 @@ def test_target_intelligence_tool_returns_findings_and_existing_copywriting(
     assert "公开邮箱" in result
     assert "已有沟通话术" in result
     assert "finding_1" in result
+
+
+def test_target_intelligence_tool_resolves_natural_target_name(monkeypatch) -> None:
+    from api.dao import findings as findings_dao
+    from api.dao import targets as targets_dao
+    from api.db import mongodb
+    from Sere1nGraph.graph.tools.analysis_tools import query_target_intelligence
+
+    async def fake_get_target(_db, target_id):
+        assert target_id == "目标公司"
+        return None
+
+    async def fake_find_target(_db, *, name, **_kwargs):
+        assert name == "目标公司"
+        return {"target_id": "tgt_resolved", "canonical_name": name}
+
+    async def fake_query(_db, target_id, **_kwargs):
+        assert target_id == "tgt_resolved"
+        return ([{"finding_id": "finding_1", "label": "高分发现"}], 1)
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(targets_dao, "get_target", fake_get_target)
+    monkeypatch.setattr(targets_dao, "find_target", fake_find_target)
+    monkeypatch.setattr(
+        findings_dao,
+        "query_target_findings_with_copywriting",
+        fake_query,
+    )
+
+    # Existing Agent calls may still put a natural name in target_id. Identity
+    # resolution belongs to this tool, so that legacy shape remains supported.
+    legacy_result = query_target_intelligence.invoke({"target_id": "目标公司"})
+    explicit_result = query_target_intelligence.invoke({"target_name": "目标公司"})
+
+    for result in (legacy_result, explicit_result):
+        assert "target_id=tgt_resolved" in result
+        assert "高分发现" in result
 
 
 @pytest.mark.asyncio
@@ -778,7 +822,7 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
         "data": {"content": "这是需要展示的关键结果。\n"},
     })
     streaming = renderer.render_streaming()
-    assert streaming.startswith("### 回答")
+    assert streaming.startswith("这是需要展示的关键结果")
     assert "这是需要展示的关键结果" in streaming
     assert "内部分析" not in streaming
     assert not streaming.endswith("\n")
@@ -816,7 +860,7 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
         [],
         include_execution_summary=False,
     )
-    assert template_final == "### 回答\n\n结论明确。"
+    assert template_final == "结论明确。"
     assert "执行摘要" not in template_final
 
     buttons = build_artifact_buttons(
@@ -1067,7 +1111,7 @@ def test_dingtalk_card_live_content_never_slides_or_leaks_reasoning() -> None:
     second = renderer.render_streaming(max_chars=420)
 
     assert first == second
-    assert first.startswith("### 回答\n\n")
+    assert first.startswith("A")
     assert "检索和工具思考过程" not in first
     assert first.endswith("…（内容较长，已截断）")
 
@@ -1102,6 +1146,18 @@ def test_dingtalk_output_removes_internal_reference_markers() -> None:
     assert "[[ref:" not in rendered
     assert "安徽广播电视台: 382 资产" in rendered
     assert "北京广播电视台：422 资产" in rendered
+
+
+def test_dingtalk_output_normalizes_dynamic_markdown_sections() -> None:
+    from api.services.dingtalk_card import clean_hub_markdown
+
+    rendered = clean_hub_markdown(
+        "直接结论。\n\n**限制与待确认**\n-   第一项\n1.   第二项"
+    )
+
+    assert "#### 限制与待确认" in rendered
+    assert "- 第一项" in rendered
+    assert "1. 第二项" in rendered
 
 
 @pytest.mark.asyncio
@@ -1230,10 +1286,10 @@ async def test_dingtalk_stream_updates_card_only_for_synthesized_answer(monkeypa
     await adapter._process_message(FakeHandler(), FakeIncoming(), "测试问题")
 
     assert len(card.streamed) == 2
-    assert all(content.startswith("### 回答") for content in card.streamed)
+    assert all(content.startswith("关键结论") for content in card.streamed)
     assert all("内部检索思考" not in content for content in card.streamed)
     assert len(card.streamed[1]) > len(card.streamed[0])
-    assert card.finished.startswith("### 回答")
+    assert card.finished.startswith("关键结论")
     assert "执行摘要" in card.finished
 
 

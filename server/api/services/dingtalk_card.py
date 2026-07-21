@@ -75,10 +75,17 @@ def clean_hub_markdown(value: Any) -> str:
     marker_start = max(text.rfind(marker) for marker in _INCOMPLETE_MARKERS)
     if marker_start >= 0 and "]]" not in text[marker_start:]:
         text = text[:marker_start].rstrip()
+    text = re.sub(
+        r"(?m)^\*\*([^*\n]{1,40})\*\*[ \t]*$",
+        r"#### \1",
+        text,
+    )
     text = _ARTIFACT_MARKER_RE.sub(lambda match: f"**产物：{match.group(1)}**", text)
     text = _LABELED_REFERENCE_MARKER_RE.sub(lambda match: match.group(1), text)
     text = _REFERENCE_MARKER_RE.sub("", text)
     text = _RELATIVE_DOWNLOAD_RE.sub("", text)
+    text = re.sub(r"(?m)^([ \t]*[-+*])\s+", r"\1 ", text)
+    text = re.sub(r"(?m)^([ \t]*\d+[.)])\s+", r"\1 ", text)
     text = re.sub(r"[ \t]+([，。；：:,.!?])", r"\1", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -258,13 +265,11 @@ class DingTalkCardRenderer:
 
     def render_streaming(self, *, max_chars: int = 12_000) -> str:
         """Render only the stable answer surface used for live Card updates."""
-        header = "### 回答\n\n"
         answer = clean_hub_markdown(self.live_text)
         if not answer:
             return ""
-        available = max(300, max_chars - len(header))
-        answer = _fit_stable_prefix(answer, available)
-        return f"{header}{answer}"[:max_chars].rstrip("\n")
+        answer = _fit_stable_prefix(answer, max(300, max_chars))
+        return answer[:max_chars].rstrip("\n")
 
     def render_preparations(
         self,
@@ -333,12 +338,11 @@ class DingTalkCardRenderer:
                     ["", "> 已生成产物；管理员配置“公网访问地址”后，钉钉中会显示打开和下载入口。"]
                 )
         footer_text = "\n".join(footer)
-        header = "### 回答\n\n"
         footer_spacing = 2 if footer_text else 0
-        available = max(300, max_chars - len(header) - len(footer_text) - footer_spacing)
+        available = max(300, max_chars - len(footer_text) - footer_spacing)
         answer = _fit_stable_prefix(answer, available)
         suffix = f"\n\n{footer_text}" if footer_text else ""
-        return f"{header}{answer}{suffix}"[:max_chars]
+        return f"{answer}{suffix}"[:max_chars]
 
     def _latest_running(self, path: str) -> _ProgressItem | None:
         return next(

@@ -272,63 +272,89 @@ def query_findings(
 @tool(
     "query_target_intelligence",
     description=(
-        "按全局 target_id 查询该公司/机构关联的泄漏、Finding、来源证据和已有话术。"
+        "按全局 target_id 或自然语言 Target 名称查询公司/机构关联的泄漏、Finding、"
+        "来源证据和已有话术；名称会通过规范名称和别名自动解析为稳定 target_id。"
         "适合回答‘某个 Target 有哪些泄漏/联系方式/风险、已经有哪些话术’。"
-        "会跨项目聚合；如只看一个项目可传 project_id。参数：target_id（必填）；"
+        "会跨项目聚合；如只看一个项目可传 project_id。参数：target_id、target_name 至少提供一个；"
         "project_id（可选）；min_score（0-100）；limit（默认10，上限30）；"
         "offset（分页偏移）。返回 finding_id，需更完整证据时继续调用 get_finding_detail，"
         "需要单条完整话术时继续调用 get_finding_copywriting。"
     ),
 )
 def query_target_intelligence(
-    target_id: str,
+    target_id: str = "",
+    target_name: str = "",
     project_id: str = "",
     min_score: int = 0,
     limit: int = 10,
     offset: int = 0,
 ) -> str:
     """Query one Target's findings and existing copywriting across projects."""
-    target_id = str(target_id or "").strip()
-    if not target_id:
-        return "请提供 target_id。"
+    requested_id = str(target_id or "").strip()
+    requested_name = str(target_name or "").strip()
+    if not requested_id and not requested_name:
+        return "请提供 target_id 或 target_name。"
 
-    async def _load() -> tuple[dict[str, Any] | None, list[dict[str, Any]], int]:
+    async def _load() -> tuple[
+        dict[str, Any] | None,
+        str,
+        list[dict[str, Any]],
+        int,
+    ]:
         from api.dao import findings as findings_dao
         from api.dao import targets as targets_dao
         from api.db.mongodb import get_db
 
         db = get_db()
-        target, result = await asyncio.gather(
-            targets_dao.get_target(db, target_id),
-            findings_dao.query_target_findings_with_copywriting(
-                db,
-                target_id,
-                project_id=str(project_id or "").strip(),
-                min_score=max(0, min(int(min_score or 0), 100)),
-                limit=max(1, min(int(limit or 10), 30)),
-                skip=max(0, min(int(offset or 0), 10_000)),
-            ),
+        target = (
+            await targets_dao.get_target(db, requested_id)
+            if requested_id
+            else None
         )
-        items, total = result
-        return target, items, total
+        lookup_name = requested_name or (requested_id if target is None else "")
+        if target is None and lookup_name:
+            target = await targets_dao.find_target(db, name=lookup_name)
+
+        resolved_id = str((target or {}).get("target_id") or "").strip()
+        if not resolved_id and requested_id.startswith(("tgt_", "target_")):
+            # Keep legacy calls useful when an old Finding still references a Target
+            # whose entity document has not yet been backfilled.
+            resolved_id = requested_id
+        if not resolved_id:
+            return target, "", [], 0
+
+        items, total = await findings_dao.query_target_findings_with_copywriting(
+            db,
+            resolved_id,
+            project_id=str(project_id or "").strip(),
+            min_score=max(0, min(int(min_score or 0), 100)),
+            limit=max(1, min(int(limit or 10), 30)),
+            skip=max(0, min(int(offset or 0), 10_000)),
+        )
+        return target, resolved_id, items, total
 
     try:
-        target, items, total = _run_coro_sync(_load())
+        target, resolved_id, items, total = _run_coro_sync(_load())
     except Exception as exc:  # noqa: BLE001
         return f"查询 Target 情报失败：{exc}"
 
-    target_name = str(
+    if not resolved_id:
+        identity = requested_name or requested_id
+        return f"未找到名称为“{identity}”的 Target，请检查名称或别名。"
+
+    display_name = str(
         (target or {}).get("canonical_name")
         or (target or {}).get("display_name")
         or (target or {}).get("name")
-        or target_id
+        or requested_name
+        or resolved_id
     )
     if not items:
-        return f"Target {target_name}（{target_id}）暂无符合条件的 Finding。"
+        return f"Target {display_name}（{resolved_id}）暂无符合条件的 Finding。"
 
     bounded_offset = max(0, min(int(offset or 0), 10_000))
     lines = [
-        f"Target：{target_name}（target_id={target_id}）",
+        f"Target：{display_name}（target_id={resolved_id}）",
         f"命中 {total} 条，返回第 {bounded_offset + 1}-{bounded_offset + len(items)} 条：",
     ]
     for index, finding in enumerate(items, start=1):
