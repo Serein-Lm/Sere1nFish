@@ -95,6 +95,64 @@
   box-shadow: 0 0 8px var(--primary-glow);
 }
 
+.target-high-score-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.target-high-score-cell .ant-tag,
+.target-scope-counts .ant-tag {
+  margin-inline-end: 0;
+}
+
+.target-scope-bar {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.target-scope-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.target-scope-domain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-scope-counts {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+@media (max-width: 768px) {
+  .target-scope-bar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .target-scope-bar > .ant-btn {
+    justify-self: start;
+  }
+
+  .target-scope-counts {
+    justify-content: flex-start;
+  }
+}
+
 .wechat-archive-summary {
   margin-bottom: 16px;
   padding: 12px 0;

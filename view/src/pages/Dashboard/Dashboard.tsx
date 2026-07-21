@@ -472,8 +472,8 @@ export default function Dashboard() {
         const phases = Object.keys(record.by_phase)
         return (
           <Space wrap size={[0, 4]}>
-            {agents.slice(0, 2).map((agent) => <Tag color="purple" key={agent}>{agent}</Tag>)}
-            {phases.slice(0, 2).map((phase) => <Tag color="cyan" key={phase}>{phase}</Tag>)}
+            {agents.slice(0, 2).map((agent) => <Tag color="purple" key={`agent:${agent}`}>{agent}</Tag>)}
+            {phases.slice(0, 2).map((phase) => <Tag color="cyan" key={`phase:${phase}`}>{phase}</Tag>)}
             {agents.length === 0 && phases.length === 0 ? '-' : null}
           </Space>
         )

@@ -119,6 +119,10 @@ export interface ProjectTargetSummary {
   alive_asset_count: number
   finding_count: number
   high_score_finding_count: number
+  high_score_by_source?: Partial<Record<
+    'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars' | 'other',
+    number
+  >>
   website_count: number
   xhs_count: number
   wechat_count: number

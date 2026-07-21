@@ -19,6 +19,66 @@ from api.db.collections import (
 )
 
 
+_HIGH_SCORE_SOURCE_KEYS = (
+    "website",
+    "xiaohongshu",
+    "wechat",
+    "bidding",
+    "scholars",
+    "other",
+)
+
+_FINDING_SOURCE_MODULES = {
+    "web_tagging": "website",
+    "website": "website",
+    "xhs": "xiaohongshu",
+    "xhs_profile": "xiaohongshu",
+    "wechat": "wechat",
+    "wechat_article": "wechat",
+    "bidding": "bidding",
+    "bidding_url_scan": "bidding",
+    "scholar": "scholars",
+    "scholar_contact": "scholars",
+}
+
+
+def _empty_high_score_breakdown() -> dict[str, int]:
+    return {key: 0 for key in _HIGH_SCORE_SOURCE_KEYS}
+
+
+def _summarize_finding_counts(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Fold Target/source aggregation rows into the stable Target summary shape."""
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity = row.get("_id")
+        if isinstance(identity, dict):
+            target_id = str(identity.get("target_id") or "")
+            source = str(identity.get("source") or "").strip().lower()
+        else:
+            target_id = str(identity or "")
+            source = ""
+        if not target_id:
+            continue
+
+        summary = summaries.setdefault(
+            target_id,
+            {
+                "finding_count": 0,
+                "high_score_finding_count": 0,
+                "high_score_by_source": _empty_high_score_breakdown(),
+            },
+        )
+        finding_count = int(row.get("finding_count") or 0)
+        high_score_count = int(row.get("high_score_count") or 0)
+        summary["finding_count"] += finding_count
+        summary["high_score_finding_count"] += high_score_count
+        source_key = _FINDING_SOURCE_MODULES.get(source, "other")
+        summary["high_score_by_source"][source_key] += high_score_count
+    return summaries
+
+
 async def resolve_target(
     db: AsyncIOMotorDatabase,
     *,
@@ -305,9 +365,12 @@ async def list_project_target_summaries(
             },
             {
                 "$group": {
-                    "_id": "$target_id",
+                    "_id": {
+                        "target_id": "$target_id",
+                        "source": {"$ifNull": ["$source", ""]},
+                    },
                     "finding_count": {"$sum": 1},
-                    "high_score_finding_count": {
+                    "high_score_count": {
                         "$sum": {
                             "$cond": [
                                 {"$gte": [{"$ifNull": ["$attention_score", 0]}, 70]},
@@ -398,7 +461,7 @@ async def list_project_target_summaries(
 
     by_target = _by_id(counts)
     assets_by_target = _by_id(asset_counts)
-    findings_by_target = _by_id(finding_counts)
+    findings_by_target = _summarize_finding_counts(finding_counts)
     xhs_by_target = _by_id(xhs_counts)
     project_docs_by_target = {
         str(item.get("_id") or ""): int(item.get("document_count") or 0)
@@ -472,6 +535,11 @@ async def list_project_target_summaries(
             "high_score_finding_count": int(
                 findings_by_target.get(str(relation.get("target_id") or ""), {}).get(
                     "high_score_finding_count", 0
+                )
+            ),
+            "high_score_by_source": dict(
+                findings_by_target.get(str(relation.get("target_id") or ""), {}).get(
+                    "high_score_by_source", _empty_high_score_breakdown()
                 )
             ),
             "website_count": int(

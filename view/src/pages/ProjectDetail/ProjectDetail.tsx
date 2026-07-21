@@ -105,6 +105,7 @@ const TASK_SOURCE_LABELS: Record<string, string> = {
 
 const MAX_COMPANY_SCAN_BATCH_SIZE = 200
 const SHOW_MOBILE_OPERATIONS_TAB = false
+const SHOW_DOUYIN_TAB = false
 
 function parseCompanyNames(value: unknown): string[] {
   const seen = new Set<string>()
@@ -125,6 +126,30 @@ function boundedTaskTuning(value: unknown, fallback: number, maximum: number): n
 }
 
 type TabKey = 'targets' | 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'bidding' | 'mobile' | 'scholars' | 'tasks' | 'stats'
+type TargetDataTabKey = 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars'
+type TargetCountKey = 'website_count' | 'xhs_count' | 'wechat_count' | 'bidding_count' | 'scholar_contact_count'
+type TargetHighScoreKey = 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars' | 'other'
+
+interface TargetModuleDefinition {
+  tab: TargetDataTabKey
+  label: string
+  countKey: TargetCountKey
+  highScoreKey: Exclude<TargetHighScoreKey, 'other'>
+}
+
+const TARGET_MODULES: readonly TargetModuleDefinition[] = [
+  { tab: 'website', label: '网站', countKey: 'website_count', highScoreKey: 'website' },
+  { tab: 'xiaohongshu', label: '小红书', countKey: 'xhs_count', highScoreKey: 'xiaohongshu' },
+  { tab: 'wechat', label: '公众号', countKey: 'wechat_count', highScoreKey: 'wechat' },
+  { tab: 'bidding', label: '招投标', countKey: 'bidding_count', highScoreKey: 'bidding' },
+  { tab: 'scholars', label: '学者联系', countKey: 'scholar_contact_count', highScoreKey: 'scholars' },
+]
+
+const TARGET_DATA_TAB_KEYS = new Set<TabKey>(TARGET_MODULES.map((module) => module.tab))
+const TARGET_HIGH_SCORE_LABELS: ReadonlyArray<{ key: TargetHighScoreKey; label: string }> = [
+  ...TARGET_MODULES.map((module) => ({ key: module.highScoreKey, label: module.label })),
+  { key: 'other', label: '其他' },
+]
 
 interface WechatDeviceOption {
   deviceId: string
@@ -227,6 +252,13 @@ function formatDate(value: string | undefined): string {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return value
   return d.toLocaleString()
+}
+
+function blurFocusedTabPaneElement() {
+  const focused = document.activeElement
+  if (focused instanceof HTMLElement && focused.closest('.ant-tabs-tabpane')) {
+    focused.blur()
+  }
 }
 
 function getRecordStatus(rec: WebTaggingRecord) {
@@ -624,6 +656,7 @@ export default function ProjectDetail() {
   const [wechatLoading, setWechatLoading] = useState(false)
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
   const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
+  const [selectedTargetId, setSelectedTargetId] = useState('')
   const [websiteTargetId, setWebsiteTargetId] = useState('')
   const [wechatTargetId, setWechatTargetId] = useState('')
   const [scholarContacts, setScholarContacts] = useState<ScholarContact[]>([])
@@ -996,6 +1029,7 @@ export default function ProjectDetail() {
       setProject(null)
       loadedTabsRef.current = new Set<TabKey>()
       setActiveTab('targets')
+      setSelectedTargetId('')
       setXhsTargetId('')
       setWebsiteTargetId('')
       setWechatTargetId('')
@@ -1024,6 +1058,7 @@ export default function ProjectDetail() {
           setWebsitePage(1)
           setWebsitePageSize(10)
           setProjectTargets([])
+          setSelectedTargetId('')
           setXhsNotes([])
           setXhsProfiles([])
           setXhsTargetId('')
@@ -2407,26 +2442,17 @@ export default function ProjectDetail() {
           <Text type="secondary">按项目 Target 查看对应网站扫描结果</Text>
           <Select
             value={websiteTargetId}
-            allowClear
             showSearch
             optionFilterProp="label"
             prefix={<FilterOutlined />}
-            placeholder="按 Target 筛选"
+            placeholder="选择 Target"
             style={{ width: 320, maxWidth: '100%' }}
-            options={[
-              { value: '', label: `全部 Target (${projectTargets.length})` },
-              ...projectTargets.map((target) => ({
-                value: target.target_id,
-                label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
-              })),
-            ]}
+            options={projectTargets.map((target) => ({
+              value: target.target_id,
+              label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+            }))}
             onChange={(value) => {
-              const nextTargetId = value || ''
-              setWebsiteTargetId(nextTargetId)
-              setWebsitePage(1)
-              if (projectId) {
-                void fetchRecords(projectId, 1, websitePageSize, nextTargetId)
-              }
+              openTargetModule(value, 'website')
             }}
           />
         </div>
@@ -2539,23 +2565,16 @@ export default function ProjectDetail() {
         <div className="xhs-content-header" style={{ gap: 8, flexWrap: 'wrap' }}>
           <Select
             value={xhsTargetId}
-            placeholder="按目标公司筛选"
-            allowClear
+            placeholder="选择 Target"
+            showSearch
+            optionFilterProp="label"
             style={{ width: 320, maxWidth: '100%' }}
-            options={[
-              { value: '', label: `全部目标 (${projectTargets.length})` },
-              ...projectTargets.map((target) => ({
-                value: target.target_id,
-                label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
-              })),
-            ]}
+            options={projectTargets.map((target) => ({
+              value: target.target_id,
+              label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+            }))}
             onChange={(value) => {
-              const nextTargetId = value || ''
-              setXhsTargetId(nextTargetId)
-              if (projectId) {
-                void fetchXhsNotes(projectId, 1, 10, nextTargetId)
-                void fetchXhsProfiles(projectId, 1, 10, nextTargetId)
-              }
+              openTargetModule(value, 'xiaohongshu')
             }}
           />
           <Button
@@ -3093,17 +3112,16 @@ export default function ProjectDetail() {
           <Space>
             <Select
               value={wechatTargetId}
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择 Target"
               style={{ width: 360, maxWidth: '100%' }}
-              options={[
-                { value: '', label: `全部 Target (${projectTargets.length})` },
-                ...projectTargets.map((target) => ({
-                  value: target.target_id,
-                  label: `${['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(target.relation_type || '') ? '[全资子公司] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
-                })),
-              ]}
+              options={projectTargets.map((target) => ({
+                value: target.target_id,
+                label: `${['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(target.relation_type || '') ? '[全资子公司] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
+              }))}
               onChange={(value) => {
-                setWechatTargetId(value)
-                if (projectId) fetchWechatRecords(projectId, wechatOnlyIncremental, value)
+                openTargetModule(value, 'wechat')
               }}
             />
             <span>仅增量</span>
@@ -3252,19 +3270,13 @@ export default function ProjectDetail() {
           <Space wrap>
             <Select
               value={scholarTargetId}
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择 Target"
               style={{ width: 300, maxWidth: '100%' }}
-              options={[
-                { value: '', label: `全部 Target (${projectTargets.length})` },
-                ...projectTargets.map((target) => ({ value: target.target_id, label: target.target_name })),
-              ]}
+              options={projectTargets.map((target) => ({ value: target.target_id, label: target.target_name }))}
               onChange={(value) => {
-                setScholarTargetId(value)
-                if (projectId) void fetchScholarContacts(
-                  projectId,
-                  scholarOnlyCorresponding,
-                  scholarOnlyVerified,
-                  value,
-                )
+                openTargetModule(value, 'scholars')
               }}
             />
             <Checkbox
@@ -3430,17 +3442,16 @@ export default function ProjectDetail() {
           <Space wrap>
             <Select
               value={biddingTargetId}
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择 Target"
               style={{ width: 320, maxWidth: '100%' }}
-              options={[
-                { value: '', label: `全部公司 (${projectTargets.length})` },
-                ...projectTargets.map((target) => ({
-                  value: target.target_id,
-                  label: target.target_name,
-                })),
-              ]}
+              options={projectTargets.map((target) => ({
+                value: target.target_id,
+                label: target.target_name,
+              }))}
               onChange={(value) => {
-                setBiddingTargetId(value)
-                if (projectId) void fetchBiddingRecords(projectId, 1, biddingPageSize, value)
+                openTargetModule(value, 'bidding')
               }}
             />
             <Button size="small" icon={<SyncOutlined />} loading={biddingLoading} onClick={() => { if (projectId) void fetchBiddingRecords(projectId, biddingPage, biddingPageSize, biddingTargetId) }}>刷新</Button>
@@ -3586,8 +3597,37 @@ export default function ProjectDetail() {
     )
   }
 
-  const openTargetModule = (targetId: string, tab: TabKey) => {
-    if (!projectId) return
+  const selectedTarget = useMemo(
+    () => projectTargets.find((target) => target.target_id === selectedTargetId) || null,
+    [projectTargets, selectedTargetId],
+  )
+
+  const applyTargetScope = (targetId: string) => {
+    if (targetId !== selectedTargetId) {
+      TARGET_DATA_TAB_KEYS.forEach((tab) => loadedTabsRef.current.delete(tab))
+    }
+    setSelectedTargetId(targetId)
+    setWebsiteTargetId(targetId)
+    setXhsTargetId(targetId)
+    setWechatTargetId(targetId)
+    setBiddingTargetId(targetId)
+    setScholarTargetId(targetId)
+  }
+
+  const returnToTargetDashboard = () => {
+    setSelectedTargetId('')
+    setWebsiteTargetId('')
+    setXhsTargetId('')
+    setWechatTargetId('')
+    setBiddingTargetId('')
+    setScholarTargetId('')
+    setActiveTab('targets')
+  }
+
+  const openTargetModule = (targetId: string, tab: TargetDataTabKey) => {
+    if (!projectId || !targetId) return
+    blurFocusedTabPaneElement()
+    applyTargetScope(targetId)
     loadedTabsRef.current.add(tab)
     setActiveTab(tab)
     if (tab === 'website') {
@@ -3612,6 +3652,13 @@ export default function ProjectDetail() {
     }
   }
 
+  const openTargetDetails = (target: ProjectTargetSummary) => {
+    const defaultModule = TARGET_MODULES.find(
+      (module) => Number(target[module.countKey] || 0) > 0,
+    ) || TARGET_MODULES[0]
+    openTargetModule(target.target_id, defaultModule.tab)
+  }
+
   const renderTargetDashboard = () => {
     const columns: ColumnsType<ProjectTargetSummary> = [
       {
@@ -3633,32 +3680,44 @@ export default function ProjectDetail() {
       },
       {
         title: '高分 Finding',
-        dataIndex: 'high_score_finding_count',
         key: 'high_score_finding_count',
-        width: 120,
+        width: 310,
         sorter: (a, b) => (a.high_score_finding_count || 0) - (b.high_score_finding_count || 0),
-        render: (value: number) => <Tag color={value > 0 ? 'red' : 'default'}>{value || 0}</Tag>,
+        render: (_, target) => {
+          const total = Number(target.high_score_finding_count || 0)
+          const breakdown = target.high_score_by_source || {}
+          const sourceCounts = TARGET_HIGH_SCORE_LABELS
+            .map((source) => ({ ...source, count: Number(breakdown[source.key] || 0) }))
+          return (
+            <div className="target-high-score-cell">
+              <Tag color={total > 0 ? 'red' : 'default'}>总计 {total}</Tag>
+              {total > 0 && sourceCounts.map((source) => (
+                <Tag key={source.key} color={source.count > 0 ? 'volcano' : 'default'}>
+                  {source.label} {source.count}
+                </Tag>
+              ))}
+            </div>
+          )
+        },
       },
       {
         title: '模块数据',
         key: 'modules',
         render: (_, target) => (
           <Space size={[4, 4]} wrap>
-            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'website') }}>
-              网站 {target.website_count || 0}
-            </Button>
-            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'xiaohongshu') }}>
-              小红书 {target.xhs_count || 0}
-            </Button>
-            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'wechat') }}>
-              公众号 {target.wechat_count || 0}
-            </Button>
-            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'bidding') }}>
-              招投标 {target.bidding_count || 0}
-            </Button>
-            <Button type="link" size="small" onClick={(event) => { event.stopPropagation(); openTargetModule(target.target_id, 'scholars') }}>
-              学者联系 {target.scholar_contact_count || 0}
-            </Button>
+            {TARGET_MODULES.map((module) => (
+              <Button
+                key={module.tab}
+                type="link"
+                size="small"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  openTargetModule(target.target_id, module.tab)
+                }}
+              >
+                {module.label} {target[module.countKey] || 0}
+              </Button>
+            ))}
           </Space>
         ),
       },
@@ -3689,7 +3748,7 @@ export default function ProjectDetail() {
     return (
       <div>
         <div className="project-data-toolbar">
-          <Text type="secondary">按 Target 汇总项目资产；点击模块数量直接查看该主体的数据。</Text>
+          <Text type="secondary">按 Target 汇总项目数据；点击整行进入默认模块，或点击模块数量直接钻取。</Text>
           <Button size="small" icon={<SyncOutlined />} onClick={() => { if (projectId) void fetchProjectTargets(projectId) }}>
             刷新
           </Button>
@@ -3701,25 +3760,15 @@ export default function ProjectDetail() {
           dataSource={projectTargets}
           locale={{ emptyText: <Empty description="项目尚未关联 Target" /> }}
           pagination={{ pageSize: 20, showTotal: (total) => `共 ${total} 个 Target` }}
-          scroll={{ x: 1040 }}
+          scroll={{ x: 1240 }}
           onRow={(target) => ({
-            onClick: () => openTargetModule(target.target_id, 'website'),
+            onClick: () => openTargetDetails(target),
             style: { cursor: 'pointer' },
           })}
         />
       </div>
     )
   }
-
-  const targetModuleTotals = projectTargets.reduce(
-    (totals, target) => ({
-      website: totals.website + (target.website_count || 0),
-      wechat: totals.wechat + (target.wechat_count || 0),
-      bidding: totals.bidding + (target.bidding_count || 0),
-      scholars: totals.scholars + (target.scholar_contact_count || 0),
-    }),
-    { website: 0, wechat: 0, bidding: 0, scholars: 0 },
-  )
 
   // Tab 配置
   const tabItems = [
@@ -3734,13 +3783,14 @@ export default function ProjectDetail() {
       ),
       children: renderTargetDashboard(),
     },
+    ...(selectedTarget ? [
     {
       key: 'website' as TabKey,
       label: (
         <Space>
           <GlobalOutlined />
           网站
-          <Tag>{loadedTabsRef.current.has('website') ? taggingTotal : targetModuleTotals.website}</Tag>
+          <Tag>{loadedTabsRef.current.has('website') ? taggingTotal : selectedTarget.website_count}</Tag>
         </Space>
       ),
       children: renderWebsiteContent(),
@@ -3751,11 +3801,12 @@ export default function ProjectDetail() {
         <Space>
           <img src="https://www.xiaohongshu.com/favicon.ico" alt="小红书" style={{ width: 14, height: 14 }} />
           小红书
+          <Tag>{selectedTarget.xhs_count}</Tag>
         </Space>
       ),
       children: renderXiaohongshuContent(),
     },
-    {
+    ...(SHOW_DOUYIN_TAB ? [{
       key: 'douyin' as TabKey,
       label: (
         <Space>
@@ -3764,14 +3815,14 @@ export default function ProjectDetail() {
         </Space>
       ),
       children: renderDouyinContent(),
-    },
+    }] : []),
     {
       key: 'wechat' as TabKey,
       label: (
         <Space>
           <FileTextOutlined />
           公众号
-          <Tag>{loadedTabsRef.current.has('wechat') ? wechatRecordsTotal : targetModuleTotals.wechat}</Tag>
+          <Tag>{loadedTabsRef.current.has('wechat') ? wechatRecordsTotal : selectedTarget.wechat_count}</Tag>
         </Space>
       ),
       children: renderWechatContent(),
@@ -3782,7 +3833,7 @@ export default function ProjectDetail() {
         <Space>
           <FileSearchOutlined />
           招投标
-          <Tag>{loadedTabsRef.current.has('bidding') ? biddingRecordsTotal : targetModuleTotals.bidding}</Tag>
+          <Tag>{loadedTabsRef.current.has('bidding') ? biddingRecordsTotal : selectedTarget.bidding_count}</Tag>
         </Space>
       ),
       children: renderBiddingContent(),
@@ -3803,11 +3854,12 @@ export default function ProjectDetail() {
         <Space>
           <TeamOutlined />
           学者联系
-          <Tag>{loadedTabsRef.current.has('scholars') ? scholarContactsTotal : targetModuleTotals.scholars}</Tag>
+          <Tag>{loadedTabsRef.current.has('scholars') ? scholarContactsTotal : selectedTarget.scholar_contact_count}</Tag>
         </Space>
       ),
       children: renderScholarsContent(),
     },
+    ] : []),
     {
       key: 'tasks' as TabKey,
       label: (
@@ -4184,16 +4236,50 @@ export default function ProjectDetail() {
             {/* 简易看板 */}
             {renderMiniDashboard()}
 
-            {/* Tab 切换：网站 / 小红书 */}
+            {selectedTarget && activeTab !== 'targets' && (
+              <div className="target-scope-bar">
+                <Button
+                  type="text"
+                  icon={<ArrowLeftOutlined />}
+                  onClick={returnToTargetDashboard}
+                >
+                  返回 Target 看板
+                </Button>
+                <div className="target-scope-identity">
+                  <Space size={[6, 4]} wrap>
+                    <Text type="secondary">当前 Target</Text>
+                    <Text strong>{selectedTarget.target_name}</Text>
+                    {selectedTarget.relation_type === 'primary' && <Tag color="blue">主目标</Tag>}
+                    {['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(selectedTarget.relation_type || '') && (
+                      <Tag color="cyan">全资子公司</Tag>
+                    )}
+                  </Space>
+                  {selectedTarget.root_domain && (
+                    <Text type="secondary" className="target-scope-domain">{selectedTarget.root_domain}</Text>
+                  )}
+                </div>
+                <div className="target-scope-counts">
+                  {TARGET_MODULES.map((module) => (
+                    <Tag key={module.tab}>{module.label} {selectedTarget[module.countKey] || 0}</Tag>
+                  ))}
+                  <Tag color={selectedTarget.high_score_finding_count > 0 ? 'red' : 'default'}>
+                    高分 {selectedTarget.high_score_finding_count || 0}
+                  </Tag>
+                </div>
+              </div>
+            )}
+
             <div className="project-detail-tabs slide-up stagger-3">
               <Tabs
                 activeKey={activeTab}
                 onChange={(key) => {
-                  const focused = document.activeElement
-                  if (focused instanceof HTMLElement && focused.closest('.ant-tabs-tabpane')) {
-                    focused.blur()
+                  blurFocusedTabPaneElement()
+                  const nextTab = key as TabKey
+                  if (nextTab === 'targets') {
+                    returnToTargetDashboard()
+                    return
                   }
-                  setActiveTab(key as TabKey)
+                  setActiveTab(nextTab)
                 }}
                 items={tabItems}
                 className="detail-tabs"

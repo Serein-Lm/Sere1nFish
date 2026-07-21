@@ -411,8 +411,8 @@ export default function Observability() {
       key: 'agent_phase',
       render: (_, row) => (
         <Space wrap size={[0, 4]}>
-          {Object.keys(row.by_agent || {}).slice(0, 2).map(agent => <Tag color="purple" key={agent}>{agent}</Tag>)}
-          {Object.keys(row.by_phase || {}).slice(0, 2).map(phase => <Tag color="cyan" key={phase}>{phase}</Tag>)}
+          {Object.keys(row.by_agent || {}).slice(0, 2).map(agent => <Tag color="purple" key={`agent:${agent}`}>{agent}</Tag>)}
+          {Object.keys(row.by_phase || {}).slice(0, 2).map(phase => <Tag color="cyan" key={`phase:${phase}`}>{phase}</Tag>)}
         </Space>
       ),
     },
