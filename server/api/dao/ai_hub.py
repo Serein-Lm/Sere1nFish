@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReturnDocument
 
 from api.db.collections import (
     AI_HUB_CONVERSATIONS_COLLECTION,
@@ -34,6 +35,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     msg = db[AI_HUB_MESSAGES_COLLECTION]
     await msg.create_index("message_id", unique=True)
     await msg.create_index([("conversation_id", 1), ("created_at", 1)])
+    await msg.create_index(
+        [("conversation_id", 1), ("context_version", 1), ("created_at", 1)]
+    )
 
 
 # ── 会话 ─────────────────────────────────────────────
@@ -51,6 +55,7 @@ async def create_conversation(
         "title": (title or "新会话").strip(),
         "owner": owner,
         "message_count": 0,
+        "context_version": 0,
         "last_message_at": None,
         "created_at": now,
         "updated_at": now,
@@ -76,6 +81,7 @@ async def ensure_conversation(
                 "title": (title or "外部会话").strip(),
                 "owner": owner,
                 "message_count": 0,
+                "context_version": 0,
                 "last_message_at": None,
                 "created_at": now,
                 "updated_at": now,
@@ -137,6 +143,37 @@ async def delete_conversation(
     }
 
 
+async def clear_conversation_messages(
+    db: AsyncIOMotorDatabase, conversation_id: str
+) -> dict[str, int]:
+    """Clear one conversation without deleting its metadata or artifacts.
+
+    Advancing ``context_version`` invalidates completions that started before
+    the clear operation, so an in-flight AI request cannot restore stale
+    context after it finishes.
+    """
+    conversation = await db[AI_HUB_CONVERSATIONS_COLLECTION].find_one_and_update(
+        {"conversation_id": conversation_id},
+        {
+            "$inc": {"context_version": 1},
+            "$set": {
+                "message_count": 0,
+                "last_message_at": None,
+                "updated_at": _now(),
+            },
+        },
+        projection={"_id": 0, "context_version": 1},
+        return_document=ReturnDocument.AFTER,
+    )
+    msg_result = await db[AI_HUB_MESSAGES_COLLECTION].delete_many(
+        {"conversation_id": conversation_id}
+    )
+    return {
+        "messages_deleted": msg_result.deleted_count,
+        "context_version": int((conversation or {}).get("context_version") or 0),
+    }
+
+
 # ── 消息 ─────────────────────────────────────────────
 
 async def append_message(
@@ -147,6 +184,7 @@ async def append_message(
     content: str,
     workflow: str = "",
     meta: dict[str, Any] | None = None,
+    context_version: int | None = None,
 ) -> dict[str, Any]:
     """追加一条消息，并同步更新会话计数与时间。"""
     now = _now()
@@ -160,14 +198,20 @@ async def append_message(
         "meta": meta or {},
         "created_at": now,
     }
+    if context_version is not None:
+        doc["context_version"] = context_version
     await db[AI_HUB_MESSAGES_COLLECTION].insert_one(dict(doc))
-    await db[AI_HUB_CONVERSATIONS_COLLECTION].update_one(
-        {"conversation_id": conversation_id},
+    conversation_filter = _context_version_filter(conversation_id, context_version)
+    update_result = await db[AI_HUB_CONVERSATIONS_COLLECTION].update_one(
+        conversation_filter,
         {
             "$inc": {"message_count": 1},
             "$set": {"last_message_at": now, "updated_at": now},
         },
     )
+    if context_version is not None and not update_result.matched_count:
+        await db[AI_HUB_MESSAGES_COLLECTION].delete_one({"message_id": mid})
+        return {}
     return doc
 
 
@@ -191,15 +235,32 @@ async def list_recent_messages(
     conversation_id: str,
     *,
     limit: int = 12,
+    context_version: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return the newest bounded message window in chronological order."""
     bounded_limit = max(1, min(int(limit or 12), 50))
     cursor = (
         db[AI_HUB_MESSAGES_COLLECTION]
-        .find({"conversation_id": conversation_id}, {"_id": 0})
+        .find(_context_version_filter(conversation_id, context_version), {"_id": 0})
         .sort("created_at", -1)
         .limit(bounded_limit)
     )
     messages = [doc async for doc in cursor]
     messages.reverse()
     return messages
+
+
+def _context_version_filter(
+    conversation_id: str, context_version: int | None
+) -> dict[str, Any]:
+    query: dict[str, Any] = {"conversation_id": conversation_id}
+    if context_version is None:
+        return query
+    if context_version == 0:
+        query["$or"] = [
+            {"context_version": 0},
+            {"context_version": {"$exists": False}},
+        ]
+    else:
+        query["context_version"] = context_version
+    return query

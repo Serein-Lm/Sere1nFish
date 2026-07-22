@@ -27,6 +27,55 @@ logger = get_logger("api.services.dingtalk_bridge")
 _HUB_WORKFLOW = "assistant"
 # 回复文本长度上限，避免超过钉钉消息容量
 _REPLY_MAX_CHARS = 4000
+_CLEAR_CONTEXT_COMMANDS = frozenset(
+    {"清空上下文", "清除上下文", "重置上下文", "新对话", "/clear", "/reset"}
+)
+_GROUP_CONVERSATION_TYPES = frozenset({"2", "group", "group_chat", "groupchat"})
+
+
+def is_clear_context_command(query: str) -> bool:
+    """Match explicit reset commands without intercepting normal questions."""
+    normalized = "".join(str(query or "").split()).rstrip("。.!！?？").casefold()
+    return normalized in _CLEAR_CONTEXT_COMMANDS
+
+
+def build_dingtalk_conversation_id(
+    *,
+    conversation_id: str,
+    sender_id: str,
+    conversation_type: str = "",
+    bot_name: str = "",
+) -> str:
+    """Build a stable AI Hub context key for one DingTalk participant.
+
+    Direct messages retain the existing bot/conversation key. Group messages
+    add the sender identity so different members cannot pollute each other's
+    context.
+    """
+    source_id = str(conversation_id or sender_id or "unknown").strip()
+    bot = str(bot_name or "").strip()
+    prefix = f"dingtalk:{bot}:{source_id}" if bot else f"dingtalk:{source_id}"
+    normalized_type = str(conversation_type or "").strip().casefold()
+    if normalized_type in _GROUP_CONVERSATION_TYPES and sender_id:
+        return f"{prefix}:member:{str(sender_id).strip()}"
+    return prefix
+
+
+def format_context_cleared_message(result: dict[str, Any]) -> str:
+    deleted = max(0, int(result.get("messages_deleted") or 0))
+    detail = f"，已移除 {deleted} 条历史消息" if deleted else ""
+    return (
+        f"已清空当前会话上下文{detail}。\n\n"
+        "下一条消息将作为新对话处理；已生成的产物不会删除。"
+    )
+
+
+async def clear_hub_context(conversation_id: str) -> dict[str, int]:
+    """Clear the current IM context through the AI Hub persistence layer."""
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db.mongodb import get_db
+
+    return await ai_hub_dao.clear_conversation_messages(get_db(), conversation_id)
 
 
 def _extract_final_text(event: dict[str, Any], sections: dict[str, str]) -> None:
@@ -51,7 +100,9 @@ def _parse_inbound(payload: dict[str, Any]) -> dict[str, Any]:
         "session_webhook": (payload.get("sessionWebhook") or "").strip(),
         "sender_nick": (payload.get("senderNick") or "").strip(),
         "sender_staff_id": (payload.get("senderStaffId") or "").strip(),
+        "sender_id": (payload.get("senderId") or "").strip(),
         "conversation_id": (payload.get("conversationId") or "").strip(),
+        "conversation_type": str(payload.get("conversationType") or "").strip(),
         "conversation_title": (payload.get("conversationTitle") or "").strip(),
     }
 
@@ -100,14 +151,29 @@ async def _run_and_reply(parsed: dict[str, Any]) -> None:
     session_webhook = parsed["session_webhook"]
     sender_staff_id = parsed["sender_staff_id"]
     at_users = [sender_staff_id] if sender_staff_id else []
+    sender_id = (
+        sender_staff_id
+        or parsed.get("sender_id")
+        or parsed.get("sender_nick")
+        or "unknown"
+    )
+    hub_conversation_id = build_dingtalk_conversation_id(
+        conversation_id=parsed.get("conversation_id") or "callback",
+        sender_id=sender_id,
+        conversation_type=parsed.get("conversation_type") or "",
+    )
 
     try:
-        final_text, _ = await run_hub_query(
-            query,
-            owner=f"dingtalk:{sender_staff_id or parsed.get('sender_nick') or 'unknown'}",
-            conversation_id=f"dingtalk:{parsed.get('conversation_id') or 'callback'}",
-            channel="dingtalk_callback",
-        )
+        if is_clear_context_command(query):
+            result = await clear_hub_context(hub_conversation_id)
+            final_text = format_context_cleared_message(result)
+        else:
+            final_text, _ = await run_hub_query(
+                query,
+                owner=f"dingtalk:{sender_id}",
+                conversation_id=hub_conversation_id,
+                channel="dingtalk_callback",
+            )
         if not final_text:
             final_text = "（本次未生成文本内容）"
         final_text = clean_hub_markdown(final_text)
@@ -159,17 +225,20 @@ async def run_hub_query(
     app_config = await get_runtime_app_config()
     db = get_db()
     execution_query = query
+    context_version: int | None = None
     if conversation_id:
-        await ai_hub_dao.ensure_conversation(
+        conversation = await ai_hub_dao.ensure_conversation(
             db,
             conversation_id=conversation_id,
             title=str(query or "")[:40],
             owner=owner,
         )
+        context_version = int(conversation.get("context_version") or 0)
         history = await ai_hub_dao.list_recent_messages(
             db,
             conversation_id,
             limit=12,
+            context_version=context_version,
         )
         execution_query = compose_conversation_query(query, history)
         await ai_hub_dao.append_message(
@@ -179,6 +248,7 @@ async def run_hub_query(
             content=query,
             workflow=_HUB_WORKFLOW,
             meta={"channel": channel},
+            context_version=context_version,
         )
 
     sections: dict[str, str] = {}
@@ -217,5 +287,6 @@ async def run_hub_query(
             content=final_text,
             workflow=_HUB_WORKFLOW,
             meta={"channel": channel, "artifacts": artifacts},
+            context_version=context_version,
         )
     return final_text, artifacts

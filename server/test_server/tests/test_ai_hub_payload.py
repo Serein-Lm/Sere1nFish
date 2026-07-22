@@ -1060,6 +1060,45 @@ def test_ai_hub_repeated_request_drops_previous_attempt_from_context() -> None:
     assert result.count(query) == 1
 
 
+def test_dingtalk_context_commands_are_explicit() -> None:
+    from api.services.dingtalk_bridge import is_clear_context_command
+
+    assert is_clear_context_command("清空上下文")
+    assert is_clear_context_command(" 重置 上下文。 ")
+    assert is_clear_context_command("/CLEAR")
+    assert is_clear_context_command("新对话")
+    assert not is_clear_context_command("怎么清空上下文？")
+    assert not is_clear_context_command("清空上下文后会删除产物吗")
+
+
+def test_dingtalk_context_isolates_group_members_but_preserves_direct_chat() -> None:
+    from api.services.dingtalk_bridge import build_dingtalk_conversation_id
+
+    direct = build_dingtalk_conversation_id(
+        bot_name="default",
+        conversation_id="conversation_1",
+        sender_id="user_1",
+        conversation_type="1",
+    )
+    group_user_1 = build_dingtalk_conversation_id(
+        bot_name="default",
+        conversation_id="conversation_1",
+        sender_id="user_1",
+        conversation_type="2",
+    )
+    group_user_2 = build_dingtalk_conversation_id(
+        bot_name="default",
+        conversation_id="conversation_1",
+        sender_id="user_2",
+        conversation_type="group",
+    )
+
+    assert direct == "dingtalk:default:conversation_1"
+    assert group_user_1 == "dingtalk:default:conversation_1:member:user_1"
+    assert group_user_2 == "dingtalk:default:conversation_1:member:user_2"
+    assert group_user_1 != group_user_2
+
+
 @pytest.mark.asyncio
 async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monkeypatch) -> None:
     from api.dao import ai_hub as ai_hub_dao
@@ -1070,14 +1109,16 @@ async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monke
     db = object()
     appended: list[dict] = []
     executed: dict[str, str] = {}
+    recent_options: dict[str, object] = {}
 
     async def fake_runtime_config():
         return object()
 
     async def fake_ensure(_db, **_kwargs):
-        return {"conversation_id": "dingtalk:conversation"}
+        return {"conversation_id": "dingtalk:conversation", "context_version": 3}
 
-    async def fake_recent(_db, _conversation_id, **_kwargs):
+    async def fake_recent(_db, _conversation_id, **kwargs):
+        recent_options.update(kwargs)
         return [
             {"role": "user", "content": "查询 target_id=tgt_1"},
             {"role": "assistant", "content": "找到 finding_id=f_1"},
@@ -1112,10 +1153,80 @@ async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monke
     assert "finding_id=f_1" in executed["query"]
     assert executed["query"].endswith("继续给这个 Target 生成三条话术")
     assert [message["role"] for message in appended] == ["user", "assistant"]
+    assert recent_options["context_version"] == 3
+    assert all(message["context_version"] == 3 for message in appended)
     assert appended[0]["content"] == "继续给这个 Target 生成三条话术"
     assert appended[1]["content"] == "已生成三条话术"
     assert final_text == "已生成三条话术"
     assert artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_ai_hub_clear_context_advances_version_and_keeps_conversation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db.collections import (
+        AI_HUB_CONVERSATIONS_COLLECTION,
+        AI_HUB_MESSAGES_COLLECTION,
+    )
+
+    conversations = SimpleNamespace(
+        find_one_and_update=AsyncMock(return_value={"context_version": 4})
+    )
+    messages = SimpleNamespace(
+        delete_many=AsyncMock(return_value=SimpleNamespace(deleted_count=9))
+    )
+    db = {
+        AI_HUB_CONVERSATIONS_COLLECTION: conversations,
+        AI_HUB_MESSAGES_COLLECTION: messages,
+    }
+
+    result = await ai_hub_dao.clear_conversation_messages(db, "conversation_1")
+
+    assert result == {"messages_deleted": 9, "context_version": 4}
+    update = conversations.find_one_and_update.await_args.args[1]
+    assert update["$inc"] == {"context_version": 1}
+    assert update["$set"]["message_count"] == 0
+    messages.delete_many.assert_awaited_once_with(
+        {"conversation_id": "conversation_1"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_ai_hub_rejects_stale_message_after_context_clear() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db.collections import (
+        AI_HUB_CONVERSATIONS_COLLECTION,
+        AI_HUB_MESSAGES_COLLECTION,
+    )
+
+    conversations = SimpleNamespace(
+        update_one=AsyncMock(return_value=SimpleNamespace(matched_count=0))
+    )
+    messages = SimpleNamespace(
+        insert_one=AsyncMock(),
+        delete_one=AsyncMock(),
+    )
+    db = {
+        AI_HUB_CONVERSATIONS_COLLECTION: conversations,
+        AI_HUB_MESSAGES_COLLECTION: messages,
+    }
+
+    result = await ai_hub_dao.append_message(
+        db,
+        conversation_id="conversation_1",
+        role="assistant",
+        content="过期回答",
+        context_version=2,
+    )
+
+    assert result == {}
+    messages.delete_one.assert_awaited_once()
 
 
 def test_dingtalk_card_live_content_never_slides_or_leaks_reasoning() -> None:
@@ -1323,6 +1434,49 @@ async def test_dingtalk_stream_updates_card_only_for_synthesized_answer(monkeypa
     assert len(card.streamed[1]) > len(card.streamed[0])
     assert card.finished.startswith("关键结论")
     assert "执行摘要" in card.finished
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_stream_clear_command_skips_ai_and_card(monkeypatch) -> None:
+    from api.services import dingtalk_bridge
+    from api.services import dingtalk_stream as stream_module
+    from crawler_tools import dingtalk_bot
+
+    cleared: list[str] = []
+    replies: list[str] = []
+
+    class FakeIncoming:
+        sender_staff_id = "user_1"
+        sender_id = "sender_1"
+        conversation_id = "group_1"
+        conversation_type = "2"
+        session_webhook = "https://example.test/session"
+
+    async def fake_clear(conversation_id: str):
+        cleared.append(conversation_id)
+        return {"messages_deleted": 6, "context_version": 2}
+
+    async def unexpected_hub_query(*_args, **_kwargs):
+        raise AssertionError("清空上下文不应调用 AI 中枢")
+
+    async def fake_reply(*_args, **kwargs):
+        replies.append(kwargs["text"])
+        return dingtalk_bot.SendResult(success=True, message="ok")
+
+    monkeypatch.setattr(dingtalk_bridge, "clear_hub_context", fake_clear)
+    monkeypatch.setattr(dingtalk_bridge, "run_hub_query", unexpected_hub_query)
+    monkeypatch.setattr(dingtalk_bot, "reply_to_session_webhook", fake_reply)
+
+    adapter = stream_module.DingTalkStreamAdapter(
+        "default",
+        {"ai_card_streaming": True},
+    )
+    await adapter._process_message(object(), FakeIncoming(), "清空上下文")
+
+    assert cleared == ["dingtalk:default:group_1:member:user_1"]
+    assert len(replies) == 1
+    assert "已移除 6 条历史消息" in replies[0]
+    assert "已生成的产物不会删除" in replies[0]
 
 
 def test_dingtalk_client_secret_is_encrypted_field() -> None:

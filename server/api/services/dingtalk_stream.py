@@ -167,8 +167,49 @@ class DingTalkStreamAdapter:
         return HubChatbotHandler()
 
     async def _process_message(self, handler: Any, incoming: Any, query: str) -> None:
-        from api.services.dingtalk_bridge import run_hub_query
+        from api.services.dingtalk_bridge import (
+            build_dingtalk_conversation_id,
+            clear_hub_context,
+            format_context_cleared_message,
+            is_clear_context_command,
+            run_hub_query,
+        )
         from crawler_tools.dingtalk_bot import reply_to_session_webhook
+
+        sender_id = str(
+            getattr(incoming, "sender_staff_id", "")
+            or getattr(incoming, "sender_id", "")
+            or "unknown"
+        )
+        source_conversation_id = str(
+            getattr(incoming, "conversation_id", "") or sender_id
+        )
+        hub_conversation_id = build_dingtalk_conversation_id(
+            bot_name=self.bot_name,
+            conversation_id=source_conversation_id,
+            sender_id=sender_id,
+            conversation_type=str(getattr(incoming, "conversation_type", "") or ""),
+        )
+
+        async def _send_markdown(title: str, text: str) -> None:
+            result = await reply_to_session_webhook(
+                str(getattr(incoming, "session_webhook", "") or ""),
+                title=title,
+                text=text,
+                at_user_ids=[sender_id] if sender_id != "unknown" else [],
+            )
+            if not result.success:
+                logger.warning(f"钉钉 Stream 回退回复失败: {result.message}")
+
+        if is_clear_context_command(query):
+            try:
+                result = await clear_hub_context(hub_conversation_id)
+                await _send_markdown("AI 中枢", format_context_cleared_message(result))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"清空钉钉上下文失败: {exc}")
+                with contextlib.suppress(Exception):
+                    await _send_markdown("AI 中枢", "清空上下文失败，请稍后重试。")
+            return
 
         renderer = DingTalkCardRenderer()
         card = None
@@ -230,28 +271,11 @@ class DingTalkStreamAdapter:
             last_sent_content = preview
             last_sent_at = now
 
-        sender_id = str(
-            getattr(incoming, "sender_staff_id", "")
-            or getattr(incoming, "sender_id", "")
-            or "unknown"
-        )
-        conversation_id = str(getattr(incoming, "conversation_id", "") or sender_id)
-
-        async def _send_markdown(title: str, text: str) -> None:
-            result = await reply_to_session_webhook(
-                str(getattr(incoming, "session_webhook", "") or ""),
-                title=title,
-                text=text,
-                at_user_ids=[sender_id] if sender_id != "unknown" else [],
-            )
-            if not result.success:
-                logger.warning(f"钉钉 Stream 回退回复失败: {result.message}")
-
         try:
             final_text, artifacts = await run_hub_query(
                 query,
                 owner=f"dingtalk:{sender_id}",
-                conversation_id=f"dingtalk:{self.bot_name}:{conversation_id}",
+                conversation_id=hub_conversation_id,
                 channel="dingtalk_stream",
                 on_event=_on_event,
             )
