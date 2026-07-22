@@ -17,7 +17,7 @@
   "api_key": "sk-your-bailian-key",
   "workspace_id": "your-workspace-id",
   "region": "beijing",
-  "qwen_image_edit_model": "qwen-image-2.0-pro",
+  "qwen_image_edit_model": "qwen-image-3.0-pro",
   "wanx_image_edit_model": "wanx2.1-imageedit",
   "text_to_video_model": "wan2.7-t2v-2026-06-12",
   "image_to_video_model": "wan2.7-i2v-2026-04-25",
@@ -51,7 +51,7 @@ curl -k -X POST https://127.0.0.1/api/v1/config/sections/bailian \
       "api_key": "sk-your-bailian-key",
       "workspace_id": "your-workspace-id",
       "region": "beijing",
-      "qwen_image_edit_model": "qwen-image-2.0-pro",
+      "qwen_image_edit_model": "qwen-image-3.0-pro",
       "wanx_image_edit_model": "wanx2.1-imageedit",
       "text_to_video_model": "wan2.7-t2v-2026-06-12",
       "image_to_video_model": "wan2.7-i2v-2026-04-25"
@@ -74,7 +74,7 @@ GET /api/v1/aigc/config
   "region": "beijing",
   "has_api_key": true,
   "has_workspace_id": true,
-  "qwen_image_edit_model": "qwen-image-2.0-pro",
+  "qwen_image_edit_model": "qwen-image-3.0-pro",
   "wanx_image_edit_model": "wanx2.1-imageedit",
   "text_to_video_model": "wan2.7-t2v-2026-06-12",
   "image_to_video_model": "wan2.7-i2v-2026-04-25"
@@ -109,7 +109,7 @@ Content-Type: application/json
   "ok": true,
   "provider": "aliyun_bailian",
   "mode": "qwen_image_edit",
-  "model": "qwen-image-2.0-pro",
+  "model": "qwen-image-3.0-pro",
   "images": ["https://..."],
   "response": {}
 }

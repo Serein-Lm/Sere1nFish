@@ -150,7 +150,7 @@ async def load_bailian_config() -> BailianRuntimeConfig:
         base_url=bailian.get("base_url"),
         legacy_base_url=bailian.get("legacy_base_url"),
         timeout_seconds=float(bailian.get("timeout_seconds") or 300),
-        qwen_image_edit_model=bailian.get("qwen_image_edit_model") or "qwen-image-2.0-pro",
+        qwen_image_edit_model=bailian.get("qwen_image_edit_model") or "qwen-image-3.0-pro",
         wanx_image_edit_model=bailian.get("wanx_image_edit_model") or "wanx2.1-imageedit",
         text_to_video_model=bailian.get("text_to_video_model") or "wan2.7-t2v-2026-06-12",
         image_to_video_model=bailian.get("image_to_video_model") or "wan2.7-i2v-2026-04-25",

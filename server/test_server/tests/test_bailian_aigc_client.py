@@ -33,7 +33,7 @@ def _make_client(
             base_url=base_url,
             legacy_base_url=None,
             timeout_seconds=30,
-            qwen_image_edit_model="qwen-image-2.0-pro",
+            qwen_image_edit_model="qwen-image-3.0-pro",
             wanx_image_edit_model="wanx2.1-imageedit",
             text_to_video_model="wan2.7-t2v-2026-06-12",
             image_to_video_model="wan2.7-i2v-2026-04-25",
@@ -51,6 +51,27 @@ def test_workspace_hostname_is_normalized_to_https_api_endpoint() -> None:
         client.workspace_base_url()
         == "https://llm-example.cn-beijing.maas.aliyuncs.com/api/v1"
     )
+
+
+def test_bailian_config_defaults_to_qwen_image_30_pro(monkeypatch) -> None:
+    from api.services import bailian_aigc
+
+    async def fake_app_config():
+        return SimpleNamespace(runtime=SimpleNamespace(api_key="sk-test"))
+
+    async def fake_bailian_section(_category: str):
+        return {"workspace_id": "ws1", "region": "beijing"}
+
+    monkeypatch.setattr(bailian_aigc, "get_runtime_app_config", fake_app_config)
+    monkeypatch.setattr(
+        bailian_aigc,
+        "get_runtime_config_section",
+        fake_bailian_section,
+    )
+
+    config = asyncio.run(bailian_aigc.load_bailian_config())
+
+    assert config.qwen_image_edit_model == "qwen-image-3.0-pro"
 
 
 def test_image_to_video_uses_wan27_media_payload() -> None:
@@ -109,7 +130,7 @@ def test_aigc_routes_delegate_to_runtime_client(monkeypatch) -> None:
             api_key="sk-test",
             workspace_id="ws1",
             region="beijing",
-            qwen_image_edit_model="qwen-image-2.0-pro",
+            qwen_image_edit_model="qwen-image-3.0-pro",
             wanx_image_edit_model="wanx2.1-imageedit",
             text_to_video_model="wan2.7-t2v-2026-06-12",
             image_to_video_model="wan2.7-i2v-2026-04-25",

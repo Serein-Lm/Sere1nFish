@@ -124,7 +124,7 @@ https://<服务器公网 IP 或域名>/
   "api_key": "sk-your-bailian-key",
   "workspace_id": "your-workspace-id",
   "region": "beijing",
-  "qwen_image_edit_model": "qwen-image-2.0-pro",
+  "qwen_image_edit_model": "qwen-image-3.0-pro",
   "wanx_image_edit_model": "wanx2.1-imageedit",
   "text_to_video_model": "wan2.7-t2v-2026-06-12",
   "image_to_video_model": "wan2.7-i2v-2026-04-25",
