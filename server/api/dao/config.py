@@ -64,6 +64,7 @@ APP_CONFIG_SECTIONS = {
     "easytier",
     "notifications",
     "object_storage",
+    "deepfake",
 }
 
 LLM_RUNTIME_MODEL_KEYS = {

@@ -1,0 +1,38 @@
+name: sere1nfish-deepfake
+
+services:
+  gateway:
+    image: sere1nfish/deepfake-gateway:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    gpus: all
+    shm_size: 2gb
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,::1
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      DEEPFAKE_API_TOKEN_FILE: /run/secrets/deepfake_api_token
+      DEEPFAKE_MAX_SESSIONS: ${DEEPFAKE_MAX_SESSIONS:-2}
+      DEEPFAKE_SESSION_TTL_SECONDS: ${DEEPFAKE_SESSION_TTL_SECONDS:-900}
+    volumes:
+      - ${DEEPFAKE_ASSETS_DIR:-./data/assets}:/opt/facefusion/.assets
+      - ${DEEPFAKE_TOKEN_FILE:-./secrets/api-token}:/run/secrets/deepfake_api_token:ro
+      - ${DEEPFAKE_TLS_CERT_FILE:-./secrets/tls.crt}:/run/secrets/tls.crt:ro
+      - ${DEEPFAKE_TLS_KEY_FILE:-./secrets/tls.key}:/run/secrets/tls.key:ro
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "443"
+      - --workers
+      - "1"
+      - --ssl-keyfile
+      - /run/secrets/tls.key
+      - --ssl-certfile
+      - /run/secrets/tls.crt
+      - --no-access-log

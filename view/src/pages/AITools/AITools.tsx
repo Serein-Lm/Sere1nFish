@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Card, Row, Col, Button, Tabs, Typography, Tag } from 'antd'
+import { lazy, Suspense, useState } from 'react'
+import { Card, Row, Col, Button, Spin, Tabs, Typography, Tag } from 'antd'
 import {
   AudioOutlined,
   PictureOutlined,
@@ -12,6 +12,8 @@ import {
 import VoiceClone from './VoiceClone'
 import BailianMedia from './BailianMedia'
 import './AITools.css'
+
+const DeepfakeStudio = lazy(() => import('./DeepfakeStudio'))
 
 const { Title, Paragraph } = Typography
 
@@ -44,8 +46,7 @@ export default function AITools() {
       title: 'AI换脸',
       description: 'DeepFake 换脸技术',
       color: '#faad14',
-      path: '/ai-tools/deepfake',
-      tabKey: undefined,
+      tabKey: 'deepfake',
     },
     {
       icon: <GlobalOutlined />,
@@ -121,6 +122,15 @@ export default function AITools() {
       key: 'video',
       label: '视频工具',
       children: <BailianMedia mode="video" />,
+    },
+    {
+      key: 'deepfake',
+      label: 'AI 换脸',
+      children: (
+        <Suspense fallback={<div className="deepfake-loading"><Spin /></div>}>
+          <DeepfakeStudio />
+        </Suspense>
+      ),
     },
   ]
 

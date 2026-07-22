@@ -37,6 +37,7 @@ from api.routers import (
     scholar_contact,
     dingtalk,
     source_documents,
+    deepfake,
 )
 from api.config import get_settings
 from api.auth import get_current_active_user, User
@@ -503,6 +504,7 @@ app.include_router(voice.router, prefix="/api/v1/voice", tags=["声音复刻"])
 app.include_router(aigc.router, prefix="/api/v1/aigc", tags=["AIGC"])
 app.include_router(dingtalk.router, prefix="/api/v1/dingtalk", tags=["钉钉机器人"])
 app.include_router(source_documents.router, prefix="/api/v1", tags=["来源文档与目标"])
+app.include_router(deepfake.router, prefix="/api/v1/deepfake", tags=["Deepfake"])
 
 
 @app.get("/")

@@ -60,6 +60,7 @@ export interface AllConfig {
   xhs_crawler?: ConfigSection
   douyin_crawler?: ConfigSection
   object_storage?: ConfigSection
+  deepfake?: ConfigSection
 }
 
 export interface ConfigRevealStatus {

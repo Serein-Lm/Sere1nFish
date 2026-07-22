@@ -50,6 +50,7 @@ const CONFIG_SECTIONS = [
   { key: 'xhs_crawler', label: '小红书采集', description: '采集、账号池、签名脚本、代理池运行参数' },
   { key: 'douyin_crawler', label: '抖音采集', description: '采集运行参数' },
   { key: 'object_storage', label: '对象存储', description: '截图、Word、音频和下载文件的统一 OSS 存储' },
+  { key: 'deepfake', label: 'Deepfake GPU', description: 'GPU Gateway、私有 CA、模型与实时推理参数' },
 ]
 
 export default function ConfigManagement() {
