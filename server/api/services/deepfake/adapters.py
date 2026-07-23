@@ -11,7 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import websockets
 
-from .contracts import DeepfakeConfig, DeepfakeStream, ImageSwapResult
+from .contracts import DeepfakeConfig, DeepfakeStream, ImageSwapResult, SourceImage
 
 
 class DeepfakeProviderError(RuntimeError):
@@ -86,17 +86,18 @@ class FaceFusionGatewayProvider:
     async def swap_image(
         self,
         *,
-        source: bytes,
-        source_name: str,
+        sources: list[SourceImage],
         target: bytes,
         target_name: str,
         max_width: int,
+        profile: str,
     ) -> ImageSwapResult:
-        files = {
-            "source": (source_name or "source.jpg", source, "application/octet-stream"),
-            "target": (target_name or "target.jpg", target, "application/octet-stream"),
-        }
-        data = {"authorized_use": "true", "max_width": str(max_width)}
+        files = [
+            ("source", (source.filename or "source.jpg", source.content, "application/octet-stream"))
+            for source in sources
+        ]
+        files.append(("target", (target_name or "target.jpg", target, "application/octet-stream")))
+        data = {"authorized_use": "true", "max_width": str(max_width), "profile": profile}
         try:
             async with httpx.AsyncClient(
                 verify=self._ssl_context,
@@ -117,20 +118,27 @@ class FaceFusionGatewayProvider:
             content=response.content,
             content_type=response.headers.get("content-type", "image/jpeg"),
             inference_ms=float(response.headers.get("x-inference-ms") or 0),
+            quality_profile=response.headers.get("x-quality-profile", profile),
+            source_count=int(response.headers.get("x-source-count") or len(sources)),
+            source_consistency=float(response.headers.get("x-source-consistency") or 1),
         )
 
     async def create_session(
         self,
         *,
-        source: bytes,
-        source_name: str,
+        sources: list[SourceImage],
         max_width: int,
+        profile: str,
     ) -> dict[str, Any]:
+        files = [
+            ("source", (source.filename or "source.jpg", source.content, "application/octet-stream"))
+            for source in sources
+        ]
         return await self._json_request(
             "POST",
             "/v1/sessions",
-            files={"source": (source_name or "source.jpg", source, "application/octet-stream")},
-            data={"authorized_use": "true", "max_width": str(max_width)},
+            files=files,
+            data={"authorized_use": "true", "max_width": str(max_width), "profile": profile},
         )
 
     async def session_status(self, session_id: str) -> dict[str, Any]:

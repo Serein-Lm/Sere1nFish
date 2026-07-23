@@ -7,6 +7,10 @@ export interface DeepfakeStatus {
   provider: string
   model: string
   pixel_boost: string
+  profiles: DeepfakeQualityProfile[]
+  default_image_profile: string
+  default_realtime_profile: string
+  max_source_images: number
   warmup_ms: number
   runtime_average_fps: number
   active_sessions: number
@@ -20,12 +24,34 @@ export interface DeepfakeStatus {
     utilization_percent?: number
   }
 }
+
+export interface DeepfakeQualityProfile {
+  id: string
+  processors: string[]
+  face_mask_types: string[]
+  face_swapper_weight: number
+  face_enhancer_model?: string | null
+  face_enhancer_blend: number
+}
+
+export interface DeepfakeSourceAnalysis {
+  count: number
+  identity_consistency: number
+  sources: Array<{
+    index: number
+    face_count: number
+    face_ratio: number
+  }>
+}
+
 export interface DeepfakeSession {
   session_id: string
   stream_path: string
   expires_in: number
   model: string
   max_width: number
+  profile: string
+  source_analysis: DeepfakeSourceAnalysis
 }
 
 export interface DeepfakeSessionStatus {
@@ -35,11 +61,16 @@ export interface DeepfakeSessionStatus {
   average_inference_ms: number
   measured_fps: number
   max_width: number
+  profile: string
+  source_analysis: DeepfakeSourceAnalysis
 }
 
 export interface DeepfakeImageResult {
   blob: Blob
   inferenceMs: number
+  qualityProfile: string
+  sourceCount: number
+  sourceConsistency: number
 }
 
 async function multipartRequest(path: string, body: FormData): Promise<Response> {
@@ -72,30 +103,37 @@ export function getDeepfakeStatus(): Promise<DeepfakeStatus> {
 }
 
 export async function swapDeepfakeImage(
-  source: File,
+  sources: File[],
   target: File,
   maxWidth = 1280,
+  profile = 'quality',
 ): Promise<DeepfakeImageResult> {
   const body = new FormData()
-  body.append('source', source)
+  sources.forEach((source) => body.append('source', source))
   body.append('target', target)
   body.append('authorized_use', 'true')
   body.append('max_width', String(maxWidth))
+  body.append('profile', profile)
   const response = await multipartRequest('/v1/deepfake/swap/image', body)
   return {
     blob: await response.blob(),
     inferenceMs: Number(response.headers.get('x-inference-ms') || 0),
+    qualityProfile: response.headers.get('x-quality-profile') || profile,
+    sourceCount: Number(response.headers.get('x-source-count') || sources.length),
+    sourceConsistency: Number(response.headers.get('x-source-consistency') || 1),
   }
 }
 
 export async function createDeepfakeSession(
-  source: File,
+  sources: File[],
   maxWidth: number,
+  profile = 'quality',
 ): Promise<DeepfakeSession> {
   const body = new FormData()
-  body.append('source', source)
+  sources.forEach((source) => body.append('source', source))
   body.append('authorized_use', 'true')
   body.append('max_width', String(maxWidth))
+  body.append('profile', profile)
   const response = await multipartRequest('/v1/deepfake/sessions', body)
   return (await response.json()) as DeepfakeSession
 }

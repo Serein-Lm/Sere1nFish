@@ -16,6 +16,7 @@ import {
 } from 'antd'
 import {
   CameraOutlined,
+  CloseOutlined,
   CloudUploadOutlined,
   DisconnectOutlined,
   FullscreenOutlined,
@@ -37,6 +38,13 @@ import {
 const { Text } = Typography
 
 type StudioMode = 'image' | 'realtime'
+type QualityProfile = 'quality' | 'balanced' | 'fast'
+
+const PROFILE_OPTIONS = [
+  { value: 'quality', label: '效果优先' },
+  { value: 'balanced', label: '稳定融合' },
+  { value: 'fast', label: '快速' },
+] satisfies Array<{ value: QualityProfile; label: string }>
 
 function useFilePreview(file: File | null): string {
   const [url, setUrl] = useState('')
@@ -51,6 +59,17 @@ function useFilePreview(file: File | null): string {
   }, [file])
   return url
 }
+
+function useFilePreviews(files: File[]): string[] {
+  const [urls, setUrls] = useState<string[]>([])
+  useEffect(() => {
+    const next = files.map((file) => URL.createObjectURL(file))
+    setUrls(next)
+    return () => next.forEach((url) => URL.revokeObjectURL(url))
+  }, [files])
+  return urls
+}
+
 function ImagePicker({
   label,
   file,
@@ -86,23 +105,97 @@ function ImagePicker({
   )
 }
 
+function IdentityPicker({
+  files,
+  previews,
+  maxCount,
+  disabled,
+  onAdd,
+  onRemove,
+}: {
+  files: File[]
+  previews: string[]
+  maxCount: number
+  disabled?: boolean
+  onAdd: (file: File) => void
+  onRemove: (index: number) => void
+}) {
+  return (
+    <div className="deepfake-picker deepfake-identity-picker">
+      <div className="deepfake-picker-head">
+        <Space size={6}>
+          <Text strong>身份图片</Text>
+          <Tag>{files.length}/{maxCount}</Tag>
+        </Space>
+        <Upload
+          accept="image/jpeg,image/png,image/webp"
+          multiple
+          showUploadList={false}
+          disabled={disabled || files.length >= maxCount}
+          beforeUpload={(next) => {
+            onAdd(next)
+            return false
+          }}
+        >
+          <Tooltip title="可添加正面及不同侧脸角度">
+            <Button
+              size="small"
+              icon={<CloudUploadOutlined />}
+              disabled={disabled || files.length >= maxCount}
+            >
+              添加
+            </Button>
+          </Tooltip>
+        </Upload>
+      </div>
+      <div className="deepfake-identity-grid">
+        {files.length ? files.map((file, index) => (
+          <div className="deepfake-identity-item" key={`${file.name}-${file.size}-${file.lastModified}`}>
+            <img src={previews[index]} alt={`身份图片 ${index + 1}`} />
+            <Tooltip title="移除">
+              <Button
+                type="text"
+                size="small"
+                icon={<CloseOutlined />}
+                disabled={disabled}
+                aria-label={`移除身份图片 ${index + 1}`}
+                onClick={() => onRemove(index)}
+              />
+            </Tooltip>
+          </div>
+        )) : (
+          <div className="deepfake-identity-empty"><PictureOutlined /></div>
+        )}
+      </div>
+      <Text type="secondary" ellipsis title={files.map((file) => file.name).join(', ')}>
+        {files.length ? files.map((file) => file.name).join('、') : '未选择'}
+      </Text>
+    </div>
+  )
+}
+
 export default function DeepfakeStudio() {
+  const [messageApi, messageContextHolder] = message.useMessage()
   const [mode, setMode] = useState<StudioMode>('image')
   const [status, setStatus] = useState<DeepfakeStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
-  const [sourceFile, setSourceFile] = useState<File | null>(null)
+  const [sourceFiles, setSourceFiles] = useState<File[]>([])
   const [targetFile, setTargetFile] = useState<File | null>(null)
   const [authorized, setAuthorized] = useState(false)
   const [imageLoading, setImageLoading] = useState(false)
   const [imageResult, setImageResult] = useState('')
   const [imageInferenceMs, setImageInferenceMs] = useState(0)
+  const [imageProfile, setImageProfile] = useState<QualityProfile>('quality')
+  const [imageSourceCount, setImageSourceCount] = useState(0)
+  const [imageSourceConsistency, setImageSourceConsistency] = useState(1)
   const [realtimeWidth, setRealtimeWidth] = useState(960)
+  const [realtimeProfile, setRealtimeProfile] = useState<QualityProfile>('quality')
   const [streamAspectRatio, setStreamAspectRatio] = useState(16 / 9)
   const [starting, setStarting] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [streamResult, setStreamResult] = useState('')
   const [sessionStatus, setSessionStatus] = useState<DeepfakeSessionStatus | null>(null)
-  const sourcePreview = useFilePreview(sourceFile)
+  const sourcePreviews = useFilePreviews(sourceFiles)
   const targetPreview = useFilePreview(targetFile)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -113,17 +206,32 @@ export default function DeepfakeStudio() {
   const outputUrlRef = useRef('')
   const imageUrlRef = useRef('')
   const captureTimerRef = useRef<number | null>(null)
+  const maxSourceImages = status?.max_source_images || 4
+
+  const addSourceFile = useCallback((file: File) => {
+    setSourceFiles((current) => {
+      if (current.length >= maxSourceImages) return current
+      const duplicate = current.some((item) => (
+        item.name === file.name && item.size === file.size && item.lastModified === file.lastModified
+      ))
+      return duplicate ? current : [...current, file]
+    })
+  }, [maxSourceImages])
+
+  const removeSourceFile = useCallback((index: number) => {
+    setSourceFiles((current) => current.filter((_, currentIndex) => currentIndex !== index))
+  }, [])
 
   const loadStatus = useCallback(async () => {
     setStatusLoading(true)
     try {
       setStatus(await getDeepfakeStatus())
     } catch (error) {
-      message.error(error instanceof Error ? error.message : 'GPU 状态读取失败')
+      messageApi.error(error instanceof Error ? error.message : 'GPU 状态读取失败')
     } finally {
       setStatusLoading(false)
     }
-  }, [])
+  }, [messageApi])
 
   useEffect(() => {
     void loadStatus()
@@ -151,7 +259,7 @@ export default function DeepfakeStudio() {
     canvas.toBlob(async (blob) => {
       if (!blob || socket.readyState !== WebSocket.OPEN) return
       socket.send(await blob.arrayBuffer())
-    }, 'image/jpeg', 0.84)
+    }, 'image/jpeg', 0.92)
   }, [realtimeWidth])
 
   const stopRealtime = useCallback(async () => {
@@ -197,21 +305,23 @@ export default function DeepfakeStudio() {
   }, [streaming])
 
   const runImageSwap = async () => {
-    if (!sourceFile || !targetFile || !authorized) {
-      message.warning('请选择两张图片并确认素材授权')
+    if (!sourceFiles.length || !targetFile || !authorized) {
+      messageApi.warning('请选择身份图片、目标图片并确认素材授权')
       return
     }
     setImageLoading(true)
     try {
-      const result = await swapDeepfakeImage(sourceFile, targetFile)
+      const result = await swapDeepfakeImage(sourceFiles, targetFile, 1280, imageProfile)
       if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current)
       const next = URL.createObjectURL(result.blob)
       imageUrlRef.current = next
       setImageResult(next)
       setImageInferenceMs(result.inferenceMs)
-      message.success('换脸完成')
+      setImageSourceCount(result.sourceCount)
+      setImageSourceConsistency(result.sourceConsistency)
+      messageApi.success('换脸完成')
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '换脸失败')
+      messageApi.error(error instanceof Error ? error.message : '换脸失败')
     } finally {
       setImageLoading(false)
     }
@@ -227,13 +337,13 @@ export default function DeepfakeStudio() {
         await output.requestFullscreen()
       }
     } catch {
-      message.error('无法进入全屏模式')
+      messageApi.error('无法进入全屏模式')
     }
   }
 
   const startRealtime = async () => {
-    if (!sourceFile || !authorized) {
-      message.warning('请选择身份图片并确认素材授权')
+    if (!sourceFiles.length || !authorized) {
+      messageApi.warning('请选择身份图片并确认素材授权')
       return
     }
     setStarting(true)
@@ -249,7 +359,7 @@ export default function DeepfakeStudio() {
       if (videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
         setStreamAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight)
       }
-      const session = await createDeepfakeSession(sourceFile, realtimeWidth)
+      const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile)
       sessionIdRef.current = session.session_id
       const socket = openDeepfakeSocket(session.stream_path)
       socket.binaryType = 'blob'
@@ -266,18 +376,18 @@ export default function DeepfakeStudio() {
             setStreaming(true)
             captureFrame()
           } else if (payload.type === 'blocked' || payload.type === 'error') {
-            message.warning(payload.message || '当前帧未处理')
+            messageApi.warning(payload.message || '当前帧未处理')
             captureTimerRef.current = window.setTimeout(captureFrame, 250)
           }
         } catch {
-          message.error('实时流返回了无效数据')
+          messageApi.error('实时流返回了无效数据')
         }
       }
-      socket.onerror = () => message.error('实时流连接失败')
+      socket.onerror = () => messageApi.error('实时流连接失败')
       socket.onclose = () => setStreaming(false)
     } catch (error) {
       await stopRealtime()
-      message.error(error instanceof Error ? error.message : '摄像头启动失败')
+      messageApi.error(error instanceof Error ? error.message : '摄像头启动失败')
     } finally {
       setStarting(false)
     }
@@ -285,6 +395,7 @@ export default function DeepfakeStudio() {
 
   return (
     <div className="deepfake-studio">
+      {messageContextHolder}
       <div className="deepfake-toolbar">
         <Segmented<StudioMode>
           value={mode}
@@ -316,27 +427,64 @@ export default function DeepfakeStudio() {
       {mode === 'image' ? (
         <div className="deepfake-workspace">
           <div className="deepfake-input-grid">
-            <ImagePicker label="身份图片" file={sourceFile} preview={sourcePreview} onChange={setSourceFile} />
+            <IdentityPicker
+              files={sourceFiles}
+              previews={sourcePreviews}
+              maxCount={maxSourceImages}
+              onAdd={addSourceFile}
+              onRemove={removeSourceFile}
+            />
             <ImagePicker label="目标图片" file={targetFile} preview={targetPreview} onChange={setTargetFile} />
           </div>
           <div className="deepfake-actions">
-            <Checkbox checked={authorized} onChange={(event) => setAuthorized(event.target.checked)}>
-              我确认已获得人脸素材授权
-            </Checkbox>
-            <Button type="primary" icon={<SwapOutlined />} loading={imageLoading} onClick={runImageSwap}>
-              开始换脸
-            </Button>
+            <Space wrap>
+              <Text strong>质量</Text>
+              <Segmented<QualityProfile>
+                value={imageProfile}
+                disabled={imageLoading}
+                onChange={setImageProfile}
+                options={PROFILE_OPTIONS}
+              />
+            </Space>
+            <Space wrap>
+              <Checkbox checked={authorized} onChange={(event) => setAuthorized(event.target.checked)}>
+                我确认已获得人脸素材授权
+              </Checkbox>
+              <Button type="primary" icon={<SwapOutlined />} loading={imageLoading} onClick={runImageSwap}>
+                开始换脸
+              </Button>
+            </Space>
           </div>
           <div className="deepfake-result">
             {imageLoading ? <Spin /> : imageResult ? <Image src={imageResult} alt="换脸结果" /> : <PictureOutlined />}
           </div>
-          {imageResult && <Text type="secondary">GPU 推理 {imageInferenceMs.toFixed(0)} ms</Text>}
+          {imageResult && (
+            <Space wrap>
+              <Tag>{imageInferenceMs.toFixed(0)} ms</Tag>
+              <Tag>{imageSourceCount} 张参考图</Tag>
+              {imageSourceCount > 1 && <Tag>身份一致度 {imageSourceConsistency.toFixed(2)}</Tag>}
+            </Space>
+          )}
         </div>
       ) : (
         <div className="deepfake-workspace">
           <div className="deepfake-realtime-controls">
-            <ImagePicker label="身份图片" file={sourceFile} preview={sourcePreview} onChange={setSourceFile} />
+            <IdentityPicker
+              files={sourceFiles}
+              previews={sourcePreviews}
+              maxCount={maxSourceImages}
+              disabled={streaming || starting}
+              onAdd={addSourceFile}
+              onRemove={removeSourceFile}
+            />
             <div className="deepfake-session-controls">
+              <Text strong>质量</Text>
+              <Segmented<QualityProfile>
+                value={realtimeProfile}
+                disabled={streaming || starting}
+                onChange={setRealtimeProfile}
+                options={PROFILE_OPTIONS}
+              />
               <Text strong>传输宽度</Text>
               <Segmented
                 value={realtimeWidth}
@@ -388,6 +536,8 @@ export default function DeepfakeStudio() {
           <canvas ref={canvasRef} className="deepfake-capture-canvas" />
           <Space wrap>
             <Tag color={streaming ? 'success' : 'default'}>{streaming ? '已连接' : '未连接'}</Tag>
+            <Tag>{PROFILE_OPTIONS.find((item) => item.value === realtimeProfile)?.label}</Tag>
+            <Tag>{sourceFiles.length} 张参考图</Tag>
             <Tag>{sessionStatus?.measured_fps?.toFixed(1) || '0.0'} FPS</Tag>
             <Tag>{sessionStatus?.average_inference_ms?.toFixed(0) || '0'} ms</Tag>
             <Tag>{sessionStatus?.frame_count || 0} 帧</Tag>

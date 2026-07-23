@@ -2,7 +2,7 @@ name: sere1nfish-deepfake
 
 services:
   gateway:
-    image: sere1nfish/deepfake-gateway:1.0.0
+    image: sere1nfish/deepfake-gateway:1.1.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -18,13 +18,16 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
       DEEPFAKE_API_TOKEN_FILE: /run/secrets/deepfake_api_token
       DEEPFAKE_MAX_SESSIONS: ${DEEPFAKE_MAX_SESSIONS:-2}
+      DEEPFAKE_MAX_SOURCE_IMAGES: ${DEEPFAKE_MAX_SOURCE_IMAGES:-4}
       DEEPFAKE_SESSION_TTL_SECONDS: ${DEEPFAKE_SESSION_TTL_SECONDS:-900}
+      DEEPFAKE_DEFAULT_IMAGE_PROFILE: ${DEEPFAKE_DEFAULT_IMAGE_PROFILE:-quality}
+      DEEPFAKE_DEFAULT_REALTIME_PROFILE: ${DEEPFAKE_DEFAULT_REALTIME_PROFILE:-quality}
     volumes:
-      - ${DEEPFAKE_ASSETS_DIR:-./data/assets}:/opt/facefusion/.assets
+      - ${DEEPFAKE_ASSETS_DIR:-../data/assets}:/opt/facefusion/.assets
       - ${DEEPFAKE_FACEFUSION_CONFIG_FILE:-./facefusion.ini}:/opt/facefusion/facefusion.ini:ro
-      - ${DEEPFAKE_TOKEN_FILE:-./secrets/api-token}:/run/secrets/deepfake_api_token:ro
-      - ${DEEPFAKE_TLS_CERT_FILE:-./secrets/tls.crt}:/run/secrets/tls.crt:ro
-      - ${DEEPFAKE_TLS_KEY_FILE:-./secrets/tls.key}:/run/secrets/tls.key:ro
+      - ${DEEPFAKE_TOKEN_FILE:-../secrets/api-token}:/run/secrets/deepfake_api_token:ro
+      - ${DEEPFAKE_TLS_CERT_FILE:-../secrets/tls.crt}:/run/secrets/tls.crt:ro
+      - ${DEEPFAKE_TLS_KEY_FILE:-../secrets/tls.key}:/run/secrets/tls.key:ro
     command:
       - --host
       - 0.0.0.0

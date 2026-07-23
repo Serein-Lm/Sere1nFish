@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any
@@ -10,7 +11,7 @@ from urllib.parse import urlsplit
 
 from api.services.runtime_config import get_runtime_config_section
 
-from .contracts import DeepfakeConfig, DeepfakeProvider, DeepfakeStream, ImageSwapResult
+from .contracts import DeepfakeConfig, DeepfakeProvider, DeepfakeStream, ImageSwapResult, SourceImage
 from .factory import DeepfakeProviderFactory
 
 
@@ -40,6 +41,7 @@ def _parse_config(raw: dict[str, Any]) -> DeepfakeConfig:
     try:
         timeout_seconds = min(120.0, max(3.0, float(raw.get("timeout_seconds") or 15)))
         max_image_bytes = min(30 * 1024 * 1024, max(1024 * 1024, int(raw.get("max_image_bytes") or 12 * 1024 * 1024)))
+        max_source_images = min(8, max(1, int(raw.get("max_source_images") or 4)))
         realtime_max_width = min(1280, max(320, int(raw.get("realtime_max_width") or 960)))
     except (TypeError, ValueError) as exc:
         raise DeepfakeConfigurationError("deepfake numeric configuration is invalid") from exc
@@ -50,6 +52,7 @@ def _parse_config(raw: dict[str, Any]) -> DeepfakeConfig:
         ca_certificate=ca_certificate,
         timeout_seconds=timeout_seconds,
         max_image_bytes=max_image_bytes,
+        max_source_images=max_source_images,
         realtime_max_width=realtime_max_width,
     )
 
@@ -70,38 +73,51 @@ class DeepfakeService:
         if len(data) > self.config.max_image_bytes:
             raise ValueError(f"{label} image exceeds the configured size limit")
 
+    def validate_sources(self, sources: list[SourceImage]) -> None:
+        if not 1 <= len(sources) <= self.config.max_source_images:
+            raise ValueError(f"source image count must be between 1 and {self.config.max_source_images}")
+        for index, source in enumerate(sources, start=1):
+            self.validate_upload(source.content, label=f"source {index}")
+
+    @staticmethod
+    def normalize_profile(profile: str) -> str:
+        value = str(profile or "").strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value):
+            raise ValueError("quality profile is invalid")
+        return value
+
     async def swap_image(
         self,
         *,
-        source: bytes,
-        source_name: str,
+        sources: list[SourceImage],
         target: bytes,
         target_name: str,
         max_width: int,
+        profile: str,
     ) -> ImageSwapResult:
-        self.validate_upload(source, label="source")
+        self.validate_sources(sources)
         self.validate_upload(target, label="target")
         return await self.provider.swap_image(
-            source=source,
-            source_name=source_name,
+            sources=sources,
             target=target,
             target_name=target_name,
             max_width=min(1920, max(320, max_width)),
+            profile=self.normalize_profile(profile),
         )
 
     async def create_session(
         self,
         *,
         username: str,
-        source: bytes,
-        source_name: str,
+        sources: list[SourceImage],
         max_width: int | None,
+        profile: str,
     ) -> dict[str, Any]:
-        self.validate_upload(source, label="source")
+        self.validate_sources(sources)
         payload = await self.provider.create_session(
-            source=source,
-            source_name=source_name,
+            sources=sources,
             max_width=min(1280, max(320, max_width or self.config.realtime_max_width)),
+            profile=self.normalize_profile(profile),
         )
         session_id = str(payload.get("session_id") or "")
         if not session_id:

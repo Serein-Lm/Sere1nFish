@@ -15,7 +15,14 @@ class DeepfakeConfig:
     ca_certificate: str
     timeout_seconds: float
     max_image_bytes: int
+    max_source_images: int
     realtime_max_width: int
+
+
+@dataclass(slots=True, frozen=True)
+class SourceImage:
+    content: bytes
+    filename: str
 
 
 @dataclass(slots=True)
@@ -23,6 +30,9 @@ class ImageSwapResult:
     content: bytes
     content_type: str
     inference_ms: float
+    quality_profile: str = ""
+    source_count: int = 1
+    source_consistency: float = 1.0
 
 
 class DeepfakeStream(Protocol):
@@ -39,19 +49,19 @@ class DeepfakeProvider(Protocol):
     async def swap_image(
         self,
         *,
-        source: bytes,
-        source_name: str,
+        sources: list[SourceImage],
         target: bytes,
         target_name: str,
         max_width: int,
+        profile: str,
     ) -> ImageSwapResult: ...
 
     async def create_session(
         self,
         *,
-        source: bytes,
-        source_name: str,
+        sources: list[SourceImage],
         max_width: int,
+        profile: str,
     ) -> dict[str, Any]: ...
 
     async def session_status(self, session_id: str) -> dict[str, Any]: ...

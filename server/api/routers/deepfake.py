@@ -15,6 +15,7 @@ from api.dao import users as users_dao
 from api.db.mongodb import get_db
 from api.services.deepfake import get_deepfake_service
 from api.services.deepfake.adapters import DeepfakeProviderError
+from api.services.deepfake.contracts import SourceImage
 from api.services.deepfake.service import DeepfakeConfigurationError
 
 router = APIRouter()
@@ -32,6 +33,23 @@ def _raise_service_error(exc: Exception) -> None:
     raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+async def _read_sources(
+    files: list[UploadFile],
+    *,
+    max_bytes: int,
+    max_count: int,
+) -> list[SourceImage]:
+    if not 1 <= len(files) <= max_count:
+        raise ValueError(f"source image count must be between 1 and {max_count}")
+    return [
+        SourceImage(
+            content=await upload.read(max_bytes + 1),
+            filename=upload.filename or f"source-{index}.jpg",
+        )
+        for index, upload in enumerate(files, start=1)
+    ]
+
+
 @router.get("/status")
 async def deepfake_status(_: User = Depends(get_current_active_user)):
     try:
@@ -42,24 +60,29 @@ async def deepfake_status(_: User = Depends(get_current_active_user)):
 
 @router.post("/swap/image")
 async def swap_image(
-    source: Annotated[UploadFile, File(...)],
+    source: Annotated[list[UploadFile], File(...)],
     target: Annotated[UploadFile, File(...)],
     authorized_use: Annotated[bool, Form(...)],
     max_width: Annotated[int, Form()] = 1280,
+    profile: Annotated[str, Form()] = "quality",
     _: User = Depends(get_current_active_user),
 ):
     if not authorized_use:
         raise HTTPException(status_code=403, detail="必须确认素材已获得授权")
     try:
         service = await get_deepfake_service()
-        source_data = await source.read(service.config.max_image_bytes + 1)
+        sources = await _read_sources(
+            source,
+            max_bytes=service.config.max_image_bytes,
+            max_count=service.config.max_source_images,
+        )
         target_data = await target.read(service.config.max_image_bytes + 1)
         result = await service.swap_image(
-            source=source_data,
-            source_name=source.filename or "source.jpg",
+            sources=sources,
             target=target_data,
             target_name=target.filename or "target.jpg",
             max_width=max_width,
+            profile=profile,
         )
         return Response(
             content=result.content,
@@ -67,6 +90,9 @@ async def swap_image(
             headers={
                 "Cache-Control": "private, no-store",
                 "X-Inference-Ms": f"{result.inference_ms:.2f}",
+                "X-Quality-Profile": result.quality_profile,
+                "X-Source-Count": str(result.source_count),
+                "X-Source-Consistency": f"{result.source_consistency:.4f}",
                 "X-Synthetic-Media": "true",
             },
         )
@@ -78,21 +104,26 @@ async def swap_image(
 
 @router.post("/sessions")
 async def create_session(
-    source: Annotated[UploadFile, File(...)],
+    source: Annotated[list[UploadFile], File(...)],
     authorized_use: Annotated[bool, Form(...)],
     max_width: Annotated[int | None, Form()] = None,
+    profile: Annotated[str, Form()] = "quality",
     user: User = Depends(get_current_active_user),
 ):
     if not authorized_use:
         raise HTTPException(status_code=403, detail="必须确认素材已获得授权")
     try:
         service = await get_deepfake_service()
-        source_data = await source.read(service.config.max_image_bytes + 1)
+        sources = await _read_sources(
+            source,
+            max_bytes=service.config.max_image_bytes,
+            max_count=service.config.max_source_images,
+        )
         return await service.create_session(
             username=user.username,
-            source=source_data,
-            source_name=source.filename or "source.jpg",
+            sources=sources,
             max_width=max_width,
+            profile=profile,
         )
     except HTTPException:
         raise

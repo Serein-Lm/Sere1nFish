@@ -13,15 +13,24 @@ Security requirements:
 - Mount a random API token and TLS private key from root-only files. Do not put
   either value in Compose, Git, logs, or frontend code.
 - `hyperswap_1a_256` with `512x512` pixel boost is configured for authorized
-  research use. Pixel boost runs four 256x256 inference tiles per detected face,
-  so measure realtime FPS after model changes.
+  research use. The gateway owns named quality profiles so API callers do not
+  depend on FaceFusion processor names or model arguments.
+- One to four source images are accepted under repeated `source` multipart
+  fields. FaceFusion averages the largest detected face from each image; the
+  gateway rejects missing faces and clearly inconsistent identities.
+- `quality` is the default for image and realtime inference. It combines
+  occlusion masking with GFPGAN 1.4 at a measured 60 percent blend. `balanced`
+  keeps occlusion masking without restoration, while `fast` uses box masking
+  only. All profiles use the benchmarked `0.65` source weight.
 
 API surface:
 
 - `GET /health`: unauthenticated liveness only.
 - `GET /v1/status`: authenticated model/GPU/runtime status.
-- `POST /v1/swap/image`: authenticated source/target image inference.
-- `POST /v1/sessions`: create an ephemeral realtime source session.
+- `POST /v1/swap/image`: authenticated source/target image inference with an
+  optional `profile` field.
+- `POST /v1/sessions`: create an ephemeral realtime source session with an
+  optional `profile` field.
 - `WS /v1/realtime/{session_id}`: JPEG frame input/output stream.
 - `GET|DELETE /v1/sessions/{session_id}`: session metrics and cleanup.
 

@@ -277,6 +277,51 @@
   position: relative;
 }
 
+.deepfake-identity-grid {
+  display: grid;
+  width: 100%;
+  overflow: hidden;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+  aspect-ratio: 16 / 9;
+  padding: 8px;
+  border-radius: 6px;
+  background: #15171a;
+}
+
+.deepfake-identity-item,
+.deepfake-identity-empty {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  place-items: center;
+  border-radius: 4px;
+  background: #22252a;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 30px;
+}
+
+.deepfake-identity-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+.deepfake-identity-item .ant-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.64);
+}
+
+.deepfake-identity-item .ant-btn:not(:disabled):hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.84);
+}
+
 .deepfake-result {
   min-height: 280px;
 }
@@ -397,6 +442,19 @@
 
   .deepfake-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .deepfake-stats .ant-statistic {
+    padding: 10px 12px;
+  }
+
+  .deepfake-stats .ant-statistic-content {
+    font-size: 15px;
+  }
+
+  .deepfake-stats .ant-statistic-content-suffix {
+    margin-inline-start: 2px;
+    font-size: 12px;
   }
 
   .deepfake-input-grid,
