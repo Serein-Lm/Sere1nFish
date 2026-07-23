@@ -55,6 +55,10 @@
   line-height: 1.7 !important;
 }
 
+.vc-instruction-input {
+  margin-top: 12px;
+}
+
 .vc-synth-controls {
   display: flex;
   gap: 12px;
@@ -142,6 +146,35 @@
   font-size: 12px;
 }
 
+.vc-live-metrics {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.vc-live-metrics > div {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-secondary, rgba(0, 0, 0, 0.08));
+  border-radius: 6px;
+  background: var(--bg-container, #fff);
+}
+
+.vc-live-metrics span,
+.vc-live-metrics strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vc-live-metrics strong {
+  margin-top: 2px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 /* 音色 ID 文字 */
 .voice-id-text {
   font-family: 'SF Mono', 'Fira Code', monospace;
@@ -155,12 +188,23 @@
 
 @media (max-width: 768px) {
   .voice-clone {
-    padding: 0 16px 16px;
+    padding: 0 0 16px;
   }
 
   .vc-section-nav {
-    flex-direction: column;
     gap: 4px;
+  }
+
+  .vc-nav-item {
+    flex: 1;
+    justify-content: center;
+    gap: 5px;
+    padding: 10px 4px;
+    white-space: nowrap;
+  }
+
+  .vc-synth-card .ant-card-body {
+    padding: 16px;
   }
 
   .vc-synth-controls {
@@ -169,5 +213,13 @@
 
   .vc-voice-select {
     min-width: 100%;
+  }
+
+  .vc-live-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .vc-player {
+    margin-top: 24px;
   }
 }

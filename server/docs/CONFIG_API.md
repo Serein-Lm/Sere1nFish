@@ -33,7 +33,7 @@
 | `langsmith` | LangSmith 追踪配置 |
 | `langfuse` | Langfuse 追踪配置 |
 | `dingtalk` | 钉钉机器人配置 |
-| `cosyvoice` | 阿里云百炼 CosyVoice / TTS 配置 |
+| `cosyvoice` | 阿里云百炼 Qwen-Audio / 实时 TTS 配置 |
 | `bailian` | 阿里云百炼图片编辑、视频生成配置 |
 | `chrome_docker` | 后端浏览器自动化容器配置 |
 | `mobile` | 手机操作 Agent 运行配置 |

@@ -110,7 +110,7 @@ https://<服务器公网 IP 或域名>/
 | `llm` | 默认文本模型、视觉模型、手机 Agent 模型 |
 | `runtime` | 运行时模型网关等兼容配置 |
 | `bailian` | 百炼图片编辑、文生视频、图生视频 |
-| `cosyvoice` | 百炼 CosyVoice / TTS |
+| `cosyvoice` | 百炼 Qwen-Audio / TTS 实时语音 |
 | `mobile` | 手机 Agent 规划、执行、读屏、画像相关配置 |
 | `chrome_docker` | 后端扫描用 Chrome Docker 配置 |
 | `tools` / `mcpServers` | 工具和 MCP 配置 |
@@ -173,17 +173,18 @@ AI 工具 -> 百炼视频工具
 server/docs/BAILIAN_AIGC_API.md
 ```
 
-## 5. TTS / 音色克隆
+## 5. 实时 TTS / 音色复刻
 
-CosyVoice 配置从前端“运行配置”写入 `cosyvoice` 配置段。上传本地音频后，后端会根据反向代理 `Host` 和 `X-Forwarded-Proto` 生成公网绝对 URL，供百炼服务端拉取。
+默认使用 `qwen-audio-3.0-tts-flash`。配置从前端“运行配置”写入 `cosyvoice` 兼容配置段；参考音频通过私有对象存储留档，并向百炼提供短时签名 URL。应用启动时预热 WebSocket 连接池，实时接口直接输出 PCM 分片。
 
 常用接口：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v1/voice/uploads` | 上传音频，返回公网 URL |
+| POST | `/api/v1/voice/upload` | 上传参考音频，返回短时访问 URL |
 | POST | `/api/v1/voice/voices` | 创建/登记音色 |
-| POST | `/api/v1/voice/synthesize` | 合成语音 |
+| POST | `/api/v1/voice/synthesize/stream` | 实时 PCM 合成 |
+| POST | `/api/v1/voice/synthesize` | 完整 MP3 合成（兼容） |
 
 详细教程见：
 

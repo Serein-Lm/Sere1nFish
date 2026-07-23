@@ -1,27 +1,23 @@
-"""CosyVoice 声音复刻 API — 音色管理 / 复刻输出 / 进度回顾"""
+"""百炼声音复刻 API — 音色管理 / 实时合成 / 进度回顾。"""
 from __future__ import annotations
 
-import asyncio
 import uuid
 from pathlib import Path
 from typing import Any
 
-import dashscope
-from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizer
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File
-from fastapi.responses import RedirectResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_active_user, require_admin, User
 from api.db.mongodb import get_db
 from api.dao import voice as voice_dao
-from api.services.bailian_aigc import (
-    BailianAPIError,
-    normalize_bailian_http_base,
-    normalize_bailian_ws_base,
+from api.services.voice_runtime import (
+    VoiceConfigurationError,
+    VoiceModelMismatchError,
+    VoiceProviderError,
+    get_voice_runtime_service,
 )
-from api.services.runtime_config import get_runtime_app_config, get_runtime_config_section
 from core.logger import get_logger
 
 router = APIRouter()
@@ -30,8 +26,8 @@ logger = get_logger("api.voice")
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads" / "voice"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
-MAX_AUDIO_SIZE = 50 * 1024 * 1024  # 50MB
+ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".m4a"}
+MAX_AUDIO_SIZE = 10 * 1024 * 1024
 
 
 def _public_url(request: Request, path: str) -> str:
@@ -43,77 +39,29 @@ def _public_url(request: Request, path: str) -> str:
     return f"{proto}://{host}{path}"
 
 
-# ==================== 配置 ====================
-
-async def _cfg() -> dict:
-    app_config = await get_runtime_app_config()
-    cv = await get_runtime_config_section("cosyvoice")
-    bailian = await get_runtime_config_section("bailian")
-    rt = app_config.runtime
-    api_key = cv.get("api_key") or bailian.get("api_key") or rt.api_key
-    if not api_key:
-        raise HTTPException(500, "数据库 bailian.api_key/runtime.api_key 未配置")
-
-    region = (cv.get("region") or bailian.get("region") or "beijing").strip().lower()
-    workspace_id = cv.get("workspace_id") or bailian.get("workspace_id")
-    base_http = cv.get("base_http") or bailian.get("base_http")
-    base_ws = cv.get("base_ws") or bailian.get("base_ws")
-
-    if not base_http or not base_ws:
-        if workspace_id and region == "singapore":
-            base_http = base_http or f"https://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api/v1"
-            base_ws = base_ws or f"wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/inference"
-        elif workspace_id:
-            base_http = base_http or f"https://{workspace_id}.cn-beijing.maas.aliyuncs.com/api/v1"
-            base_ws = base_ws or f"wss://{workspace_id}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
-        elif region == "singapore":
-            base_http = base_http or "https://dashscope-intl.aliyuncs.com/api/v1"
-            base_ws = base_ws or "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference"
-        else:
-            base_http = base_http or "https://dashscope.aliyuncs.com/api/v1"
-            base_ws = base_ws or "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
-
-    try:
-        base_http = normalize_bailian_http_base(base_http)
-        base_ws = normalize_bailian_ws_base(base_ws)
-    except BailianAPIError as exc:
-        raise HTTPException(500, str(exc)) from exc
-
-    return {
-        "api_key": api_key,
-        "model": cv.get("model", "cosyvoice-v3.5-plus"),
-        "region": region,
-        "workspace_id": workspace_id,
-        "prefix": cv.get("prefix", "sere1nfish"),
-        "language_hints": cv.get("language_hints", ["zh"]),
-        "max_prompt_audio_length": cv.get("max_prompt_audio_length", 10.0),
-        "enable_preprocess": cv.get("enable_preprocess", False),
-        "base_http": base_http,
-        "base_ws": base_ws,
-    }
-
-
-async def _init_sdk() -> dict:
-    c = await _cfg()
-    dashscope.api_key = c["api_key"]
-    dashscope.base_http_api_url = c["base_http"]
-    dashscope.base_websocket_api_url = c["base_ws"]
-    return c
-
-
 # ==================== 请求/响应模型 ====================
 
 class VoiceCreateReq(BaseModel):
-    url: str = Field(..., description="音频文件公网 URL（wav/mp3/flac/m4a，3-30 秒）")
-    prefix: str | None = Field(None, max_length=10, pattern=r"^[a-zA-Z0-9]*$",
-                                description="音色名前缀（仅字母数字，≤10 字符）")
+    url: str = Field(..., description="音频文件公网 URL（wav/mp3/m4a，建议 10-20 秒）")
+    prefix: str | None = Field(
+        None,
+        min_length=1,
+        max_length=10,
+        pattern=r"^[a-z0-9]+$",
+        description="音色名前缀（仅小写字母和数字，1-10 字符）",
+    )
     language_hints: list[str] | None = Field(None, description="语种提示 zh/en/ja/ko/…")
-    max_prompt_audio_length: float | None = Field(None, ge=3.0, le=30.0, description="参考音频最大时长(秒)")
+    max_prompt_audio_length: float | None = Field(None, ge=3.0, le=60.0, description="参考音频最大时长(秒)")
     enable_preprocess: bool | None = Field(None, description="开启降噪/增强/音量规整")
+    authorized_use: bool = Field(
+        ...,
+        description="确认已获得该声音所有者授权，且仅用于合法合成",
+    )
 
     model_config = {"json_schema_extra": {"examples": [{
         "url": "https://oss.example.com/audio/sample.wav",
         "prefix": "user01",
+        "authorized_use": True,
     }]}}
 
 
@@ -123,8 +71,8 @@ class VoiceCreateResp(BaseModel):
     request_id: str | None = None
 
     model_config = {"json_schema_extra": {"examples": [{
-        "voice_id": "cosyvoice-v3.5-plus-user01-a1b2c3d4",
-        "model": "cosyvoice-v3.5-plus",
+        "voice_id": "qwen-audio-3.0-tts-flash-user01-a1b2c3d4",
+        "model": "qwen-audio-3.0-tts-flash",
         "request_id": "req-xxxx",
     }]}}
 
@@ -132,7 +80,7 @@ class VoiceCreateResp(BaseModel):
 class VoiceUpdateReq(BaseModel):
     url: str = Field(..., description="新的音频文件 URL")
     language_hints: list[str] | None = None
-    max_prompt_audio_length: float | None = Field(None, ge=3.0, le=30.0)
+    max_prompt_audio_length: float | None = Field(None, ge=3.0, le=60.0)
     enable_preprocess: bool | None = None
 
 
@@ -140,10 +88,15 @@ class SynthesizeReq(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000, description="待合成文本")
     voice_id: str = Field(..., description="音色 ID")
     model: str | None = Field(None, description="合成模型（需与创建音色时一致，不传用配置默认值）")
+    instruction: str | None = Field(
+        None,
+        max_length=128,
+        description="语气、方言或表达方式指令",
+    )
 
     model_config = {"json_schema_extra": {"examples": [{
         "text": "你好，这是一段测试语音",
-        "voice_id": "cosyvoice-v3.5-plus-user01-a1b2c3d4",
+        "voice_id": "qwen-audio-3.0-tts-flash-user01-a1b2c3d4",
     }]}}
 
 
@@ -159,12 +112,12 @@ class PageResp(BaseModel):
 @router.post("/upload", summary="上传音频文件")
 async def upload_audio(
     request: Request,
-    file: UploadFile = File(..., description="音频文件（wav/mp3/flac/m4a/ogg，≤50MB）"),
+    file: UploadFile = File(..., description="音频文件（wav/mp3/m4a，≤10MB）"),
     _: User = Depends(get_current_active_user),
 ):
     """上传本地音频文件，返回可用于创建音色的 URL。
 
-    支持格式: wav, mp3, flac, m4a, ogg, aac, wma（≤50MB）
+    支持格式: wav, mp3, m4a（≤10MB）
     """
     if not file.filename:
         raise HTTPException(400, "文件名不能为空")
@@ -216,6 +169,9 @@ async def upload_audio(
 @router.get("/files/{filename}", summary="获取已上传的音频文件")
 async def get_uploaded_file(filename: str):
     """返回已上传的音频文件（供 CosyVoice API 访问）。"""
+    if not filename or Path(filename).name != filename:
+        raise HTTPException(400, "文件名无效")
+
     from api.dao import storage_objects as storage_dao
     from api.storage import get_object_storage
 
@@ -255,39 +211,39 @@ async def get_uploaded_file(filename: str):
 # ==================== 一、音色管理 ====================
 
 @router.post("/voices", response_model=VoiceCreateResp, summary="创建复刻音色")
-async def create_voice(body: VoiceCreateReq, _: User = Depends(get_current_active_user)):
+async def create_voice(
+    body: VoiceCreateReq,
+    user: User = Depends(get_current_active_user),
+):
     """传入音频公网 URL 创建专属音色，返回 voice_id。
 
     注意: 每次调用创建新音色，达到配额上限后不可再创建。
     """
-    c = await _init_sdk()
-
-    prefix = body.prefix or c["prefix"]
-    hints = body.language_hints or c["language_hints"]
-    max_len = body.max_prompt_audio_length or c["max_prompt_audio_length"]
-    preprocess = body.enable_preprocess if body.enable_preprocess is not None else c["enable_preprocess"]
-
+    if not body.authorized_use:
+        raise HTTPException(403, "创建复刻音色前必须确认已获得声音所有者授权")
     try:
-        svc = VoiceEnrollmentService()
-        voice_id = await asyncio.to_thread(
-            svc.create_voice,
-            target_model=c["model"], prefix=prefix, url=body.url,
-            language_hints=hints, max_prompt_audio_length=max_len,
-            enable_preprocess=preprocess,
+        result = await get_voice_runtime_service().create_voice(
+            get_db(),
+            url=body.url,
+            prefix=body.prefix,
+            language_hints=body.language_hints,
+            max_prompt_audio_length=body.max_prompt_audio_length,
+            enable_preprocess=body.enable_preprocess,
+            authorized_by=user.username,
         )
-        req_id = svc.get_last_request_id()
-    except Exception as e:
-        logger.error(f"创建音色失败: {e}")
-        raise HTTPException(500, f"创建音色失败: {e}")
+    except VoiceConfigurationError as exc:
+        logger.error("声音复刻配置不可用: %s", exc)
+        raise HTTPException(500, str(exc)) from exc
+    except VoiceProviderError as exc:
+        logger.error("创建音色失败: %s", exc)
+        raise HTTPException(502, str(exc)) from exc
 
-    db = get_db()
-    await voice_dao.save_clone(
-        db, voice_id=voice_id, model=c["model"], prefix=prefix,
-        url=body.url, language_hints=hints, request_id=req_id,
+    logger.info("音色创建: voice_id=%s model=%s", result.voice_id, result.model)
+    return VoiceCreateResp(
+        voice_id=result.voice_id,
+        model=result.model,
+        request_id=result.request_id,
     )
-    logger.info(f"音色创建: voice_id={voice_id}")
-
-    return VoiceCreateResp(voice_id=voice_id, model=c["model"], request_id=req_id)
 
 
 @router.get("/voices", response_model=PageResp, summary="音色列表")
@@ -309,20 +265,16 @@ async def list_voices(
 @router.get("/voices/{voice_id}", summary="音色详情")
 async def get_voice(voice_id: str, _: User = Depends(get_current_active_user)):
     """查询指定音色的本地记录 + DashScope 远端详情。"""
-    db = get_db()
-    local = await voice_dao.get_clone(db, voice_id)
-
-    await _init_sdk()
     try:
-        svc = VoiceEnrollmentService()
-        remote = await asyncio.to_thread(svc.query_voice, voice_id=voice_id)
-    except Exception:
-        remote = None
-
-    if not local and not remote:
+        detail = await get_voice_runtime_service().get_voice_detail(
+            get_db(),
+            voice_id,
+        )
+    except VoiceConfigurationError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    if not detail:
         raise HTTPException(404, f"音色 {voice_id} 不存在")
-
-    return {"local": local, "remote": remote}
+    return detail
 
 
 @router.put("/voices/{voice_id}", summary="更新音色音频")
@@ -331,45 +283,32 @@ async def update_voice(
     _: User = Depends(get_current_active_user),
 ):
     """用新音频替换已有音色。voice_id 不变。"""
-    c = await _init_sdk()
-
-    hints = body.language_hints or c["language_hints"]
-    max_len = body.max_prompt_audio_length or c["max_prompt_audio_length"]
-    preprocess = body.enable_preprocess if body.enable_preprocess is not None else c["enable_preprocess"]
-
     try:
-        svc = VoiceEnrollmentService()
-        await asyncio.to_thread(
-            svc.update_voice, voice_id=voice_id, url=body.url,
-            language_hints=hints, max_prompt_audio_length=max_len,
-            enable_preprocess=preprocess,
+        request_id = await get_voice_runtime_service().update_voice(
+            get_db(),
+            voice_id=voice_id,
+            url=body.url,
         )
-        req_id = svc.get_last_request_id()
-    except Exception as e:
-        err = str(e)
+    except (VoiceConfigurationError, VoiceProviderError) as exc:
+        err = str(exc)
         if "not found" in err.lower() or "not exist" in err.lower():
             raise HTTPException(404, f"音色 {voice_id} 不存在")
-        raise HTTPException(500, f"更新音色失败: {err}")
+        raise HTTPException(502, f"更新音色失败: {err}") from exc
 
     logger.info(f"音色更新: voice_id={voice_id}")
-    return {"ok": True, "voice_id": voice_id, "request_id": req_id}
+    return {"ok": True, "voice_id": voice_id, "request_id": request_id}
 
 
 @router.delete("/voices/{voice_id}", summary="删除音色")
 async def delete_voice(voice_id: str, _: User = Depends(require_admin)):
     """永久删除音色（管理员权限）。同步删除 DashScope 远端和本地记录。"""
-    await _init_sdk()
-
     try:
-        svc = VoiceEnrollmentService()
-        await asyncio.to_thread(svc.delete_voice, voice_id=voice_id)
-    except Exception as e:
-        err = str(e)
+        await get_voice_runtime_service().delete_voice(get_db(), voice_id)
+    except (VoiceConfigurationError, VoiceProviderError) as exc:
+        err = str(exc)
         if "not found" not in err.lower() and "not exist" not in err.lower():
-            raise HTTPException(500, f"删除音色失败: {err}")
+            raise HTTPException(502, f"删除音色失败: {err}") from exc
 
-    db = get_db()
-    await voice_dao.delete_clone(db, voice_id)
     logger.info(f"音色删除: voice_id={voice_id}")
     return {"ok": True, "voice_id": voice_id}
 
@@ -387,50 +326,80 @@ async def synthesize(body: SynthesizeReq, _: User = Depends(get_current_active_u
     返回 audio/mpeg 二进制流，前端可直接用 `<audio>` 播放。
     响应 Header 包含 X-Request-Id 和 X-Record-Id。
     """
-    c = await _init_sdk()
-    model = body.model or c["model"]
+    try:
+        record_id, result = await get_voice_runtime_service().synthesize(
+            get_db(),
+            text=body.text,
+            voice_id=body.voice_id,
+            requested_model=body.model,
+            instruction=body.instruction,
+        )
+    except VoiceModelMismatchError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except VoiceConfigurationError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    except VoiceProviderError as exc:
+        logger.error("合成失败: %s", exc)
+        raise HTTPException(502, str(exc)) from exc
 
-    db = get_db()
-    record_id = await voice_dao.create_synthesis_record(
-        db, voice_id=body.voice_id, text=body.text, model=model,
+    return Response(
+        content=result.audio,
+        media_type="audio/mpeg",
+        headers={
+            "X-Request-Id": result.request_id or "",
+            "X-Record-Id": record_id,
+            "X-First-Package-Delay-Ms": str(result.first_package_delay_ms),
+            "X-Voice-Model": result.model,
+            "X-Synthetic-Media": "true",
+            "Content-Disposition": 'inline; filename="speech.mp3"',
+        },
     )
 
+
+@router.post(
+    "/synthesize/stream",
+    summary="实时流式语音合成",
+    responses={
+        200: {
+            "content": {"audio/pcm": {}},
+            "description": "24kHz 单声道 16-bit little-endian PCM 分片流",
+        }
+    },
+)
+async def synthesize_stream(
+    body: SynthesizeReq,
+    _: User = Depends(get_current_active_user),
+):
+    """使用预热 WebSocket 连接，将复刻音色 PCM 分片直接透传给客户端。"""
     try:
-        synth = SpeechSynthesizer(model=model, voice=body.voice_id)
-        audio = await asyncio.to_thread(synth.call, body.text)
-
-        if not audio:
-            await voice_dao.fail_synthesis_record(db, record_id, "合成返回空数据")
-            raise HTTPException(500, "语音合成返回空数据")
-
-        req_id = synth.get_last_request_id()
-        delay = synth.get_first_package_delay()
-
-        await voice_dao.complete_synthesis_record(
-            db, record_id,
-            audio_bytes=len(audio),
-            first_pkg_delay_ms=delay or 0,
-            request_id=req_id,
+        handle = await get_voice_runtime_service().stream_synthesis(
+            get_db(),
+            text=body.text,
+            voice_id=body.voice_id,
+            requested_model=body.model,
+            instruction=body.instruction,
         )
+    except VoiceModelMismatchError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except VoiceConfigurationError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    except VoiceProviderError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
-        logger.info(f"合成完成: record={record_id}, bytes={len(audio)}, delay={delay}ms")
-
-        return Response(
-            content=audio,
-            media_type="audio/mpeg",
-            headers={
-                "X-Request-Id": req_id or "",
-                "X-Record-Id": record_id,
-                "X-First-Package-Delay-Ms": str(delay or 0),
-                "Content-Disposition": 'inline; filename="speech.mp3"',
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        await voice_dao.fail_synthesis_record(db, record_id, str(e))
-        logger.error(f"合成失败: {e}")
-        raise HTTPException(500, f"语音合成失败: {e}")
+    return StreamingResponse(
+        handle.chunks,
+        media_type=f"audio/pcm;rate={handle.sample_rate};channels=1",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            "X-Record-Id": handle.record_id,
+            "X-Voice-Model": handle.model,
+            "X-Audio-Encoding": "pcm_s16le",
+            "X-Audio-Sample-Rate": str(handle.sample_rate),
+            "X-Audio-Channels": "1",
+            "X-Synthetic-Media": "true",
+        },
+    )
 
 
 # ==================== 三、进度回顾（合成历史） ====================
@@ -438,7 +407,10 @@ async def synthesize(body: SynthesizeReq, _: User = Depends(get_current_active_u
 @router.get("/records", response_model=PageResp, summary="合成记录列表")
 async def list_records(
     voice_id: str | None = Query(None, description="按音色 ID 筛选"),
-    status: str | None = Query(None, description="按状态筛选 processing/completed/failed"),
+    status: str | None = Query(
+        None,
+        description="按状态筛选 processing/completed/failed/cancelled",
+    ),
     page: int = Query(0, ge=0),
     page_size: int = Query(20, ge=1, le=100),
     _: User = Depends(get_current_active_user),

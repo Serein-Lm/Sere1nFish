@@ -13,6 +13,42 @@ export function clearToken(): void {
   localStorage.removeItem('userInfo')
 }
 
+export async function apiFetchResponse(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers)
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  const response = await fetch(`${API_CONFIG.BASE_URL}${path}`, {
+    ...init,
+    headers,
+  })
+  if (response.status === 401) {
+    clearToken()
+    redirectToLogin()
+    throw new Error('Unauthorized')
+  }
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const payload = await response.json().catch(() => null) as {
+        detail?: string | Array<{ msg?: string }>
+      } | null
+      const detail = payload?.detail
+      if (typeof detail === 'string') throw new Error(detail)
+      if (Array.isArray(detail)) {
+        const message = detail.map(item => item.msg).filter(Boolean).join('；')
+        throw new Error(message || `HTTP ${response.status}`)
+      }
+    }
+    const text = await response.text().catch(() => '')
+    throw new Error(text || `HTTP error! status: ${response.status}`)
+  }
+  return response
+}
+
 export function apiFetch<T>(
   path: string,
   init: RequestInit = {}

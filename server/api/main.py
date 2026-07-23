@@ -354,7 +354,29 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"钉钉 Stream Mode 启动失败(不影响运行): {e}")
 
+    # 启动时：预热百炼实时语音 WebSocket 连接池，消除首请求建连开销。
+    try:
+        from api.services.voice_runtime import warmup_voice_runtime
+
+        voice_config = await warmup_voice_runtime()
+        logger.info(
+            "百炼实时语音连接池已预热: model=%s pool=%s",
+            voice_config.model,
+            voice_config.pool_size,
+        )
+    except Exception as e:
+        logger.warning(f"百炼实时语音预热失败(不影响运行): {e}")
+
     yield
+
+    # 关闭时：先释放百炼 WebSocket 连接与维护线程。
+    try:
+        from api.services.voice_runtime import shutdown_voice_runtime
+
+        await shutdown_voice_runtime()
+        logger.info("百炼实时语音连接池已停止")
+    except Exception as e:
+        logger.warning(f"百炼实时语音连接池停止失败: {e}")
 
     # 关闭时：停止任务异常监控；执行中的持久任务会退回待恢复状态。
     try:

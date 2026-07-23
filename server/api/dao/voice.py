@@ -21,6 +21,7 @@ SYNTHESIS_COLLECTION = "voice_synthesis_records"
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     clones = db[CLONES_COLLECTION]
     await clones.create_index("voice_id", unique=True)
+    await clones.create_index("model")
     await clones.create_index("status")
     await clones.create_index("created_at")
 
@@ -43,7 +44,9 @@ async def save_clone(
     url: str,
     language_hints: list[str] | None = None,
     request_id: str | None = None,
+    authorized_by: str | None = None,
 ) -> dict[str, Any]:
+    now = time.time()
     doc = {
         "voice_id": voice_id,
         "model": model,
@@ -52,13 +55,35 @@ async def save_clone(
         "language_hints": language_hints or [],
         "status": "active",
         "request_id": request_id,
-        "created_at": time.time(),
-        "updated_at": time.time(),
+        "authorized_by": authorized_by,
+        "authorization_confirmed_at": now if authorized_by else None,
+        "created_at": now,
+        "updated_at": now,
     }
     await db[CLONES_COLLECTION].update_one(
         {"voice_id": voice_id}, {"$set": doc}, upsert=True,
     )
     return doc
+
+
+async def update_clone_source(
+    db: AsyncIOMotorDatabase,
+    voice_id: str,
+    *,
+    url: str,
+    request_id: str | None = None,
+) -> bool:
+    result = await db[CLONES_COLLECTION].update_one(
+        {"voice_id": voice_id},
+        {
+            "$set": {
+                "url": url,
+                "request_id": request_id,
+                "updated_at": time.time(),
+            }
+        },
+    )
+    return result.matched_count > 0
 
 
 async def list_clones(
@@ -108,6 +133,9 @@ async def create_synthesis_record(
     voice_id: str,
     text: str,
     model: str,
+    streaming: bool = False,
+    audio_format: str = "mp3",
+    sample_rate: int = 24000,
 ) -> str:
     record_id = f"syn-{uuid.uuid4().hex[:12]}"
     doc = {
@@ -119,6 +147,12 @@ async def create_synthesis_record(
         "status": "processing",
         "audio_bytes": 0,
         "first_pkg_delay_ms": 0,
+        "total_latency_ms": 0,
+        "audio_duration_ms": 0,
+        "rtf": 0.0,
+        "streaming": streaming,
+        "audio_format": audio_format,
+        "sample_rate": sample_rate,
         "request_id": None,
         "error": None,
         "created_at": time.time(),
@@ -134,6 +168,9 @@ async def complete_synthesis_record(
     *,
     audio_bytes: int,
     first_pkg_delay_ms: int = 0,
+    total_latency_ms: int = 0,
+    audio_duration_ms: int = 0,
+    rtf: float = 0.0,
     request_id: str | None = None,
 ) -> None:
     await db[SYNTHESIS_COLLECTION].update_one(
@@ -142,6 +179,9 @@ async def complete_synthesis_record(
             "status": "completed",
             "audio_bytes": audio_bytes,
             "first_pkg_delay_ms": first_pkg_delay_ms,
+            "total_latency_ms": total_latency_ms,
+            "audio_duration_ms": audio_duration_ms,
+            "rtf": rtf,
             "request_id": request_id,
             "completed_at": time.time(),
         }},
@@ -160,6 +200,23 @@ async def fail_synthesis_record(
             "error": error,
             "completed_at": time.time(),
         }},
+    )
+
+
+async def cancel_synthesis_record(
+    db: AsyncIOMotorDatabase,
+    record_id: str,
+    reason: str,
+) -> None:
+    await db[SYNTHESIS_COLLECTION].update_one(
+        {"record_id": record_id},
+        {
+            "$set": {
+                "status": "cancelled",
+                "error": reason,
+                "completed_at": time.time(),
+            }
+        },
     )
 
 

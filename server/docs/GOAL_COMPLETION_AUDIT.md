@@ -136,8 +136,8 @@ test_config_observability.py::test_graph_runtime_rejects_file_config_entrypoint
 
 当前实现：
 
-- TTS / CosyVoice 从 MongoDB 运行配置读取。
-- 上传音频返回基于代理 Host/Proto 的公网 URL，便于百炼拉取。
+- 实时 TTS / Qwen-Audio 从 MongoDB 运行配置读取，并预热 WebSocket 连接池。
+- 参考音频写入私有对象存储，向百炼提供短时签名 URL。
 - Qwen Image Edit、万相图片编辑、Wan2.7 文生视频、Wan2.7 图生视频接口已实现。
 - Wan2.7 图生视频支持新版 `media` 数组。
 - 旧版图生视频 payload 仍兼容。

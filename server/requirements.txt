@@ -4,7 +4,6 @@ langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
 langchain-mcp-adapters>=0.2.2
-dashscope
 
 # FastAPI
 fastapi>=0.115.0
@@ -59,8 +58,8 @@ dingtalk-stream>=0.24.3,<0.25.0
 websockets>=11.0,<17.0
 alibabacloud-oss-v2>=1.3.2,<2.0
 
-# 声音复刻 (CosyVoice / DashScope TTS)
-dashscope>=1.22.0
+# 声音复刻与实时 TTS（Qwen-Audio 3.0 / DashScope）
+dashscope>=1.26.4
 
 # 手机控制内核 (AutoGLM-GUI)
 # 源码内置于 AutoGLM-GUI-main/，由 api/__init__.py 注入 sys.path 复用，

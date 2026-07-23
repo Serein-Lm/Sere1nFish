@@ -1,5 +1,4 @@
-import { apiFetch, getToken } from './http'
-import { API_CONFIG } from '../config/api'
+import { apiFetch, apiFetchResponse } from './http'
 
 // ==================== 类型定义 ====================
 
@@ -9,6 +8,7 @@ export interface VoiceCreateReq {
   language_hints?: string[]
   max_prompt_audio_length?: number
   enable_preprocess?: boolean
+  authorized_use: boolean
 }
 
 export interface VoiceCreateResp {
@@ -47,9 +47,15 @@ export interface SynthesisRecord {
   text: string
   text_length: number
   model: string
-  status: 'processing' | 'completed' | 'failed'
+  status: 'processing' | 'completed' | 'failed' | 'cancelled'
   audio_bytes: number
   first_pkg_delay_ms: number
+  total_latency_ms: number
+  audio_duration_ms: number
+  rtf: number
+  streaming: boolean
+  audio_format: 'mp3' | 'pcm_s16le'
+  sample_rate: number
   request_id: string | null
   error: string | null
   created_at: number
@@ -70,6 +76,29 @@ export interface SynthesizeResult {
   delayMs: number
 }
 
+export interface VoiceStreamMetadata {
+  recordId: string
+  model: string
+  encoding: string
+  sampleRate: number
+  channels: number
+}
+
+export interface VoiceStreamResult extends VoiceStreamMetadata {
+  audioBytes: number
+  firstChunkLatencyMs: number
+}
+
+export interface VoiceStreamOptions {
+  text: string
+  voiceId: string
+  model?: string
+  instruction?: string
+  signal?: AbortSignal
+  onOpen?: (metadata: VoiceStreamMetadata) => void
+  onChunk: (chunk: Uint8Array) => void
+}
+
 export interface UploadResult {
   filename: string
   original_name: string
@@ -81,22 +110,13 @@ export interface UploadResult {
 // ==================== API 调用 ====================
 
 export async function uploadAudio(file: File): Promise<UploadResult> {
-  const token = getToken()
   const formData = new FormData()
   formData.append('file', file)
 
-  const res = await fetch(`${API_CONFIG.BASE_URL}/v1/voice/upload`, {
+  const res = await apiFetchResponse('/v1/voice/upload', {
     method: 'POST',
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
     body: formData,
   })
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '')
-    throw new Error(errText || `上传失败: HTTP ${res.status}`)
-  }
 
   return (await res.json()) as UploadResult
 }
@@ -150,20 +170,13 @@ export async function synthesizeSpeech(
   voiceId: string,
   model?: string,
 ): Promise<SynthesizeResult> {
-  const token = getToken()
-  const res = await fetch(`${API_CONFIG.BASE_URL}/v1/voice/synthesize`, {
+  const res = await apiFetchResponse('/v1/voice/synthesize', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ text, voice_id: voiceId, model: model || undefined }),
   })
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '')
-    throw new Error(errText || `合成失败: HTTP ${res.status}`)
-  }
 
   const blob = await res.blob()
   return {
@@ -171,6 +184,64 @@ export async function synthesizeSpeech(
     requestId: res.headers.get('X-Request-Id'),
     recordId: res.headers.get('X-Record-Id'),
     delayMs: Number(res.headers.get('X-First-Package-Delay-Ms') || 0),
+  }
+}
+
+export async function streamSpeech({
+  text,
+  voiceId,
+  model,
+  instruction,
+  signal,
+  onOpen,
+  onChunk,
+}: VoiceStreamOptions): Promise<VoiceStreamResult> {
+  const startedAt = performance.now()
+  const response = await apiFetchResponse('/v1/voice/synthesize/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      voice_id: voiceId,
+      model: model || undefined,
+      instruction: instruction?.trim() || undefined,
+    }),
+    signal,
+  })
+  if (!response.body) throw new Error('浏览器无法读取实时语音流')
+
+  const metadata: VoiceStreamMetadata = {
+    recordId: response.headers.get('X-Record-Id') || '',
+    model: response.headers.get('X-Voice-Model') || model || '',
+    encoding: response.headers.get('X-Audio-Encoding') || 'pcm_s16le',
+    sampleRate: Number(response.headers.get('X-Audio-Sample-Rate') || 24000),
+    channels: Number(response.headers.get('X-Audio-Channels') || 1),
+  }
+  onOpen?.(metadata)
+
+  const reader = response.body.getReader()
+  let audioBytes = 0
+  let firstChunkLatencyMs = 0
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (!value?.byteLength) continue
+      if (!firstChunkLatencyMs) {
+        firstChunkLatencyMs = Math.max(1, Math.round(performance.now() - startedAt))
+      }
+      const chunk = value.slice()
+      audioBytes += chunk.byteLength
+      onChunk(chunk)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  return {
+    ...metadata,
+    audioBytes,
+    firstChunkLatencyMs,
   }
 }
 
