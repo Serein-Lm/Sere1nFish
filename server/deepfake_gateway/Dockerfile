@@ -3,7 +3,17 @@ FROM ${BASE_IMAGE}
 
 USER root
 ARG TENSORRT_VERSION=10.9.0.34
-RUN python3 -m pip install --no-cache-dir "tensorrt-cu12==${TENSORRT_VERSION}"
+ARG WHEEL_STUB_VERSION=0.5.0
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN python3 -m pip install \
+    --no-cache-dir \
+    --index-url "${PIP_INDEX_URL}" \
+    "wheel-stub==${WHEEL_STUB_VERSION}"
+RUN python3 -m pip install \
+    --no-cache-dir \
+    --no-build-isolation \
+    --index-url "${PIP_INDEX_URL}" \
+    "tensorrt-cu12==${TENSORRT_VERSION}"
 COPY . /opt/gateway/deepfake_gateway
 ENV PYTHONPATH=/opt/facefusion:/opt/gateway \
     FACEFUSION_CONFIG_PATH=/opt/facefusion/facefusion.ini \
