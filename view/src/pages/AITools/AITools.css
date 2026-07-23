@@ -210,10 +210,17 @@
   gap: 16px;
 }
 
-.deepfake-input-grid,
-.deepfake-stream-grid {
+.deepfake-input-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.deepfake-stream-grid {
+  display: grid;
+  align-items: start;
+  grid-template-areas: "source output";
+  grid-template-columns: minmax(220px, 0.38fr) minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -248,7 +255,6 @@
   font-size: 36px;
 }
 
-.deepfake-picker-preview img,
 .deepfake-result .ant-image,
 .deepfake-result .ant-image-img,
 .deepfake-stream-view video,
@@ -256,6 +262,19 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+.deepfake-picker-preview img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+.deepfake-picker-preview {
+  position: relative;
 }
 
 .deepfake-result {
@@ -285,9 +304,18 @@
 
 .deepfake-stream-view {
   position: relative;
+  aspect-ratio: var(--deepfake-stream-aspect, 16 / 9);
 }
 
-.deepfake-stream-view > span {
+.deepfake-stream-source {
+  grid-area: source;
+}
+
+.deepfake-stream-output {
+  grid-area: output;
+}
+
+.deepfake-stream-label {
   position: absolute;
   right: 8px;
   bottom: 8px;
@@ -296,6 +324,30 @@
   background: rgba(0, 0, 0, 0.62);
   color: #fff;
   font-size: 12px;
+}
+
+.deepfake-stream-fullscreen.ant-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  width: 34px;
+  height: 34px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+}
+
+.deepfake-stream-fullscreen.ant-btn:not(:disabled):hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.deepfake-stream-output:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  aspect-ratio: auto;
+  border-radius: 0;
+  background: #000;
 }
 
 .deepfake-stream-view .is-mirrored {
@@ -351,5 +403,11 @@
   .deepfake-stream-grid,
   .deepfake-realtime-controls {
     grid-template-columns: 1fr;
+  }
+
+  .deepfake-stream-grid {
+    grid-template-areas:
+      "output"
+      "source";
   }
 }

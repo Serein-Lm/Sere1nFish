@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
   Alert,
   Button,
@@ -9,6 +9,7 @@ import {
   Spin,
   Statistic,
   Tag,
+  Tooltip,
   Typography,
   Upload,
   message,
@@ -17,6 +18,7 @@ import {
   CameraOutlined,
   CloudUploadOutlined,
   DisconnectOutlined,
+  FullscreenOutlined,
   PictureOutlined,
   ReloadOutlined,
   SwapOutlined,
@@ -95,6 +97,7 @@ export default function DeepfakeStudio() {
   const [imageResult, setImageResult] = useState('')
   const [imageInferenceMs, setImageInferenceMs] = useState(0)
   const [realtimeWidth, setRealtimeWidth] = useState(960)
+  const [streamAspectRatio, setStreamAspectRatio] = useState(16 / 9)
   const [starting, setStarting] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [streamResult, setStreamResult] = useState('')
@@ -103,6 +106,7 @@ export default function DeepfakeStudio() {
   const targetPreview = useFilePreview(targetFile)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const outputViewRef = useRef<HTMLDivElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const mediaRef = useRef<MediaStream | null>(null)
   const sessionIdRef = useRef('')
@@ -213,6 +217,20 @@ export default function DeepfakeStudio() {
     }
   }
 
+  const openOutputFullscreen = async () => {
+    const output = outputViewRef.current
+    if (!output || !streamResult) return
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen()
+      } else {
+        await output.requestFullscreen()
+      }
+    } catch {
+      message.error('无法进入全屏模式')
+    }
+  }
+
   const startRealtime = async () => {
     if (!sourceFile || !authorized) {
       message.warning('请选择身份图片并确认素材授权')
@@ -228,6 +246,9 @@ export default function DeepfakeStudio() {
       if (!videoRef.current) throw new Error('摄像头预览未初始化')
       videoRef.current.srcObject = media
       await videoRef.current.play()
+      if (videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
+        setStreamAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight)
+      }
       const session = await createDeepfakeSession(sourceFile, realtimeWidth)
       sessionIdRef.current = session.session_id
       const socket = openDeepfakeSocket(session.stream_path)
@@ -341,14 +362,27 @@ export default function DeepfakeStudio() {
               )}
             </div>
           </div>
-          <div className="deepfake-stream-grid">
-            <div className="deepfake-stream-view">
+          <div
+            className="deepfake-stream-grid"
+            style={{ '--deepfake-stream-aspect': streamAspectRatio } as CSSProperties}
+          >
+            <div className="deepfake-stream-view deepfake-stream-source">
               <video ref={videoRef} muted playsInline className="is-mirrored" />
-              <span>原始画面</span>
+              <span className="deepfake-stream-label">原始画面</span>
             </div>
-            <div className="deepfake-stream-view">
+            <div ref={outputViewRef} className="deepfake-stream-view deepfake-stream-output">
               {streamResult ? <img src={streamResult} alt="实时换脸画面" className="is-mirrored" /> : <CameraOutlined />}
-              <span>换脸画面</span>
+              <span className="deepfake-stream-label">换脸画面</span>
+              <Tooltip title="全屏查看换脸画面">
+                <Button
+                  type="text"
+                  icon={<FullscreenOutlined />}
+                  className="deepfake-stream-fullscreen"
+                  disabled={!streamResult}
+                  aria-label="全屏查看换脸画面"
+                  onClick={() => void openOutputFullscreen()}
+                />
+              </Tooltip>
             </div>
           </div>
           <canvas ref={canvasRef} className="deepfake-capture-canvas" />
