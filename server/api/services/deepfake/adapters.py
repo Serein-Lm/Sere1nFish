@@ -121,6 +121,7 @@ class FaceFusionGatewayProvider:
             quality_profile=response.headers.get("x-quality-profile", profile),
             source_count=int(response.headers.get("x-source-count") or len(sources)),
             source_consistency=float(response.headers.get("x-source-consistency") or 1),
+            effective_max_width=int(response.headers.get("x-max-width") or max_width),
         )
 
     async def create_session(

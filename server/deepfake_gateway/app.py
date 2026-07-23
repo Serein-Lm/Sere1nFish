@@ -137,7 +137,7 @@ class FaceFusionRuntime:
         if not core.common_pre_check():
             raise RuntimeError("FaceFusion model pre-check failed")
         self.model = str(state_manager.get_item("face_swapper_model") or "")
-        self.pixel_boost = str(state_manager.get_item("face_swapper_pixel_boost") or "")
+        self.pixel_boost = QUALITY_PROFILES.get(DEFAULT_IMAGE_PROFILE).face_swapper_pixel_boost
         processor_names = list(QUALITY_PROFILES.processor_names())
         modules = get_processors_modules(processor_names)
         for processor_name, module in zip(processor_names, modules, strict=True):
@@ -153,59 +153,94 @@ class FaceFusionRuntime:
             return
         source = cv2.imread(str(example_source), cv2.IMREAD_COLOR)
         capture = cv2.VideoCapture(str(example_target))
-        ok, target = capture.read()
-        capture.release()
-        if source is None or not ok or target is None:
-            return
-        self.validate_source_sync([source])
-        for profile in QUALITY_PROFILES.all():
-            self.process_sync([source], target, profile)
+        try:
+            ok, content_target = capture.read()
+            if source is None or not ok or content_target is None:
+                return
 
-    def validate_source_sync(self, source_frames: list[numpy.ndarray[Any, Any]]) -> dict[str, Any]:
+            from facefusion.content_analyser import analyse_frame
+
+            analyse_frame(content_target)
+            for profile in QUALITY_PROFILES.all():
+                ok, target = capture.read()
+                if not ok or target is None:
+                    break
+                _, source_face_sets = self.validate_source_sync([source], profile=profile)
+                self.process_sync([source], source_face_sets, target, profile)
+        finally:
+            capture.release()
+
+    def validate_source_sync(
+        self,
+        source_frames: list[numpy.ndarray[Any, Any]],
+        *,
+        profile: QualityProfile | None = None,
+    ) -> tuple[dict[str, Any], list[list[Any]]]:
+        from facefusion import face_store
         from facefusion.face_creator import get_static_faces
         from facefusion.face_selector import sort_faces_by_order
 
-        if not 1 <= len(source_frames) <= MAX_SOURCE_IMAGES:
-            raise GatewayError(f"Provide between 1 and {MAX_SOURCE_IMAGES} source images")
+        if profile:
+            self._apply_profile(profile)
+        face_store.clear_faces()
+        try:
+            if not 1 <= len(source_frames) <= MAX_SOURCE_IMAGES:
+                raise GatewayError(f"Provide between 1 and {MAX_SOURCE_IMAGES} source images")
 
-        primary_faces = []
-        source_details = []
-        for index, source_frame in enumerate(source_frames, start=1):
-            faces = sort_faces_by_order(get_static_faces([source_frame]), "large-small")
-            if not faces:
-                raise GatewayError(f"No face was detected in source image {index}")
-            primary_face = faces[0]
-            primary_faces.append(primary_face)
-            x1, y1, x2, y2 = [float(value) for value in primary_face.bounding_box]
-            frame_height, frame_width = source_frame.shape[:2]
-            face_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / float(frame_width * frame_height)
-            source_details.append(
+            primary_faces = []
+            source_face_sets = []
+            source_details = []
+            for index, source_frame in enumerate(source_frames, start=1):
+                faces = sort_faces_by_order(get_static_faces([source_frame]), "large-small")
+                if not faces:
+                    raise GatewayError(f"No face was detected in source image {index}")
+                source_face_sets.append(faces)
+                primary_face = faces[0]
+                primary_faces.append(primary_face)
+                x1, y1, x2, y2 = [float(value) for value in primary_face.bounding_box]
+                frame_height, frame_width = source_frame.shape[:2]
+                face_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / float(frame_width * frame_height)
+                source_details.append(
+                    {
+                        "index": index,
+                        "face_count": len(faces),
+                        "face_ratio": round(face_ratio, 4),
+                    }
+                )
+
+            consistency = 1.0
+            if len(primary_faces) > 1:
+                similarities = []
+                for left_index, left_face in enumerate(primary_faces):
+                    for right_face in primary_faces[left_index + 1 :]:
+                        similarities.append(float(numpy.dot(left_face.embedding_norm, right_face.embedding_norm)))
+                consistency = min(similarities)
+                if consistency < 0.15:
+                    raise GatewayError("Source images do not appear to show the same identity")
+
+            return (
                 {
-                    "index": index,
-                    "face_count": len(faces),
-                    "face_ratio": round(face_ratio, 4),
-                }
+                    "count": len(source_frames),
+                    "identity_consistency": round(consistency, 4),
+                    "sources": source_details,
+                },
+                source_face_sets,
             )
+        finally:
+            face_store.clear_faces()
 
-        consistency = 1.0
-        if len(primary_faces) > 1:
-            similarities = []
-            for left_index, left_face in enumerate(primary_faces):
-                for right_face in primary_faces[left_index + 1 :]:
-                    similarities.append(float(numpy.dot(left_face.embedding_norm, right_face.embedding_norm)))
-            consistency = min(similarities)
-            if consistency < 0.15:
-                raise GatewayError("Source images do not appear to show the same identity")
-
-        return {
-            "count": len(source_frames),
-            "identity_consistency": round(consistency, 4),
-            "sources": source_details,
-        }
-
-    async def validate_source(self, source_frames: list[numpy.ndarray[Any, Any]]) -> dict[str, Any]:
+    async def validate_source(
+        self,
+        source_frames: list[numpy.ndarray[Any, Any]],
+        *,
+        profile: QualityProfile | None = None,
+    ) -> tuple[dict[str, Any], list[list[Any]]]:
         async with self._inference_lock:
-            return await asyncio.to_thread(self.validate_source_sync, source_frames)
+            return await asyncio.to_thread(
+                self.validate_source_sync,
+                source_frames,
+                profile=profile,
+            )
 
     def _apply_profile(self, profile: QualityProfile) -> None:
         from facefusion import state_manager
@@ -213,6 +248,10 @@ class FaceFusionRuntime:
         state_manager.set_item("processors", list(profile.processors))
         state_manager.set_item("face_mask_types", list(profile.face_mask_types))
         state_manager.set_item("face_swapper_weight", profile.face_swapper_weight)
+        state_manager.set_item("face_swapper_pixel_boost", profile.face_swapper_pixel_boost)
+        state_manager.set_item("face_detector_model", profile.face_detector_model)
+        state_manager.set_item("face_detector_size", profile.face_detector_size)
+        state_manager.set_item("face_landmarker_model", profile.face_landmarker_model)
         if profile.face_enhancer_model:
             state_manager.set_item("face_enhancer_model", profile.face_enhancer_model)
             state_manager.set_item("face_enhancer_blend", profile.face_enhancer_blend)
@@ -221,34 +260,43 @@ class FaceFusionRuntime:
     def process_sync(
         self,
         source_frames: list[numpy.ndarray[Any, Any]],
+        source_face_sets: list[list[Any]],
         target_frame: numpy.ndarray[Any, Any],
         profile: QualityProfile,
     ) -> numpy.ndarray[Any, Any]:
+        from facefusion import face_store
         from facefusion.audio import create_empty_audio_frame
         from facefusion.vision import extract_vision_mask
 
         self._apply_profile(profile)
+        face_store.clear_faces()
+        for source_frame, source_faces in zip(source_frames, source_face_sets, strict=True):
+            face_store.set_faces(source_frame, source_faces)
         source_audio = create_empty_audio_frame()
         source_voice = create_empty_audio_frame()
         output = target_frame.copy()
         output_mask = extract_vision_mask(output)
-        for processor_name in profile.processors:
-            processor = self._processor_modules[processor_name]
-            output, output_mask = processor.process_frame(
-                {
-                    "source_vision_frames": source_frames,
-                    "source_audio_frame": source_audio,
-                    "source_voice_frame": source_voice,
-                    "target_vision_frames": [target_frame],
-                    "temp_vision_frame": output,
-                    "temp_vision_mask": output_mask,
-                }
-            )
-        return output
+        try:
+            for processor_name in profile.processors:
+                processor = self._processor_modules[processor_name]
+                output, output_mask = processor.process_frame(
+                    {
+                        "source_vision_frames": source_frames,
+                        "source_audio_frame": source_audio,
+                        "source_voice_frame": source_voice,
+                        "target_vision_frames": [target_frame],
+                        "temp_vision_frame": output,
+                        "temp_vision_mask": output_mask,
+                    }
+                )
+            return output
+        finally:
+            face_store.clear_faces()
 
     async def process(
         self,
         source_frames: list[numpy.ndarray[Any, Any]],
+        source_face_sets: list[list[Any]],
         target_frame: numpy.ndarray[Any, Any],
         *,
         profile: QualityProfile,
@@ -263,7 +311,13 @@ class FaceFusionRuntime:
 
                 if await asyncio.to_thread(analyse_frame, target_frame):
                     raise UnsafeContentError("Frame rejected by the content analyser")
-            output = await asyncio.to_thread(self.process_sync, source_frames, target_frame, profile)
+            output = await asyncio.to_thread(
+                self.process_sync,
+                source_frames,
+                source_face_sets,
+                target_frame,
+                profile,
+            )
         elapsed = time.perf_counter() - started
         self.total_frames += 1
         self.total_inference_seconds += elapsed
@@ -275,11 +329,18 @@ class FaceFusionRuntime:
             return 0.0
         return self.total_frames / self.total_inference_seconds
 
+    @property
+    def face_cache_entries(self) -> int:
+        from facefusion import face_store
+
+        return len(face_store.FACE_STORE)
+
 
 @dataclass(slots=True)
 class StreamSession:
     session_id: str
     source_frames: list[numpy.ndarray[Any, Any]]
+    source_face_sets: list[list[Any]]
     source_analysis: dict[str, Any]
     ticket_hash: str
     max_width: int
@@ -341,7 +402,7 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.2.0", lifespan=lifespan)
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -389,6 +450,7 @@ async def status() -> dict[str, Any]:
         "max_source_images": MAX_SOURCE_IMAGES,
         "warmup_ms": round(runtime.warmup_ms, 2),
         "runtime_average_fps": round(runtime.average_fps, 2),
+        "face_cache_entries": runtime.face_cache_entries,
         "active_sessions": sum(1 for session in sessions.values() if session.connected),
         "session_count": len(sessions),
         "max_sessions": MAX_SESSIONS,
@@ -427,14 +489,19 @@ async def swap_image(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     source_frames = await _decode_source_uploads(source)
+    effective_max_width = min(max_width, quality_profile.max_width)
     target_frame = _fit_frame(
         _decode_image(await target.read(MAX_IMAGE_BYTES + 1), label="target"),
-        max_width,
+        effective_max_width,
     )
     try:
-        source_analysis = await runtime.validate_source(source_frames)
+        source_analysis, source_face_sets = await runtime.validate_source(
+            source_frames,
+            profile=quality_profile,
+        )
         output, inference_ms = await runtime.process(
             source_frames,
+            source_face_sets,
             target_frame,
             profile=quality_profile,
             analyse_content=True,
@@ -452,6 +519,7 @@ async def swap_image(
             "X-Quality-Profile": quality_profile.profile_id,
             "X-Source-Count": str(source_analysis["count"]),
             "X-Source-Consistency": str(source_analysis["identity_consistency"]),
+            "X-Max-Width": str(effective_max_width),
             "X-Synthetic-Media": "true",
         },
     )
@@ -472,7 +540,10 @@ async def create_session(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     source_frames = await _decode_source_uploads(source)
     try:
-        source_analysis = await runtime.validate_source(source_frames)
+        source_analysis, source_face_sets = await runtime.validate_source(
+            source_frames,
+            profile=quality_profile,
+        )
     except GatewayError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with sessions_lock:
@@ -484,12 +555,14 @@ async def create_session(
             raise HTTPException(status_code=429, detail="The GPU pending session limit has been reached")
         session_id = uuid.uuid4().hex
         ticket = secrets.token_urlsafe(32)
+        effective_max_width = min(max_width, quality_profile.max_width)
         sessions[session_id] = StreamSession(
             session_id=session_id,
             source_frames=source_frames,
+            source_face_sets=source_face_sets,
             source_analysis=source_analysis,
             ticket_hash=hashlib.sha256(ticket.encode()).hexdigest(),
-            max_width=max_width,
+            max_width=effective_max_width,
             profile_id=quality_profile.profile_id,
         )
     return {
@@ -498,7 +571,7 @@ async def create_session(
         "websocket_path": f"/v1/realtime/{session_id}",
         "expires_in": SESSION_TTL_SECONDS,
         "model": runtime.model,
-        "max_width": max_width,
+        "max_width": effective_max_width,
         "profile": quality_profile.profile_id,
         "source_analysis": source_analysis,
     }
@@ -582,6 +655,7 @@ async def realtime_stream(websocket: WebSocket, session_id: str) -> None:
                 analyse_content = session.frame_count % 15 == 0
                 output, inference_ms = await runtime.process(
                     session.source_frames,
+                    session.source_face_sets,
                     target,
                     profile=QUALITY_PROFILES.get(session.profile_id),
                     analyse_content=analyse_content,

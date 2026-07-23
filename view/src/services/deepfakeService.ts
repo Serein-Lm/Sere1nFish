@@ -13,6 +13,7 @@ export interface DeepfakeStatus {
   max_source_images: number
   warmup_ms: number
   runtime_average_fps: number
+  face_cache_entries: number
   active_sessions: number
   session_count: number
   max_sessions: number
@@ -30,6 +31,11 @@ export interface DeepfakeQualityProfile {
   processors: string[]
   face_mask_types: string[]
   face_swapper_weight: number
+  face_swapper_pixel_boost: string
+  face_detector_model: string
+  face_detector_size: string
+  face_landmarker_model: string
+  max_width: number
   face_enhancer_model?: string | null
   face_enhancer_blend: number
 }
@@ -71,6 +77,7 @@ export interface DeepfakeImageResult {
   qualityProfile: string
   sourceCount: number
   sourceConsistency: number
+  maxWidth: number
 }
 
 async function multipartRequest(path: string, body: FormData): Promise<Response> {
@@ -121,13 +128,14 @@ export async function swapDeepfakeImage(
     qualityProfile: response.headers.get('x-quality-profile') || profile,
     sourceCount: Number(response.headers.get('x-source-count') || sources.length),
     sourceConsistency: Number(response.headers.get('x-source-consistency') || 1),
+    maxWidth: Number(response.headers.get('x-max-width') || maxWidth),
   }
 }
 
 export async function createDeepfakeSession(
   sources: File[],
   maxWidth: number,
-  profile = 'quality',
+  profile = 'fast',
 ): Promise<DeepfakeSession> {
   const body = new FormData()
   sources.forEach((source) => body.append('source', source))

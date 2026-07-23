@@ -11,6 +11,11 @@ class QualityProfile:
     processors: tuple[str, ...]
     face_mask_types: tuple[str, ...]
     face_swapper_weight: float
+    face_swapper_pixel_boost: str
+    face_detector_model: str
+    face_detector_size: str
+    face_landmarker_model: str
+    max_width: int
     face_enhancer_model: str | None = None
     face_enhancer_blend: int = 0
     face_enhancer_weight: float = 0.5
@@ -21,6 +26,11 @@ class QualityProfile:
             "processors": list(self.processors),
             "face_mask_types": list(self.face_mask_types),
             "face_swapper_weight": self.face_swapper_weight,
+            "face_swapper_pixel_boost": self.face_swapper_pixel_boost,
+            "face_detector_model": self.face_detector_model,
+            "face_detector_size": self.face_detector_size,
+            "face_landmarker_model": self.face_landmarker_model,
+            "max_width": self.max_width,
             "face_enhancer_model": self.face_enhancer_model,
             "face_enhancer_blend": self.face_enhancer_blend,
         }
@@ -53,21 +63,33 @@ QUALITY_PROFILES = QualityProfileRegistry(
             processors=("face_swapper",),
             face_mask_types=("box",),
             face_swapper_weight=0.65,
+            face_swapper_pixel_boost="256x256",
+            face_detector_model="scrfd",
+            face_detector_size="320x320",
+            face_landmarker_model="peppa_wutz",
+            max_width=640,
         ),
         QualityProfile(
             profile_id="balanced",
             processors=("face_swapper",),
             face_mask_types=("box", "occlusion"),
             face_swapper_weight=0.65,
+            face_swapper_pixel_boost="512x512",
+            face_detector_model="yolo_face",
+            face_detector_size="640x640",
+            face_landmarker_model="2dfan4",
+            max_width=960,
         ),
         QualityProfile(
             profile_id="quality",
-            processors=("face_swapper", "face_enhancer"),
+            processors=("face_swapper",),
             face_mask_types=("box", "occlusion"),
             face_swapper_weight=0.65,
-            face_enhancer_model="gfpgan_1.4",
-            face_enhancer_blend=60,
-            face_enhancer_weight=0.5,
+            face_swapper_pixel_boost="768x768",
+            face_detector_model="yolo_face",
+            face_detector_size="640x640",
+            face_landmarker_model="2dfan4",
+            max_width=1280,
         ),
     )
 )

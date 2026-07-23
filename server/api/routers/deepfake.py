@@ -93,6 +93,7 @@ async def swap_image(
                 "X-Quality-Profile": result.quality_profile,
                 "X-Source-Count": str(result.source_count),
                 "X-Source-Consistency": f"{result.source_consistency:.4f}",
+                "X-Max-Width": str(result.effective_max_width or max_width),
                 "X-Synthetic-Media": "true",
             },
         )
@@ -107,7 +108,7 @@ async def create_session(
     source: Annotated[list[UploadFile], File(...)],
     authorized_use: Annotated[bool, Form(...)],
     max_width: Annotated[int | None, Form()] = None,
-    profile: Annotated[str, Form()] = "quality",
+    profile: Annotated[str, Form()] = "fast",
     user: User = Depends(get_current_active_user),
 ):
     if not authorized_use:

@@ -33,6 +33,7 @@ class ImageSwapResult:
     quality_profile: str = ""
     source_count: int = 1
     source_consistency: float = 1.0
+    effective_max_width: int = 0
 
 
 class DeepfakeStream(Protocol):

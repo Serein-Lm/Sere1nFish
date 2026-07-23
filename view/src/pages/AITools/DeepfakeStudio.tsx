@@ -42,9 +42,17 @@ type QualityProfile = 'quality' | 'balanced' | 'fast'
 
 const PROFILE_OPTIONS = [
   { value: 'quality', label: '效果优先' },
-  { value: 'balanced', label: '稳定融合' },
-  { value: 'fast', label: '快速' },
+  { value: 'balanced', label: '均衡' },
+  { value: 'fast', label: '视频通话' },
 ] satisfies Array<{ value: QualityProfile; label: string }>
+
+const PROFILE_WIDTH_FALLBACK: Record<QualityProfile, number> = {
+  quality: 1280,
+  balanced: 960,
+  fast: 640,
+}
+
+const REALTIME_WIDTHS = [640, 960, 1280] as const
 
 function useFilePreview(file: File | null): string {
   const [url, setUrl] = useState('')
@@ -188,8 +196,8 @@ export default function DeepfakeStudio() {
   const [imageProfile, setImageProfile] = useState<QualityProfile>('quality')
   const [imageSourceCount, setImageSourceCount] = useState(0)
   const [imageSourceConsistency, setImageSourceConsistency] = useState(1)
-  const [realtimeWidth, setRealtimeWidth] = useState(960)
-  const [realtimeProfile, setRealtimeProfile] = useState<QualityProfile>('quality')
+  const [realtimeWidth, setRealtimeWidth] = useState(640)
+  const [realtimeProfile, setRealtimeProfile] = useState<QualityProfile>('fast')
   const [streamAspectRatio, setStreamAspectRatio] = useState(16 / 9)
   const [starting, setStarting] = useState(false)
   const [streaming, setStreaming] = useState(false)
@@ -206,7 +214,16 @@ export default function DeepfakeStudio() {
   const outputUrlRef = useRef('')
   const imageUrlRef = useRef('')
   const captureTimerRef = useRef<number | null>(null)
+  const effectiveRealtimeWidthRef = useRef(640)
+  const profileDefaultsAppliedRef = useRef(false)
   const maxSourceImages = status?.max_source_images || 4
+  const realtimeProfileMaxWidth = (
+    status?.profiles.find((profile) => profile.id === realtimeProfile)?.max_width
+    || PROFILE_WIDTH_FALLBACK[realtimeProfile]
+  )
+  const realtimeWidthOptions = REALTIME_WIDTHS
+    .filter((width) => width <= realtimeProfileMaxWidth)
+    .map((width) => ({ value: width, label: String(width) }))
 
   const addSourceFile = useCallback((file: File) => {
     setSourceFiles((current) => {
@@ -225,7 +242,25 @@ export default function DeepfakeStudio() {
   const loadStatus = useCallback(async () => {
     setStatusLoading(true)
     try {
-      setStatus(await getDeepfakeStatus())
+      const next = await getDeepfakeStatus()
+      setStatus(next)
+      if (!profileDefaultsAppliedRef.current) {
+        const imageDefault = PROFILE_OPTIONS.some((option) => option.value === next.default_image_profile)
+          ? next.default_image_profile as QualityProfile
+          : 'quality'
+        const realtimeDefault = PROFILE_OPTIONS.some((option) => option.value === next.default_realtime_profile)
+          ? next.default_realtime_profile as QualityProfile
+          : 'fast'
+        const realtimeDefaultWidth = (
+          next.profiles.find((profile) => profile.id === realtimeDefault)?.max_width
+          || PROFILE_WIDTH_FALLBACK[realtimeDefault]
+        )
+        setImageProfile(imageDefault)
+        setRealtimeProfile(realtimeDefault)
+        setRealtimeWidth(realtimeDefaultWidth)
+        effectiveRealtimeWidthRef.current = realtimeDefaultWidth
+        profileDefaultsAppliedRef.current = true
+      }
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : 'GPU 状态读取失败')
     } finally {
@@ -249,7 +284,7 @@ export default function DeepfakeStudio() {
     const video = videoRef.current
     const canvas = canvasRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN || !video || !canvas || video.videoWidth === 0) return
-    const width = Math.min(realtimeWidth, video.videoWidth)
+    const width = Math.min(effectiveRealtimeWidthRef.current, video.videoWidth)
     const height = Math.max(64, Math.round(video.videoHeight * (width / video.videoWidth)))
     canvas.width = width
     canvas.height = height
@@ -260,7 +295,7 @@ export default function DeepfakeStudio() {
       if (!blob || socket.readyState !== WebSocket.OPEN) return
       socket.send(await blob.arrayBuffer())
     }, 'image/jpeg', 0.92)
-  }, [realtimeWidth])
+  }, [])
 
   const stopRealtime = useCallback(async () => {
     if (captureTimerRef.current !== null) {
@@ -360,6 +395,8 @@ export default function DeepfakeStudio() {
         setStreamAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight)
       }
       const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile)
+      effectiveRealtimeWidthRef.current = session.max_width
+      if (session.max_width !== realtimeWidth) setRealtimeWidth(session.max_width)
       sessionIdRef.current = session.session_id
       const socket = openDeepfakeSocket(session.stream_path)
       socket.binaryType = 'blob'
@@ -482,19 +519,27 @@ export default function DeepfakeStudio() {
               <Segmented<QualityProfile>
                 value={realtimeProfile}
                 disabled={streaming || starting}
-                onChange={setRealtimeProfile}
+                onChange={(value) => {
+                  const maxWidth = (
+                    status?.profiles.find((profile) => profile.id === value)?.max_width
+                    || PROFILE_WIDTH_FALLBACK[value]
+                  )
+                  setRealtimeProfile(value)
+                  setRealtimeWidth(maxWidth)
+                  effectiveRealtimeWidthRef.current = maxWidth
+                }}
                 options={PROFILE_OPTIONS}
               />
               <Text strong>传输宽度</Text>
               <Segmented
                 value={realtimeWidth}
                 disabled={streaming || starting}
-                onChange={(value) => setRealtimeWidth(Number(value))}
-                options={[
-                  { value: 640, label: '640' },
-                  { value: 960, label: '960' },
-                  { value: 1280, label: '1280' },
-                ]}
+                onChange={(value) => {
+                  const width = Number(value)
+                  setRealtimeWidth(width)
+                  effectiveRealtimeWidthRef.current = width
+                }}
+                options={realtimeWidthOptions}
               />
               <Checkbox checked={authorized} onChange={(event) => setAuthorized(event.target.checked)}>
                 我确认已获得人脸素材授权

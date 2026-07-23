@@ -72,9 +72,14 @@ def test_parse_config_requires_https_and_secret() -> None:
 
 def test_quality_profile_registry_keeps_effects_behind_named_policies() -> None:
     assert [profile.profile_id for profile in QUALITY_PROFILES.all()] == ["fast", "balanced", "quality"]
-    assert QUALITY_PROFILES.get("quality").processors == ("face_swapper", "face_enhancer")
+    assert QUALITY_PROFILES.get("fast").face_swapper_pixel_boost == "256x256"
+    assert QUALITY_PROFILES.get("fast").face_landmarker_model == "peppa_wutz"
+    assert QUALITY_PROFILES.get("fast").max_width == 640
+    assert QUALITY_PROFILES.get("quality").processors == ("face_swapper",)
     assert QUALITY_PROFILES.get("quality").face_mask_types == ("box", "occlusion")
     assert QUALITY_PROFILES.get("quality").face_swapper_weight == 0.65
+    assert QUALITY_PROFILES.get("quality").face_swapper_pixel_boost == "768x768"
+    assert QUALITY_PROFILES.get("quality").max_width == 1280
     with pytest.raises(ValueError, match="Unknown quality profile"):
         QUALITY_PROFILES.get("unregistered")
 
