@@ -12,7 +12,9 @@ Security requirements:
   TLS verification to false in the Sere1nFish provider.
 - Mount a random API token and TLS private key from root-only files. Do not put
   either value in Compose, Git, logs, or frontend code.
-- `simswap_unofficial_512` is configured for authorized non-commercial use.
+- `hyperswap_1a_256` with `512x512` pixel boost is configured for authorized
+  research use. Pixel boost runs four 256x256 inference tiles per detected face,
+  so measure realtime FPS after model changes.
 
 API surface:
 
