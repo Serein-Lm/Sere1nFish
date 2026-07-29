@@ -53,6 +53,8 @@ CORE_PROMPT_SLUGS = {
     "douyin_profile/douyin_profile",
     "douyin_profile/douyin_tagging",
     "profile_copywriting/profile_copywriting",
+    "persona_collect/persona_collect",
+    "persona_research/persona_research",
     "hub/classify",
     "hub/content",
     "hub/data",

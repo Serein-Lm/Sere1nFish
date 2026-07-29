@@ -49,7 +49,13 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
             tool
             for tool in READ_TOOLS
             if _name(tool)
-            in {"list_contact_profiles", "get_contact_profile", "list_mobile_operations"}
+            in {
+                "list_mobile_devices",
+                "get_mobile_device_status",
+                "list_contact_profiles",
+                "get_contact_profile",
+                "list_mobile_operations",
+            }
         ],
     )
     content_context_names = {

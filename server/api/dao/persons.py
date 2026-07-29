@@ -10,7 +10,7 @@
 
 文档结构:
 {
-  person_id, project_ids: [...],
+  person_id, project_ids: [...], is_fictional, generation_brief, generation_key,
   name, gender, aliases: [...],
   company, company_root_domain, company_meta_id, industry,
   position, position_level, department, work_years,
@@ -18,6 +18,7 @@
   location, contact: {phone, email, wechat, other_social: [...]},
   background, personality, summary,
   interests: [...], tags: [...], risk_signals: [...],
+  source_urls: [...], evidence: [...],
   sources: [{source, ref_id, finding_id, collected_at}],
   confidence, created_at, updated_at
 }
@@ -36,10 +37,18 @@ from api.db.collections import PERSONS_COLLECTION
 _SCALAR_FIELDS = (
     "name", "gender", "company", "company_root_domain", "company_meta_id",
     "industry", "position", "position_level", "department", "work_years",
-    "location", "background", "personality", "summary", "confidence",
+    "location", "background", "personality", "summary", "confidence", "age", "age_range",
+    "is_fictional", "generation_brief", "generation_key",
 )
 # 列表字段：取并集
-_LIST_FIELDS = ("interests", "tags", "risk_signals", "aliases")
+_LIST_FIELDS = (
+    "interests",
+    "tags",
+    "risk_signals",
+    "aliases",
+    "source_urls",
+    "evidence",
+)
 # 嵌套对象字段：子字段非空才覆盖
 _NESTED_FIELDS = ("education", "contact")
 
@@ -51,6 +60,12 @@ def _now() -> datetime:
 def person_id(name: str, company: str = "") -> str:
     """一个 (姓名, 公司) 对应确定的全局 person_id（人设库不绑定项目）。"""
     raw = f"person:{name.strip()}:{company.strip()}".encode("utf-8")
+    return "ps_" + hashlib.sha1(raw).hexdigest()[:20]
+
+
+def fictional_person_id(generation_key: str) -> str:
+    """Map one normalized background brief to a stable synthetic person id."""
+    raw = f"fictional-person:{generation_key.strip()}".encode("utf-8")
     return "ps_" + hashlib.sha1(raw).hexdigest()[:20]
 
 
@@ -66,6 +81,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await coll.create_index("company_root_domain")
     await coll.create_index("company_meta_id")
     await coll.create_index("tags")
+    await coll.create_index("age")
+    await coll.create_index("is_fictional")
+    await coll.create_index("generation_key", unique=True, sparse=True)
     await coll.create_index("updated_at")
 
 
@@ -110,7 +128,41 @@ def _merge_set_fields(
             if base:
                 set_fields[field] = base
 
+    # A fictional profile must never retain contact details from an earlier
+    # manual edit or a legacy collection run.
+    if patch.get("is_fictional") is True:
+        set_fields["contact"] = {
+            "phone": "",
+            "email": "",
+            "wechat": "",
+            "other_social": [],
+        }
+        set_fields["company_root_domain"] = ""
+
     return set_fields, list_add
+
+
+def _normalize_profile_sources(profile: dict[str, Any]) -> dict[str, Any]:
+    """Separate model evidence sources from collection provenance records.
+
+    ``PersonaProfile.sources`` is a list of public websites/platforms, while
+    ``persons.sources`` stores structured ingestion provenance.  Keeping them
+    under the same field silently discarded the model evidence during upsert.
+    """
+    normalized = dict(profile or {})
+    raw_sources = normalized.pop("sources", None)
+    if isinstance(raw_sources, list):
+        source_urls = [
+            value.strip()
+            for value in raw_sources
+            if isinstance(value, str) and value.strip()
+        ]
+        if source_urls:
+            normalized["source_urls"] = [
+                *list(normalized.get("source_urls") or []),
+                *source_urls,
+            ]
+    return normalized
 
 
 async def upsert_person(
@@ -136,11 +188,17 @@ async def upsert_person(
     Returns:
         归并后的最新 person 文档。
     """
+    profile = _normalize_profile_sources(profile)
     name = str(profile.get("name") or "").strip()
     if not name:
         raise ValueError("人设档案缺少 name，无法入库")
     company = str(profile.get("company") or "").strip()
-    pid = person_id(name, company)
+    generation_key = str(profile.get("generation_key") or "").strip()
+    pid = (
+        fictional_person_id(generation_key)
+        if profile.get("is_fictional") and generation_key
+        else person_id(name, company)
+    )
 
     existing = await get_person(db, pid)
     set_fields, list_add = _merge_set_fields(existing, profile)
@@ -185,6 +243,9 @@ async def search_persons(
     company: str = "",
     industry: str = "",
     position: str = "",
+    personality: str = "",
+    age_min: int | None = None,
+    age_max: int | None = None,
     tags: list[str] | None = None,
     min_confidence: float = 0.0,
     sort: str = "confidence_desc",
@@ -204,6 +265,15 @@ async def search_persons(
         query["industry"] = {"$regex": industry, "$options": "i"}
     if position:
         query["position"] = {"$regex": position, "$options": "i"}
+    if personality:
+        query["personality"] = {"$regex": personality, "$options": "i"}
+    if age_min is not None or age_max is not None:
+        age_query: dict[str, int] = {}
+        if age_min is not None:
+            age_query["$gte"] = max(18, int(age_min))
+        if age_max is not None:
+            age_query["$lte"] = min(75, int(age_max))
+        query["age"] = age_query
     if tags:
         query["tags"] = {"$all": tags}
     if min_confidence > 0:
@@ -212,7 +282,8 @@ async def search_persons(
         rx = {"$regex": keyword, "$options": "i"}
         query["$or"] = [
             {"name": rx}, {"company": rx}, {"position": rx},
-            {"background": rx}, {"summary": rx}, {"tags": rx}, {"aliases": rx},
+            {"background": rx}, {"personality": rx}, {"summary": rx},
+            {"generation_brief": rx}, {"tags": rx}, {"aliases": rx},
         ]
 
     sort_map = {

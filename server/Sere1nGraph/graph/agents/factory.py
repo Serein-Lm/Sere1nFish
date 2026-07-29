@@ -362,11 +362,14 @@ async def create_hub_specialist_agent(
     让单个子 Agent 的上下文保持有界，避免单一「大而全」Agent 上下文爆炸。
     工具的调用与顺序由子 Agent 自主决定（ReAct，无固定编排）。
     """
+    from .runtime import RequireEvidenceToolMiddleware
+
     return create_agent_node(
         app_config=app_config,
         system_prompt=system_prompt,
         builtin_tools=tools,
         middleware=[
+            RequireEvidenceToolMiddleware(),
             SummarizationMiddleware(
                 model=create_llm(app_config),
                 trigger=("tokens", summary_trigger_tokens),
@@ -478,22 +481,21 @@ async def create_profile_copywriting_agent(
     )
 
 
-async def create_persona_collect_agent(
+async def create_persona_research_agent(
     app_config: AppConfig,
     server_name: str = "chrome-devtools",
     output_mode: OutputMode = "silent",
 ) -> Callable:
     """
-    创建人设收集 Agent。
+    创建虚构人设背景研究 Agent。
 
-    能力：AI 浏览器搜索公开渠道收集真实人物信息（公司/职位/教育/背景等），
-    输出结构化人物档案（由 PersonaProfile 约束）。
-    复用 create_agent_node + chrome-devtools MCP，并携带 tianyancha_get_domain 补全公司域名。
+    浏览器只研究行业、岗位与生活阶段的通用背景，不采集真实自然人身份；
+    输出 PersonaGenerationPlan，后续由文本模型生成虚构 PersonaProfile。
     """
     return create_agent_node(
         app_config=app_config,
-        system_prompt=load_prompt("persona_collect/persona_collect"),
-        builtin_tools=[tianyancha_get_domain],
+        system_prompt=load_prompt("persona_research/persona_research"),
+        builtin_tools=[],
         middleware=[
             SummarizationMiddleware(
                 model=create_llm(app_config),
@@ -502,5 +504,21 @@ async def create_persona_collect_agent(
             ),
         ],
         mcp_server_name=server_name,
+        output_mode=output_mode,
+        timeout=300,
+        mcp_tool_limit=16,
+        max_attempts=1,
+    )
+
+
+async def create_persona_collect_agent(
+    app_config: AppConfig,
+    server_name: str = "chrome-devtools",
+    output_mode: OutputMode = "silent",
+) -> Callable:
+    """Backward-compatible alias for the background research Agent."""
+    return await create_persona_research_agent(
+        app_config,
+        server_name=server_name,
         output_mode=output_mode,
     )

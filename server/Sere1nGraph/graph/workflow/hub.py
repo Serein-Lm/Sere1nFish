@@ -25,7 +25,7 @@ from langgraph.types import Send
 from pydantic import BaseModel, Field
 
 from ..agents.factory import create_hub_specialist_agent
-from ..agents.runtime import create_llm
+from ..agents.runtime import REQUIRE_EVIDENCE_TOOL_MARKER, create_llm
 from ..prompts.loader import load_prompt
 
 HubTarget = Literal["data", "persona", "content", "payload"]
@@ -43,6 +43,7 @@ class AgentOutput(TypedDict):
 class Classification(TypedDict):
     source: HubTarget
     query: str
+    requires_tools: bool
 
 
 class HubState(TypedDict):
@@ -58,12 +59,35 @@ class ClassificationResult(BaseModel):
     )
 
 
-def _compose_specialist_query(original_query: str, focused_query: str) -> str:
+def _compose_specialist_query(
+    original_query: str,
+    focused_query: str,
+    *,
+    requires_tools: bool = False,
+) -> str:
     """保留用户的 URL、ID 和引用，同时附加分类器的领域聚焦。"""
     focused = focused_query.strip() or original_query
+    tool_requirement = f"\n\n{REQUIRE_EVIDENCE_TOOL_MARKER}" if requires_tools else ""
     return (
-        f"【用户原始请求】\n{original_query}\n\n"
-        f"【分类器聚焦任务】\n{focused}"
+        f"【用户原始请求（只用于保留上下文、URL、ID 和引用）】\n{original_query}\n\n"
+        f"【你唯一要执行的聚焦任务】\n{focused}\n\n"
+        "只回答聚焦任务；不要代替其他专家回答原始请求中的其他部分。"
+        f"{tool_requirement}"
+    )
+
+
+def _build_synthesis_prompt(query: str, response_style: str) -> str:
+    """Build an evidence-closed prompt for combining specialist outputs."""
+    return (
+        f"根据以下多个专家的结果，回答用户原始问题：{query}\n"
+        "- 专家结果是本轮唯一事实来源；不得添加结果中没有出现的实体、数量、ID、状态、时间或建议依据\n"
+        "- 某项结果为空、未找到或为 0 时必须原样表达，不得补造示例、历史值或离线记录\n"
+        "- 专家结果互相冲突时明确指出冲突，不自行选择或补全\n"
+        "- 合并关键信息，去重、保持条理\n"
+        "- 完整保留结果中的 [[ref:...]] 跳转标记，不要改写或删除\n"
+        "- 完整保留结果中的 [[artifact:...]] 产物标记和下载链接\n"
+        "- 用简洁中文给出结论\n\n"
+        f"{response_style}"
     )
 
 
@@ -117,7 +141,7 @@ async def build_hub_graph(app_config: Any):
             )
 
         classifications = result.classifications or [
-            {"source": "data", "query": state["query"]}
+            {"source": "data", "query": state["query"], "requires_tools": False}
         ]
 
         await emit_event({
@@ -134,6 +158,7 @@ async def build_hub_graph(app_config: Any):
             specialist_query = _compose_specialist_query(
                 original_query,
                 str(classification.get("query") or ""),
+                requires_tools=bool(classification.get("requires_tools")),
             )
             requests.append(
                 Send(classification["source"], {"query": specialist_query})
@@ -227,13 +252,9 @@ async def build_hub_graph(app_config: Any):
                 [
                     {
                         "role": "system",
-                        "content": (
-                            f"根据以下多个专家的结果，回答用户原始问题：{state['query']}\n"
-                            "- 合并关键信息，去重、保持条理\n"
-                            "- 完整保留结果中的 [[ref:...]] 跳转标记，不要改写或删除\n"
-                            "- 完整保留结果中的 [[artifact:...]] 产物标记和下载链接\n"
-                            "- 用简洁中文给出结论与建议\n\n"
-                            f"{response_style}"
+                        "content": _build_synthesis_prompt(
+                            state["query"],
+                            response_style,
                         ),
                     },
                     {"role": "user", "content": "\n\n".join(formatted)},

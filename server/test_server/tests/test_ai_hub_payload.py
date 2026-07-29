@@ -46,6 +46,13 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
     assert "query_target_intelligence" in data["tools"]
     assert "get_project_data_catalog" in data["tools"]
     assert "read_project_dataset" in data["tools"]
+    assert "list_mobile_devices" in data["tools"]
+    assert "get_mobile_device_status" in data["tools"]
+    persona = next(item for item in catalog["agents"] if item["name"] == "persona")
+    assert "search_personas" in persona["tools"]
+    assert "get_persona" in persona["tools"]
+    assert "list_mobile_devices" in persona["tools"]
+    assert "get_mobile_device_status" in persona["tools"]
     assert catalog["audit"]["project_dataset_interfaces"] == len(
         catalog["project_datasets"]
     )
@@ -54,6 +61,411 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
         item for item in catalog["project_datasets"] if item["source"] == "bidding_records"
     )
     assert bidding["filters"] == ["offset", "target_id"]
+
+
+def test_persona_profile_sources_are_kept_as_public_evidence() -> None:
+    from api.dao.persons import _normalize_profile_sources
+
+    normalized = _normalize_profile_sources(
+        {
+            "name": "测试人物",
+            "sources": ["https://example.com/profile", "权威媒体访谈"],
+            "source_urls": ["https://company.example/about"],
+            "evidence": ["公开页面明确列出该职位"],
+        }
+    )
+
+    assert "sources" not in normalized
+    assert normalized["source_urls"] == [
+        "https://company.example/about",
+        "https://example.com/profile",
+        "权威媒体访谈",
+    ]
+    assert normalized["evidence"] == ["公开页面明确列出该职位"]
+
+
+@pytest.mark.asyncio
+async def test_mobile_status_service_enriches_and_filters_devices(monkeypatch) -> None:
+    from api.dao import device_metadata
+    from api.services.mobile_status import list_mobile_device_statuses
+    from core.mobile.pool import DevicePool
+
+    class FakePool:
+        def list_pool(self):
+            return [
+                {
+                    "device_id": "10.144.144.2:5555",
+                    "device_key": "serial-1",
+                    "model": "V2353A",
+                    "status": "device",
+                    "online": True,
+                    "connection_type": "wifi",
+                    "network_ip": "10.144.144.2",
+                    "reserved": False,
+                },
+                {
+                    "device_id": "serial-2",
+                    "device_key": "serial-2",
+                    "model": "LE2110",
+                    "status": "disconnected",
+                    "online": False,
+                    "connection_type": "wifi",
+                    "reserved": True,
+                },
+            ]
+
+    async def fake_metadata(_db, keys):
+        assert set(keys) == {"serial-1", "serial-2"}
+        return {
+            "serial-1": {
+                "display_name": "测试手机",
+                "note": "主设备",
+                "tags": ["微信"],
+                "group_id": "group-1",
+            }
+        }
+
+    monkeypatch.setattr(DevicePool, "get_instance", staticmethod(lambda: FakePool()))
+    monkeypatch.setattr(device_metadata, "get_metadata_map", fake_metadata)
+
+    all_items = await list_mobile_device_statuses(object())
+    grouped = await list_mobile_device_statuses(object(), group_id="group-1")
+    ungrouped = await list_mobile_device_statuses(object(), group_id="ungrouped")
+
+    assert len(all_items) == 2
+    assert all_items[0]["meta"]["display_name"] == "测试手机"
+    assert grouped == [all_items[0]]
+    assert ungrouped == [all_items[1]]
+
+
+def test_mobile_status_tools_return_live_pool_summary(monkeypatch) -> None:
+    from api.db import mongodb
+    from api.services import mobile_status
+    from Sere1nGraph.graph.tools.read_tools import (
+        get_mobile_device_status,
+        list_mobile_devices,
+    )
+
+    devices = [
+        {
+            "device_id": "10.144.144.2:5555",
+            "device_key": "serial-1",
+            "model": "V2353A",
+            "status": "device",
+            "online": True,
+            "connection_type": "wifi",
+            "network_ip": "10.144.144.2",
+            "reserved": False,
+            "meta": {"display_name": "业务手机", "tags": ["微信"], "note": ""},
+        }
+    ]
+
+    async def fake_list(_db, **_kwargs):
+        return devices
+
+    async def fake_get(_db, identifier, *, probe_health=False):
+        assert identifier == "serial-1"
+        assert probe_health is True
+        return {
+            **devices[0],
+            "health": {
+                "screenshot_ready": True,
+                "input_ready": True,
+                "current_app_ready": True,
+                "error": None,
+            },
+        }
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(mobile_status, "list_mobile_device_statuses", fake_list)
+    monkeypatch.setattr(mobile_status, "get_mobile_device_status", fake_get)
+
+    summary = list_mobile_devices.invoke({"online_only": False})
+    detail = get_mobile_device_status.invoke(
+        {"device_id": "serial-1", "probe_health": True}
+    )
+
+    assert "在线 1 台" in summary
+    assert "业务手机" in summary
+    assert "10.144.144.2" in summary
+    assert "截图就绪" in detail
+
+
+def test_fictional_persona_enforces_dimensions_and_contact_privacy() -> None:
+    from api.services.persona_collect import _enforce_fictional_profile
+    from Sere1nGraph.graph.skills.schemas import PersonaArchetype
+
+    archetype = PersonaArchetype(
+        fictional_name="林知远",
+        industry="制造业",
+        age_range="30-39",
+        role="信息化项目经理",
+        position_level="中层",
+        region="华东二线城市",
+        personality_traits=["谨慎", "重流程"],
+        source_urls=["https://example.com/role"],
+        context_evidence=["岗位通常需要跨部门协调"],
+    )
+    profile = _enforce_fictional_profile(
+        {
+            "name": "林知远",
+            "summary": "负责供应链系统升级",
+            "contact": {"phone": "13800000000", "email": "real@example.com"},
+            "company_root_domain": "real.example",
+        },
+        brief="制造业数字化背景",
+        index=0,
+        archetype=archetype,
+        dimension_slot={
+            "industry": "制造业",
+            "age_range": "40-49",
+            "personality": "规则导向、风险敏感",
+        },
+        generation_key="stable-key",
+        global_sources=["https://example.com/industry"],
+        company="",
+        position="",
+    )
+
+    assert profile["is_fictional"] is True
+    assert profile["industry"] == "制造业"
+    assert profile["age_range"] == "40-49"
+    assert 40 <= profile["age"] <= 49
+    assert profile["generation_key"] == "stable-key"
+    assert profile["personality"].startswith("规则导向、风险敏感")
+    assert profile["position"] == "信息化项目经理"
+    assert profile["contact"] == {
+        "phone": "",
+        "email": "",
+        "wechat": "",
+        "other_social": [],
+    }
+    assert profile["company_root_domain"] == ""
+    assert profile["sources"] == [
+        "https://example.com/industry",
+        "https://example.com/role",
+    ]
+    assert profile["evidence"] == ["岗位通常需要跨部门协调"]
+    assert profile["summary"].startswith("【虚构人设】")
+
+
+def test_persona_dimension_matrix_is_deterministic_and_balanced() -> None:
+    from api.services.persona_collect import _dimension_matrix
+
+    matrix = _dimension_matrix(
+        12,
+        ["制造业", "金融", "医疗", "教育"],
+        ["22-29", "30-39", "40-49"],
+        ["谨慎", "外向", "稳定"],
+    )
+
+    assert matrix == _dimension_matrix(
+        12,
+        ["制造业", "金融", "医疗", "教育"],
+        ["22-29", "30-39", "40-49"],
+        ["谨慎", "外向", "稳定"],
+    )
+    assert {item["industry"] for item in matrix} == {"制造业", "金融", "医疗", "教育"}
+    assert {item["age_range"] for item in matrix} == {"22-29", "30-39", "40-49"}
+    assert {item["personality"] for item in matrix} == {"谨慎", "外向", "稳定"}
+
+
+def test_persona_work_years_normalization_rejects_structural_noise() -> None:
+    from api.services.persona_collect import _normalize_work_years
+
+    assert _normalize_work_years("12") == "12年"
+    assert _normalize_work_years(", 3") == "3年"
+    assert _normalize_work_years("32年") == "32年"
+    assert _normalize_work_years(',n "education": {}') == ""
+    assert _normalize_work_years("2015") == ""
+
+
+def test_fictional_persona_merge_clears_legacy_contact() -> None:
+    from api.dao.persons import _merge_set_fields
+
+    set_fields, _ = _merge_set_fields(
+        {
+            "contact": {
+                "phone": "13800000000",
+                "email": "legacy@example.com",
+                "wechat": "legacy",
+                "other_social": ["legacy"],
+            },
+            "company_root_domain": "legacy.example",
+        },
+        {"is_fictional": True, "contact": {}},
+    )
+
+    assert set_fields["contact"] == {
+        "phone": "",
+        "email": "",
+        "wechat": "",
+        "other_social": [],
+    }
+    assert set_fields["company_root_domain"] == ""
+
+
+@pytest.mark.asyncio
+async def test_persona_research_is_wrapped_in_token_observation(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    from api.services.persona_collect import _research_archetypes
+    from api.services.info_collection import url_tools
+    from browser_manager import provider as browser_provider
+    from core import observability
+    from Sere1nGraph.graph.agents import factory, runtime
+
+    observed: list[dict] = []
+
+    @contextmanager
+    def fake_context(**kwargs):
+        observed.append(kwargs)
+        yield
+
+    class FakeProvider:
+        released = False
+
+        async def get_cdp_endpoint(self, **_kwargs):
+            return "http://chrome.test:9222"
+
+        async def release_cdp_endpoint(self, _task_id):
+            self.released = True
+
+    async def fake_create_agent(_config):
+        async def run(_payload):
+            return {"messages": []}
+
+        return run
+
+    async def fake_extract(*_args, **_kwargs):
+        return {
+            "research_summary": "通用岗位研究",
+            "source_urls": ["https://example.com/report"],
+            "archetypes": [
+                {
+                    "fictional_name": "周谨言",
+                    "industry": "金融服务",
+                    "age_range": "40-49",
+                    "role": "合规经理",
+                    "personality_traits": ["规则导向"],
+                }
+            ],
+        }
+
+    provider = FakeProvider()
+    monkeypatch.setattr(observability, "observation_context", fake_context)
+    monkeypatch.setattr(browser_provider, "get_browser_provider", lambda: provider)
+    monkeypatch.setattr(url_tools, "_build_worker_chrome_config", lambda *_args: object())
+    monkeypatch.setattr(factory, "create_persona_research_agent", fake_create_agent)
+    monkeypatch.setattr(runtime, "extract_with_retry", fake_extract)
+
+    plan = await _research_archetypes(
+        object(),
+        request_text="研究一个金融岗位原型",
+        count=1,
+        project_id="project-1",
+        task_id="persona-task-1",
+    )
+
+    assert len(plan.archetypes) == 1
+    assert provider.released is True
+    assert observed == [
+        {
+            "project_id": "project-1",
+            "task_id": "persona-task-1",
+            "phase": "persona_research",
+            "agent": "persona_research",
+            "task_type": "persona_research",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persona_batch_generation_tracks_tokens_and_persists(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    from api.dao import persons as persons_dao
+    from api.services import persona_collect
+    from core import observability
+    from Sere1nGraph.graph.agents import runtime
+    from Sere1nGraph.graph.skills.schemas import (
+        PersonaArchetype,
+        PersonaGenerationPlan,
+        PersonaProfile,
+    )
+
+    observed: list[dict] = []
+    generated_names = iter(["林知远", "周明澜"])
+
+    @contextmanager
+    def fake_context(**kwargs):
+        observed.append(kwargs)
+        yield
+
+    async def fake_research(*_args, **_kwargs):
+        return PersonaGenerationPlan(
+            research_summary="多行业背景",
+            source_urls=["https://example.com/report"],
+            archetypes=[
+                PersonaArchetype(
+                    fictional_name="林知远",
+                    industry="制造业",
+                    age_range="30-39",
+                    role="信息化项目经理",
+                    personality_traits=["谨慎"],
+                ),
+                PersonaArchetype(
+                    fictional_name="周明澜",
+                    industry="医疗健康",
+                    age_range="40-49",
+                    role="运营主管",
+                    personality_traits=["共情"],
+                ),
+            ],
+        )
+
+    class FakeStructuredLlm:
+        async def ainvoke(self, _messages):
+            return PersonaProfile(
+                name=next(generated_names),
+                age=35,
+                background="虚构职业背景",
+                summary="完整的背景角色",
+                confidence=0.9,
+            )
+
+    class FakeLlm:
+        def with_structured_output(self, _schema):
+            return FakeStructuredLlm()
+
+    async def fake_upsert(_db, *, profile, **_kwargs):
+        return {**profile, "person_id": f"person-{profile['generation_key']}"}
+
+    monkeypatch.setattr(persona_collect, "_research_archetypes", fake_research)
+    monkeypatch.setattr(runtime, "create_llm", lambda *_args, **_kwargs: FakeLlm())
+    monkeypatch.setattr(persons_dao, "upsert_person", fake_upsert)
+    monkeypatch.setattr(observability, "observation_context", fake_context)
+    monkeypatch.setattr(observability, "obs_log", lambda *_args, **_kwargs: None)
+
+    result = await persona_collect.generate_personas(
+        object(),
+        object(),
+        background="覆盖制造业与医疗运营岗位",
+        count=2,
+        industries=["制造业", "医疗健康"],
+        age_ranges=["30-39", "40-49"],
+        personalities=["谨慎", "共情"],
+        task_id="persona-task-2",
+    )
+
+    assert result["generated"] == 2
+    assert {item["industry"] for item in result["items"]} == {"制造业", "医疗健康"}
+    assert all(item["is_fictional"] for item in result["items"])
+    assert [item["contact"]["phone"] for item in result["items"]] == ["", ""]
+    assert len({item["generation_key"] for item in result["items"]}) == 2
+    generation_contexts = [item for item in observed if item["phase"] == "persona_generate"]
+    assert len(generation_contexts) == 2
+    assert all(item["task_id"] == "persona-task-2" for item in generation_contexts)
 
 
 def test_project_dataset_registry_covers_project_detail_data_surfaces() -> None:
@@ -1332,12 +1744,73 @@ async def test_agent_stream_separates_trace_from_final_result() -> None:
 
 
 def test_hub_specialist_query_preserves_original_parameters() -> None:
+    from Sere1nGraph.graph.agents.runtime import REQUIRE_EVIDENCE_TOOL_MARKER
     from Sere1nGraph.graph.workflow.hub import _compose_specialist_query
 
     original = "读取 https://example.test/report 并引用 artifact_id=art_123"
-    result = _compose_specialist_query(original, "核验报告并生成 Word")
+    result = _compose_specialist_query(
+        original,
+        "核验报告并生成 Word",
+        requires_tools=True,
+    )
     assert original in result
     assert "核验报告并生成 Word" in result
+    assert "唯一要执行的聚焦任务" in result
+    assert "不要代替其他专家" in result
+    assert REQUIRE_EVIDENCE_TOOL_MARKER in result
+
+
+@pytest.mark.asyncio
+async def test_hub_evidence_middleware_forces_first_tool_call() -> None:
+    from langchain.agents.middleware import ModelRequest, ModelResponse
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from Sere1nGraph.graph.agents.runtime import (
+        REQUIRE_EVIDENCE_TOOL_MARKER,
+        RequireEvidenceToolMiddleware,
+    )
+
+    seen_choices: list[object] = []
+
+    async def handler(request):
+        seen_choices.append(request.tool_choice)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    middleware = RequireEvidenceToolMiddleware()
+    base = {
+        "model": object(),
+        "tools": [{"type": "function", "function": {"name": "query"}}],
+    }
+    await middleware.awrap_model_call(
+        ModelRequest(
+            **base,
+            messages=[HumanMessage(content=REQUIRE_EVIDENCE_TOOL_MARKER)],
+        ),
+        handler,
+    )
+    await middleware.awrap_model_call(
+        ModelRequest(
+            **base,
+            messages=[
+                HumanMessage(content=REQUIRE_EVIDENCE_TOOL_MARKER),
+                ToolMessage(content="0 条", tool_call_id="call-1"),
+            ],
+        ),
+        handler,
+    )
+
+    assert seen_choices == ["required", None]
+
+
+def test_hub_synthesis_prompt_is_evidence_closed() -> None:
+    from Sere1nGraph.graph.workflow.hub import _build_synthesis_prompt
+
+    prompt = _build_synthesis_prompt("查询实时手机状态", "保持简洁")
+
+    assert "唯一事实来源" in prompt
+    assert "为空、未找到或为 0" in prompt
+    assert "不得补造示例、历史值或离线记录" in prompt
+    assert "互相冲突时明确指出冲突" in prompt
 
 
 def test_dingtalk_stream_requires_complete_credentials() -> None:

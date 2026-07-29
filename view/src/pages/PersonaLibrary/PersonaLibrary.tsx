@@ -4,6 +4,7 @@ import {
   Typography,
   Button,
   Input,
+  InputNumber,
   Select,
   Tag,
   Drawer,
@@ -57,6 +58,8 @@ export default function PersonaLibrary() {
   const [company, setCompany] = useState('')
   const [industry, setIndustry] = useState('')
   const [position, setPosition] = useState('')
+  const [personality, setPersonality] = useState('')
+  const [ageRange, setAgeRange] = useState('')
   const [sort, setSort] = useState<'confidence_desc' | 'time_desc'>('confidence_desc')
 
   // 详情 / 编辑
@@ -79,6 +82,9 @@ export default function PersonaLibrary() {
         company: company.trim(),
         industry: industry.trim(),
         position: position.trim(),
+        personality: personality.trim(),
+        age_min: ageRange ? Number(ageRange.split('-')[0]) : undefined,
+        age_max: ageRange ? Number(ageRange.split('-')[1]) : undefined,
         sort,
         limit: pageSize,
         skip: (page - 1) * pageSize,
@@ -90,7 +96,7 @@ export default function PersonaLibrary() {
     } finally {
       setLoading(false)
     }
-  }, [keyword, company, industry, position, sort, page])
+  }, [keyword, company, industry, position, personality, ageRange, sort, page])
 
   useEffect(() => {
     refresh()
@@ -192,8 +198,8 @@ export default function PersonaLibrary() {
     try {
       const values = await collectForm.validateFields()
       setCollecting(true)
-      await collectPersona(values)
-      message.success('已发起采集，稍后刷新查看结果')
+      const result = await collectPersona(values)
+      message.success(`已发起 ${result.count} 条虚构人设的背景研究与生成`)
       setCollectOpen(false)
       collectForm.resetFields()
     } catch (e) {
@@ -213,9 +219,12 @@ export default function PersonaLibrary() {
           <div className="persona-name-cell">
             <div className="persona-avatar">{(r.name || '?').slice(0, 1)}</div>
             <div className="persona-name-info">
-              <div className="persona-name">{r.name || '未命名'}</div>
+              <div className="persona-name">
+                {r.name || '未命名'}
+                {r.is_fictional && <Tag color="purple">虚构</Tag>}
+              </div>
               <div className="persona-sub">
-                {[r.position, r.company].filter(Boolean).join(' · ') || '—'}
+                {[r.age ? `${r.age}岁` : r.age_range, r.position, r.company].filter(Boolean).join(' · ') || '—'}
               </div>
             </div>
           </div>
@@ -252,7 +261,7 @@ export default function PersonaLibrary() {
         ),
       },
       {
-        title: '置信度',
+        title: '一致性',
         dataIndex: 'confidence',
         key: 'confidence',
         width: 90,
@@ -290,7 +299,7 @@ export default function PersonaLibrary() {
             <TeamOutlined /> 人设库
           </Title>
           <Paragraph className="page-description">
-            全局人物真源 · AI 浏览器采集结构化档案 · 跨项目复用，供 AI 中枢检索
+            AI 研究行业与岗位背景，批量生成不对应真实自然人的多维虚构人设
           </Paragraph>
         </div>
       </div>
@@ -308,6 +317,21 @@ export default function PersonaLibrary() {
         <Input allowClear placeholder="公司" value={company} onChange={(e) => setCompany(e.target.value)} style={{ maxWidth: 160 }} />
         <Input allowClear placeholder="行业" value={industry} onChange={(e) => setIndustry(e.target.value)} style={{ maxWidth: 140 }} />
         <Input allowClear placeholder="职位" value={position} onChange={(e) => setPosition(e.target.value)} style={{ maxWidth: 140 }} />
+        <Input allowClear placeholder="性格" value={personality} onChange={(e) => setPersonality(e.target.value)} style={{ maxWidth: 140 }} />
+        <Select
+          allowClear
+          placeholder="年龄段"
+          value={ageRange || undefined}
+          onChange={(value) => setAgeRange(value || '')}
+          style={{ minWidth: 110 }}
+          options={[
+            { label: '18-29', value: '18-29' },
+            { label: '30-39', value: '30-39' },
+            { label: '40-49', value: '40-49' },
+            { label: '50-59', value: '50-59' },
+            { label: '60-75', value: '60-75' },
+          ]}
+        />
         <Select
           value={sort}
           onChange={setSort}
@@ -319,7 +343,7 @@ export default function PersonaLibrary() {
         />
         <div className="toolbar-spacer" />
         <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => setCollectOpen(true)}>
-          采集人设
+          批量生成人设
         </Button>
         <Tooltip title="刷新">
           <Button icon={<ReloadOutlined />} loading={loading} onClick={refresh} />
@@ -340,7 +364,7 @@ export default function PersonaLibrary() {
             hideOnSinglePage: true,
             onChange: setPage,
           }}
-          locale={{ emptyText: <Empty description="暂无人设，点「采集人设」开始" /> }}
+          locale={{ emptyText: <Empty description="暂无人设，点「批量生成人设」开始" /> }}
         />
       </div>
 
@@ -353,7 +377,7 @@ export default function PersonaLibrary() {
         }
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        width={480}
+        size={480}
         extra={
           editing ? (
             <Space>
@@ -370,7 +394,10 @@ export default function PersonaLibrary() {
             <div className="detail-head">
               <div className="persona-avatar lg">{(active.name || '?').slice(0, 1)}</div>
               <div>
-                <div className="detail-name">{active.name || '未命名'}</div>
+                <div className="detail-name">
+                  {active.name || '未命名'}
+                  {active.is_fictional && <Tag color="purple">虚构人设</Tag>}
+                </div>
                 <div className="detail-sub">
                   {active.position && <Tag>{active.position}</Tag>}
                   {active.company && <Tag icon={<BankOutlined />}>{active.company}</Tag>}
@@ -379,6 +406,8 @@ export default function PersonaLibrary() {
             </div>
 
             <Field label="摘要" value={active.summary} />
+            <Field label="年龄" value={active.age ? `${active.age} 岁` : active.age_range} />
+            <Field label="生成背景" value={active.generation_brief} />
             <Field label="职业背景" value={active.background} />
             <Field label="性格特点" value={active.personality} />
             <Field label="行业" value={active.industry} />
@@ -388,6 +417,31 @@ export default function PersonaLibrary() {
             <Chips icon={<HeartOutlined />} label="兴趣" items={active.interests} />
             <Chips icon={<TagsOutlined />} label="标签" items={active.tags} />
             <Chips icon={<WarningOutlined />} label="风险点" items={active.risk_signals} />
+
+            <div className="detail-section-title">背景参考来源</div>
+            <div className="persona-sources">
+              {(active.source_urls || []).map((source, i) => (
+                <div key={`source-${i}`} className="source-item">
+                  <Tag color="blue">参考</Tag>
+                  {/^https?:\/\//i.test(source) ? (
+                    <Typography.Link href={source} target="_blank" rel="noreferrer">
+                      {source}
+                    </Typography.Link>
+                  ) : (
+                    <Text>{source}</Text>
+                  )}
+                </div>
+              ))}
+              {(active.evidence || []).map((evidence, i) => (
+                <div key={`evidence-${i}`} className="source-item">
+                  <Tag color="green">依据</Tag>
+                  <Text type="secondary">{evidence}</Text>
+                </div>
+              ))}
+              {!active.source_urls?.length && !active.evidence?.length && (
+                <Text type="secondary">暂无背景参考来源</Text>
+              )}
+            </div>
 
             <div className="detail-section-title">来源溯源（{active.sources?.length || 0}）</div>
             <div className="persona-sources">
@@ -436,24 +490,43 @@ export default function PersonaLibrary() {
 
       {/* 采集人设弹窗 */}
       <Modal
-        title={<span><ThunderboltOutlined /> AI 采集人设</span>}
+        title={<span><ThunderboltOutlined /> AI 批量生成虚构人设</span>}
         open={collectOpen}
         onCancel={() => setCollectOpen(false)}
         onOk={handleCollect}
         confirmLoading={collecting}
-        okText="开始采集"
+        okText="开始研究并生成"
         cancelText="取消"
       >
         <Form form={collectForm} layout="vertical">
-          <Form.Item name="name" label="姓名" rules={[{ required: true, message: '请输入人物姓名' }]}>
-            <Input placeholder="如 张三" />
+          <Form.Item
+            name="background"
+            label="总体背景设定"
+            rules={[{ required: true, message: '请输入背景设定' }]}
+          >
+            <Input.TextArea
+              autoSize={{ minRows: 3, maxRows: 6 }}
+              placeholder="例如：覆盖企业数字化、业务运营和公共服务岗位，用于内容演练；人物必须完全虚构"
+            />
           </Form.Item>
-          <Form.Item name="company" label="公司（可选）"><Input placeholder="所属公司" /></Form.Item>
-          <Form.Item name="position" label="职位（可选）"><Input placeholder="职位" /></Form.Item>
-          <Form.Item name="extra" label="其他线索（可选）"><Input.TextArea autoSize={{ minRows: 2, maxRows: 3 }} placeholder="有助于定位人物的其他信息" /></Form.Item>
+          <Form.Item name="count" label="生成数量" initialValue={12}>
+            <InputNumber min={1} max={40} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="industries" label="行业维度（留空由 AI 扩展）">
+            <Select mode="tags" placeholder="如 制造业、金融、医疗、教育" />
+          </Form.Item>
+          <Form.Item name="age_ranges" label="年龄维度（留空使用 22-59 岁多段分布）">
+            <Select mode="tags" placeholder="如 22-29、30-39、40-49" />
+          </Form.Item>
+          <Form.Item name="personalities" label="性格维度（留空由 AI 做多样化）">
+            <Select mode="tags" placeholder="如 谨慎理性、外向主动、稳定协作" />
+          </Form.Item>
+          <Form.Item name="company" label="组织设定（可选）"><Input placeholder="留空可使用虚构组织" /></Form.Item>
+          <Form.Item name="position" label="职位设定（可选）"><Input placeholder="留空按行业分布" /></Form.Item>
+          <Form.Item name="extra" label="其他约束（可选）"><Input.TextArea autoSize={{ minRows: 2, maxRows: 3 }} placeholder="地区、职级比例、生活阶段等约束" /></Form.Item>
         </Form>
         <div className="modal-hint">
-          <ThunderboltOutlined /> 将由 AI 浏览器搜索公开渠道，结构化提取并增量归并入库。
+          <ThunderboltOutlined /> AI 先爬取通用行业与岗位背景，再生成虚构人物；不会采集真实姓名和联系方式。
         </div>
       </Modal>
     </div>

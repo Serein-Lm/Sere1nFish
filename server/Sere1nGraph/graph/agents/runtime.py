@@ -18,7 +18,8 @@ from typing import Any, Callable, AsyncGenerator, Literal
 
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import MessagesState
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -39,6 +40,25 @@ OutputMode = Literal["silent", "console", "sse"]
 # 默认超时（秒）
 DEFAULT_AGENT_TIMEOUT = 500
 DEFAULT_TOOL_TIMEOUT = 60
+REQUIRE_EVIDENCE_TOOL_MARKER = "【工具调用要求】本子任务必须先调用至少一个事实查询工具。"
+
+
+def _requires_initial_evidence_tool(messages: list[Any]) -> bool:
+    """Return true until a marked Agent run has produced its first tool result."""
+    marked = any(
+        REQUIRE_EVIDENCE_TOOL_MARKER in str(getattr(message, "content", "") or "")
+        for message in messages
+    )
+    return marked and not any(isinstance(message, ToolMessage) for message in messages)
+
+
+class RequireEvidenceToolMiddleware(AgentMiddleware):
+    """Force the first tool call for platform-fact specialist tasks."""
+
+    async def awrap_model_call(self, request: ModelRequest, handler: Callable) -> ModelResponse:
+        if request.tools and _requires_initial_evidence_tool(request.messages):
+            request = request.override(tool_choice="required")
+        return await handler(request)
 
 
 class GuardedChatOpenAI(ChatOpenAI):

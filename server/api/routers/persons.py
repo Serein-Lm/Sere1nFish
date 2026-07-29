@@ -1,8 +1,9 @@
 """
 人设库 API 路由（薄层）。
 
-人设库全局化：默认不绑定项目，person_id = f(name, company)。
-- POST /persons/collect ：AI 浏览器采集单个人物 → PersonaProfile 结构化 → 增量入库（后台执行）。
+人设库全局化：默认不绑定项目，虚构人设按背景指纹稳定归并。
+- POST /persons/generate：背景设定 → AI 生成虚构 PersonaProfile → 增量入库（后台执行）。
+- POST /persons/collect ：兼容旧客户端，语义同 generate。
 - GET  /persons         ：多维检索（公司/行业/职位/标签/关键词/置信度）分页。
 - GET  /persons/{id}    ：查看单个人设。
 - PUT  /persons/{id}    ：手动编辑归并。
@@ -31,12 +32,27 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 # ── 请求模型 ─────────────────────────────────────────
 
-class PersonaCollectRequest(BaseModel):
-    name: str = Field(..., description="人物姓名（必填）")
-    company: str = Field(default="", description="所属公司")
-    position: str = Field(default="", description="职位")
-    extra: str = Field(default="", description="其他线索")
+class PersonaGenerateRequest(BaseModel):
+    background: str = Field(..., min_length=1, description="虚构人物的背景设定（必填）")
+    count: int = Field(default=12, ge=1, le=40, description="本轮生成数量")
+    industries: list[str] = Field(default_factory=list, description="行业维度，留空使用默认矩阵")
+    age_ranges: list[str] = Field(default_factory=list, description="年龄段维度")
+    personalities: list[str] = Field(default_factory=list, description="性格维度")
+    name: str = Field(default="", description="可选虚构姓名偏好，留空则自动生成")
+    company: str = Field(default="", description="可选组织设定")
+    position: str = Field(default="", description="可选职位设定")
+    extra: str = Field(default="", description="其他生成约束")
     project_id: str = Field(default="", description="可选溯源项目（人设库默认不绑定项目）")
+
+
+class PersonaCollectRequest(BaseModel):
+    """旧采集入口的兼容请求；只生成单个虚构人物。"""
+
+    name: str = Field(..., min_length=1, description="虚构姓名偏好")
+    company: str = Field(default="", description="可选组织设定")
+    position: str = Field(default="", description="可选职位设定")
+    extra: str = Field(default="", description="其他生成约束")
+    project_id: str = Field(default="", description="可选溯源项目")
 
 
 class PersonUpsertRequest(BaseModel):
@@ -46,14 +62,14 @@ class PersonUpsertRequest(BaseModel):
 
 # ── 采集 ─────────────────────────────────────────────
 
-@router.post("/collect")
-async def collect(req: PersonaCollectRequest):
-    """触发单个人物人设采集（后台执行），返回 task_id。"""
-    name = (req.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="人物姓名不能为空")
+@router.post("/generate")
+async def generate(req: PersonaGenerateRequest):
+    """根据背景设定批量生成不对应真实自然人的虚构人物。"""
+    background = (req.background or "").strip()
+    if not background:
+        raise HTTPException(status_code=400, detail="背景设定不能为空")
 
-    from api.services.persona_collect import collect_persona
+    from api.services.persona_collect import generate_personas
     from api.services.runtime_config import get_runtime_app_config
 
     app_config = await get_runtime_app_config()
@@ -62,22 +78,56 @@ async def collect(req: PersonaCollectRequest):
     async def _run() -> None:
         db = get_db()
         try:
-            await collect_persona(
+            await generate_personas(
                 db,
                 app_config,
-                name=name,
+                background=background,
+                count=req.count,
+                industries=req.industries,
+                age_ranges=req.age_ranges,
+                personalities=req.personalities,
+                name=req.name,
                 project_id=req.project_id,
                 company=req.company,
                 position=req.position,
                 extra=req.extra,
                 task_id=task_id,
-                source="web",
+                source="synthetic_research",
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[persons] 采集失败 task={task_id} name='{name}': {exc}")
+            logger.warning(f"[persons] 生成失败 task={task_id}: {exc}")
 
-    spawn_background(_run(), name=f"persona_collect:{task_id}")
-    return {"task_id": task_id, "status": "running", "name": name}
+    spawn_background(_run(), name=f"persona_generate:{task_id}")
+    return {
+        "task_id": task_id,
+        "status": "running",
+        "name": (req.name or "").strip(),
+        "count": req.count,
+        "is_fictional": True,
+    }
+
+
+@router.post("/collect", deprecated=True)
+async def collect(req: PersonaCollectRequest):
+    """兼容旧客户端：按已有线索生成一名不对应真实自然人的虚构人物。"""
+    background_parts = ["生成一名完全虚构、但职业与生活背景内部一致的人物"]
+    if req.company.strip():
+        background_parts.append(f"组织背景为 {req.company.strip()}")
+    if req.position.strip():
+        background_parts.append(f"岗位背景为 {req.position.strip()}")
+    if req.extra.strip():
+        background_parts.append(req.extra.strip())
+    return await generate(
+        PersonaGenerateRequest(
+            background="；".join(background_parts),
+            count=1,
+            name=req.name.strip(),
+            company=req.company,
+            position=req.position,
+            extra=req.extra,
+            project_id=req.project_id,
+        )
+    )
 
 
 # ── 检索 / CRUD ──────────────────────────────────────
@@ -89,6 +139,9 @@ async def list_persons(
     company: str = "",
     industry: str = "",
     position: str = "",
+    personality: str = "",
+    age_min: int | None = None,
+    age_max: int | None = None,
     tags: str = "",
     min_confidence: float = 0.0,
     sort: str = "confidence_desc",
@@ -105,6 +158,9 @@ async def list_persons(
         company=company,
         industry=industry,
         position=position,
+        personality=personality,
+        age_min=age_min,
+        age_max=age_max,
         tags=tag_list,
         min_confidence=min_confidence,
         sort=sort,
@@ -131,6 +187,9 @@ async def upsert_person(person_id: str, req: PersonUpsertRequest):
     profile = dict(req.profile or {})
     if not str(profile.get("name") or "").strip():
         raise HTTPException(status_code=400, detail="人设档案缺少 name")
+    existing = await persons_dao.get_person(db, person_id)
+    if existing:
+        profile = {**existing, **profile}
     doc = await persons_dao.upsert_person(
         db,
         profile=profile,

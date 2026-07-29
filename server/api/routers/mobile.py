@@ -1116,27 +1116,10 @@ async def pool_overview(
 
     可选 `group_id` 过滤。每个设备附带 `device_key`(稳定硬件 key)与 `meta`。
     """
-    from core.mobile.pool import DevicePool
     from api.db.mongodb import get_db
-    from api.dao import device_metadata as dm_dao
+    from api.services.mobile_status import list_mobile_device_statuses
 
-    items = await asyncio.to_thread(DevicePool.get_instance().list_pool)  # 已含 device_key
-    keys = [it.get("device_key") or it["device_id"] for it in items]
-    metas = await dm_dao.get_metadata_map(get_db(), set(keys))
-    for it, key in zip(items, keys):
-        m = metas.get(key) or {}
-        it.setdefault("device_key", key)
-        it["meta"] = {
-            "display_name": m.get("display_name"),
-            "note": m.get("note", ""),
-            "tags": m.get("tags", []),
-            "group_id": m.get("group_id"),
-        }
-    if group_id is not None:
-        if group_id == "ungrouped":
-            items = [it for it in items if not it["meta"].get("group_id")]
-        else:
-            items = [it for it in items if it["meta"].get("group_id") == group_id]
+    items = await list_mobile_device_statuses(get_db(), group_id=group_id)
     return {"devices": items, "total": len(items)}
 
 

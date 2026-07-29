@@ -64,6 +64,10 @@
 }
 
 .persona-name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   font-weight: 600;
 }
 
@@ -116,6 +120,10 @@
 }
 
 .detail-name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   font-size: 18px;
   font-weight: 600;
 }
@@ -164,8 +172,13 @@
 
 .source-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
+}
+
+.source-item > :last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .modal-hint {

@@ -278,22 +278,48 @@ class PersonaContact(BaseModel):
     other_social: list[str] = Field(default_factory=list, description="其他社交账号/主页")
 
 
+class PersonaArchetype(BaseModel):
+    """One researched dimension combination used to generate a fictional person."""
+    fictional_name: str = Field(description="本批次内唯一的虚构姓名")
+    industry: str = Field(description="行业")
+    age_range: str = Field(description="年龄段，如 22-29")
+    role: str = Field(description="典型岗位")
+    position_level: str = Field(default="", description="职级")
+    region: str = Field(default="", description="地区或城市层级")
+    personality_traits: list[str] = Field(default_factory=list, description="性格维度")
+    background_focus: str = Field(default="", description="职业与生活背景重点")
+    context_summary: str = Field(default="", description="公开资料提炼的行业岗位背景")
+    source_urls: list[str] = Field(default_factory=list, description="背景参考来源 URL")
+    context_evidence: list[str] = Field(default_factory=list, description="背景依据摘要")
+
+
+class PersonaGenerationPlan(BaseModel):
+    """Browser-researched matrix for fictional persona generation."""
+    research_summary: str = Field(default="", description="本轮背景研究摘要")
+    source_urls: list[str] = Field(default_factory=list, description="本轮背景研究来源")
+    archetypes: list[PersonaArchetype] = Field(default_factory=list, description="多维人物原型")
+
+
 class PersonaProfile(BaseModel):
     """
-    人设档案 — 浏览器搜集的真实人物信息结构化输出。
+    人设档案 — 根据背景约束生成的虚构人物结构化输出。
 
-    真实信息为后续话术、人物画像背景、招股书等产物生成提供丰富元信息。
-    company_root_domain 用于关联 company_meta 公司元信息，形成人-公司图。
+    默认不对应真实自然人，供场景编排、内容生成和演练复用。
     """
-    name: str = Field(description="真实姓名或常用名（必填）")
+    name: str = Field(description="虚构姓名或角色名（必填）")
+    is_fictional: bool = Field(default=True, description="是否为虚构人物，生成链路必须为 true")
+    generation_brief: str = Field(default="", description="生成该人设所依据的背景设定")
+    generation_key: str = Field(default="", description="背景设定的稳定指纹，用于幂等归并")
     gender: str = Field(default="", description="性别：男/女/未知")
+    age: int | None = Field(default=None, ge=18, le=75, description="虚构年龄")
+    age_range: str = Field(default="", description="年龄段，如 22-29")
     company: str = Field(default="", description="所属公司工商全称")
     company_root_domain: str = Field(default="", description="公司官网根域名，用于关联公司元信息")
     industry: str = Field(default="", description="所属行业")
     position: str = Field(default="", description="职位")
     position_level: str = Field(default="", description="职级，如高管/中层/基层")
     department: str = Field(default="", description="部门")
-    work_years: str = Field(default="", description="工作年限")
+    work_years: str = Field(default="", description="工作年限，如 8年")
     education: PersonaEducation = Field(default_factory=PersonaEducation, description="教育背景")
     location: str = Field(default="", description="所在城市/地区")
     contact: PersonaContact = Field(default_factory=PersonaContact, description="公开可得的联系方式")

@@ -40,6 +40,50 @@ def _execution_owner() -> str:
     return str(context.owner or "").strip() if context else ""
 
 
+def _mobile_state_label(item: dict[str, Any]) -> str:
+    if item.get("pairing_required"):
+        return "待配对"
+    if item.get("online"):
+        return "在线"
+    status = str(item.get("status") or "unknown")
+    return {"disconnected": "离线", "offline": "离线"}.get(status, status)
+
+
+def _format_mobile_device(item: dict[str, Any], *, detailed: bool = False) -> str:
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    device_id = str(item.get("device_id") or "")
+    display = meta.get("display_name") or item.get("model") or device_id or "未知设备"
+    lines = [f"{display}（device_id={device_id or '未知'}）"]
+    lines.append(f"- 状态：{_mobile_state_label(item)}")
+    if item.get("model") and item.get("model") != display:
+        lines.append(f"- 型号：{item['model']}")
+    if item.get("connection_type"):
+        lines.append(f"- 连接方式：{item['connection_type']}")
+    if item.get("network_ip"):
+        lines.append(f"- 内网 IP：{item['network_ip']}")
+    if item.get("device_key") and item.get("device_key") != device_id:
+        lines.append(f"- 稳定标识：{item['device_key']}")
+    reservation = "已占用" if item.get("reserved") else "空闲"
+    if item.get("reserved") and item.get("owner"):
+        reservation += f"（{item['owner']}）"
+    lines.append(f"- 资源状态：{reservation}")
+    if meta.get("tags"):
+        lines.append("- 标签：" + "、".join(str(tag) for tag in meta["tags"][:12]))
+    if detailed and meta.get("note"):
+        lines.append(f"- 备注：{_truncate(str(meta['note']), 200)}")
+    health = item.get("health") if isinstance(item.get("health"), dict) else None
+    if health is not None:
+        lines.append(
+            "- 健康探测："
+            f"截图{'就绪' if health.get('screenshot_ready') else '不可用'}，"
+            f"输入{'就绪' if health.get('input_ready') else '不可用'}，"
+            f"当前应用{'可读' if health.get('current_app_ready') else '不可读'}"
+        )
+        if health.get("error"):
+            lines.append(f"- 探测错误：{_truncate(str(health['error']), 200)}")
+    return "\n".join(lines)
+
+
 # ============ 项目与任务 ============
 
 @tool(
@@ -313,6 +357,78 @@ def get_finding_profile(finding_id: str) -> str:
 
 
 # ============ 手机与联系人 ============
+
+@tool(
+    "list_mobile_devices",
+    description=(
+        "查询手机资源池的实时状态（只读），返回在线/离线/待配对、型号、连接方式、"
+        "EasyTier 内网 IP、占用状态和设备备注。用于回答『哪些手机在线』『哪台手机可用』。"
+        "参数：online_only（默认 false，仅返回在线设备时设为 true）。"
+    ),
+)
+def list_mobile_devices(online_only: bool = False) -> str:
+    """列出手机资源池实时状态。"""
+
+    async def _load() -> list[dict[str, Any]]:
+        from api.db.mongodb import get_db
+        from api.services.mobile_status import list_mobile_device_statuses
+
+        return await list_mobile_device_statuses(get_db())
+
+    try:
+        items = _run_coro_sync(_load())
+    except Exception as exc:  # noqa: BLE001
+        return f"查询手机状态失败：{exc}"
+
+    if online_only:
+        items = [item for item in items if item.get("online")]
+    if not items:
+        return "当前没有符合条件的手机设备。"
+
+    online = sum(bool(item.get("online")) for item in items)
+    pairing = sum(bool(item.get("pairing_required")) for item in items)
+    reserved = sum(bool(item.get("reserved")) for item in items)
+    lines = [
+        f"手机资源池共 {len(items)} 台：在线 {online} 台，"
+        f"离线 {len(items) - online - pairing} 台，待配对 {pairing} 台，占用 {reserved} 台。"
+    ]
+    for idx, item in enumerate(items, 1):
+        summary = _format_mobile_device(item).replace("\n", "；")
+        lines.append(f"{idx}. {summary}")
+    return "\n".join(lines)
+
+
+@tool(
+    "get_mobile_device_status",
+    description=(
+        "查询单台手机的实时状态（只读）。先用 list_mobile_devices 获取 device_id，"
+        "再按 device_id、稳定 device_key 或 EasyTier 内网 IP 查询。"
+        "probe_health=true 时额外探测截图、输入和当前应用读取能力，可能需要数秒。"
+    ),
+)
+def get_mobile_device_status(device_id: str, probe_health: bool = False) -> str:
+    """获取单台手机状态，可选执行健康探测。"""
+    identifier = str(device_id or "").strip()
+    if not identifier:
+        return "请提供 device_id、device_key 或 EasyTier 内网 IP。"
+
+    async def _load() -> dict[str, Any] | None:
+        from api.db.mongodb import get_db
+        from api.services.mobile_status import get_mobile_device_status as load_status
+
+        return await load_status(
+            get_db(),
+            identifier,
+            probe_health=bool(probe_health),
+        )
+
+    try:
+        item = _run_coro_sync(_load())
+    except Exception as exc:  # noqa: BLE001
+        return f"查询手机 {identifier} 状态失败：{exc}"
+    if item is None:
+        return f"未找到手机 {identifier}。请先调用 list_mobile_devices 获取当前设备标识。"
+    return _format_mobile_device(item, detailed=True)
 
 @tool(
     "list_contact_profiles",
@@ -828,6 +944,8 @@ READ_TOOLS = [
     get_finding_detail,
     get_finding_copywriting,
     get_finding_profile,
+    list_mobile_devices,
+    get_mobile_device_status,
     list_contact_profiles,
     get_contact_profile,
     list_mobile_operations,
