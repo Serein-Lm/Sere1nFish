@@ -21,11 +21,38 @@ from langchain_core.messages import SystemMessage
 
 from ..config.models import AppConfig
 from ..prompts.loader import load_prompt
-from .runtime import create_agent_node, create_llm, OutputMode
+from .runtime import (
+    OutputMode,
+    RequireEvidenceToolMiddleware,
+    create_agent_node,
+    create_llm,
+)
 from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids
 
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT = 6
+PERSONA_RESEARCH_MCP_TOOLS = ("navigate_page", "evaluate_script")
+PERSONA_RESEARCH_MCP_TOOL_LIMIT = 24
+PERSONA_RESEARCH_TOOL_OUTPUT_MAX_CHARS = 7000
+PERSONA_RESEARCH_SUMMARY_PROMPT = """\
+把下面的浏览研究历史压缩为可继续执行的证据账本，最多 1200 个中文字符。
+必须保留 mission_id、已经访问的每个来源 URL 与标题、各来源支持的具体事实、
+已经覆盖和仍缺失的研究维度，以及下一步应访问的候选 URL。删除页面导航过程、
+重复快照、工具状态和推理措辞，不得补写历史中不存在的来源或事实。
+
+研究历史：
+{messages}
+"""
+PERSONA_RESEARCH_RUNTIME_POLICY = """
+# 紧凑浏览运行策略
+
+- 运行时只提供 `navigate_page` 与 `evaluate_script`。不得尝试调用快照、截图、点击、表单或下载工具。
+- 先用 3 个有差异的检索词打开搜索结果页；每个结果页只读取一次，并提取候选 URL。
+- 页面读取统一使用只读 `evaluate_script`：搜索页返回当前 URL、标题及不超过 30 条候选链接；正文页优先读取 article/main，并把正文限制在 4500 字符内。
+- `evaluate_script` 不得发起 fetch/XHR，不得点击、提交表单、读取 Cookie 或本地存储。
+- 每个 URL 最多导航两次。维护来源证据账本，不要反复读取已经获得的页面内容。
+- 实际读取 8 个跨站点有效正文来源并形成至少 12 条有 URL 关联的具体洞察后，立即输出最终 JSON。
+"""
 WEB_TAGGING_RUNTIME_POLICY = (
     "运行时浏览约束覆盖旧版提示词中的次数说明：浏览器工具最多调用 6 次；"
     "允许同站 HTTP 转 HTTPS 重试一次；遇到登录弹窗不得登录，"
@@ -34,6 +61,99 @@ WEB_TAGGING_RUNTIME_POLICY = (
     "新快照中的电话、群号或二维码地址；一旦获得至少一个真实值，立即停止调用"
     "浏览器并输出最终 JSON，不要继续探索其它入口或重复读取同一页面状态。"
 )
+
+
+def _compact_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    marker = "\n...[工具结果已按运行时预算截断]...\n"
+    available = max(0, max_chars - len(marker))
+    head_size = int(available * 0.8)
+    return value[:head_size] + marker + value[-(available - head_size):]
+
+
+def _compact_persona_research_result(_tool_name: str, result: Any) -> Any:
+    """Bound browser text before it becomes durable Agent conversation state."""
+    max_chars = PERSONA_RESEARCH_TOOL_OUTPUT_MAX_CHARS
+
+    def _compact_content(content: Any) -> Any:
+        if isinstance(content, str):
+            return _compact_text(content, max_chars)
+        if not isinstance(content, list):
+            return content
+
+        remaining = max_chars
+        compacted: list[Any] = []
+        for block in content:
+            if remaining <= 0:
+                break
+            if isinstance(block, str):
+                text = _compact_text(block, remaining)
+                compacted.append(text)
+                remaining -= len(text)
+                continue
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                text = _compact_text(block["text"], remaining)
+                compacted.append({**block, "text": text})
+                remaining -= len(text)
+                continue
+            compacted.append(block)
+        return compacted
+
+    if isinstance(result, tuple) and len(result) == 2:
+        return _compact_content(result[0]), result[1]
+    return _compact_content(result)
+
+
+def _build_persona_research_guard(
+) -> Callable[[str, tuple[Any, ...], dict[str, Any]], str | None]:
+    navigation_counts: dict[str, int] = {}
+
+    def _argument(
+        name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> str:
+        value = kwargs.get(name)
+        if value is None and args and isinstance(args[0], dict):
+            value = args[0].get(name)
+        return str(value or "").strip()
+
+    def _guard(
+        tool_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> str | None:
+        if tool_name == "navigate_page":
+            url = _argument("url", args, kwargs)
+            if not url:
+                return None
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"http", "https"}:
+                return "只允许导航到公开 HTTP(S) 页面。"
+            normalized = parsed._replace(fragment="").geturl()
+            navigation_counts[normalized] = navigation_counts.get(normalized, 0) + 1
+            if navigation_counts[normalized] > 2:
+                return "该 URL 已达到两次导航上限，请使用现有证据或更换来源。"
+            return None
+
+        if tool_name == "evaluate_script":
+            script = _argument("function", args, kwargs)
+            lowered = script.lower().replace(" ", "")
+            unsafe_markers = (
+                "fetch(",
+                "xmlhttprequest",
+                ".click(",
+                ".submit(",
+                "document.cookie",
+                "localstorage",
+                "sessionstorage",
+            )
+            if len(script) > 3000 or any(marker in lowered for marker in unsafe_markers):
+                return "脚本已被阻止：只允许紧凑、只读的 DOM 文本与链接提取。"
+        return None
+
+    return _guard
 
 
 def _build_same_site_navigation_guard(
@@ -490,24 +610,37 @@ async def create_persona_research_agent(
     创建虚构人设背景研究 Agent。
 
     浏览器只研究行业、岗位与生活阶段的通用背景，不采集真实自然人身份；
-    输出 PersonaGenerationPlan，后续由文本模型生成虚构 PersonaProfile。
+    输出 PersonaResearchReport，后续由文本模型综合虚构人物原型。
     """
     return create_agent_node(
         app_config=app_config,
-        system_prompt=load_prompt("persona_research/persona_research"),
+        system_prompt=(
+            f"{load_prompt('persona_research/persona_research')}\n\n"
+            f"{PERSONA_RESEARCH_RUNTIME_POLICY}"
+        ),
         builtin_tools=[],
         middleware=[
+            RequireEvidenceToolMiddleware(),
+            ModelCallLimitMiddleware(
+                run_limit=28,
+                exit_behavior="end",
+            ),
             SummarizationMiddleware(
                 model=create_llm(app_config),
-                trigger=("tokens", 3000),
-                keep=("messages", 8),
+                trigger=("tokens", 7500),
+                keep=("messages", 2),
+                summary_prompt=PERSONA_RESEARCH_SUMMARY_PROMPT,
+                trim_tokens_to_summarize=5000,
             ),
         ],
         mcp_server_name=server_name,
         output_mode=output_mode,
-        timeout=300,
-        mcp_tool_limit=16,
+        timeout=420,
+        mcp_tool_limit=PERSONA_RESEARCH_MCP_TOOL_LIMIT,
         max_attempts=1,
+        mcp_call_guard=_build_persona_research_guard(),
+        mcp_tool_names=PERSONA_RESEARCH_MCP_TOOLS,
+        mcp_result_transform=_compact_persona_research_result,
     )
 
 

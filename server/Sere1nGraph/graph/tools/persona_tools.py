@@ -43,6 +43,10 @@ def _format_person(p: dict[str, Any], *, brief: bool = True) -> str:
             parts.append(f"{label}：{val}")
     if p.get("summary"):
         parts.append(f"摘要：{p['summary']}")
+    if p.get("profile_version"):
+        parts.append(
+            f"资料版本：v{p['profile_version']}（研究 {p.get('research_rounds') or 0} 轮）"
+        )
     if not brief:
         if p.get("aliases"):
             parts.append(f"别名：{', '.join(p['aliases'])}")
@@ -58,8 +62,37 @@ def _format_person(p: dict[str, Any], *, brief: bool = True) -> str:
             parts.append(f"背景：{p['background']}")
         if p.get("personality"):
             parts.append(f"性格：{p['personality']}")
+        for label, key in (
+            ("组织环境", "organization_context"),
+            ("职业阶段", "career_stage"),
+            ("职业路径", "career_path"),
+            ("生活阶段", "life_stage"),
+            ("工作场景", "work_context"),
+            ("工作节奏", "work_rhythm"),
+            ("决策方式", "decision_style"),
+            ("沟通方式", "communication_style"),
+            ("协作方式", "collaboration_style"),
+            ("技术态度", "technology_attitude"),
+            ("学习方式", "learning_style"),
+            ("压力反应", "stress_response"),
+        ):
+            if p.get(key):
+                parts.append(f"{label}：{p[key]}")
         if p.get("interests"):
             parts.append(f"兴趣：{', '.join(p['interests'])}")
+        for label, key in (
+            ("信息偏好", "information_preferences"),
+            ("数字习惯", "digital_habits"),
+            ("核心动机", "motivations"),
+            ("阶段目标", "goals"),
+            ("具体痛点", "pain_points"),
+            ("价值取向", "values"),
+            ("行为模式", "behavior_patterns"),
+            ("内容偏好", "content_preferences"),
+            ("选择考虑", "purchase_considerations"),
+        ):
+            if p.get(key):
+                parts.append(f"{label}：{', '.join(p[key])}")
         if p.get("risk_signals"):
             parts.append(f"风险点：{', '.join(p['risk_signals'])}")
         if p.get("generation_brief"):
@@ -68,6 +101,21 @@ def _format_person(p: dict[str, Any], *, brief: bool = True) -> str:
             parts.append("背景参考来源：" + "、".join(str(x) for x in p["source_urls"][:12]))
         if p.get("evidence"):
             parts.append("背景依据：" + "；".join(str(x) for x in p["evidence"][:8]))
+        if p.get("research_evidence"):
+            evidence_lines = []
+            for item in p["research_evidence"][:12]:
+                if not isinstance(item, dict):
+                    continue
+                evidence_lines.append(
+                    "{dimension}｜{finding}｜适用：{applicability}｜来源：{sources}".format(
+                        dimension=item.get("dimension") or "未分类",
+                        finding=item.get("finding") or "",
+                        applicability=item.get("applicability") or "",
+                        sources="、".join(item.get("source_urls") or []),
+                    )
+                )
+            if evidence_lines:
+                parts.append("结构化研究证据：" + "；".join(evidence_lines))
         if p.get("confidence") is not None:
             parts.append(f"内部一致性：{p['confidence']}")
     if p.get("tags"):
@@ -83,8 +131,9 @@ def _format_person(p: dict[str, Any], *, brief: bool = True) -> str:
     "search_personas",
     description=(
         "检索人设库中的虚构人物档案（全局，不绑定项目，不对应真实自然人）。"
-        "支持按关键词、公司、行业、职位、年龄、性格、标签筛选，返回结构化摘要。"
-        "在内容生成或演练前，可先用它获取虚构角色背景。"
+        "支持按关键词、公司、行业、职位、年龄、性格、标签筛选，只返回 summary、"
+        "核心标签和 person_id。必须先用本工具筛选，再对选中的 person_id 调用 get_persona，"
+        "不要批量读取全库明细。"
         "参数均可选：keyword、company、industry、position、personality、age_min、age_max、"
         "tags（逗号分隔）、limit（默认5）。"
     ),
@@ -118,6 +167,7 @@ def search_personas(
             age_max=age_max,
             tags=tag_list,
             limit=max(1, min(limit, 20)),
+            summary_only=True,
         )
 
     try:

@@ -38,6 +38,8 @@ import {
   listPersons,
   getPerson,
   collectPersona,
+  enrichPerson,
+  waitForPersonaResearchTask,
   upsertPerson,
   deletePerson,
   type Person,
@@ -67,6 +69,7 @@ export default function PersonaLibrary() {
   const [active, setActive] = useState<Person | null>(null)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [enriching, setEnriching] = useState(false)
   const [editForm] = Form.useForm()
 
   // 采集
@@ -88,6 +91,7 @@ export default function PersonaLibrary() {
         sort,
         limit: pageSize,
         skip: (page - 1) * pageSize,
+        summary_only: true,
       })
       setPersons(res.items)
       setTotal(res.total)
@@ -194,14 +198,79 @@ export default function PersonaLibrary() {
     }
   }
 
+  const handleEnrich = async () => {
+    if (!active) return
+    let messageKey = ''
+    setEnriching(true)
+    try {
+      const result = await enrichPerson(active.person_id)
+      messageKey = `persona-enrich-${result.task_id}`
+      message.loading({
+        key: messageKey,
+        content: `正在持续研究，当前资料版本 v${result.profile_version}`,
+        duration: 0,
+      })
+      const task = await waitForPersonaResearchTask(result.task_id, (progress) => {
+        message.loading({
+          key: messageKey,
+          content: progress.message || '正在持续研究',
+          duration: 0,
+        })
+      })
+      if (task.status !== 'completed') {
+        throw new Error(task.error || task.message || '持续研究未完成')
+      }
+      const fresh = await getPerson(active.person_id)
+      setActive(fresh)
+      await refresh()
+      message.success({
+        key: messageKey,
+        content: `人设已升级至 v${fresh.profile_version || result.profile_version + 1}`,
+      })
+    } catch (e) {
+      message.error({
+        key: messageKey || undefined,
+        content: e instanceof Error ? e.message : '持续研究发起失败',
+      })
+    } finally {
+      setEnriching(false)
+    }
+  }
+
   const handleCollect = async () => {
     try {
       const values = await collectForm.validateFields()
       setCollecting(true)
       const result = await collectPersona(values)
-      message.success(`已发起 ${result.count} 条虚构人设的背景研究与生成`)
       setCollectOpen(false)
       collectForm.resetFields()
+      const messageKey = `persona-generate-${result.task_id}`
+      message.loading({
+        key: messageKey,
+        content: `已进入队列，计划生成 ${result.count} 条虚构人设`,
+        duration: 0,
+      })
+      void waitForPersonaResearchTask(result.task_id, (progress) => {
+        message.loading({
+          key: messageKey,
+          content: progress.message || '正在研究并生成人设',
+          duration: 0,
+        })
+      }).then(async (task) => {
+        if (task.status !== 'completed') {
+          throw new Error(task.error || task.message || '人设生成未完成')
+        }
+        await refresh()
+        message.success({
+          key: messageKey,
+          content: `已生成 ${task.completed_count} 条人设`,
+        })
+      }).catch((error: unknown) => {
+        message.error({
+          key: messageKey,
+          content: error instanceof Error ? error.message : '人设生成失败',
+        })
+      })
     } catch (e) {
       if (e instanceof Error) message.error(e.message)
     } finally {
@@ -306,6 +375,8 @@ export default function PersonaLibrary() {
 
       <div className="persona-toolbar slide-up stagger-1">
         <Input
+          id="persona-keyword"
+          name="persona_keyword"
           allowClear
           prefix={<SearchOutlined />}
           placeholder="搜索姓名 / 公司 / 职位 / 摘要"
@@ -314,10 +385,10 @@ export default function PersonaLibrary() {
           onPressEnter={() => { setPage(1); refresh() }}
           className="persona-search"
         />
-        <Input allowClear placeholder="公司" value={company} onChange={(e) => setCompany(e.target.value)} style={{ maxWidth: 160 }} />
-        <Input allowClear placeholder="行业" value={industry} onChange={(e) => setIndustry(e.target.value)} style={{ maxWidth: 140 }} />
-        <Input allowClear placeholder="职位" value={position} onChange={(e) => setPosition(e.target.value)} style={{ maxWidth: 140 }} />
-        <Input allowClear placeholder="性格" value={personality} onChange={(e) => setPersonality(e.target.value)} style={{ maxWidth: 140 }} />
+        <Input id="persona-company" name="persona_company" allowClear placeholder="公司" value={company} onChange={(e) => setCompany(e.target.value)} style={{ maxWidth: 160 }} />
+        <Input id="persona-industry" name="persona_industry" allowClear placeholder="行业" value={industry} onChange={(e) => setIndustry(e.target.value)} style={{ maxWidth: 140 }} />
+        <Input id="persona-position" name="persona_position" allowClear placeholder="职位" value={position} onChange={(e) => setPosition(e.target.value)} style={{ maxWidth: 140 }} />
+        <Input id="persona-personality" name="persona_personality" allowClear placeholder="性格" value={personality} onChange={(e) => setPersonality(e.target.value)} style={{ maxWidth: 140 }} />
         <Select
           allowClear
           placeholder="年龄段"
@@ -356,6 +427,7 @@ export default function PersonaLibrary() {
           columns={columns}
           dataSource={persons}
           loading={loading}
+          scroll={{ x: 980 }}
           pagination={{
             current: page,
             pageSize,
@@ -407,19 +479,74 @@ export default function PersonaLibrary() {
 
             <Field label="摘要" value={active.summary} />
             <Field label="年龄" value={active.age ? `${active.age} 岁` : active.age_range} />
-            <Field label="生成背景" value={active.generation_brief} />
+            <Field
+              label="资料版本"
+              value={`v${active.profile_version || 1} · ${active.research_rounds || 0} 轮研究`}
+            />
+            {active.generation_brief !== active.summary && (
+              <Field label="生成背景" value={active.generation_brief} />
+            )}
+
+            <div className="detail-section-title">职业与生活背景</div>
             <Field label="职业背景" value={active.background} />
-            <Field label="性格特点" value={active.personality} />
             <Field label="行业" value={active.industry} />
+            <Field label="部门与职级" value={[active.department, active.position_level].filter(Boolean).join(' · ')} />
+            <Field label="工作年限" value={active.work_years} />
             <Field label="所在地" value={active.location} />
-            <Field label="公司根域名" value={active.company_root_domain} />
+            <Field label="地域类型" value={active.region_type} />
+            <Field label="组织环境" value={active.organization_context} />
+            <Field label="职业阶段" value={active.career_stage} />
+            <Field label="职业路径" value={active.career_path} />
+            <Field label="生活阶段" value={active.life_stage} />
+            <Field label="工作场景" value={active.work_context} />
+            <Field label="工作节奏" value={active.work_rhythm} />
+            <Field
+              label="教育经历"
+              value={active.education
+                ? [active.education.school, active.education.degree, active.education.major, active.education.graduation_year]
+                    .filter(Boolean)
+                    .join(' · ')
+                : undefined}
+            />
+
+            <div className="detail-section-title">性格与行为逻辑</div>
+            <Field label="性格特点" value={active.personality} />
+            <Field label="决策方式" value={active.decision_style} />
+            <Field label="沟通方式" value={active.communication_style} />
+            <Field label="协作方式" value={active.collaboration_style} />
+            <Field label="技术态度" value={active.technology_attitude} />
+            <Field label="学习方式" value={active.learning_style} />
+            <Field label="压力反应" value={active.stress_response} />
 
             <Chips icon={<HeartOutlined />} label="兴趣" items={active.interests} />
+            <Chips label="信息偏好" items={active.information_preferences} />
+            <Chips label="数字习惯" items={active.digital_habits} />
+            <Chips label="核心动机" items={active.motivations} />
+            <Chips label="阶段目标" items={active.goals} />
+            <Chips label="具体痛点" items={active.pain_points} />
+            <Chips label="价值取向" items={active.values} />
+            <Chips label="行为模式" items={active.behavior_patterns} />
+            <Chips label="内容偏好" items={active.content_preferences} />
+            <Chips label="选择考虑" items={active.purchase_considerations} />
             <Chips icon={<TagsOutlined />} label="标签" items={active.tags} />
             <Chips icon={<WarningOutlined />} label="风险点" items={active.risk_signals} />
 
             <div className="detail-section-title">背景参考来源</div>
             <div className="persona-sources">
+              {(active.research_evidence || []).map((item, i) => (
+                <div key={`research-evidence-${i}`} className="source-item">
+                  <Tag color="cyan">{item.dimension}</Tag>
+                  <div>
+                    <Text>{item.finding}</Text>
+                    <div><Text type="secondary">适用：{item.applicability}</Text></div>
+                    {item.source_urls.map((url) => (
+                      <div key={url}>
+                        <Typography.Link href={url} target="_blank" rel="noreferrer">{url}</Typography.Link>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
               {(active.source_urls || []).map((source, i) => (
                 <div key={`source-${i}`} className="source-item">
                   <Tag color="blue">参考</Tag>
@@ -455,10 +582,19 @@ export default function PersonaLibrary() {
             </div>
 
             <Button
+              block
+              icon={<ReloadOutlined />}
+              loading={enriching}
+              style={{ marginTop: 16 }}
+              onClick={handleEnrich}
+            >
+              持续研究并升级
+            </Button>
+            <Button
               type="primary"
               block
               icon={<RobotOutlined />}
-              style={{ marginTop: 16 }}
+              style={{ marginTop: 12 }}
               onClick={() => jumpToHubWithPerson(active)}
             >
               引用到 AI 中枢并提出需求
@@ -509,16 +645,16 @@ export default function PersonaLibrary() {
               placeholder="例如：覆盖企业数字化、业务运营和公共服务岗位，用于内容演练；人物必须完全虚构"
             />
           </Form.Item>
-          <Form.Item name="count" label="生成数量" initialValue={12}>
-            <InputNumber min={1} max={40} precision={0} style={{ width: '100%' }} />
+          <Form.Item name="count" label="生成数量" initialValue={36}>
+            <InputNumber min={1} max={60} precision={0} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="industries" label="行业维度（留空由 AI 扩展）">
             <Select mode="tags" placeholder="如 制造业、金融、医疗、教育" />
           </Form.Item>
-          <Form.Item name="age_ranges" label="年龄维度（留空使用 22-59 岁多段分布）">
+          <Form.Item name="age_ranges" label="年龄提示（留空由 AI 自主探索）">
             <Select mode="tags" placeholder="如 22-29、30-39、40-49" />
           </Form.Item>
-          <Form.Item name="personalities" label="性格维度（留空由 AI 做多样化）">
+          <Form.Item name="personalities" label="性格提示（留空由 AI 自主探索）">
             <Select mode="tags" placeholder="如 谨慎理性、外向主动、稳定协作" />
           </Form.Item>
           <Form.Item name="company" label="组织设定（可选）"><Input placeholder="留空可使用虚构组织" /></Form.Item>
@@ -526,7 +662,7 @@ export default function PersonaLibrary() {
           <Form.Item name="extra" label="其他约束（可选）"><Input.TextArea autoSize={{ minRows: 2, maxRows: 3 }} placeholder="地区、职级比例、生活阶段等约束" /></Form.Item>
         </Form>
         <div className="modal-hint">
-          <ThunderboltOutlined /> AI 先爬取通用行业与岗位背景，再生成虚构人物；不会采集真实姓名和联系方式。
+          <ThunderboltOutlined /> AI 自主规划研究分片、真实爬取公网并审校人物逻辑；不会采集真人身份和联系方式。
         </div>
       </Modal>
     </div>

@@ -13,7 +13,10 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote_plus
 
-from api.services.dingtalk_ai_card import create_ai_card_session
+from api.services.dingtalk_ai_card import (
+    BufferedDingTalkCardSession,
+    create_ai_card_session,
+)
 from api.services.dingtalk_card import DingTalkCardRenderer, build_artifact_buttons
 from core.background import spawn_background
 from core.logger import get_logger
@@ -190,6 +193,14 @@ class DingTalkStreamAdapter:
             sender_id=sender_id,
             conversation_type=str(getattr(incoming, "conversation_type", "") or ""),
         )
+        started_at = time.monotonic()
+        logger.info(
+            "钉钉 Stream 消息开始 bot=%s conversation=%s sender=%s chars=%s",
+            self.bot_name,
+            hub_conversation_id,
+            sender_id,
+            len(query),
+        )
 
         async def _send_markdown(title: str, text: str) -> None:
             result = await reply_to_session_webhook(
@@ -212,15 +223,17 @@ class DingTalkStreamAdapter:
             return
 
         renderer = DingTalkCardRenderer()
-        card = None
+        card: BufferedDingTalkCardSession | None = None
         card_streaming = bool(self.config.get("ai_card_streaming", True))
         if card_streaming:
-            card = await create_ai_card_session(
+            card_session = await create_ai_card_session(
                 handler,
                 incoming,
                 query=query,
                 template_id=str(self.config.get("ai_card_template_id") or ""),
             )
+            if card_session is not None:
+                card = BufferedDingTalkCardSession(card_session)
 
         last_sent_content = ""
         last_sent_at = 0.0
@@ -231,18 +244,25 @@ class DingTalkStreamAdapter:
             renderer.consume(event)
             if card is None:
                 return
+            if card.failed:
+                logger.warning(
+                    "钉钉 AI Card 增量更新失败，后续回退 Markdown: %s",
+                    card.last_error,
+                )
+                failed_card = card
+                card = None
+                spawn_background(
+                    failed_card.fail("卡片增量更新失败，最终结果将以普通消息发送。"),
+                    name=f"dingtalk_card_fail:{self.bot_name}",
+                )
+                return
 
             event_type = str(event.get("event") or "")
             if event_type in {"start", "end", "error"}:
                 preparations = renderer.render_preparations()
                 serialized = json.dumps(preparations, ensure_ascii=False, sort_keys=True)
                 if serialized != last_preparations:
-                    try:
-                        await card.update_progress(preparations)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(f"更新钉钉 AI Card 进度失败，后续回退 Markdown: {exc}")
-                        card = None
-                        return
+                    card.publish_progress(preparations)
                     last_preparations = serialized
 
             # The primary content variable only receives the synthesized answer.
@@ -262,12 +282,7 @@ class DingTalkStreamAdapter:
             ):
                 return
 
-            try:
-                await card.stream(preview)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"更新钉钉 AI Card 失败，后续回退 Markdown: {exc}")
-                card = None
-                return
+            card.publish_stream(preview)
             last_sent_content = preview
             last_sent_at = now
 
@@ -291,13 +306,39 @@ class DingTalkStreamAdapter:
             if card is not None:
                 buttons = self._artifact_buttons(artifacts)
                 try:
-                    await card.update_progress(renderer.render_preparations(final=True))
                     await card.finish(final_markdown, buttons=buttons)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"结束钉钉 AI Card 失败，回退 Markdown: {exc}")
+                    with contextlib.suppress(Exception):
+                        await card.fail("卡片更新失败，最终结果已通过普通消息发送。")
                     await _send_markdown("AI 中枢回复", final_markdown)
             else:
                 await _send_markdown("AI 中枢回复", final_markdown)
+            logger.info(
+                "钉钉 Stream 消息完成 bot=%s conversation=%s elapsed=%.2fs artifacts=%s",
+                self.bot_name,
+                hub_conversation_id,
+                time.monotonic() - started_at,
+                len(artifacts),
+            )
+        except asyncio.CancelledError:
+            logger.warning(
+                "钉钉 Stream 消息因服务重载中断 bot=%s conversation=%s elapsed=%.2fs",
+                self.bot_name,
+                hub_conversation_id,
+                time.monotonic() - started_at,
+            )
+            interrupted = "服务正在重载，本次处理已中断，请稍后重新发送该问题。"
+            if card is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        asyncio.shield(card.fail(interrupted)),
+                        timeout=12,
+                    )
+            else:
+                with contextlib.suppress(Exception):
+                    await _send_markdown("AI 中枢", interrupted)
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"钉钉 Stream AI 中枢处理失败: {exc}")
             error_text = f"处理问题时发生错误：{exc}"[:1000]

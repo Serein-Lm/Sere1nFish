@@ -272,7 +272,15 @@ async def lifespan(app: FastAPI):
             )
         # 人设库 — 统一人物实体索引
         from api.dao import persons as persons_dao
+        from api.dao import persona_research_tasks as persona_research_tasks_dao
         await persons_dao.ensure_indexes(db)
+        backfilled_persona_versions = await persons_dao.backfill_profile_versions(db)
+        if backfilled_persona_versions:
+            logger.info("已初始化人设版本元数据: %s", backfilled_persona_versions)
+        await persona_research_tasks_dao.ensure_indexes(db)
+        interrupted_persona_tasks = await persona_research_tasks_dao.mark_interrupted(db)
+        if interrupted_persona_tasks:
+            logger.warning("已关闭中断的人设研究任务: %s", interrupted_persona_tasks)
         # AI 中枢对话留存索引
         from api.dao import ai_hub as ai_hub_dao
         await ai_hub_dao.ensure_indexes(db)

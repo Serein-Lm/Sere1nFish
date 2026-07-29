@@ -20,6 +20,20 @@ _CARD_UPDATE_OPTIONS = {
     "updateCardDataByKey": True,
     "updatePrivateDataByKey": True,
 }
+_CARD_REQUEST_TIMEOUT_SECONDS = 10.0
+_CARD_BUFFER_CLOSE_TIMEOUT_SECONDS = 12.0
+
+
+async def _await_card_request(operation: str, awaitable: Any) -> Any:
+    try:
+        return await asyncio.wait_for(
+            awaitable,
+            timeout=_CARD_REQUEST_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"{operation}超过 {_CARD_REQUEST_TIMEOUT_SECONDS:g} 秒"
+        ) from exc
 
 
 class _SDKErrorCapture:
@@ -95,7 +109,7 @@ class _TemplateCardSession:
 
     async def _checked(self, operation: str, awaitable: Any) -> Any:
         self._sdk_errors.reset()
-        result = await awaitable
+        result = await _await_card_request(operation, awaitable)
         self._sdk_errors.raise_if_error(operation)
         return result
 
@@ -180,7 +194,10 @@ class _LegacyMarkdownCardSession:
         del preparations
 
     async def stream(self, markdown: str) -> None:
-        await asyncio.to_thread(self._card.ai_streaming, markdown.rstrip("\n"), False)
+        await _await_card_request(
+            "流式更新钉钉 AI Card",
+            asyncio.to_thread(self._card.ai_streaming, markdown.rstrip("\n"), False),
+        )
 
     async def finish(
         self,
@@ -188,16 +205,128 @@ class _LegacyMarkdownCardSession:
         *,
         buttons: list[dict[str, Any]],
     ) -> None:
-        await asyncio.to_thread(
-            lambda: self._card.ai_finish(markdown=markdown, button_list=buttons)
+        await _await_card_request(
+            "结束钉钉 AI Card",
+            asyncio.to_thread(
+                lambda: self._card.ai_finish(markdown=markdown, button_list=buttons)
+            ),
         )
 
     async def fail(self, message: str) -> None:
         ai_fail = getattr(self._card, "ai_fail", None)
         if callable(ai_fail):
-            await asyncio.to_thread(ai_fail, message)
+            await _await_card_request(
+                "标记钉钉 AI Card 失败",
+                asyncio.to_thread(ai_fail, message),
+            )
             return
         await self.finish(message, buttons=[])
+
+
+class BufferedDingTalkCardSession:
+    """Coalesce Card updates so DingTalk latency cannot block model streaming."""
+
+    def __init__(self, session: DingTalkCardSession) -> None:
+        self._session = session
+        self.has_progress_panel = session.has_progress_panel
+        self._event = asyncio.Event()
+        self._pending_progress: list[dict[str, Any]] | None = None
+        self._pending_markdown: str | None = None
+        self._closing = False
+        self._closed = False
+        self._last_error = ""
+        # This worker is owned and awaited by the session. Keeping it outside the
+        # global fire-and-forget registry lets a cancelled message still flush a
+        # terminal Card state during application shutdown.
+        self._worker = asyncio.create_task(
+            self._run(),
+            name="dingtalk_card_updates",
+        )
+
+    @property
+    def failed(self) -> bool:
+        return bool(self._last_error)
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    def publish_progress(self, preparations: list[dict[str, Any]]) -> None:
+        if self._closing or self._closed or self.failed:
+            return
+        self._pending_progress = preparations
+        self._event.set()
+
+    def publish_stream(self, markdown: str) -> None:
+        if self._closing or self._closed or self.failed:
+            return
+        self._pending_markdown = markdown
+        self._event.set()
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                await self._event.wait()
+                self._event.clear()
+                progress = self._pending_progress
+                markdown = self._pending_markdown
+                self._pending_progress = None
+                self._pending_markdown = None
+                if progress is not None:
+                    await self._session.update_progress(progress)
+                if markdown is not None:
+                    await self._session.stream(markdown)
+                if (
+                    self._closing
+                    and self._pending_progress is None
+                    and self._pending_markdown is None
+                ):
+                    return
+                if self._pending_progress is not None or self._pending_markdown is not None:
+                    self._event.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = str(exc)
+            self._pending_progress = None
+            self._pending_markdown = None
+            logger.warning(f"钉钉 AI Card 增量更新已停止: {exc}")
+
+    async def _stop_worker(self, *, final_progress: list[dict[str, Any]] | None) -> None:
+        if self._closed:
+            return
+        self._pending_progress = final_progress
+        self._pending_markdown = None
+        self._closing = True
+        self._event.set()
+        try:
+            await asyncio.wait_for(
+                self._worker,
+                timeout=_CARD_BUFFER_CLOSE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            self._worker.cancel()
+            raise TimeoutError("钉钉 AI Card 增量更新队列关闭超时") from exc
+        finally:
+            self._closed = True
+        if self._last_error:
+            raise RuntimeError(self._last_error)
+
+    async def finish(
+        self,
+        markdown: str,
+        *,
+        buttons: list[dict[str, Any]],
+    ) -> None:
+        await self._stop_worker(final_progress=[])
+        await self._session.finish(markdown, buttons=buttons)
+
+    async def fail(self, message: str) -> None:
+        try:
+            await self._stop_worker(final_progress=None)
+        except Exception:
+            pass
+        await self._session.fail(message)
 
 
 async def create_ai_card_session(
@@ -230,9 +359,12 @@ async def create_ai_card_session(
                 }
             )
             sdk_errors.reset()
-            card_instance_id = await replier.async_create_and_deliver_card(
-                normalized_template_id,
-                card_data,
+            card_instance_id = await _await_card_request(
+                "创建钉钉 AI Card",
+                replier.async_create_and_deliver_card(
+                    normalized_template_id,
+                    card_data,
+                ),
             )
             sdk_errors.raise_if_error("创建钉钉 AI Card")
             if card_instance_id:
@@ -248,10 +380,13 @@ async def create_ai_card_session(
             logger.warning(f"创建自定义钉钉 AI Card 失败，回退内置模板: {exc}")
 
     try:
-        card = await asyncio.to_thread(
-            handler.ai_markdown_card_start,
-            incoming,
-            "AI 中枢",
+        card = await _await_card_request(
+            "创建内置钉钉 AI Card",
+            asyncio.to_thread(
+                handler.ai_markdown_card_start,
+                incoming,
+                "AI 中枢",
+            ),
         )
         if getattr(card, "card_instance_id", None):
             return _LegacyMarkdownCardSession(card)

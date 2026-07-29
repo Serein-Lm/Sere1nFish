@@ -95,6 +95,7 @@ BIDDING_RECORDS_COLLECTION = "bidding_records"
 
 # 人设库 — 统一人物实体（跨平台/跨项目真源，稳定 person_id）
 PERSONS_COLLECTION = "persons"
+PERSONA_RESEARCH_TASKS_COLLECTION = "persona_research_tasks"
 
 # AI 中枢对话留存（会话 + 消息）
 AI_HUB_CONVERSATIONS_COLLECTION = "ai_hub_conversations"

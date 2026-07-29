@@ -200,6 +200,10 @@
     max-width: none !important;
     width: 100%;
   }
+  .persona-toolbar .persona-search {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
   .persona-toolbar .toolbar-spacer {
     display: none;
   }

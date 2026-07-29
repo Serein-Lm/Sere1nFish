@@ -191,24 +191,133 @@ def test_mobile_status_tools_return_live_pool_summary(monkeypatch) -> None:
     assert "截图就绪" in detail
 
 
-def test_fictional_persona_enforces_dimensions_and_contact_privacy() -> None:
-    from api.services.persona_collect import _enforce_fictional_profile
-    from Sere1nGraph.graph.skills.schemas import PersonaArchetype
+def _rich_persona_archetype(name: str = "林知远", industry: str = "制造业"):
+    from Sere1nGraph.graph.skills.schemas import PersonaArchetype, PersonaResearchInsight
 
-    archetype = PersonaArchetype(
-        fictional_name="林知远",
-        industry="制造业",
+    research_evidence = [
+        PersonaResearchInsight(
+            dimension=dimension,
+            finding=finding,
+            applicability="制造业信息化项目管理岗位",
+            source_urls=["https://example.com/role"],
+        )
+        for dimension, finding in (
+            ("岗位职责", "岗位需要跨部门协调"),
+            ("风险管理", "项目交付强调风险管理"),
+            ("决策方式", "项目试点需要数据核验"),
+            ("沟通协作", "书面责任边界有助于跨团队交付"),
+        )
+    ]
+
+    return PersonaArchetype(
+        fictional_name=name,
+        industry=industry,
         age_range="30-39",
         role="信息化项目经理",
         position_level="中层",
         region="华东二线城市",
-        personality_traits=["谨慎", "重流程"],
+        organization_context="虚构的区域制造集团，约八百名员工",
+        career_stage="专业骨干转管理",
+        life_stage="双职工育儿阶段",
+        personality_traits=["谨慎", "重流程", "重视证据"],
+        background_focus="供应链系统升级与家庭时间协调",
+        work_context="负责业务、供应商与技术团队之间的项目交付",
+        work_rhythm="月末交付繁忙，工作日固定复盘",
+        decision_style="先核验数据，再通过小范围试点决策",
+        communication_style="书面结论先行，会议中逐项确认责任人",
+        technology_attitude="愿意采用经过同行验证的成熟工具",
+        information_channels=["行业协会报告", "同行技术社群"],
+        digital_habits=["工作日使用项目看板", "通勤时阅读行业简报"],
+        motivations=["降低交付风险", "获得管理晋升"],
+        goals=["完成供应链升级", "建立稳定团队"],
+        pain_points=["跨部门数据口径不一", "交付周期紧张"],
+        values=["可靠", "长期主义"],
+        behavior_patterns=["重要事项留书面记录", "决策前寻找反例"],
+        content_preferences=["案例拆解", "带数据的短报告"],
+        context_summary="公开岗位资料显示该类岗位需要跨部门协调和交付管理",
         source_urls=["https://example.com/role"],
-        context_evidence=["岗位通常需要跨部门协调"],
+        context_evidence=["岗位需要跨部门协调", "项目交付强调风险管理"],
+        research_evidence=research_evidence,
     )
+
+
+def _rich_fictional_profile(name: str = "候选姓名"):
+    from Sere1nGraph.graph.skills.schemas import (
+        RichFictionalPersonaProfile,
+        RichPersonaEducation,
+    )
+
+    return RichFictionalPersonaProfile(
+        name=name,
+        gender="女",
+        age=36,
+        age_range="30-39",
+        region_type="华东二线城市",
+        company="澄川智造有限公司（虚构）",
+        industry="制造业",
+        position="信息化项目经理",
+        position_level="中层",
+        department="数字化运营部",
+        work_years="12年",
+        education=RichPersonaEducation(
+            school="江澜理工学院（虚构）",
+            degree="本科",
+            major="信息管理",
+            graduation_year="2012",
+        ),
+        location="华东二线城市",
+        organization_context="区域制造集团，约八百名员工",
+        career_stage="专业骨干转管理",
+        career_path="2012年进入制造企业做系统实施，2018年转项目管理，2023年负责部门项目",
+        life_stage="双职工育儿阶段",
+        work_context="协调业务、供应商与技术团队完成供应链系统交付",
+        work_rhythm="月末交付繁忙，工作日固定复盘",
+        decision_style="先核验数据，再通过小范围试点决策",
+        communication_style="书面结论先行，会议逐项确认责任人",
+        collaboration_style="提前明确边界，冲突时回到交付指标",
+        technology_attitude="愿意采用经过同行验证的成熟工具",
+        learning_style="通过案例复盘和同行交流学习",
+        stress_response="压力增加时拆分任务并减少非必要会议",
+        background=(
+            "2012年进入区域制造企业负责系统实施，2018年转向供应链项目管理，"
+            "2023年起带领跨部门团队推进数字化交付；当前同时承担项目风险控制、"
+            "供应商协调和两名青年骨干培养，并在双职工育儿阶段保持固定周复盘。"
+        ),
+        personality="谨慎且重视证据，在明确责任边界后愿意推动变化",
+        interests=["城市徒步", "项目管理阅读"],
+        information_preferences=["行业协会报告", "同行案例"],
+        digital_habits=["使用项目看板", "通勤阅读行业简报"],
+        motivations=["降低交付风险", "获得管理晋升"],
+        goals=["完成供应链升级", "建立稳定团队"],
+        pain_points=["数据口径不一", "交付周期紧张"],
+        values=["可靠", "长期主义"],
+        behavior_patterns=["重要事项留痕", "决策前寻找反例"],
+        content_preferences=["案例拆解", "数据短报告"],
+        purchase_considerations=["实施风险", "同业案例"],
+        tags=["制造业", "中层", "30-39", "谨慎理性"],
+        risk_signals=["厌恶夸大承诺", "对未经验证的新工具谨慎"],
+        summary=(
+            "【虚构人设】36岁的制造业数字化项目经理，处于专业骨干转管理阶段，"
+            "需要协调业务、供应商和技术团队完成供应链系统交付。她习惯先核验数据"
+            "再小范围试点，重视书面留痕、同业案例和实施风险；核心目标是稳定交付并"
+            "培养团队，适合用具体案例、数据短报告和明确责任边界进行沟通。"
+        ),
+        sources=["https://example.com/role"],
+        evidence=["岗位需要跨部门协调", "项目交付强调风险管理"],
+        research_evidence=_rich_persona_archetype().research_evidence,
+        confidence=0.92,
+    )
+
+
+def test_fictional_persona_enforces_ai_plan_and_contact_privacy() -> None:
+    from api.services.persona_collect import _enforce_fictional_profile
+
+    archetype = _rich_persona_archetype()
     profile = _enforce_fictional_profile(
         {
             "name": "林知远",
+            "age": 36,
+            "personality": "谨慎且重视证据",
             "summary": "负责供应链系统升级",
             "contact": {"phone": "13800000000", "email": "real@example.com"},
             "company_root_domain": "real.example",
@@ -216,11 +325,6 @@ def test_fictional_persona_enforces_dimensions_and_contact_privacy() -> None:
         brief="制造业数字化背景",
         index=0,
         archetype=archetype,
-        dimension_slot={
-            "industry": "制造业",
-            "age_range": "40-49",
-            "personality": "规则导向、风险敏感",
-        },
         generation_key="stable-key",
         global_sources=["https://example.com/industry"],
         company="",
@@ -229,10 +333,10 @@ def test_fictional_persona_enforces_dimensions_and_contact_privacy() -> None:
 
     assert profile["is_fictional"] is True
     assert profile["industry"] == "制造业"
-    assert profile["age_range"] == "40-49"
-    assert 40 <= profile["age"] <= 49
+    assert profile["age_range"] == "30-39"
+    assert profile["age"] == 36
     assert profile["generation_key"] == "stable-key"
-    assert profile["personality"].startswith("规则导向、风险敏感")
+    assert profile["decision_style"] == "先核验数据，再通过小范围试点决策"
     assert profile["position"] == "信息化项目经理"
     assert profile["contact"] == {
         "phone": "",
@@ -245,39 +349,333 @@ def test_fictional_persona_enforces_dimensions_and_contact_privacy() -> None:
         "https://example.com/industry",
         "https://example.com/role",
     ]
-    assert profile["evidence"] == ["岗位通常需要跨部门协调"]
+    assert profile["evidence"] == ["岗位需要跨部门协调", "项目交付强调风险管理"]
     assert profile["summary"].startswith("【虚构人设】")
 
 
-def test_persona_dimension_matrix_is_deterministic_and_balanced() -> None:
-    from api.services.persona_collect import _dimension_matrix
-
-    matrix = _dimension_matrix(
-        12,
-        ["制造业", "金融", "医疗", "教育"],
-        ["22-29", "30-39", "40-49"],
-        ["谨慎", "外向", "稳定"],
+def test_persona_dimension_hints_do_not_create_code_defaults() -> None:
+    from api.services.persona_collect import (
+        _clean_hints,
+        _merge_existing_profile,
+        _profile_quality_issues,
     )
 
-    assert matrix == _dimension_matrix(
-        12,
-        ["制造业", "金融", "医疗", "教育"],
-        ["22-29", "30-39", "40-49"],
-        ["谨慎", "外向", "稳定"],
+    assert _clean_hints(None) == []
+    assert _clean_hints([]) == []
+    assert _clean_hints(["制造业", "制造业", "  医疗健康  "]) == ["制造业", "医疗健康"]
+
+    issues = _profile_quality_issues(
+        {
+            "summary": "具体摘要" * 30,
+            "background": "完整职业与生活时间线" * 20,
+            "communication_style": "当前信息缺失，属于假设性描述",
+            "digital_habits": ["每日查看生产看板", "其他数字行为模式缺失"],
+            "research_evidence": [
+                {
+                    "dimension": "研究缺口识别",
+                    "finding": "现有来源未覆盖核心维度",
+                    "applicability": "指导后续研究",
+                    "source_urls": ["https://example.com/gap"],
+                }
+            ],
+        }
     )
-    assert {item["industry"] for item in matrix} == {"制造业", "金融", "医疗", "教育"}
-    assert {item["age_range"] for item in matrix} == {"22-29", "30-39", "40-49"}
-    assert {item["personality"] for item in matrix} == {"谨慎", "外向", "稳定"}
+    assert "communication_style 包含缺失或占位描述" in issues
+    assert "digital_habits 包含缺失或占位条目" in issues
+    assert "research_evidence 包含研究缺口或待补充证据" in issues
+
+    merged = _merge_existing_profile(
+        {
+            "name": "虚构姓名",
+            "digital_habits": ["其他数字行为模式缺失", "每日查看生产看板"],
+            "content_preferences": ["内容偏好缺失", "偏好带步骤的实操案例"],
+            "motivations": ["家庭责任平衡动机缺失", "改善日常工作效率"],
+            "information_preferences": ["技术论坛（待验证）", "行业政策原文"],
+            "location": "具体城市待定",
+            "region_type": "中部或东部省会（待验证）",
+            "generation_brief": "旧研究生成说明",
+            "research_evidence": [
+                {
+                    "dimension": "研究缺口识别",
+                    "finding": "现有来源无法支撑人物细节",
+                    "applicability": "后续待补充",
+                    "source_urls": ["https://example.com/gap"],
+                }
+            ],
+        },
+        {
+            "digital_habits": ["每周整理一次异常案例"],
+            "content_preferences": ["偏好同行复盘"],
+            "motivations": ["形成可复用经验"],
+            "information_preferences": ["设备维修案例库"],
+            "location": "武汉",
+            "region_type": "中部省会城市",
+            "generation_brief": "新一轮研究生成说明",
+            "research_evidence": [
+                {
+                    "dimension": "工作节奏",
+                    "finding": "每天在晨会前核对生产异常",
+                    "applicability": "制造业一线管理岗位",
+                    "source_urls": ["https://example.com/fact"],
+                }
+            ],
+        },
+    )
+    assert merged["digital_habits"] == ["每日查看生产看板", "每周整理一次异常案例"]
+    assert merged["content_preferences"] == ["偏好带步骤的实操案例", "偏好同行复盘"]
+    assert merged["motivations"] == ["改善日常工作效率", "形成可复用经验"]
+    assert merged["information_preferences"] == ["行业政策原文", "设备维修案例库"]
+    assert merged["location"] == "武汉"
+    assert merged["region_type"] == "中部省会城市"
+    assert merged["generation_brief"] == "新一轮研究生成说明"
+    assert merged["research_evidence"] == [
+        {
+            "dimension": "工作节奏",
+            "finding": "每天在晨会前核对生产异常",
+            "applicability": "制造业一线管理岗位",
+            "source_urls": ["https://example.com/fact"],
+        }
+    ]
 
 
-def test_persona_work_years_normalization_rejects_structural_noise() -> None:
-    from api.services.persona_collect import _normalize_work_years
+def test_persona_research_replaces_reviewed_list_state() -> None:
+    from api.dao.persons import _replace_research_collections
 
-    assert _normalize_work_years("12") == "12年"
-    assert _normalize_work_years(", 3") == "3年"
-    assert _normalize_work_years("32年") == "32年"
-    assert _normalize_work_years(',n "education": {}') == ""
-    assert _normalize_work_years("2015") == ""
+    set_fields: dict[str, object] = {}
+    list_add: dict[str, list[object]] = {
+        "digital_habits": ["每日查看生产看板"],
+        "research_evidence": [{"dimension": "工作节奏"}],
+        "tags": ["制造业"],
+    }
+    _replace_research_collections(
+        {"person_id": "ps_existing"},
+        {
+            "digital_habits": ["每日查看生产看板"],
+            "research_evidence": [{"dimension": "工作节奏"}],
+        },
+        set_fields,
+        list_add,
+    )
+
+    assert set_fields == {
+        "digital_habits": ["每日查看生产看板"],
+        "research_evidence": [{"dimension": "工作节奏"}],
+    }
+    assert list_add == {"tags": ["制造业"]}
+
+
+def test_persona_research_browser_parses_compact_mcp_evidence() -> None:
+    from api.services.persona_research_browser import (
+        ResearchCandidate,
+        _candidate_url_allowed,
+        _extract_json_object,
+        _round_robin_candidates,
+        research_url_identity,
+    )
+
+    payload = _extract_json_object(
+        'Script ran on page and returned:\n```json\n{"items":[{"url":"https://example.com/a"}]}\n```'
+    )
+    assert payload["items"][0]["url"] == "https://example.com/a"
+    assert research_url_identity("HTTPS://Example.COM/a/#part") == "https://example.com/a"
+    assert research_url_identity("https://example.com:invalid/a") == ""
+    assert not _candidate_url_allowed("https://:secret@example.com/private")
+
+    first = [
+        ResearchCandidate("https://a.example/1", "A1", "", "q1"),
+        ResearchCandidate("https://a.example/2", "A2", "", "q1"),
+    ]
+    second = [ResearchCandidate("https://b.example/1", "B1", "", "q2")]
+    ordered = _round_robin_candidates([first, second], offset=0)
+    assert [item.title for item in ordered] == ["A1", "B1", "A2"]
+
+
+def test_public_url_validation_rejects_embedded_password() -> None:
+    import asyncio
+
+    from api.services.url_security import assert_public_http_url
+
+    with pytest.raises(ValueError, match="无凭据"):
+        asyncio.run(assert_public_http_url("https://:secret@example.com/private"))
+
+
+def test_rich_persona_schema_rejects_incomplete_ai_output() -> None:
+    from pydantic import ValidationError
+    from Sere1nGraph.graph.skills.schemas import RichFictionalPersonaProfile
+
+    with pytest.raises(ValidationError):
+        RichFictionalPersonaProfile(name="只有姓名")
+
+
+@pytest.mark.asyncio
+async def test_persona_research_program_is_ai_planned_and_observed(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    from api.services.persona_collect import _plan_research_program
+    from core import observability
+    from Sere1nGraph.graph.agents import runtime
+    from Sere1nGraph.graph.skills.schemas import (
+        PersonaResearchMission,
+        PersonaResearchProgram,
+    )
+
+    observed: list[dict] = []
+
+    @contextmanager
+    def fake_context(**kwargs):
+        observed.append(kwargs)
+        yield
+
+    class FakeStructured:
+        async def ainvoke(self, _messages):
+            def mission(index: int) -> PersonaResearchMission:
+                return PersonaResearchMission(
+                    mission_id=f"mission-{index}",
+                    objective=f"AI 自主规划的研究方向 {index}",
+                    persona_count=6,
+                    search_queries=[f"检索词 {index}-{item}" for item in range(4)],
+                    discovery_dimensions=[f"维度 {item}" for item in range(5)],
+                    diversity_focus=[f"差异 {item}" for item in range(3)],
+                    source_priorities=["政府", "高校", "行业协会"],
+                    overlap_avoidance=f"避开其他分片 {index}",
+                )
+
+            return PersonaResearchProgram(
+                strategy="由 AI 自主探索多维背景",
+                coverage_dimensions=[f"覆盖维度 {item}" for item in range(8)],
+                missions=[mission(1), mission(2)],
+            )
+
+    class FakeLlm:
+        def with_structured_output(self, _schema):
+            return FakeStructured()
+
+    monkeypatch.setattr(runtime, "create_llm", lambda *_args, **_kwargs: FakeLlm())
+    monkeypatch.setattr(observability, "observation_context", fake_context)
+
+    program = await _plan_research_program(
+        object(),
+        background="由 AI 自主探索",
+        count=12,
+        industries=[],
+        age_ranges=[],
+        personalities=[],
+        company="",
+        position="",
+        extra="",
+        project_id="project-1",
+        task_id="persona-plan-1",
+    )
+
+    assert len(program.missions) == 2
+    assert sum(item.persona_count for item in program.missions) == 12
+    assert observed == [
+        {
+            "project_id": "project-1",
+            "task_id": "persona-plan-1",
+            "phase": "persona_research_plan",
+            "agent": "persona_research_plan",
+            "task_type": "persona_research_plan",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persona_research_plan_retries_empty_semantic_values(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    from api.services.persona_collect import _plan_research_program
+    from core import observability
+    from Sere1nGraph.graph.agents import runtime
+    from Sere1nGraph.graph.skills.schemas import (
+        PersonaResearchMission,
+        PersonaResearchProgram,
+    )
+
+    calls = 0
+
+    def mission(queries: list[str]) -> PersonaResearchMission:
+        return PersonaResearchMission(
+            mission_id="mission-1",
+            objective="研究职业与生活背景",
+            persona_count=1,
+            search_queries=queries,
+            discovery_dimensions=[f"维度 {index}" for index in range(5)],
+            diversity_focus=[f"差异 {index}" for index in range(3)],
+            source_priorities=["政府", "高校", "行业协会"],
+            overlap_avoidance="单任务无重叠",
+        )
+
+    class FakeStructured:
+        async def ainvoke(self, _messages):
+            nonlocal calls
+            calls += 1
+            queries = ["", " ", "", ""] if calls == 1 else [
+                "制造业岗位调研",
+                "制造业职业发展",
+                "制造业工作节奏",
+                "制造业数字化转型",
+            ]
+            return PersonaResearchProgram(
+                strategy="自主研究",
+                coverage_dimensions=[f"全局维度 {index}" for index in range(8)],
+                missions=[mission(queries)],
+            )
+
+    class FakeLlm:
+        def with_structured_output(self, _schema):
+            return FakeStructured()
+
+    @contextmanager
+    def fake_context(**_kwargs):
+        yield
+
+    monkeypatch.setattr(runtime, "create_llm", lambda *_args, **_kwargs: FakeLlm())
+    monkeypatch.setattr(observability, "observation_context", fake_context)
+
+    program = await _plan_research_program(
+        object(),
+        background="自主研究",
+        count=1,
+        industries=[],
+        age_ranges=[],
+        personalities=[],
+        company="",
+        position="",
+        extra="",
+        project_id="",
+        task_id="persona-plan-semantic",
+    )
+
+    assert calls == 2
+    assert len(program.missions[0].search_queries) == 4
+
+
+@pytest.mark.asyncio
+async def test_persona_direct_model_calls_have_a_hard_timeout(monkeypatch) -> None:
+    from api.services import persona_collect
+
+    monkeypatch.setattr(persona_collect, "MODEL_REQUEST_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError, match="人设研究规划模型调用超过"):
+        await persona_collect._invoke_model(
+            asyncio.sleep(1),
+            phase="人设研究规划",
+        )
+
+    calls = 0
+
+    async def retryable_call():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(1)
+        return "completed"
+
+    assert await persona_collect._invoke_model(
+        retryable_call,
+        phase="人设研究规划",
+    ) == "completed"
+    assert calls == 2
 
 
 def test_fictional_persona_merge_clears_legacy_contact() -> None:
@@ -305,15 +703,167 @@ def test_fictional_persona_merge_clears_legacy_contact() -> None:
     assert set_fields["company_root_domain"] == ""
 
 
+def test_persona_incremental_merge_preserves_identity_and_adds_information() -> None:
+    from api.services.persona_collect import _merge_existing_profile
+
+    merged = _merge_existing_profile(
+        {
+            "name": "原有姓名",
+            "age": 36,
+            "company": "原有虚构公司",
+            "location": "上海",
+            "summary": "原有摘要",
+            "goals": ["原有目标"],
+            "research_evidence": [
+                {
+                    "dimension": "工作节奏",
+                    "finding": "原有具体结论",
+                    "applicability": "原有场景",
+                    "source_urls": ["https://example.com/old"],
+                }
+            ],
+        },
+        {
+            "name": "不应替换身份",
+            "age": 40,
+            "company": "不应替换公司",
+            "location": "武汉",
+            "summary": "包含新研究信息的升级摘要",
+            "goals": ["新增目标"],
+            "research_evidence": [
+                {
+                    "dimension": "信息渠道",
+                    "finding": "新增具体结论",
+                    "applicability": "新增场景",
+                    "source_urls": ["https://example.com/new"],
+                }
+            ],
+        },
+    )
+
+    assert merged["name"] == "原有姓名"
+    assert merged["age"] == 36
+    assert merged["company"] == "原有虚构公司"
+    assert merged["location"] == "上海"
+    assert merged["summary"] == "包含新研究信息的升级摘要"
+    assert merged["goals"] == ["原有目标", "新增目标"]
+    assert len(merged["research_evidence"]) == 2
+
+
+def test_persona_tools_disclose_summary_before_full_profile() -> None:
+    from api.dao.persons import _SUMMARY_PROJECTION
+    from Sere1nGraph.graph.tools.persona_tools import _format_person
+
+    person = {
+        "person_id": "ps_summary_first",
+        "name": "虚构人物",
+        "is_fictional": True,
+        "summary": "用于候选筛选的具体摘要",
+        "background": "仅完整读取时出现的职业经历细节",
+        "tags": ["媒体", "内容运营"],
+        "research_evidence": [
+            {
+                "dimension": "内容偏好",
+                "finding": "偏好视频案例",
+                "applicability": "内容平台用户",
+                "source_urls": ["https://example.com/source"],
+            }
+        ],
+        "profile_version": 3,
+        "research_rounds": 3,
+    }
+
+    brief = _format_person(person, brief=True)
+    detail = _format_person(person, brief=False)
+    assert "用于候选筛选的具体摘要" in brief
+    assert "person_id：ps_summary_first" in brief
+    assert "职业经历细节" not in brief
+    assert "结构化研究证据" not in brief
+    assert "职业经历细节" in detail
+    assert "偏好视频案例" in detail
+    assert _SUMMARY_PROJECTION["summary"] == 1
+    assert _SUMMARY_PROJECTION["confidence"] == 1
+    assert "background" not in _SUMMARY_PROJECTION
+    assert "research_evidence" not in _SUMMARY_PROJECTION
+
+
+def test_persona_research_browser_context_is_compact_and_read_only() -> None:
+    from Sere1nGraph.graph.agents.factory import (
+        PERSONA_RESEARCH_MCP_TOOLS,
+        PERSONA_RESEARCH_TOOL_OUTPUT_MAX_CHARS,
+        _build_persona_research_guard,
+        _compact_persona_research_result,
+    )
+    from Sere1nGraph.graph.agents.runtime import _filter_mcp_tools
+
+    class FakeTool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    filtered = _filter_mcp_tools(
+        [FakeTool("navigate_page"), FakeTool("take_snapshot"), FakeTool("evaluate_script")],
+        PERSONA_RESEARCH_MCP_TOOLS,
+    )
+    assert [tool.name for tool in filtered] == ["navigate_page", "evaluate_script"]
+
+    result = _compact_persona_research_result(
+        "evaluate_script",
+        ([{"type": "text", "text": "x" * 50000}], {"structured": "kept"}),
+    )
+    assert len(result[0][0]["text"]) <= PERSONA_RESEARCH_TOOL_OUTPUT_MAX_CHARS
+    assert "运行时预算截断" in result[0][0]["text"]
+    assert result[1] == {"structured": "kept"}
+
+    guard = _build_persona_research_guard()
+    public_url = "https://example.com/report#section"
+    assert guard("navigate_page", (), {"url": public_url}) is None
+    assert guard("navigate_page", (), {"url": public_url}) is None
+    assert "两次导航上限" in str(
+        guard("navigate_page", (), {"url": public_url})
+    )
+    assert "只允许导航" in str(
+        guard("navigate_page", (), {"url": "file:///etc/passwd"})
+    )
+    assert "脚本已被阻止" in str(
+        guard("evaluate_script", (), {"function": "async () => fetch('/private')"})
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_transforms_mcp_result_before_model_context() -> None:
+    from Sere1nGraph.graph.agents.runtime import _wrap_tools_with_error_handling
+
+    class FakeTool:
+        name = "evaluate_script"
+        response_format = "content_and_artifact"
+
+        async def coroutine(self, **_kwargs):
+            return ([{"type": "text", "text": "raw browser output"}], {"id": 1})
+
+    tool = FakeTool()
+    wrapped = _wrap_tools_with_error_handling(
+        [tool],
+        result_transform=lambda name, value: (
+            [{"type": "text", "text": f"compact:{name}"}],
+            value[1],
+        ),
+    )[0]
+    content, artifact = await wrapped.coroutine()
+
+    assert content == [{"type": "text", "text": "compact:evaluate_script"}]
+    assert artifact == {"id": 1}
+
+
 @pytest.mark.asyncio
 async def test_persona_research_is_wrapped_in_token_observation(monkeypatch) -> None:
     from contextlib import contextmanager
 
-    from api.services.persona_collect import _research_archetypes
-    from api.services.info_collection import url_tools
-    from browser_manager import provider as browser_provider
+    from api.services import persona_collect
+    from api.services import persona_research_browser
+    from api.services.persona_research_browser import ResearchPage
     from core import observability
-    from Sere1nGraph.graph.agents import factory, runtime
+    from Sere1nGraph.graph.agents import runtime
+    from Sere1nGraph.graph.skills.schemas import PersonaResearchReport
 
     observed: list[dict] = []
 
@@ -322,53 +872,80 @@ async def test_persona_research_is_wrapped_in_token_observation(monkeypatch) -> 
         observed.append(kwargs)
         yield
 
-    class FakeProvider:
-        released = False
+    pages = [
+        ResearchPage(
+            url=f"https://example.com/report-{index}",
+            title=f"岗位研究 {index}",
+            publisher="研究机构",
+            description="岗位研究摘要",
+            text="具体岗位背景依据" * 80,
+            query="金融岗位研究",
+        )
+        for index in range(8)
+    ]
+    browser_calls: list[dict] = []
 
-        async def get_cdp_endpoint(self, **_kwargs):
-            return "http://chrome.test:9222"
+    class FakeBrowser:
+        async def collect(self, _config, **kwargs):
+            browser_calls.append(kwargs)
+            return pages
 
-        async def release_cdp_endpoint(self, _task_id):
-            self.released = True
-
-    async def fake_create_agent(_config):
-        async def run(_payload):
-            return {"messages": []}
-
-        return run
-
-    async def fake_extract(*_args, **_kwargs):
-        return {
-            "research_summary": "通用岗位研究",
-            "source_urls": ["https://example.com/report"],
-            "archetypes": [
+    class FakeStructured:
+        async def ainvoke(self, _messages):
+            return PersonaResearchReport(**{
+                "mission_id": "mission-1",
+                "summary": "通用岗位研究",
+                "sources": [
                 {
-                    "fictional_name": "周谨言",
-                    "industry": "金融服务",
-                    "age_range": "40-49",
-                    "role": "合规经理",
-                    "personality_traits": ["规则导向"],
+                    "url": f"https://example.com/report-{index}",
+                    "title": f"岗位研究 {index}",
+                    "publisher": "研究机构",
+                    "source_type": "研究报告",
+                    "covered_dimensions": ["岗位背景"],
+                    "evidence": ["具体岗位背景依据"],
                 }
+                for index in range(8)
             ],
-        }
+            "insights": [
+                {
+                    "dimension": "岗位背景",
+                    "finding": f"具体研究发现 {index}",
+                    "applicability": "金融服务岗位",
+                    "source_urls": ["https://example.com/report-0"],
+                }
+                for index in range(12)
+                ],
+            })
 
-    provider = FakeProvider()
+    class FakeLlm:
+        def with_structured_output(self, _schema):
+            return FakeStructured()
+
+    async def fake_verify(report, **_kwargs):
+        return report
+
     monkeypatch.setattr(observability, "observation_context", fake_context)
-    monkeypatch.setattr(browser_provider, "get_browser_provider", lambda: provider)
-    monkeypatch.setattr(url_tools, "_build_worker_chrome_config", lambda *_args: object())
-    monkeypatch.setattr(factory, "create_persona_research_agent", fake_create_agent)
-    monkeypatch.setattr(runtime, "extract_with_retry", fake_extract)
+    monkeypatch.setattr(
+        persona_research_browser,
+        "create_persona_research_browser",
+        lambda: FakeBrowser(),
+    )
+    monkeypatch.setattr(runtime, "create_llm", lambda *_args, **_kwargs: FakeLlm())
+    monkeypatch.setattr(persona_collect, "_verify_research_sources", fake_verify)
 
-    plan = await _research_archetypes(
+    report = await persona_collect._research_mission(
         object(),
         request_text="研究一个金融岗位原型",
-        count=1,
+        mission_id="mission-1",
+        search_queries=["金融岗位研究", "金融职业发展", "金融从业者调研", "金融工作节奏"],
         project_id="project-1",
         task_id="persona-task-1",
     )
 
-    assert len(plan.archetypes) == 1
-    assert provider.released is True
+    assert len(report.sources) == 8
+    assert len(report.insights) == 12
+    assert browser_calls[0]["task_id"] == "persona-task-1"
+    assert browser_calls[0]["search_queries"][0] == "金融岗位研究"
     assert observed == [
         {
             "project_id": "project-1",
@@ -383,65 +960,67 @@ async def test_persona_research_is_wrapped_in_token_observation(monkeypatch) -> 
 @pytest.mark.asyncio
 async def test_persona_batch_generation_tracks_tokens_and_persists(monkeypatch) -> None:
     from contextlib import contextmanager
+    from types import SimpleNamespace
 
     from api.dao import persons as persons_dao
     from api.services import persona_collect
     from core import observability
     from Sere1nGraph.graph.agents import runtime
     from Sere1nGraph.graph.skills.schemas import (
-        PersonaArchetype,
+        PersonaConsistencyReview,
         PersonaGenerationPlan,
-        PersonaProfile,
     )
 
     observed: list[dict] = []
-    generated_names = iter(["林知远", "周明澜"])
 
     @contextmanager
     def fake_context(**kwargs):
         observed.append(kwargs)
         yield
 
-    async def fake_research(*_args, **_kwargs):
-        return PersonaGenerationPlan(
-            research_summary="多行业背景",
-            source_urls=["https://example.com/report"],
-            archetypes=[
-                PersonaArchetype(
-                    fictional_name="林知远",
-                    industry="制造业",
-                    age_range="30-39",
-                    role="信息化项目经理",
-                    personality_traits=["谨慎"],
-                ),
-                PersonaArchetype(
-                    fictional_name="周明澜",
-                    industry="医疗健康",
-                    age_range="40-49",
-                    role="运营主管",
-                    personality_traits=["共情"],
-                ),
-            ],
-        )
+    plan = PersonaGenerationPlan(
+        research_summary="多行业背景",
+        source_urls=["https://example.com/report"],
+        archetypes=[
+            _rich_persona_archetype("林知远", "制造业"),
+            _rich_persona_archetype("周明澜", "医疗健康"),
+        ],
+    )
+
+    async def fake_plan(*_args, **_kwargs):
+        return SimpleNamespace(missions=[SimpleNamespace(mission_id="mission-1")])
+
+    async def fake_reports(*_args, **_kwargs):
+        return [SimpleNamespace(insights=["insight-1", "insight-2"])]
+
+    async def fake_synthesize(*_args, **_kwargs):
+        return plan
 
     class FakeStructuredLlm:
+        def __init__(self, schema):
+            self.schema = schema
+
         async def ainvoke(self, _messages):
-            return PersonaProfile(
-                name=next(generated_names),
-                age=35,
-                background="虚构职业背景",
-                summary="完整的背景角色",
-                confidence=0.9,
-            )
+            profile = _rich_fictional_profile()
+            if self.schema is PersonaConsistencyReview:
+                return PersonaConsistencyReview(
+                    consistent=True,
+                    issues_found=[],
+                    corrections_made=["完成逻辑复核"],
+                    profile=profile,
+                )
+            return profile
 
     class FakeLlm:
-        def with_structured_output(self, _schema):
-            return FakeStructuredLlm()
+        def with_structured_output(self, schema):
+            return FakeStructuredLlm(schema)
 
     async def fake_upsert(_db, *, profile, **_kwargs):
         return {**profile, "person_id": f"person-{profile['generation_key']}"}
 
-    monkeypatch.setattr(persona_collect, "_research_archetypes", fake_research)
+    monkeypatch.setattr(persona_collect, "_plan_research_program", fake_plan)
+    monkeypatch.setattr(persona_collect, "_research_program_batches", fake_reports)
+    monkeypatch.setattr(persona_collect, "_synthesize_archetypes", fake_synthesize)
     monkeypatch.setattr(runtime, "create_llm", lambda *_args, **_kwargs: FakeLlm())
     monkeypatch.setattr(persons_dao, "upsert_person", fake_upsert)
     monkeypatch.setattr(observability, "observation_context", fake_context)
@@ -450,11 +1029,8 @@ async def test_persona_batch_generation_tracks_tokens_and_persists(monkeypatch) 
     result = await persona_collect.generate_personas(
         object(),
         object(),
-        background="覆盖制造业与医疗运营岗位",
+        background="由 AI 自主探索制造业与医疗岗位",
         count=2,
-        industries=["制造业", "医疗健康"],
-        age_ranges=["30-39", "40-49"],
-        personalities=["谨慎", "共情"],
         task_id="persona-task-2",
     )
 
@@ -464,7 +1040,9 @@ async def test_persona_batch_generation_tracks_tokens_and_persists(monkeypatch) 
     assert [item["contact"]["phone"] for item in result["items"]] == ["", ""]
     assert len({item["generation_key"] for item in result["items"]}) == 2
     generation_contexts = [item for item in observed if item["phase"] == "persona_generate"]
+    review_contexts = [item for item in observed if item["phase"] == "persona_consistency"]
     assert len(generation_contexts) == 2
+    assert len(review_contexts) == 2
     assert all(item["task_id"] == "persona-task-2" for item in generation_contexts)
 
 
@@ -1423,6 +2001,63 @@ async def test_dingtalk_template_card_falls_back_when_sdk_only_logs_http_error(
     assert legacy.streamed == ["已回退"]
 
 
+@pytest.mark.asyncio
+async def test_dingtalk_card_requests_have_a_hard_timeout(monkeypatch) -> None:
+    from api.services import dingtalk_ai_card
+
+    monkeypatch.setattr(dingtalk_ai_card, "_CARD_REQUEST_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError, match="测试钉钉请求超过"):
+        await dingtalk_ai_card._await_card_request(
+            "测试钉钉请求",
+            asyncio.sleep(1),
+        )
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_card_buffer_coalesces_without_blocking_producer() -> None:
+    from api.services.dingtalk_ai_card import BufferedDingTalkCardSession
+
+    class FakeSession:
+        has_progress_panel = True
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.streamed: list[str] = []
+            self.finished = ""
+
+        async def update_progress(self, _preparations):
+            return None
+
+        async def stream(self, markdown: str):
+            self.started.set()
+            await self.release.wait()
+            self.streamed.append(markdown)
+
+        async def finish(self, markdown: str, *, buttons):
+            assert buttons == []
+            self.finished = markdown
+
+        async def fail(self, _message: str):
+            return None
+
+    session = FakeSession()
+    buffered = BufferedDingTalkCardSession(session)
+    buffered.publish_stream("第一段")
+    await session.started.wait()
+    buffered.publish_stream("第二段")
+    buffered.publish_stream("第二段后的最新完整正文")
+    session.release.set()
+    for _ in range(20):
+        if len(session.streamed) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    await buffered.finish("最终正文", buttons=[])
+
+    assert session.streamed == ["第一段", "第二段后的最新完整正文"]
+    assert session.finished == "最终正文"
+
+
 def test_ai_hub_conversation_context_is_bounded_and_current_turn_wins() -> None:
     from api.services.ai_hub_context import compose_conversation_query
 
@@ -1901,12 +2536,61 @@ async def test_dingtalk_stream_updates_card_only_for_synthesized_answer(monkeypa
     )
     await adapter._process_message(FakeHandler(), FakeIncoming(), "测试问题")
 
-    assert len(card.streamed) == 2
+    assert len(card.streamed) <= 2
     assert all(content.startswith("关键结论") for content in card.streamed)
     assert all("内部检索思考" not in content for content in card.streamed)
-    assert len(card.streamed[1]) > len(card.streamed[0])
+    if len(card.streamed) == 2:
+        assert len(card.streamed[1]) > len(card.streamed[0])
     assert card.finished.startswith("关键结论")
     assert "执行摘要" in card.finished
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_stream_marks_card_failed_when_reload_cancels_turn(monkeypatch) -> None:
+    from api.services import dingtalk_bridge
+    from api.services import dingtalk_stream as stream_module
+
+    class FakeCard:
+        card_instance_id = "card_cancelled"
+
+        def __init__(self) -> None:
+            self.failed = ""
+
+        def ai_streaming(self, _markdown: str, _append: bool = False) -> None:
+            return None
+
+        def ai_finish(self, **_kwargs) -> None:
+            return None
+
+        def ai_fail(self, message: str) -> None:
+            self.failed = message
+
+    card = FakeCard()
+
+    class FakeHandler:
+        @staticmethod
+        def ai_markdown_card_start(_incoming, _title):
+            return card
+
+    class FakeIncoming:
+        sender_staff_id = "user_1"
+        sender_id = "sender_1"
+        conversation_id = "conversation_1"
+        session_webhook = "https://example.test/session"
+
+    async def cancelled_query(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(dingtalk_bridge, "run_hub_query", cancelled_query)
+    adapter = stream_module.DingTalkStreamAdapter(
+        "default",
+        {"ai_card_streaming": True},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._process_message(FakeHandler(), FakeIncoming(), "测试重载")
+
+    assert "服务正在重载" in card.failed
 
 
 @pytest.mark.asyncio

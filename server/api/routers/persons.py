@@ -3,6 +3,8 @@
 
 人设库全局化：默认不绑定项目，虚构人设按背景指纹稳定归并。
 - POST /persons/generate：背景设定 → AI 生成虚构 PersonaProfile → 增量入库（后台执行）。
+- POST /persons/{id}/enrich：读取已有 summary 和证据，研究新来源并持续升级。
+- GET  /persons/tasks/{id}：读取生成或持续研究任务的持久化阶段与结果。
 - POST /persons/collect ：兼容旧客户端，语义同 generate。
 - GET  /persons         ：多维检索（公司/行业/职位/标签/关键词/置信度）分页。
 - GET  /persons/{id}    ：查看单个人设。
@@ -13,6 +15,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from typing import Any
 
@@ -20,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_active_user
+from api.dao import persona_research_tasks as research_tasks_dao
 from api.db.mongodb import get_db
 from api.dao import persons as persons_dao
 from core.background import spawn_background
@@ -34,10 +39,10 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 class PersonaGenerateRequest(BaseModel):
     background: str = Field(..., min_length=1, description="虚构人物的背景设定（必填）")
-    count: int = Field(default=12, ge=1, le=40, description="本轮生成数量")
-    industries: list[str] = Field(default_factory=list, description="行业维度，留空使用默认矩阵")
-    age_ranges: list[str] = Field(default_factory=list, description="年龄段维度")
-    personalities: list[str] = Field(default_factory=list, description="性格维度")
+    count: int = Field(default=36, ge=1, le=60, description="本轮生成数量")
+    industries: list[str] = Field(default_factory=list, description="可选行业提示，留空由 AI 探索")
+    age_ranges: list[str] = Field(default_factory=list, description="可选年龄提示，留空由 AI 探索")
+    personalities: list[str] = Field(default_factory=list, description="可选性格提示，留空由 AI 探索")
     name: str = Field(default="", description="可选虚构姓名偏好，留空则自动生成")
     company: str = Field(default="", description="可选组织设定")
     position: str = Field(default="", description="可选职位设定")
@@ -60,6 +65,11 @@ class PersonUpsertRequest(BaseModel):
     project_id: str = Field(default="", description="可选溯源项目")
 
 
+class PersonaEnrichRequest(BaseModel):
+    extra: str = Field(default="", description="本轮持续研究的补充方向")
+    project_id: str = Field(default="", description="可选溯源项目")
+
+
 # ── 采集 ─────────────────────────────────────────────
 
 @router.post("/generate")
@@ -74,11 +84,18 @@ async def generate(req: PersonaGenerateRequest):
 
     app_config = await get_runtime_app_config()
     task_id = "persona_" + uuid.uuid4().hex[:16]
+    await research_tasks_dao.create_task(
+        get_db(),
+        task_id=task_id,
+        task_type="generate",
+        requested_count=req.count,
+        project_id=req.project_id,
+    )
 
     async def _run() -> None:
         db = get_db()
         try:
-            await generate_personas(
+            result = await generate_personas(
                 db,
                 app_config,
                 background=background,
@@ -94,13 +111,49 @@ async def generate(req: PersonaGenerateRequest):
                 task_id=task_id,
                 source="synthetic_research",
             )
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await research_tasks_dao.update_task(
+                    db,
+                    task_id,
+                    status="cancelled",
+                    stage="interrupted",
+                    message="服务重载导致任务中断，请重新发起",
+                    error="runtime_reloaded",
+                )
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[persons] 生成失败 task={task_id}: {exc}")
+            await research_tasks_dao.update_task(
+                db,
+                task_id,
+                status="failed",
+                stage="failed",
+                message="人设研究或生成失败",
+                failed_count=req.count,
+                error=str(exc),
+            )
+        else:
+            items = list(result.get("items") or [])
+            await research_tasks_dao.update_task(
+                db,
+                task_id,
+                status="completed",
+                stage="completed",
+                message=f"已完成人设生成，共 {len(items)} 条",
+                completed_count=len(items),
+                failed_count=len(result.get("errors") or []),
+                result_person_ids=[str(item.get("person_id") or "") for item in items],
+                details={
+                    "verified_sources": len(result.get("source_urls") or []),
+                    "research_summary": str(result.get("research_summary") or "")[:1000],
+                },
+            )
 
     spawn_background(_run(), name=f"persona_generate:{task_id}")
     return {
         "task_id": task_id,
-        "status": "running",
+        "status": "queued",
         "name": (req.name or "").strip(),
         "count": req.count,
         "is_fictional": True,
@@ -130,7 +183,105 @@ async def collect(req: PersonaCollectRequest):
     )
 
 
+@router.post("/{person_id}/enrich")
+async def enrich(person_id: str, req: PersonaEnrichRequest):
+    """从已有摘要出发，为同一虚构人设持续补充新来源和新信息。"""
+    db = get_db()
+    existing = await persons_dao.get_person(db, person_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="人设不存在")
+    if existing.get("is_fictional") is not True:
+        raise HTTPException(status_code=400, detail="仅支持持续研究虚构人设")
+    active_task = await research_tasks_dao.get_active_person_task(db, person_id)
+    if active_task:
+        return {
+            "task_id": active_task["task_id"],
+            "status": active_task["status"],
+            "person_id": person_id,
+            "profile_version": int(existing.get("profile_version") or 1),
+        }
+
+    from api.services.persona_collect import enrich_persona
+    from api.services.runtime_config import get_runtime_app_config
+
+    app_config = await get_runtime_app_config()
+    task_id = "persona_enrich_" + uuid.uuid4().hex[:16]
+    await research_tasks_dao.create_task(
+        db,
+        task_id=task_id,
+        task_type="enrich",
+        requested_count=1,
+        person_id=person_id,
+        project_id=req.project_id,
+    )
+
+    async def _run() -> None:
+        task_db = get_db()
+        try:
+            updated = await enrich_persona(
+                task_db,
+                app_config,
+                person_id=person_id,
+                project_id=req.project_id,
+                extra=req.extra,
+                task_id=task_id,
+            )
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await research_tasks_dao.update_task(
+                    task_db,
+                    task_id,
+                    status="cancelled",
+                    stage="interrupted",
+                    message="服务重载导致持续研究中断，请重新发起",
+                    error="runtime_reloaded",
+                )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[persons] 持续研究失败 task={task_id}: {exc}")
+            await research_tasks_dao.update_task(
+                task_db,
+                task_id,
+                status="failed",
+                stage="failed",
+                message="持续研究失败",
+                failed_count=1,
+                error=str(exc),
+            )
+        else:
+            await research_tasks_dao.update_task(
+                task_db,
+                task_id,
+                status="completed",
+                stage="completed",
+                message="人设资料已升级",
+                completed_count=1,
+                result_person_ids=[str(updated.get("person_id") or person_id)],
+                details={
+                    "profile_version": int(updated.get("profile_version") or 1),
+                    "research_rounds": int(updated.get("research_rounds") or 1),
+                },
+            )
+
+    spawn_background(_run(), name=f"persona_enrich:{task_id}")
+    return {
+        "task_id": task_id,
+        "status": "queued",
+        "person_id": person_id,
+        "profile_version": int(existing.get("profile_version") or 1),
+    }
+
+
 # ── 检索 / CRUD ──────────────────────────────────────
+
+
+@router.get("/tasks/{task_id}")
+async def get_research_task(task_id: str):
+    """读取批量生成或持续研究的持久化进度。"""
+    task = await research_tasks_dao.get_task(get_db(), task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="人设研究任务不存在")
+    return task
 
 @router.get("")
 async def list_persons(
@@ -147,6 +298,7 @@ async def list_persons(
     sort: str = "confidence_desc",
     limit: int = 20,
     skip: int = 0,
+    summary_only: bool = False,
 ):
     """多维检索人设库（全局），project_id 可选按溯源筛选。"""
     db = get_db()
@@ -166,6 +318,7 @@ async def list_persons(
         sort=sort,
         limit=limit,
         skip=skip,
+        summary_only=summary_only,
     )
     return {"items": items, "total": total, "limit": limit, "skip": skip}
 

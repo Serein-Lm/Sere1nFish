@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, Callable, AsyncGenerator, Literal
+from typing import Any, Callable, AsyncGenerator, Literal, Sequence
 
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
@@ -36,6 +36,7 @@ logger = get_logger("agent_runtime")
 
 # 输出模式类型
 OutputMode = Literal["silent", "console", "sse"]
+ToolResultTransform = Callable[[str, Any], Any]
 
 # 默认超时（秒）
 DEFAULT_AGENT_TIMEOUT = 500
@@ -82,6 +83,7 @@ def _wrap_tools_with_error_handling(
     call_guard: Callable[
         [str, tuple[Any, ...], dict[str, Any]], str | None
     ] | None = None,
+    result_transform: ToolResultTransform | None = None,
 ) -> list:
     """
     给每个工具包一层 try/except，异常时返回错误字符串而不是抛异常。
@@ -138,7 +140,11 @@ def _wrap_tools_with_error_handling(
                     )
                     _es["consecutive"] = 0  # 成功则重置
                     _es["container_error_consecutive"] = 0
-                    return result
+                    return (
+                        result_transform(_name, result)
+                        if result_transform is not None
+                        else result
+                    )
                 except Exception as e:
                     _es["consecutive"] += 1
                     err_str = str(e)
@@ -188,7 +194,11 @@ def _wrap_tools_with_error_handling(
                     result = _orig(*args, **kwargs)
                     _es["consecutive"] = 0
                     _es["container_error_consecutive"] = 0
-                    return result
+                    return (
+                        result_transform(_name, result)
+                        if result_transform is not None
+                        else result
+                    )
                 except Exception as e:
                     _es["consecutive"] += 1
                     err_str = str(e)
@@ -214,6 +224,14 @@ def _wrap_tools_with_error_handling(
 
         wrapped.append(tool)
     return wrapped
+
+
+def _filter_mcp_tools(tools: list, allowed_names: Sequence[str] | None) -> list:
+    """Expose only the MCP capabilities needed by a specialized Agent."""
+    if allowed_names is None:
+        return tools
+    allowed = {str(name).strip() for name in allowed_names if str(name).strip()}
+    return [tool for tool in tools if getattr(tool, "name", "") in allowed]
 
 
 def create_llm(
@@ -277,6 +295,8 @@ def create_agent_node(
     mcp_call_guard: Callable[
         [str, tuple[Any, ...], dict[str, Any]], str | None
     ] | None = None,
+    mcp_tool_names: Sequence[str] | None = None,
+    mcp_result_transform: ToolResultTransform | None = None,
 ) -> Callable[[MessagesState], dict[str, Any] | AsyncGenerator[dict[str, Any], None]]:
     """
     创建 Agent 节点函数。
@@ -290,6 +310,8 @@ def create_agent_node(
     - output_mode: 输出模式
     - streaming: LLM 是否使用流式输出（默认 True，关闭可获得完整 token 统计）
     - timeout: Agent 执行超时秒数（默认从 config.runtime.agent_timeout 读取，fallback 500s，0 表示不限）
+    - mcp_tool_names: 专用 Agent 可见的 MCP 工具白名单；None 表示保留全部工具
+    - mcp_result_transform: MCP 工具结果进入模型上下文前的统一转换器
     
     返回：
     - output_mode="silent" 或 "console": 返回异步函数，执行后返回 {"messages": [...]}
@@ -322,10 +344,12 @@ def create_agent_node(
                 if transport == "stdio":
                     async with client.session(mcp_server_name) as session:
                         mcp_tools = await load_mcp_tools(session)
+                        mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
                         mcp_tools = _wrap_tools_with_error_handling(
                             mcp_tools,
                             max_calls=mcp_tool_limit,
                             call_guard=mcp_call_guard,
+                            result_transform=mcp_result_transform,
                         )
                         all_tools.extend(mcp_tools)
                         agent = create_agent(
@@ -340,10 +364,12 @@ def create_agent_node(
                         return
                 else:
                     mcp_tools = await client.get_tools()
+                    mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
                     mcp_tools = _wrap_tools_with_error_handling(
                         mcp_tools,
                         max_calls=mcp_tool_limit,
                         call_guard=mcp_call_guard,
+                        result_transform=mcp_result_transform,
                     )
                     all_tools.extend(mcp_tools)
 
@@ -402,19 +428,23 @@ def create_agent_node(
                     if transport == "stdio":
                         async with client.session(mcp_server_name) as session:
                             mcp_tools = await load_mcp_tools(session)
+                            mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
                             mcp_tools = _wrap_tools_with_error_handling(
                                 mcp_tools,
                                 max_calls=mcp_tool_limit,
                                 call_guard=mcp_call_guard,
+                                result_transform=mcp_result_transform,
                             )
                             all_tools.extend(mcp_tools)
                             return await _execute(all_tools)
                     else:
                         mcp_tools = await client.get_tools()
+                        mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
                         mcp_tools = _wrap_tools_with_error_handling(
                             mcp_tools,
                             max_calls=mcp_tool_limit,
                             call_guard=mcp_call_guard,
+                            result_transform=mcp_result_transform,
                         )
                         all_tools.extend(mcp_tools)
 

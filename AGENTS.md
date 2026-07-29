@@ -73,6 +73,7 @@
 - `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
 - `SourceDocumentLink` 是 Project、Target、任务、关键词发现某个文档的关系，持久化在 `source_document_links`。任务字段、主体对应度和相关性评分属于该场景关联，不得写成全局来源事实；相同场景可按分析指纹复用，不同 Target 必须独立分析。
 - `Finding` 是从来源证据派生的项目级事实。联系方式 Finding 必须保留 `target_id`、`source_document_id`、`source_document_version_id`、原文 URL、联系方式邻近上下文和证据引用；同一联系方式的多次发现累计 evidence，不覆盖历史来源。
+- 虚构人设持久化在 `persons`，AI 先通过 summary 投影筛选，再按 `person_id` 渐进读取完整档案；持续研究保持稳定身份并累加 `profile_version`、`research_rounds` 和来源证据。生成与升级进度独立持久化在 `persona_research_tasks`，进程重启时必须把遗留运行态明确标记为中断。
 - 公众号深采采用“手机发现、浏览器读取”的职责划分：手机只负责应用内搜索、命中文章和复制真实链接；链接交给 `api.services.source_documents` 的 Provider registry，由项目 Chrome 池读取全文和媒体。浏览器读取失败时才回退原有手机逐屏深采。
 - 来源版本层只保存文章自身事实和证据；ProjectTarget 关联层保存搜索场景和任务分析；手机采集记录保存本次任务结果；前端按项目过滤记录并可按 Target 聚合。禁止在这些层之间复制原始 HTML 或把搜索关键词自动当作公司名。
 

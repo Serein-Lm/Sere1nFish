@@ -4,11 +4,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
-import ipaddress
 import json
 import mimetypes
 import re
-import socket
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -24,6 +22,7 @@ from api.services.info_collection.tuning import (
     DEFAULT_COPYWRITING_CONCURRENCY,
     DEFAULT_URL_SCAN_CONCURRENCY,
 )
+from api.services.url_security import assert_public_http_url
 from api.storage import get_object_storage
 from core.logger import get_logger
 
@@ -154,23 +153,6 @@ def _filename_from_response(url: str, headers: aiohttp.typedefs.LooseHeaders, co
     return name
 
 
-async def _assert_public_url(url: str) -> None:
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
-        raise ValueError("仅允许无凭据的 HTTP/HTTPS 公网地址")
-    if parsed.hostname.lower() == "localhost":
-        raise ValueError("不允许访问本机地址")
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(
-        parsed.hostname,
-        parsed.port or (443 if parsed.scheme == "https" else 80),
-        type=socket.SOCK_STREAM,
-    )
-    addresses = {item[4][0].split("%", 1)[0] for item in infos}
-    if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
-        raise ValueError("目标地址不是公网地址")
-
-
 async def _fetch_resource(
     session: aiohttp.ClientSession,
     url: str,
@@ -180,7 +162,7 @@ async def _fetch_resource(
 ) -> _FetchedResource:
     current = url
     for _ in range(redirects + 1):
-        await _assert_public_url(current)
+        await assert_public_http_url(current)
         async with session.get(current, allow_redirects=False) as response:
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.headers.get("Location")
