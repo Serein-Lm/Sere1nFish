@@ -243,3 +243,55 @@ def test_realtime_audio_is_published_to_bound_media_output(monkeypatch) -> None:
         assert browser.audio == [b"\x01\x00\x02\x00"]
 
     asyncio.run(run())
+
+
+def test_media_voice_bridge_reservation_is_hashed_reconnectable_and_deletable(monkeypatch) -> None:
+    from api.services.voice_realtime import service as voice_service
+    from api.services.voice_realtime.contracts import RealtimeSessionOptions
+
+    options = RealtimeSessionOptions(
+        voice="longanqian",
+        mode="smart_turn",
+        instructions="",
+        max_history_turns=20,
+        vad_threshold=0.5,
+        vad_silence_ms=800,
+    )
+
+    async def fake_config():
+        return SimpleNamespace()
+
+    async def fake_options(self, db, payload, config):
+        assert db == "db"
+        assert payload["type"] == "session.start"
+        return options
+
+    monkeypatch.setattr(voice_service, "load_realtime_voice_config", fake_config)
+    monkeypatch.setattr(
+        voice_service.RealtimeVoiceSessionService,
+        "_session_options",
+        fake_options,
+    )
+
+    async def run() -> None:
+        service = voice_service.RealtimeVoiceSessionService()
+        created = await service.reserve_media_bridge(
+            "db",
+            username="alice",
+            payload={"type": "session.start"},
+            expires_in=120,
+        )
+        stored = service._media_bridges[created.bridge_id]
+        assert created.token not in stored.token_hash
+        assert await service._claim_media_bridge(created.bridge_id, "wrong") is None
+        claimed = await service._claim_media_bridge(created.bridge_id, created.token)
+        assert claimed is stored
+        assert await service._claim_media_bridge(created.bridge_id, created.token) is None
+        stored.expires_at = 0
+        await service._release_media_bridge(created.bridge_id, stored)
+        assert stored.expires_at > 0
+        assert await service._claim_media_bridge(created.bridge_id, created.token) is stored
+        await service.delete_media_bridge(created.bridge_id)
+        assert created.bridge_id not in service._media_bridges
+
+    asyncio.run(run())

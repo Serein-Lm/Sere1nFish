@@ -472,6 +472,32 @@
   padding: 0;
 }
 
+.deepfake-integrated-voice {
+  border-radius: 8px;
+}
+
+.deepfake-voice-settings {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.72fr) minmax(110px, 0.4fr);
+  gap: 14px;
+}
+
+.deepfake-voice-settings label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.deepfake-voice-settings .ant-select,
+.deepfake-voice-settings .ant-input-number {
+  width: 100%;
+}
+
+.deepfake-voice-instructions {
+  grid-column: 1 / -1;
+}
+
 .deepfake-obs-guide {
   margin: 4px 0 0;
   padding-left: 22px;
@@ -575,5 +601,13 @@
 
   .deepfake-remote-output-url {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deepfake-voice-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deepfake-voice-instructions {
+    grid-column: auto;
   }
 }

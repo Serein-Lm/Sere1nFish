@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -51,6 +52,8 @@ MEDIA_ENABLED = os.getenv("DEEPFAKE_MEDIA_ENABLED", "0").lower() in {"1", "true"
 MEDIA_PUBLIC_BASE_URL = os.getenv("DEEPFAKE_MEDIA_PUBLIC_BASE_URL", "").strip().rstrip("/")
 MEDIA_RTSP_BASE_URL = os.getenv("DEEPFAKE_MEDIA_RTSP_BASE_URL", "rtsp://127.0.0.1:8554").strip().rstrip("/")
 MEDIA_OUTPUT_FPS = min(30, max(5, int(os.getenv("DEEPFAKE_MEDIA_OUTPUT_FPS", "15"))))
+VOICE_BRIDGE_BASE_URL = os.getenv("DEEPFAKE_VOICE_BRIDGE_BASE_URL", "").strip().rstrip("/")
+VOICE_BRIDGE_CA_FILE = os.getenv("DEEPFAKE_VOICE_BRIDGE_CA_FILE", "").strip()
 
 if MEDIA_ENABLED:
     media_public_url = urlsplit(MEDIA_PUBLIC_BASE_URL)
@@ -58,6 +61,18 @@ if MEDIA_ENABLED:
         raise RuntimeError("DEEPFAKE_MEDIA_PUBLIC_BASE_URL must be a valid HTTPS URL")
     if urlsplit(MEDIA_RTSP_BASE_URL).scheme != "rtsp":
         raise RuntimeError("DEEPFAKE_MEDIA_RTSP_BASE_URL must be a valid RTSP URL")
+    if VOICE_BRIDGE_BASE_URL:
+        voice_bridge_url = urlsplit(VOICE_BRIDGE_BASE_URL)
+        if (
+            voice_bridge_url.scheme != "wss"
+            or voice_bridge_url.hostname not in {"localhost", "127.0.0.1"}
+            or not voice_bridge_url.path
+            or voice_bridge_url.query
+            or voice_bridge_url.fragment
+        ):
+            raise RuntimeError("DEEPFAKE_VOICE_BRIDGE_BASE_URL must use the local WSS tunnel")
+        if not VOICE_BRIDGE_CA_FILE or not Path(VOICE_BRIDGE_CA_FILE).is_file():
+            raise RuntimeError("DEEPFAKE_VOICE_BRIDGE_CA_FILE is unavailable")
 
 QUALITY_PROFILES.get(DEFAULT_IMAGE_PROFILE)
 QUALITY_PROFILES.get(DEFAULT_REALTIME_PROFILE)
@@ -362,6 +377,8 @@ class StreamSession:
     media_publish_hash: str = ""
     media_read_hash: str = ""
     media_internal_token: str = field(default="", repr=False)
+    voice_bridge_id: str = field(default="", repr=False)
+    voice_bridge_token: str = field(default="", repr=False)
     media_pipeline: MediaPipeline | None = field(default=None, repr=False)
     media_task: asyncio.Task[None] | None = field(default=None, repr=False)
     created_at: str = field(default_factory=_now_iso)
@@ -445,6 +462,13 @@ async def _run_media_session(session: StreamSession) -> None:
         max_width=session.max_width,
         output_fps=MEDIA_OUTPUT_FPS,
         processor=process_frame,
+        voice_bridge_url=(
+            f"{VOICE_BRIDGE_BASE_URL}/{session.voice_bridge_id}"
+            if session.voice_bridge_id
+            else ""
+        ),
+        voice_bridge_token=session.voice_bridge_token,
+        voice_bridge_ca_file=VOICE_BRIDGE_CA_FILE,
     )
     session.media_pipeline = pipeline
     try:
@@ -495,7 +519,7 @@ async def lifespan(_: FastAPI):
     await asyncio.gather(*(_stop_media_session(session) for session in remaining))
 
 
-app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.4.0", lifespan=lifespan)
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -552,6 +576,8 @@ async def status() -> dict[str, Any]:
             "protocol": "whip_whep" if MEDIA_ENABLED else "",
             "public_base_url": MEDIA_PUBLIC_BASE_URL if MEDIA_ENABLED else "",
             "output_fps": MEDIA_OUTPUT_FPS if MEDIA_ENABLED else 0,
+            "audio_supported": bool(MEDIA_ENABLED and VOICE_BRIDGE_BASE_URL),
+            "audio_codec": "Opus" if MEDIA_ENABLED and VOICE_BRIDGE_BASE_URL else "",
         },
         "gpu": _gpu_status(),
         "model_use": "authorized_non_commercial",
@@ -631,6 +657,8 @@ async def create_session(
     max_width: int = Form(default=960, ge=320, le=1280),
     profile: str = Form(default=DEFAULT_REALTIME_PROFILE),
     transport: str = Form(default="frame_ws"),
+    voice_bridge_id: str = Form(default=""),
+    voice_bridge_token: str = Form(default=""),
 ) -> dict[str, Any]:
     if not authorized_use:
         raise HTTPException(status_code=403, detail="Explicit authorization is required")
@@ -643,6 +671,19 @@ async def create_session(
         raise HTTPException(status_code=422, detail="Unknown realtime transport")
     if transport == "obs_whip" and not MEDIA_ENABLED:
         raise HTTPException(status_code=503, detail="OBS direct media transport is not configured")
+    voice_bridge_id = voice_bridge_id.strip()
+    voice_bridge_token = voice_bridge_token.strip()
+    if bool(voice_bridge_id) != bool(voice_bridge_token):
+        raise HTTPException(status_code=422, detail="Voice bridge credentials are incomplete")
+    if voice_bridge_id:
+        if transport != "obs_whip":
+            raise HTTPException(status_code=422, detail="Voice bridge requires OBS direct transport")
+        if not VOICE_BRIDGE_BASE_URL:
+            raise HTTPException(status_code=503, detail="Voice bridge is not configured")
+        if not re.fullmatch(r"mvoice-[a-f0-9]{32}", voice_bridge_id):
+            raise HTTPException(status_code=422, detail="Voice bridge ID is invalid")
+        if len(voice_bridge_token) < 32:
+            raise HTTPException(status_code=422, detail="Voice bridge token is invalid")
     source_frames = await _decode_source_uploads(source)
     try:
         source_analysis, source_face_sets = await runtime.validate_source(
@@ -685,6 +726,8 @@ async def create_session(
                 media_publish_hash=hashlib.sha256(media_publish_token.encode()).hexdigest() if media_publish_token else "",
                 media_read_hash=hashlib.sha256(media_read_token.encode()).hexdigest() if media_read_token else "",
                 media_internal_token=media_internal_token,
+                voice_bridge_id=voice_bridge_id,
+                voice_bridge_token=voice_bridge_token,
             )
             sessions[session_id] = session
             if transport == "obs_whip":
@@ -715,7 +758,10 @@ async def create_session(
         payload["media"] = {
             "publish_url": f"{MEDIA_PUBLIC_BASE_URL}/{input_path}/whip",
             "publish_token": media_publish_token,
-            "viewer_url": f"{MEDIA_PUBLIC_BASE_URL}/{output_path}/?token={quote(media_read_token, safe='')}",
+            "viewer_url": (
+                f"{MEDIA_PUBLIC_BASE_URL}/{output_path}/?"
+                f"token={quote(media_read_token, safe='')}&controls=false&muted=false&autoplay=true&playsInline=true"
+            ),
             "whep_url": f"{MEDIA_PUBLIC_BASE_URL}/{output_path}/whep",
             "read_token": media_read_token,
             "expires_in": SESSION_TTL_SECONDS,
@@ -724,6 +770,13 @@ async def create_session(
                 "fps": MEDIA_OUTPUT_FPS,
                 "video_codec": "H264",
                 "keyframe_interval_seconds": 1,
+                "audio_codec": "Opus" if voice_bridge_id else "",
+                "audio_sample_rate": 48000 if voice_bridge_id else 0,
+            },
+            "audio": {
+                "enabled": bool(voice_bridge_id),
+                "input": "OBS microphone",
+                "output": "Bailian full-duplex voice",
             },
         }
     return payload

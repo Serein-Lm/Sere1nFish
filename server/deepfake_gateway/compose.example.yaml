@@ -1,6 +1,6 @@
 services:
   gateway:
-    image: sere1nfish/deepfake-gateway:1.3.0
+    image: sere1nfish/deepfake-gateway:1.4.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -26,11 +26,15 @@ services:
       DEEPFAKE_MEDIA_OUTPUT_FPS: ${DEEPFAKE_MEDIA_OUTPUT_FPS:-15}
       DEEPFAKE_MEDIA_ENCODER: ${DEEPFAKE_MEDIA_ENCODER:-h264_nvenc}
       DEEPFAKE_MEDIA_VIDEO_BITRATE: ${DEEPFAKE_MEDIA_VIDEO_BITRATE:-1800k}
+      DEEPFAKE_MEDIA_AUDIO_BITRATE: ${DEEPFAKE_MEDIA_AUDIO_BITRATE:-64k}
+      DEEPFAKE_VOICE_BRIDGE_BASE_URL: ${DEEPFAKE_VOICE_BRIDGE_BASE_URL:-wss://localhost:18444/api/v1/voice/realtime/media-bridge}
+      DEEPFAKE_VOICE_BRIDGE_CA_FILE: /run/secrets/server-ca.crt
     volumes:
       - ${DEEPFAKE_ASSETS_DIR:-../data/assets}:/opt/facefusion/.assets
       - ${DEEPFAKE_CACHE_DIR:-../data/cache}:/opt/facefusion/.caches
       - ${DEEPFAKE_FACEFUSION_CONFIG_FILE:-./facefusion.ini}:/opt/facefusion/facefusion.ini:ro
       - ${DEEPFAKE_TOKEN_FILE:-../secrets/api-token}:/run/secrets/deepfake_api_token:ro
+      - ${DEEPFAKE_SERVER_CA_FILE:-../secrets/server-ca.crt}:/run/secrets/server-ca.crt:ro
     command:
       - --host
       - 127.0.0.1

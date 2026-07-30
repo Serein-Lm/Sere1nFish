@@ -9,9 +9,21 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from api.services.runtime_config import get_runtime_config_section
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from .contracts import DeepfakeConfig, DeepfakeProvider, DeepfakeStream, ImageSwapResult, SourceImage
+from api.services.runtime_config import get_runtime_config_section
+from api.services.voice_realtime import RealtimeVoiceError, get_realtime_voice_service
+from api.services.voice_realtime.config import RealtimeVoiceConfigurationError
+
+from .contracts import (
+    DeepfakeConfig,
+    DeepfakeProvider,
+    DeepfakeStream,
+    DeepfakeVoiceBridge,
+    DeepfakeVoiceOptions,
+    ImageSwapResult,
+    SourceImage,
+)
 from .factory import DeepfakeProviderFactory
 
 
@@ -22,6 +34,7 @@ class DeepfakeConfigurationError(RuntimeError):
 @dataclass(slots=True)
 class SessionOwner:
     username: str
+    voice_bridge_id: str = ""
 
 
 _SESSION_OWNERS: dict[str, SessionOwner] = {}
@@ -120,19 +133,60 @@ class DeepfakeService:
         max_width: int | None,
         profile: str,
         transport: str = "frame_ws",
+        db: AsyncIOMotorDatabase | None = None,
+        voice_options: DeepfakeVoiceOptions | None = None,
     ) -> dict[str, Any]:
         self.validate_sources(sources)
-        payload = await self.provider.create_session(
-            sources=sources,
-            max_width=min(1280, max(320, max_width or self.config.realtime_max_width)),
-            profile=self.normalize_profile(profile),
-            transport=self.normalize_transport(transport),
-        )
+        normalized_transport = self.normalize_transport(transport)
+        voice_bridge: DeepfakeVoiceBridge | None = None
+        if voice_options is not None:
+            if normalized_transport != "obs_whip":
+                raise ValueError("integrated voice is only supported by OBS direct sessions")
+            if db is None:
+                raise RuntimeError("database is required for integrated voice")
+            try:
+                reservation = await get_realtime_voice_service().reserve_media_bridge(
+                    db,
+                    username=username,
+                    payload={
+                        "type": "session.start",
+                        "model": voice_options.model,
+                        "voice": voice_options.voice,
+                        "mode": voice_options.mode,
+                        "instructions": voice_options.instructions,
+                        "max_history_turns": voice_options.max_history_turns,
+                    },
+                )
+            except RealtimeVoiceConfigurationError as exc:
+                raise DeepfakeConfigurationError(str(exc)) from exc
+            except RealtimeVoiceError as exc:
+                raise ValueError(str(exc)) from exc
+            voice_bridge = DeepfakeVoiceBridge(
+                bridge_id=reservation.bridge_id,
+                token=reservation.token,
+            )
+        try:
+            payload = await self.provider.create_session(
+                sources=sources,
+                max_width=min(1280, max(320, max_width or self.config.realtime_max_width)),
+                profile=self.normalize_profile(profile),
+                transport=normalized_transport,
+                voice_bridge=voice_bridge,
+            )
+        except Exception:
+            if voice_bridge:
+                await get_realtime_voice_service().delete_media_bridge(voice_bridge.bridge_id)
+            raise
         session_id = str(payload.get("session_id") or "")
         if not session_id:
+            if voice_bridge:
+                await get_realtime_voice_service().delete_media_bridge(voice_bridge.bridge_id)
             raise RuntimeError("GPU gateway did not return a session ID")
         async with _SESSION_OWNERS_LOCK:
-            _SESSION_OWNERS[session_id] = SessionOwner(username=username)
+            _SESSION_OWNERS[session_id] = SessionOwner(
+                username=username,
+                voice_bridge_id=voice_bridge.bridge_id if voice_bridge else "",
+            )
         payload.pop("ticket", None)
         if payload.get("transport") == "frame_ws":
             payload["stream_path"] = f"/api/v1/deepfake/sessions/{session_id}/stream"
@@ -152,7 +206,9 @@ class DeepfakeService:
         await self._require_owner(session_id, username)
         payload = await self.provider.delete_session(session_id)
         async with _SESSION_OWNERS_LOCK:
-            _SESSION_OWNERS.pop(session_id, None)
+            owner = _SESSION_OWNERS.pop(session_id, None)
+        if owner and owner.voice_bridge_id:
+            await get_realtime_voice_service().delete_media_bridge(owner.voice_bridge_id)
         return payload
 
     async def open_stream(

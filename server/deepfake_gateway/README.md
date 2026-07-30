@@ -14,6 +14,13 @@ Security requirements:
   TLS verification to false in the Sere1nFish provider.
 - Mount a random API token and TLS private key from root-only files. Do not put
   either value in Compose, Git, logs, or frontend code.
+- OBS publishes the camera and microphone in one WHIP session. The gateway
+  decodes microphone audio to 16 kHz PCM, sends it through a short-lived WSS
+  tunnel to Sere1nFish, and muxes returned AI speech as Opus into the processed
+  H.264 output. The Bailian API key remains on Sere1nFish.
+- The GPU-to-Sere1nFish WSS endpoint uses a loopback reverse SSH tunnel. Mount
+  the Sere1nFish nginx CA certificate read-only as
+  `/run/secrets/server-ca.crt`; never disable TLS verification.
 - `hyperswap_1a_256` is configured for authorized research use. The gateway
   owns named quality profiles so API callers do not depend on FaceFusion
   processor names or model arguments.
@@ -47,7 +54,8 @@ API surface:
 - `POST /v1/swap/image`: authenticated source/target image inference with an
   optional `profile` field.
 - `POST /v1/sessions`: create an ephemeral realtime source session with an
-  optional `profile` and `transport` (`frame_ws` or `obs_whip`) field.
+  optional `profile`, `transport` (`frame_ws` or `obs_whip`) and private voice
+  bridge credentials supplied by the Sere1nFish adapter.
 - `WS /v1/realtime/{session_id}`: JPEG frame input/output stream.
 - `POST /internal/mediamtx/auth`: loopback-only per-session media
   authorization endpoint.
@@ -68,3 +76,14 @@ Before starting MediaMTX, install `sysctl-mediamtx.conf` under
 `/etc/sysctl.d/99-sere1nfish-mediamtx.conf` and run `sysctl --system`. Caddy
 keeps the legacy private-CA IP endpoint for Sere1nFish while automatically
 issuing a public certificate for `DEEPFAKE_PUBLIC_HOST`.
+
+The server-side SSH tunnel must additionally expose local nginx to GPU
+loopback. The complete forwarding set is:
+
+```text
+-L 172.18.0.1:18443:127.0.0.1:443
+-R 127.0.0.1:17890:43.106.0.54:18818
+-R 127.0.0.1:18444:127.0.0.1:443
+```
+
+`18444` remains loopback-only on the GPU and is not a security-group port.

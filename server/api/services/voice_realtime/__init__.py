@@ -2,6 +2,7 @@
 
 from .config import load_realtime_voice_config
 from .service import (
+    MediaVoiceBridgeReservation,
     RealtimeVoiceError,
     RealtimeVoiceSessionService,
     get_realtime_voice_service,
@@ -11,6 +12,7 @@ from .service import (
 __all__ = [
     "RealtimeVoiceError",
     "RealtimeVoiceSessionService",
+    "MediaVoiceBridgeReservation",
     "get_realtime_voice_service",
     "load_realtime_voice_config",
     "shutdown_realtime_voice_service",

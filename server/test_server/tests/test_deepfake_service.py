@@ -3,7 +3,13 @@ from contextlib import asynccontextmanager
 import pytest
 
 from api.routers import deepfake as deepfake_router
-from api.services.deepfake.contracts import DeepfakeConfig, ImageSwapResult, SourceImage
+from api.services.deepfake.contracts import (
+    DeepfakeConfig,
+    DeepfakeVoiceOptions,
+    ImageSwapResult,
+    SourceImage,
+)
+from api.services.deepfake import service as deepfake_service_module
 from api.services.deepfake.service import (
     DeepfakeConfigurationError,
     DeepfakeService,
@@ -21,6 +27,7 @@ class FakeProvider:
         self.session_profile = ""
         self.session_source_count = 0
         self.session_transport = ""
+        self.session_voice_bridge = None
 
     async def status(self):
         return {"ok": True}
@@ -33,6 +40,7 @@ class FakeProvider:
         self.session_profile = kwargs["profile"]
         self.session_source_count = len(kwargs["sources"])
         self.session_transport = kwargs["transport"]
+        self.session_voice_bridge = kwargs.get("voice_bridge")
         payload = {
             "session_id": "session-test-owner",
             "ticket": "must-not-leak",
@@ -152,6 +160,87 @@ async def test_obs_direct_session_preserves_short_lived_media_credentials() -> N
     assert "ticket" not in created
     assert "stream_path" not in created
     assert provider.session_transport == "obs_whip"
+
+
+@pytest.mark.asyncio
+async def test_obs_direct_voice_bridge_is_private_and_released(monkeypatch) -> None:
+    class VoiceService:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        async def reserve_media_bridge(self, db, *, username, payload):
+            assert db == "db"
+            assert username == "alice"
+            assert payload["voice"] == "longanqian"
+            return type(
+                "Reservation",
+                (),
+                {"bridge_id": "mvoice-test", "token": "bridge-secret"},
+            )()
+
+        async def delete_media_bridge(self, bridge_id: str):
+            self.deleted.append(bridge_id)
+
+    voice_service = VoiceService()
+    monkeypatch.setattr(
+        deepfake_service_module,
+        "get_realtime_voice_service",
+        lambda: voice_service,
+    )
+    provider = FakeProvider()
+    service = DeepfakeService(_config(), provider)
+    created = await service.create_session(
+        username="alice",
+        sources=[SourceImage(b"source", "source.jpg")],
+        max_width=640,
+        profile="fast",
+        transport="obs_whip",
+        db="db",
+        voice_options=DeepfakeVoiceOptions(
+            model="qwen-audio-3.0-realtime-plus",
+            voice="longanqian",
+            mode="smart_turn",
+            instructions="",
+            max_history_turns=20,
+        ),
+    )
+    assert "bridge-secret" not in str(created)
+    assert provider.session_voice_bridge.bridge_id == "mvoice-test"
+    assert provider.session_voice_bridge.token == "bridge-secret"
+    await service.delete_session(created["session_id"], "alice")
+    assert voice_service.deleted == ["mvoice-test"]
+
+
+@pytest.mark.asyncio
+async def test_obs_direct_voice_validation_error_is_exposed_as_request_error(monkeypatch) -> None:
+    from api.services.voice_realtime import RealtimeVoiceError
+
+    class VoiceService:
+        async def reserve_media_bridge(self, *_args, **_kwargs):
+            raise RealtimeVoiceError("invalid voice")
+
+    monkeypatch.setattr(
+        deepfake_service_module,
+        "get_realtime_voice_service",
+        lambda: VoiceService(),
+    )
+    service = DeepfakeService(_config(), FakeProvider())
+    with pytest.raises(ValueError, match="invalid voice"):
+        await service.create_session(
+            username="alice",
+            sources=[SourceImage(b"source", "source.jpg")],
+            max_width=640,
+            profile="fast",
+            transport="obs_whip",
+            db="db",
+            voice_options=DeepfakeVoiceOptions(
+                model="qwen-audio-3.0-realtime-plus",
+                voice="missing",
+                mode="smart_turn",
+                instructions="",
+                max_history_turns=20,
+            ),
+        )
 
 
 @pytest.mark.asyncio

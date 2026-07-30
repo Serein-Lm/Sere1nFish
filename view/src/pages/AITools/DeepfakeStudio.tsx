@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   Alert,
   Button,
@@ -6,11 +6,14 @@ import {
   Collapse,
   Image,
   Input,
+  InputNumber,
   Modal,
   Segmented,
+  Select,
   Space,
   Spin,
   Statistic,
+  Switch,
   Tag,
   Tooltip,
   Typography,
@@ -51,6 +54,11 @@ import {
   type RemoteMediaOutputSession,
 } from '../../services/mediaOutputService'
 import RealtimeVoicePanel from './RealtimeVoicePanel'
+import {
+  getRealtimeVoiceConfig,
+  type RealtimeTurnMode,
+  type RealtimeVoiceConfig,
+} from '../../services/voiceRealtimeService'
 
 const { Text } = Typography
 
@@ -77,6 +85,15 @@ const MEDIA_STATE_LABELS: Record<string, string> = {
   starting: '正在启动',
   live: '直连中',
   reconnecting: '正在重连',
+  stopped: '已停止',
+}
+
+const AUDIO_STATE_LABELS: Record<string, string> = {
+  disabled: '未启用',
+  connecting: '连接语音服务',
+  live: 'AI 音轨在线',
+  reconnecting: '语音重连中',
+  waiting_audio: '等待 OBS 麦克风',
   stopped: '已停止',
 }
 
@@ -217,6 +234,13 @@ export default function DeepfakeStudio() {
   const [streamResult, setStreamResult] = useState('')
   const [sessionStatus, setSessionStatus] = useState<DeepfakeSessionStatus | null>(null)
   const [directSession, setDirectSession] = useState<DeepfakeSession | null>(null)
+  const [voiceConfig, setVoiceConfig] = useState<RealtimeVoiceConfig | null>(null)
+  const [voiceConfigLoading, setVoiceConfigLoading] = useState(false)
+  const [integratedVoice, setIntegratedVoice] = useState(true)
+  const [integratedVoiceId, setIntegratedVoiceId] = useState('')
+  const [integratedVoiceMode, setIntegratedVoiceMode] = useState<Exclude<RealtimeTurnMode, 'manual'>>('smart_turn')
+  const [integratedVoiceInstructions, setIntegratedVoiceInstructions] = useState('')
+  const [integratedVoiceHistory, setIntegratedVoiceHistory] = useState(20)
   const [obsGuideOpen, setObsGuideOpen] = useState(false)
   const [obsCreating, setObsCreating] = useState(false)
   const [obsOutput, setObsOutput] = useState<RemoteMediaOutputSession | null>(null)
@@ -241,6 +265,25 @@ export default function DeepfakeStudio() {
     .filter((width) => width <= realtimeProfileMaxWidth)
     .map((width) => ({ value: width, label: String(width) }))
   const obsViewerUrl = obsOutput ? remoteMediaOutputViewerUrl(obsOutput) : ''
+  const integratedVoiceOptions = useMemo(() => {
+    if (!voiceConfig) return []
+    return [
+      {
+        label: '系统音色',
+        options: voiceConfig.system_voices.map((item) => ({
+          value: item.voice_id,
+          label: item.label,
+        })),
+      },
+      ...(voiceConfig.cloned_voices.length ? [{
+        label: '复刻音色',
+        options: voiceConfig.cloned_voices.map((item) => ({
+          value: item.voice_id,
+          label: item.label,
+        })),
+      }] : []),
+    ]
+  }, [voiceConfig])
 
   const addSourceFile = useCallback((file: File) => {
     setSourceFiles((current) => {
@@ -261,6 +304,7 @@ export default function DeepfakeStudio() {
     try {
       const next = await getDeepfakeStatus()
       setStatus(next)
+      if (!next.media_transport?.audio_supported) setIntegratedVoice(false)
       if (!profileDefaultsAppliedRef.current) {
         const imageDefault = PROFILE_OPTIONS.some((option) => option.value === next.default_image_profile)
           ? next.default_image_profile as QualityProfile
@@ -285,9 +329,27 @@ export default function DeepfakeStudio() {
     }
   }, [messageApi])
 
+  const loadVoiceConfig = useCallback(async () => {
+    setVoiceConfigLoading(true)
+    try {
+      const next = await getRealtimeVoiceConfig()
+      setVoiceConfig(next)
+      setIntegratedVoiceId((current) => current || next.default_voice)
+      setIntegratedVoiceMode(next.default_mode === 'server_vad' ? 'server_vad' : 'smart_turn')
+      setIntegratedVoiceInstructions(next.default_instructions || '')
+      setIntegratedVoiceHistory(next.max_history_turns)
+    } catch (error) {
+      setIntegratedVoice(false)
+      messageApi.error(error instanceof Error ? error.message : '全双工语音配置加载失败')
+    } finally {
+      setVoiceConfigLoading(false)
+    }
+  }, [messageApi])
+
   useEffect(() => {
     void loadStatus()
-  }, [loadStatus])
+    void loadVoiceConfig()
+  }, [loadStatus, loadVoiceConfig])
 
   const setOutputBlob = useCallback((blob: Blob) => {
     const previous = outputUrlRef.current
@@ -493,16 +555,32 @@ export default function DeepfakeStudio() {
       messageApi.error('GPU 尚未启用 OBS 直连媒体服务')
       return
     }
+    if (integratedVoice && (!status.media_transport.audio_supported || !voiceConfig || !integratedVoiceId)) {
+      messageApi.error('GPU 音频桥接或全双工音色尚未就绪')
+      return
+    }
     setStarting(true)
     try {
-      const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile, 'obs_whip')
+      const session = await createDeepfakeSession(
+        sourceFiles,
+        realtimeWidth,
+        realtimeProfile,
+        'obs_whip',
+        integratedVoice && voiceConfig ? {
+          model: voiceConfig.model,
+          voice: integratedVoiceId,
+          mode: integratedVoiceMode,
+          instructions: integratedVoiceInstructions,
+          maxHistoryTurns: integratedVoiceHistory,
+        } : undefined,
+      )
       if (!session.media) throw new Error('GPU 未返回 OBS 直连配置')
       effectiveRealtimeWidthRef.current = session.max_width
       if (session.max_width !== realtimeWidth) setRealtimeWidth(session.max_width)
       sessionIdRef.current = session.session_id
       setDirectSession(session)
       setSessionStatus(await getDeepfakeSession(session.session_id))
-      messageApi.success('OBS 直连会话已创建，等待 OBS 推流')
+      messageApi.success(integratedVoice ? 'OBS 音视频会话已创建，等待推流' : 'OBS 视频会话已创建，等待推流')
     } catch (error) {
       await stopRealtime()
       messageApi.error(error instanceof Error ? error.message : 'OBS 直连会话创建失败')
@@ -666,6 +744,85 @@ export default function DeepfakeStudio() {
               )}
             </div>
           </div>
+          {realtimeTransport === 'obs_whip' && !directSession && (
+            <Collapse
+              className="deepfake-integrated-voice"
+              defaultActiveKey={['integrated-voice']}
+              items={[{
+                key: 'integrated-voice',
+                label: (
+                  <Space wrap>
+                    <AudioOutlined />
+                    <Text strong>音频合流</Text>
+                    <Tag color={integratedVoice ? 'cyan' : 'default'}>{integratedVoice ? 'AI 音轨' : '静音输出'}</Tag>
+                    {voiceConfig?.model && integratedVoice && <Tag>{voiceConfig.model}</Tag>}
+                  </Space>
+                ),
+                extra: (
+                  <Switch
+                    checked={integratedVoice}
+                    disabled={starting || voiceConfigLoading || !status?.media_transport?.audio_supported}
+                    loading={voiceConfigLoading}
+                    onChange={setIntegratedVoice}
+                    aria-label="启用 AI 音频合流"
+                    onClick={(_, event) => event.stopPropagation()}
+                  />
+                ),
+                children: integratedVoice ? (
+                  <div className="deepfake-voice-settings">
+                    <label>
+                      <Text type="secondary">输出音色</Text>
+                      <Select
+                        value={integratedVoiceId || undefined}
+                        options={integratedVoiceOptions}
+                        onChange={setIntegratedVoiceId}
+                        disabled={starting}
+                        loading={voiceConfigLoading}
+                        showSearch
+                        optionFilterProp="label"
+                      />
+                    </label>
+                    <label>
+                      <Text type="secondary">轮次检测</Text>
+                      <Select
+                        value={integratedVoiceMode}
+                        onChange={setIntegratedVoiceMode}
+                        disabled={starting}
+                        options={[
+                          { value: 'smart_turn', label: '智能轮次' },
+                          { value: 'server_vad', label: '快速检测' },
+                        ]}
+                      />
+                    </label>
+                    <label>
+                      <Text type="secondary">历史轮次</Text>
+                      <InputNumber
+                        id="deepfake-voice-history"
+                        name="deepfake_voice_history"
+                        min={1}
+                        max={50}
+                        value={integratedVoiceHistory}
+                        onChange={(value) => setIntegratedVoiceHistory(value || 20)}
+                        disabled={starting}
+                      />
+                    </label>
+                    <label className="deepfake-voice-instructions">
+                      <Text type="secondary">会话指令</Text>
+                      <Input.TextArea
+                        id="deepfake-voice-instructions"
+                        name="deepfake_voice_instructions"
+                        value={integratedVoiceInstructions}
+                        onChange={(event) => setIntegratedVoiceInstructions(event.target.value)}
+                        maxLength={4000}
+                        autoSize={{ minRows: 2, maxRows: 4 }}
+                        disabled={starting}
+                      />
+                    </label>
+                  </div>
+                ) : null,
+              }]}
+            />
+          )}
           {realtimeTransport === 'obs_whip' ? (
             directSession?.media ? (
               <>
@@ -673,12 +830,13 @@ export default function DeepfakeStudio() {
                 <div className="deepfake-remote-output-head">
                   <Space wrap>
                     <LaptopOutlined />
-                    <Text strong>OBS 与 GPU 直连</Text>
+                    <Text strong>OBS 与 GPU 音视频直连</Text>
                     <Tag color={sessionStatus?.media?.state === 'live' ? 'success' : 'processing'}>
                       {MEDIA_STATE_LABELS[sessionStatus?.media?.state || 'waiting_input'] || '等待 OBS'}
                     </Tag>
                     <Tag>{directSession.media.recommended.width}px</Tag>
                     <Tag>{directSession.media.recommended.fps} FPS</Tag>
+                    {directSession.media.audio?.enabled && <Tag color="cyan">H.264 + Opus</Tag>}
                   </Space>
                 </div>
 
@@ -709,13 +867,13 @@ export default function DeepfakeStudio() {
                     />
                   </Tooltip>
 
-                  <Text type="secondary">换脸输出</Text>
+                  <Text type="secondary">换脸音视频输出</Text>
                   <Input value={directSession.media.viewer_url} readOnly />
                   <Space.Compact>
                     <Tooltip title="复制 OBS 浏览器源地址">
                       <Button
                         icon={<CopyOutlined />}
-                        aria-label="复制换脸输出地址"
+                        aria-label="复制换脸音视频输出地址"
                         onClick={() => void navigator.clipboard.writeText(directSession.media!.viewer_url).then(
                           () => messageApi.success('换脸输出地址已复制'),
                           () => messageApi.error('复制失败'),
@@ -737,47 +895,22 @@ export default function DeepfakeStudio() {
                   <Tag>{sessionStatus?.media?.dropped_frames || 0} 丢弃帧</Tag>
                   <Tag>{sessionStatus?.media?.last_inference_ms?.toFixed(0) || '0'} ms</Tag>
                   <Tag>{sessionStatus?.media?.reconnects || 0} 次重连</Tag>
+                  {directSession.media.audio?.enabled && (
+                    <Tag color={sessionStatus?.media?.audio?.state === 'live' ? 'success' : 'processing'}>
+                      {AUDIO_STATE_LABELS[sessionStatus?.media?.audio?.state || 'connecting'] || '音频初始化中'}
+                    </Tag>
+                  )}
+                  {directSession.media.audio?.enabled && (
+                    <Tag>{Math.round((sessionStatus?.media?.audio?.output_bytes || 0) / 1024)} KB AI 音频</Tag>
+                  )}
                 </Space>
                 {sessionStatus?.media?.last_error && (
                   <Alert type="warning" showIcon title={sessionStatus.media.last_error} />
                 )}
+                {sessionStatus?.media?.audio?.last_error && (
+                  <Alert type="warning" showIcon title={sessionStatus.media.audio.last_error} />
+                )}
                 </section>
-                <Collapse
-                  className="deepfake-output-voice"
-                  items={[{
-                    key: 'direct-voice-output',
-                    label: (
-                      <Space wrap>
-                        <AudioOutlined />
-                        <Text strong>目标音色与全双工对话</Text>
-                        <Tag color={obsOutput ? 'cyan' : 'default'}>{obsOutput ? '独立音轨已就绪' : '未创建音轨'}</Tag>
-                      </Space>
-                    ),
-                    children: obsOutput ? (
-                      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                        <div className="deepfake-remote-output-url">
-                          <Input value={obsViewerUrl} readOnly aria-label="OBS 语音浏览器源地址" />
-                          <Tooltip title="复制 OBS 语音来源地址">
-                            <Button
-                              icon={<CopyOutlined />}
-                              onClick={() => void navigator.clipboard.writeText(obsViewerUrl).then(
-                                () => messageApi.success('语音来源地址已复制'),
-                                () => messageApi.error('复制失败'),
-                              )}
-                            >
-                              复制音轨地址
-                            </Button>
-                          </Tooltip>
-                        </div>
-                        <RealtimeVoicePanel outputSessionId={obsOutput.session_id} />
-                      </Space>
-                    ) : (
-                      <Button icon={<AudioOutlined />} loading={obsCreating} onClick={() => void createObsOutput()}>
-                        创建 OBS 语音来源
-                      </Button>
-                    ),
-                  }]}
-                />
               </>
             ) : null
           ) : (
@@ -867,12 +1000,13 @@ export default function DeepfakeStudio() {
       >
         {realtimeTransport === 'obs_whip' ? (
           <ol className="deepfake-obs-guide">
-            <li>创建“原始摄像头”场景，只添加本机的视频采集设备，并保持它作为 OBS 节目画面。</li>
+            <li>创建“原始摄像头”场景，添加本机的视频采集设备和“音频输入采集”，并保持它作为 OBS 节目画面。</li>
             <li>在“设置 → 直播”选择 WHIP，分别填写页面生成的 WHIP 地址和 Bearer Token。</li>
-            <li>视频编码选择 H.264，输出分辨率和帧率按页面建议设置，然后点击“开始直播”。</li>
-            <li>创建“换脸输出”场景，添加浏览器来源并填写页面生成的换脸输出地址。</li>
-            <li>打开虚拟摄像机设置，输出类型选择“来源”，指定换脸浏览器源后启动虚拟摄像机。</li>
-            <li>不需要开始录制；节目画面保持原始摄像头，避免将换脸结果再次推回 GPU。</li>
+            <li>视频编码选择 H.264，确认 OBS 混音器中的麦克风有电平后点击“开始直播”。</li>
+            <li>创建“换脸输出”场景，添加浏览器来源并填写页面生成的换脸音视频输出地址，启用“通过 OBS 控制音频”。</li>
+            <li>Mac 安装 BlackHole 2ch；在 OBS 音频设置中将监听设备设为 BlackHole 2ch，并把换脸浏览器源设为“仅监听（输出静音）”。</li>
+            <li>打开虚拟摄像机设置，输出类型选择“来源”，指定换脸浏览器源；通话软件的视频选 OBS Virtual Camera，麦克风选 BlackHole 2ch。</li>
+            <li>不需要开始录制；节目画面保持原始摄像头，避免将换脸结果或 AI 声音再次推回 GPU。</li>
           </ol>
         ) : (
           <ol className="deepfake-obs-guide">

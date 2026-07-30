@@ -27,6 +27,8 @@ export interface DeepfakeStatus {
     protocol: string
     public_base_url: string
     output_fps: number
+    audio_supported?: boolean
+    audio_codec?: string
   }
   model_use: string
   gpu: {
@@ -85,7 +87,22 @@ export interface DeepfakeDirectMedia {
     fps: number
     video_codec: string
     keyframe_interval_seconds: number
+    audio_codec?: string
+    audio_sample_rate?: number
   }
+  audio?: {
+    enabled: boolean
+    input: string
+    output: string
+  }
+}
+
+export interface DeepfakeVoiceSessionOptions {
+  model: string
+  voice: string
+  mode: 'smart_turn' | 'server_vad'
+  instructions?: string
+  maxHistoryTurns?: number
 }
 
 export interface DeepfakeMediaStatus {
@@ -101,6 +118,15 @@ export interface DeepfakeMediaStatus {
   reconnects: number
   last_inference_ms: number
   last_error: string
+  audio?: {
+    state: 'disabled' | 'connecting' | 'live' | 'reconnecting' | 'waiting_audio' | 'stopped'
+    input_bytes: number
+    output_bytes: number
+    buffered_ms: number
+    reconnects: number
+    last_event: string
+    last_error: string
+  }
 }
 
 export interface DeepfakeSessionStatus {
@@ -182,6 +208,7 @@ export async function createDeepfakeSession(
   maxWidth: number,
   profile = 'fast',
   transport: 'frame_ws' | 'obs_whip' = 'frame_ws',
+  voiceOptions?: DeepfakeVoiceSessionOptions,
 ): Promise<DeepfakeSession> {
   const body = new FormData()
   sources.forEach((source) => body.append('source', source))
@@ -189,6 +216,14 @@ export async function createDeepfakeSession(
   body.append('max_width', String(maxWidth))
   body.append('profile', profile)
   body.append('transport', transport)
+  body.append('voice_enabled', String(Boolean(voiceOptions)))
+  if (voiceOptions) {
+    body.append('voice_model', voiceOptions.model)
+    body.append('voice', voiceOptions.voice)
+    body.append('voice_mode', voiceOptions.mode)
+    body.append('voice_instructions', voiceOptions.instructions?.trim() || '')
+    body.append('voice_max_history_turns', String(voiceOptions.maxHistoryTurns || 20))
+  }
   const response = await multipartRequest('/v1/deepfake/sessions', body)
   return (await response.json()) as DeepfakeSession
 }

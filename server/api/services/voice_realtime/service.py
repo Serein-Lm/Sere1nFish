@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import secrets
 import time
 import uuid
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import WebSocket
@@ -35,6 +38,23 @@ logger = get_logger("api.services.voice_realtime")
 
 class RealtimeVoiceError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class MediaVoiceBridgeReservation:
+    bridge_id: str
+    token: str
+    expires_in: int
+
+
+@dataclass(slots=True)
+class _ReservedMediaBridge:
+    username: str
+    token_hash: str
+    options: RealtimeSessionOptions
+    expires_at: float
+    reconnect_ttl_seconds: int
+    connected: bool = False
 
 
 _CLIENT_CONTROLS = {
@@ -155,6 +175,8 @@ class RealtimeVoiceSessionService:
     def __init__(self) -> None:
         self._connections: set[RealtimeVoiceConnection] = set()
         self._connections_lock = asyncio.Lock()
+        self._media_bridges: dict[str, _ReservedMediaBridge] = {}
+        self._media_bridges_lock = asyncio.Lock()
 
     async def metadata(self, db: AsyncIOMotorDatabase) -> dict[str, Any]:
         config = await load_realtime_voice_config()
@@ -366,6 +388,237 @@ class RealtimeVoiceSessionService:
             if public is not None:
                 await websocket.send_text(_event_text(public))
 
+    async def _relay(
+        self,
+        websocket: WebSocket,
+        connection: RealtimeVoiceConnection,
+        config: RealtimeVoiceConfig,
+        counters: dict[str, int],
+        *,
+        session_id: str,
+        output_session_id: str,
+        username: str,
+    ) -> None:
+        tasks: set[asyncio.Task[None]] = set()
+        try:
+            async with asyncio.timeout(config.session_timeout_seconds):
+                client_task = asyncio.create_task(
+                    self._browser_to_provider(websocket, connection, config, counters),
+                    name=f"{session_id}-client",
+                )
+                provider_task = asyncio.create_task(
+                    self._provider_to_browser(
+                        websocket,
+                        connection,
+                        counters,
+                        output_session_id=output_session_id,
+                        username=username,
+                    ),
+                    name=f"{session_id}-provider",
+                )
+                tasks = {client_task, provider_task}
+                done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
+        finally:
+            remaining = [task for task in tasks if not task.done()]
+            for task in remaining:
+                task.cancel()
+            await asyncio.gather(*remaining, return_exceptions=True)
+
+    async def reserve_media_bridge(
+        self,
+        db: AsyncIOMotorDatabase,
+        *,
+        username: str,
+        payload: dict[str, Any],
+        expires_in: int = 900,
+    ) -> MediaVoiceBridgeReservation:
+        """Reserve a reconnectable, short-lived GPU-to-voice session."""
+        config = await load_realtime_voice_config()
+        options = await self._session_options(db, payload, config)
+        if options.mode == "manual":
+            raise RealtimeVoiceError("OBS 音轨不支持按住说话，请使用智能轮次或快速检测")
+        ttl = min(7200, max(60, int(expires_in)))
+        bridge_id = f"mvoice-{uuid.uuid4().hex}"
+        token = secrets.token_urlsafe(48)
+        now = time.monotonic()
+        reservation = _ReservedMediaBridge(
+            username=username,
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            options=options,
+            expires_at=now + ttl,
+            reconnect_ttl_seconds=ttl,
+        )
+        async with self._media_bridges_lock:
+            self._drop_expired_media_bridges(now)
+            self._media_bridges[bridge_id] = reservation
+        return MediaVoiceBridgeReservation(
+            bridge_id=bridge_id,
+            token=token,
+            expires_in=ttl,
+        )
+
+    def _drop_expired_media_bridges(self, now: float) -> None:
+        expired = [
+            bridge_id
+            for bridge_id, reservation in self._media_bridges.items()
+            if not reservation.connected and reservation.expires_at <= now
+        ]
+        for bridge_id in expired:
+            self._media_bridges.pop(bridge_id, None)
+
+    async def delete_media_bridge(self, bridge_id: str) -> None:
+        if not bridge_id:
+            return
+        async with self._media_bridges_lock:
+            self._media_bridges.pop(bridge_id, None)
+
+    async def _claim_media_bridge(
+        self,
+        bridge_id: str,
+        token: str,
+    ) -> _ReservedMediaBridge | None:
+        now = time.monotonic()
+        token_hash = hashlib.sha256(token.encode()).hexdigest() if token else ""
+        async with self._media_bridges_lock:
+            self._drop_expired_media_bridges(now)
+            reservation = self._media_bridges.get(bridge_id)
+            if (
+                not reservation
+                or reservation.connected
+                or not token_hash
+                or not secrets.compare_digest(token_hash, reservation.token_hash)
+            ):
+                return None
+            reservation.connected = True
+            return reservation
+
+    async def _release_media_bridge(
+        self,
+        bridge_id: str,
+        reservation: _ReservedMediaBridge,
+    ) -> None:
+        async with self._media_bridges_lock:
+            current = self._media_bridges.get(bridge_id)
+            if current is reservation:
+                current.connected = False
+                current.expires_at = time.monotonic() + current.reconnect_ttl_seconds
+
+    async def run_media_bridge(
+        self,
+        websocket: WebSocket,
+        db: AsyncIOMotorDatabase,
+        *,
+        bridge_id: str,
+        token: str,
+    ) -> None:
+        """Relay GPU PCM to the configured provider without exposing its API key."""
+        reservation = await self._claim_media_bridge(bridge_id, token)
+        if reservation is None:
+            await websocket.close(code=4401)
+            return
+
+        session_id = f"rvoice-gpu-{uuid.uuid4().hex[:16]}"
+        counters = {"input_bytes": 0, "output_bytes": 0, "provider_events": 0}
+        started = time.perf_counter()
+        connection: RealtimeVoiceConnection | None = None
+        config: RealtimeVoiceConfig | None = None
+        status = "completed"
+        await websocket.accept()
+        try:
+            config = await load_realtime_voice_config()
+            provider = RealtimeVoiceProviderFactory.create(config)
+            connection = await provider.connect(reservation.options)
+            async with self._connections_lock:
+                self._connections.add(connection)
+            await websocket.send_text(
+                _event_text(
+                    {
+                        "type": "session.ready",
+                        "session_id": session_id,
+                        "provider": provider.name,
+                        "model": config.model,
+                        "voice": reservation.options.voice,
+                        "mode": reservation.options.mode,
+                        "input_sample_rate": 16000,
+                        "output_sample_rate": 24000,
+                    }
+                )
+            )
+            obs_log(
+                "OBS 音轨全双工语音会话开始",
+                task_id=session_id,
+                source="voice_realtime_media_bridge",
+                level="info",
+                event="voice_media_bridge_start",
+                data={
+                    "username": reservation.username,
+                    "bridge_id": bridge_id,
+                    "model": config.model,
+                    "mode": reservation.options.mode,
+                },
+            )
+            await self._relay(
+                websocket,
+                connection,
+                config,
+                counters,
+                session_id=session_id,
+                output_session_id="",
+                username=reservation.username,
+            )
+        except WebSocketDisconnect:
+            status = "cancelled"
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        except TimeoutError:
+            status = "timeout"
+            await self._send_error(websocket, "全双工语音会话已达到最长时限")
+        except (
+            RealtimeVoiceConfigurationError,
+            RealtimeVoiceProviderError,
+            RealtimeVoiceError,
+            ValueError,
+        ) as exc:
+            status = "failed"
+            logger.warning("OBS 音轨语音桥接失败: bridge=%s error=%s", bridge_id, exc)
+            await self._send_error(websocket, str(exc))
+        except Exception:
+            status = "failed"
+            logger.exception("OBS 音轨语音桥接异常: bridge=%s", bridge_id)
+            await self._send_error(websocket, "OBS 音轨语音桥接异常中断")
+        finally:
+            if connection is not None:
+                async with self._connections_lock:
+                    self._connections.discard(connection)
+                with suppress(Exception):
+                    await connection.close()
+            await self._release_media_bridge(bridge_id, reservation)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            obs_log(
+                "OBS 音轨全双工语音会话结束",
+                task_id=session_id,
+                source="voice_realtime_media_bridge",
+                level="error" if status == "failed" else "info",
+                event="voice_media_bridge_end",
+                data={
+                    "username": reservation.username,
+                    "bridge_id": bridge_id,
+                    "model": config.model if config else "",
+                    "status": status,
+                    "elapsed_ms": elapsed_ms,
+                    **counters,
+                },
+            )
+
     async def run(
         self,
         websocket: WebSocket,
@@ -426,38 +679,15 @@ class RealtimeVoiceSessionService:
                 },
             )
 
-            tasks: set[asyncio.Task[None]] = set()
-            try:
-                async with asyncio.timeout(config.session_timeout_seconds):
-                    browser_task = asyncio.create_task(
-                        self._browser_to_provider(websocket, connection, config, counters),
-                        name=f"{session_id}-browser",
-                    )
-                    provider_task = asyncio.create_task(
-                        self._provider_to_browser(
-                            websocket,
-                            connection,
-                            counters,
-                            output_session_id=output_session_id,
-                            username=username,
-                        ),
-                        name=f"{session_id}-provider",
-                    )
-                    tasks = {browser_task, provider_task}
-                    done, pending = await asyncio.wait(
-                        tasks,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
-                    for task in done:
-                        task.result()
-            finally:
-                remaining = [task for task in tasks if not task.done()]
-                for task in remaining:
-                    task.cancel()
-                await asyncio.gather(*remaining, return_exceptions=True)
+            await self._relay(
+                websocket,
+                connection,
+                config,
+                counters,
+                session_id=session_id,
+                output_session_id=output_session_id,
+                username=username,
+            )
         except WebSocketDisconnect:
             status = "cancelled"
         except asyncio.CancelledError:
@@ -523,6 +753,8 @@ class RealtimeVoiceSessionService:
         async with self._connections_lock:
             connections = list(self._connections)
             self._connections.clear()
+        async with self._media_bridges_lock:
+            self._media_bridges.clear()
         await asyncio.gather(
             *(connection.close() for connection in connections),
             return_exceptions=True,

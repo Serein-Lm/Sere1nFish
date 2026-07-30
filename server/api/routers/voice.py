@@ -464,6 +464,21 @@ async def realtime_voice_session(websocket: WebSocket) -> None:
                 await websocket.close(code=1000)
 
 
+@router.websocket("/realtime/media-bridge/{bridge_id}")
+async def realtime_voice_media_bridge(websocket: WebSocket, bridge_id: str) -> None:
+    """Private GPU PCM bridge authenticated with a short-lived bearer token."""
+    scheme, _, token = websocket.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer":
+        await websocket.close(code=4401)
+        return
+    await get_realtime_voice_service().run_media_bridge(
+        websocket,
+        get_db(),
+        bridge_id=bridge_id,
+        token=token,
+    )
+
+
 # ==================== 四、进度回顾（合成历史） ====================
 
 @router.get("/records", response_model=PageResp, summary="合成记录列表")

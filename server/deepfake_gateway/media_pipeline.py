@@ -11,11 +11,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from typing import Any, Awaitable, Callable
 
 import numpy
+
+from .voice_bridge import (
+    MediaVoiceBridge,
+    MediaVoiceBridgeStats,
+    PcmOutputBuffer,
+    validate_voice_bridge_environment,
+)
 
 
 class MediaPipelineError(RuntimeError):
@@ -39,11 +46,13 @@ class MediaPipelineStats:
     reconnects: int = 0
     last_inference_ms: float = 0.0
     last_error: str = ""
+    audio: MediaVoiceBridgeStats = field(default_factory=MediaVoiceBridgeStats)
 
     def as_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["source_fps"] = round(self.source_fps, 2)
         payload["last_inference_ms"] = round(self.last_inference_ms, 2)
+        payload["audio"] = self.audio.as_dict()
         return payload
 
 
@@ -77,6 +86,9 @@ class MediaPipeline:
         max_width: int,
         output_fps: int,
         processor: FrameProcessor,
+        voice_bridge_url: str = "",
+        voice_bridge_token: str = "",
+        voice_bridge_ca_file: str = "",
     ) -> None:
         self.input_url = input_url
         self.output_url = output_url
@@ -86,29 +98,57 @@ class MediaPipeline:
         self.stats = MediaPipelineStats(output_fps=self.output_fps)
         self._stopping = asyncio.Event()
         self._processes: set[asyncio.subprocess.Process] = set()
+        self._audio_buffer = PcmOutputBuffer()
+        self._voice_bridge: MediaVoiceBridge | None = None
+        if voice_bridge_url or voice_bridge_token:
+            validate_voice_bridge_environment(
+                voice_bridge_url,
+                voice_bridge_token,
+                voice_bridge_ca_file,
+            )
+            self._voice_bridge = MediaVoiceBridge(
+                input_url=self.input_url,
+                websocket_url=voice_bridge_url,
+                token=voice_bridge_token,
+                ca_file=voice_bridge_ca_file,
+                output_buffer=self._audio_buffer,
+                stats=self.stats.audio,
+            )
 
     async def run(self) -> None:
-        while not self._stopping.is_set():
-            self.stats.state = "waiting_input"
-            stream = await self._probe_input()
-            if stream is None:
-                await self._sleep_or_stop(0.5)
-                continue
-            try:
-                await self._run_stream(*stream)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.stats.state = "reconnecting"
-                self.stats.last_error = str(exc)[:300]
-                self.stats.reconnects += 1
-                await self._sleep_or_stop(1.0)
-            finally:
-                await self._terminate_processes()
-        self.stats.state = "stopped"
+        voice_task: asyncio.Task[None] | None = None
+        if self._voice_bridge:
+            voice_task = asyncio.create_task(self._voice_bridge.run(), name="media-voice-bridge")
+        try:
+            while not self._stopping.is_set():
+                self.stats.state = "waiting_input"
+                stream = await self._probe_input()
+                if stream is None:
+                    await self._sleep_or_stop(0.5)
+                    continue
+                try:
+                    await self._run_stream(*stream)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.stats.state = "reconnecting"
+                    self.stats.last_error = str(exc)[:300]
+                    self.stats.reconnects += 1
+                    await self._sleep_or_stop(1.0)
+                finally:
+                    await self._terminate_processes()
+        finally:
+            if self._voice_bridge:
+                await self._voice_bridge.stop()
+            if voice_task:
+                voice_task.cancel()
+                await asyncio.gather(voice_task, return_exceptions=True)
+            self.stats.state = "stopped"
 
     async def stop(self) -> None:
         self._stopping.set()
+        if self._voice_bridge:
+            await self._voice_bridge.stop()
         await self._terminate_processes()
 
     async def _sleep_or_stop(self, seconds: float) -> None:
@@ -162,7 +202,11 @@ class MediaPipeline:
         self.stats.last_error = ""
 
         decoder = await self._start_decoder(width, height)
-        encoder = await self._start_encoder(width, height)
+        encoder, audio_write_fd = await self._start_encoder(
+            width,
+            height,
+            audio_enabled=self._voice_bridge is not None,
+        )
         frame_size = width * height * 3
         latest_input: bytes | None = None
         latest_input_sequence = 0
@@ -225,11 +269,32 @@ class MediaPipeline:
                 deadline += interval
                 await asyncio.sleep(max(0.0, deadline - loop.time()))
 
+        async def write_audio() -> None:
+            if audio_write_fd is None:
+                return
+            loop = asyncio.get_running_loop()
+            interval = 0.02
+            frame_bytes = 24000 * 2 * 20 // 1000
+            deadline = loop.time()
+            while not self._stopping.is_set():
+                chunk = self._audio_buffer.take_or_silence(frame_bytes)
+                self.stats.audio.buffered_ms = self._audio_buffer.buffered_ms
+                try:
+                    os.write(audio_write_fd, chunk)
+                except BlockingIOError:
+                    pass
+                except (BrokenPipeError, OSError) as exc:
+                    raise MediaPipelineError("GPU audio encoder stopped") from exc
+                deadline += interval
+                await asyncio.sleep(max(0.0, deadline - loop.time()))
+
         tasks = [
             asyncio.create_task(read_frames(), name="media-read"),
             asyncio.create_task(process_frames(), name="media-inference"),
             asyncio.create_task(write_frames(), name="media-publish"),
         ]
+        if audio_write_fd is not None:
+            tasks.append(asyncio.create_task(write_audio(), name="media-audio-publish"))
         self.stats.state = "starting"
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -243,6 +308,11 @@ class MediaPipeline:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if audio_write_fd is not None:
+                try:
+                    os.close(audio_write_fd)
+                except OSError:
+                    pass
 
     async def _start_decoder(self, width: int, height: int) -> asyncio.subprocess.Process:
         process = await asyncio.create_subprocess_exec(
@@ -280,7 +350,13 @@ class MediaPipeline:
         self._processes.add(process)
         return process
 
-    async def _start_encoder(self, width: int, height: int) -> asyncio.subprocess.Process:
+    async def _start_encoder(
+        self,
+        width: int,
+        height: int,
+        *,
+        audio_enabled: bool,
+    ) -> tuple[asyncio.subprocess.Process, int | None]:
         encoder = os.getenv("DEEPFAKE_MEDIA_ENCODER", "h264_nvenc").strip() or "h264_nvenc"
         bitrate = os.getenv("DEEPFAKE_MEDIA_VIDEO_BITRATE", "1800k").strip() or "1800k"
         codec_args = ["-c:v", encoder]
@@ -288,48 +364,99 @@ class MediaPipeline:
             codec_args.extend(["-preset", "p1", "-tune", "ull", "-rc", "cbr", "-zerolatency", "1"])
         else:
             codec_args.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "bgr24",
-            "-video_size",
-            f"{width}x{height}",
-            "-framerate",
-            str(self.output_fps),
-            "-i",
-            "pipe:0",
-            "-an",
-            *codec_args,
-            "-pix_fmt",
-            "yuv420p",
-            "-profile:v",
-            "baseline",
-            "-b:v",
-            bitrate,
-            "-maxrate",
-            bitrate,
-            "-bufsize",
-            bitrate,
-            "-g",
-            str(self.output_fps),
-            "-bf",
-            "0",
-            "-f",
-            "rtsp",
-            "-rtsp_transport",
-            "tcp",
-            self.output_url,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        audio_read_fd: int | None = None
+        audio_write_fd: int | None = None
+        audio_input_args: list[str] = []
+        audio_map_args: list[str] = []
+        audio_codec_args: list[str] = ["-an"]
+        pass_fds: tuple[int, ...] = ()
+        if audio_enabled:
+            audio_read_fd, audio_write_fd = os.pipe()
+            os.set_blocking(audio_write_fd, False)
+            pass_fds = (audio_read_fd,)
+            audio_input_args = [
+                "-thread_queue_size",
+                "64",
+                "-f",
+                "s16le",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                "-i",
+                f"pipe:{audio_read_fd}",
+            ]
+            audio_map_args = ["-map", "0:v:0", "-map", "1:a:0"]
+            audio_codec_args = [
+                "-c:a",
+                "libopus",
+                "-b:a",
+                os.getenv("DEEPFAKE_MEDIA_AUDIO_BITRATE", "64k"),
+                "-ar",
+                "48000",
+                "-ac",
+                "1",
+                "-application",
+                "voip",
+                "-frame_duration",
+                "20",
+            ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "bgr24",
+                "-video_size",
+                f"{width}x{height}",
+                "-framerate",
+                str(self.output_fps),
+                "-i",
+                "pipe:0",
+                *audio_input_args,
+                *audio_map_args,
+                *codec_args,
+                "-pix_fmt",
+                "yuv420p",
+                "-profile:v",
+                "baseline",
+                "-b:v",
+                bitrate,
+                "-maxrate",
+                bitrate,
+                "-bufsize",
+                bitrate,
+                "-g",
+                str(self.output_fps),
+                "-bf",
+                "0",
+                *audio_codec_args,
+                "-f",
+                "rtsp",
+                "-rtsp_transport",
+                "tcp",
+                self.output_url,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                pass_fds=pass_fds,
+            )
+        except Exception:
+            for descriptor in (audio_read_fd, audio_write_fd):
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+            raise
+        if audio_read_fd is not None:
+            os.close(audio_read_fd)
         self._processes.add(process)
-        return process
+        return process, audio_write_fd
 
     async def _terminate_processes(self) -> None:
         processes = list(self._processes)
