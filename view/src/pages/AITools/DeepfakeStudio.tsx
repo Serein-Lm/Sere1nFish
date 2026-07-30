@@ -264,7 +264,12 @@ export default function DeepfakeStudio() {
   const realtimeWidthOptions = REALTIME_WIDTHS
     .filter((width) => width <= realtimeProfileMaxWidth)
     .map((width) => ({ value: width, label: String(width) }))
-  const obsViewerUrl = obsOutput ? remoteMediaOutputViewerUrl(obsOutput) : ''
+  const obsViewerUrl = obsOutput
+    ? remoteMediaOutputViewerUrl(
+      obsOutput,
+      status?.media_transport?.public_base_url || window.location.origin,
+    )
+    : ''
   const integratedVoiceOptions = useMemo(() => {
     if (!voiceConfig) return []
     return [

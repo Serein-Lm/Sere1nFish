@@ -67,6 +67,13 @@ but never stores or returns the Bearer Token. Polling an owned session also keep
 the pending endpoint alive; abandoned sessions still expire after the configured
 TTL.
 
+The browser-capture fallback publishes its protected OBS viewer through the GPU
+node's trusted HTTPS origin. `sere1nfish-media-output-relay.service` maintains a
+loopback-only SSH reverse tunnel from GPU port `18443` to the application server's
+local HTTPS port. Caddy proxies only `/api/v1/media-output/view` and
+`/api/v1/media-output/watch` through this tunnel; no additional public port is
+required.
+
 Sere1nFish should call this service through `api.services.deepfake`; application
 code must not call the gateway or FaceFusion directly.
 

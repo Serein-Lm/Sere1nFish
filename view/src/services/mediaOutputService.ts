@@ -39,8 +39,10 @@ export function deleteRemoteMediaOutput(
 
 export function remoteMediaOutputViewerUrl(
   session: Pick<RemoteMediaOutputSession, 'viewer_path' | 'viewer_token'>,
+  publicBaseUrl = window.location.origin,
 ): string {
-  const url = new URL(session.viewer_path, window.location.origin)
+  const publicOrigin = new URL(publicBaseUrl, window.location.origin).origin
+  const url = new URL(session.viewer_path, `${publicOrigin}/`)
   url.hash = session.viewer_token
   return url.toString()
 }
