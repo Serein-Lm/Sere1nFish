@@ -20,12 +20,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 
 import cv2
 import numpy
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import Response
 
+from .media_pipeline import MediaPipeline
 from .profiles import QUALITY_PROFILES, QualityProfile
 
 MAX_IMAGE_BYTES = int(os.getenv("DEEPFAKE_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
@@ -45,6 +47,17 @@ DEFAULT_IMAGE_PROFILE = os.getenv("DEEPFAKE_DEFAULT_IMAGE_PROFILE", "quality").s
 DEFAULT_REALTIME_PROFILE = os.getenv("DEEPFAKE_DEFAULT_REALTIME_PROFILE", "quality").strip()
 CONFIG_PATH = os.getenv("FACEFUSION_CONFIG_PATH", "/opt/facefusion/facefusion.ini")
 TOKEN_FILE = Path(os.getenv("DEEPFAKE_API_TOKEN_FILE", "/run/secrets/deepfake_api_token"))
+MEDIA_ENABLED = os.getenv("DEEPFAKE_MEDIA_ENABLED", "0").lower() in {"1", "true", "yes"}
+MEDIA_PUBLIC_BASE_URL = os.getenv("DEEPFAKE_MEDIA_PUBLIC_BASE_URL", "").strip().rstrip("/")
+MEDIA_RTSP_BASE_URL = os.getenv("DEEPFAKE_MEDIA_RTSP_BASE_URL", "rtsp://127.0.0.1:8554").strip().rstrip("/")
+MEDIA_OUTPUT_FPS = min(30, max(5, int(os.getenv("DEEPFAKE_MEDIA_OUTPUT_FPS", "15"))))
+
+if MEDIA_ENABLED:
+    media_public_url = urlsplit(MEDIA_PUBLIC_BASE_URL)
+    if media_public_url.scheme != "https" or not media_public_url.hostname:
+        raise RuntimeError("DEEPFAKE_MEDIA_PUBLIC_BASE_URL must be a valid HTTPS URL")
+    if urlsplit(MEDIA_RTSP_BASE_URL).scheme != "rtsp":
+        raise RuntimeError("DEEPFAKE_MEDIA_RTSP_BASE_URL must be a valid RTSP URL")
 
 QUALITY_PROFILES.get(DEFAULT_IMAGE_PROFILE)
 QUALITY_PROFILES.get(DEFAULT_REALTIME_PROFILE)
@@ -345,12 +358,29 @@ class StreamSession:
     ticket_hash: str
     max_width: int
     profile_id: str
+    transport: str = "frame_ws"
+    media_publish_hash: str = ""
+    media_read_hash: str = ""
+    media_internal_token: str = field(default="", repr=False)
+    media_pipeline: MediaPipeline | None = field(default=None, repr=False)
+    media_task: asyncio.Task[None] | None = field(default=None, repr=False)
     created_at: str = field(default_factory=_now_iso)
     last_used_monotonic: float = field(default_factory=time.monotonic)
     frame_count: int = 0
     total_inference_ms: float = 0.0
     recent_inference_ms: deque[float] = field(default_factory=lambda: deque(maxlen=30))
     connected: bool = False
+
+    @property
+    def active(self) -> bool:
+        return self.connected or bool(
+            self.media_pipeline
+            and self.media_pipeline.stats.state in {"starting", "live", "reconnecting"}
+        )
+
+    @property
+    def reserves_gpu_slot(self) -> bool:
+        return self.connected or self.transport == "obs_whip"
 
     @property
     def measured_fps(self) -> float:
@@ -368,6 +398,8 @@ class StreamSession:
             "measured_fps": round(self.measured_fps, 2),
             "max_width": self.max_width,
             "profile": self.profile_id,
+            "transport": self.transport,
+            "media": self.media_pipeline.stats.as_dict() if self.media_pipeline else None,
             "source_analysis": self.source_analysis,
         }
 
@@ -378,14 +410,73 @@ sessions_lock = asyncio.Lock()
 cleanup_task: asyncio.Task[None] | None = None
 
 
+def _rtsp_session_url(path: str, token: str) -> str:
+    parsed = urlsplit(MEDIA_RTSP_BASE_URL)
+    host = parsed.hostname or "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"worker:{quote(token, safe='')}@{host}{port}"
+    base_path = parsed.path.rstrip("/")
+    return urlunsplit((parsed.scheme, netloc, f"{base_path}/{path}", "", ""))
+
+
+async def _run_media_session(session: StreamSession) -> None:
+    async def process_frame(target: numpy.ndarray[Any, Any]) -> tuple[numpy.ndarray[Any, Any], float]:
+        try:
+            output, inference_ms = await runtime.process(
+                session.source_frames,
+                session.source_face_sets,
+                target,
+                profile=QUALITY_PROFILES.get(session.profile_id),
+                analyse_content=session.frame_count % 15 == 0,
+            )
+        except UnsafeContentError:
+            return target, 0.0
+        session.frame_count += 1
+        session.total_inference_ms += inference_ms
+        session.recent_inference_ms.append(inference_ms)
+        session.last_used_monotonic = time.monotonic()
+        return output, inference_ms
+
+    pipeline = MediaPipeline(
+        input_url=_rtsp_session_url(f"media/input/{session.session_id}", session.media_internal_token),
+        output_url=_rtsp_session_url(f"media/output/{session.session_id}", session.media_internal_token),
+        max_width=session.max_width,
+        output_fps=MEDIA_OUTPUT_FPS,
+        processor=process_frame,
+    )
+    session.media_pipeline = pipeline
+    try:
+        await pipeline.run()
+    except asyncio.CancelledError:
+        await pipeline.stop()
+        raise
+
+
+async def _stop_media_session(session: StreamSession) -> None:
+    if session.media_pipeline:
+        await session.media_pipeline.stop()
+    task = session.media_task
+    session.media_task = None
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def _cleanup_sessions() -> None:
     while True:
         await asyncio.sleep(30)
         cutoff = time.monotonic() - SESSION_TTL_SECONDS
+        removed: list[StreamSession] = []
         async with sessions_lock:
-            expired = [key for key, value in sessions.items() if not value.connected and value.last_used_monotonic < cutoff]
+            expired = [key for key, value in sessions.items() if not value.active and value.last_used_monotonic < cutoff]
             for key in expired:
-                sessions.pop(key, None)
+                removed_session = sessions.pop(key, None)
+                if removed_session:
+                    removed.append(removed_session)
+        for session in removed:
+            await _stop_media_session(session)
 
 
 @asynccontextmanager
@@ -400,9 +491,11 @@ async def lifespan(_: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             pass
+    remaining = list(sessions.values())
+    await asyncio.gather(*(_stop_media_session(session) for session in remaining))
 
 
-app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.3.0", lifespan=lifespan)
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -451,9 +544,15 @@ async def status() -> dict[str, Any]:
         "warmup_ms": round(runtime.warmup_ms, 2),
         "runtime_average_fps": round(runtime.average_fps, 2),
         "face_cache_entries": runtime.face_cache_entries,
-        "active_sessions": sum(1 for session in sessions.values() if session.connected),
+        "active_sessions": sum(1 for session in sessions.values() if session.reserves_gpu_slot),
         "session_count": len(sessions),
         "max_sessions": MAX_SESSIONS,
+        "media_transport": {
+            "enabled": MEDIA_ENABLED,
+            "protocol": "whip_whep" if MEDIA_ENABLED else "",
+            "public_base_url": MEDIA_PUBLIC_BASE_URL if MEDIA_ENABLED else "",
+            "output_fps": MEDIA_OUTPUT_FPS if MEDIA_ENABLED else 0,
+        },
         "gpu": _gpu_status(),
         "model_use": "authorized_non_commercial",
     }
@@ -531,6 +630,7 @@ async def create_session(
     authorized_use: bool = Form(...),
     max_width: int = Form(default=960, ge=320, le=1280),
     profile: str = Form(default=DEFAULT_REALTIME_PROFILE),
+    transport: str = Form(default="frame_ws"),
 ) -> dict[str, Any]:
     if not authorized_use:
         raise HTTPException(status_code=403, detail="Explicit authorization is required")
@@ -538,6 +638,11 @@ async def create_session(
         quality_profile = QUALITY_PROFILES.get(profile)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    transport = transport.strip().lower()
+    if transport not in {"frame_ws", "obs_whip"}:
+        raise HTTPException(status_code=422, detail="Unknown realtime transport")
+    if transport == "obs_whip" and not MEDIA_ENABLED:
+        raise HTTPException(status_code=503, detail="OBS direct media transport is not configured")
     source_frames = await _decode_source_uploads(source)
     try:
         source_analysis, source_face_sets = await runtime.validate_source(
@@ -546,26 +651,54 @@ async def create_session(
         )
     except GatewayError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    removed_sessions: list[StreamSession] = []
+    session: StreamSession | None = None
+    capacity_error = ""
     async with sessions_lock:
         cutoff = time.monotonic() - SESSION_TTL_SECONDS
         expired = [key for key, value in sessions.items() if not value.connected and value.last_used_monotonic < cutoff]
         for key in expired:
-            sessions.pop(key, None)
+            removed = sessions.pop(key, None)
+            if removed:
+                removed_sessions.append(removed)
+        reserved_count = sum(1 for value in sessions.values() if value.reserves_gpu_slot)
         if len(sessions) >= MAX_STORED_SESSIONS:
-            raise HTTPException(status_code=429, detail="The GPU pending session limit has been reached")
-        session_id = uuid.uuid4().hex
-        ticket = secrets.token_urlsafe(32)
-        effective_max_width = min(max_width, quality_profile.max_width)
-        sessions[session_id] = StreamSession(
-            session_id=session_id,
-            source_frames=source_frames,
-            source_face_sets=source_face_sets,
-            source_analysis=source_analysis,
-            ticket_hash=hashlib.sha256(ticket.encode()).hexdigest(),
-            max_width=effective_max_width,
-            profile_id=quality_profile.profile_id,
-        )
-    return {
+            capacity_error = "The GPU pending session limit has been reached"
+        elif transport == "obs_whip" and reserved_count >= MAX_SESSIONS:
+            capacity_error = "The GPU realtime session limit has been reached"
+        else:
+            session_id = uuid.uuid4().hex
+            ticket = secrets.token_urlsafe(32)
+            media_publish_token = secrets.token_urlsafe(32) if transport == "obs_whip" else ""
+            media_read_token = secrets.token_urlsafe(32) if transport == "obs_whip" else ""
+            media_internal_token = secrets.token_urlsafe(32) if transport == "obs_whip" else ""
+            effective_max_width = min(max_width, quality_profile.max_width)
+            session = StreamSession(
+                session_id=session_id,
+                source_frames=source_frames,
+                source_face_sets=source_face_sets,
+                source_analysis=source_analysis,
+                ticket_hash=hashlib.sha256(ticket.encode()).hexdigest(),
+                max_width=effective_max_width,
+                profile_id=quality_profile.profile_id,
+                transport=transport,
+                media_publish_hash=hashlib.sha256(media_publish_token.encode()).hexdigest() if media_publish_token else "",
+                media_read_hash=hashlib.sha256(media_read_token.encode()).hexdigest() if media_read_token else "",
+                media_internal_token=media_internal_token,
+            )
+            sessions[session_id] = session
+            if transport == "obs_whip":
+                session.media_task = asyncio.create_task(
+                    _run_media_session(session),
+                    name=f"deepfake-media-{session_id}",
+                )
+    if removed_sessions:
+        await asyncio.gather(*(_stop_media_session(value) for value in removed_sessions))
+    if capacity_error:
+        raise HTTPException(status_code=429, detail=capacity_error)
+    if session is None:
+        raise HTTPException(status_code=500, detail="Unable to create the GPU session")
+    payload: dict[str, Any] = {
         "session_id": session_id,
         "ticket": ticket,
         "websocket_path": f"/v1/realtime/{session_id}",
@@ -573,8 +706,82 @@ async def create_session(
         "model": runtime.model,
         "max_width": effective_max_width,
         "profile": quality_profile.profile_id,
+        "transport": transport,
         "source_analysis": source_analysis,
     }
+    if transport == "obs_whip":
+        input_path = f"media/input/{session_id}"
+        output_path = f"media/output/{session_id}"
+        payload["media"] = {
+            "publish_url": f"{MEDIA_PUBLIC_BASE_URL}/{input_path}/whip",
+            "publish_token": media_publish_token,
+            "viewer_url": f"{MEDIA_PUBLIC_BASE_URL}/{output_path}/?token={quote(media_read_token, safe='')}",
+            "whep_url": f"{MEDIA_PUBLIC_BASE_URL}/{output_path}/whep",
+            "read_token": media_read_token,
+            "expires_in": SESSION_TTL_SECONDS,
+            "recommended": {
+                "width": effective_max_width,
+                "fps": MEDIA_OUTPUT_FPS,
+                "video_codec": "H264",
+                "keyframe_interval_seconds": 1,
+            },
+        }
+    return payload
+
+
+def _media_auth_token(payload: dict[str, Any]) -> str:
+    token = str(payload.get("token") or "").strip()
+    if token:
+        return token
+    query = parse_qs(str(payload.get("query") or ""), keep_blank_values=False)
+    for key in ("token", "jwt"):
+        values = query.get(key)
+        if values and values[0]:
+            return values[0]
+    return str(payload.get("password") or "").strip()
+
+
+def _media_session_for_path(path: str) -> tuple[StreamSession | None, str]:
+    parts = path.strip("/").split("/")
+    if len(parts) != 3 or parts[0] != "media" or parts[1] not in {"input", "output"}:
+        return None, ""
+    return sessions.get(parts[2]), parts[1]
+
+
+def _media_request_authorized(payload: dict[str, Any]) -> bool:
+    session, direction = _media_session_for_path(str(payload.get("path") or ""))
+    if not session or session.transport != "obs_whip":
+        return False
+    action = str(payload.get("action") or "")
+    user = str(payload.get("user") or "")
+    token = _media_auth_token(payload)
+    if not token:
+        return False
+    if user == "worker":
+        allowed = (direction, action) in {("input", "read"), ("output", "publish")}
+        return allowed and secrets.compare_digest(token, session.media_internal_token)
+    expected_hash = ""
+    if direction == "input" and action == "publish":
+        expected_hash = session.media_publish_hash
+    elif direction == "output" and action == "read":
+        expected_hash = session.media_read_hash
+    return bool(expected_hash) and secrets.compare_digest(
+        hashlib.sha256(token.encode()).hexdigest(),
+        expected_hash,
+    )
+
+
+@app.post("/internal/mediamtx/auth", include_in_schema=False)
+async def mediamtx_auth(request: Request) -> Response:
+    if not MEDIA_ENABLED or not request.client or request.client.host not in {"127.0.0.1", "::1"}:
+        return Response(status_code=401)
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return Response(status_code=401)
+    if not isinstance(payload, dict) or not _media_request_authorized(payload):
+        return Response(status_code=401)
+    return Response(status_code=204)
 
 
 @app.get("/v1/sessions/{session_id}", dependencies=[Depends(require_api_token)])
@@ -587,13 +794,16 @@ async def get_session(session_id: str) -> dict[str, Any]:
 
 @app.delete("/v1/sessions/{session_id}", dependencies=[Depends(require_api_token)])
 async def delete_session(session_id: str) -> dict[str, bool]:
+    removed: StreamSession | None = None
     async with sessions_lock:
         session = sessions.get(session_id)
         if not session:
             return {"deleted": False}
         if session.connected:
             raise HTTPException(status_code=409, detail="Disconnect the realtime stream before deleting the session")
-        sessions.pop(session_id, None)
+        removed = sessions.pop(session_id, None)
+    if removed:
+        await _stop_media_session(removed)
     return {"deleted": True}
 
 
@@ -621,12 +831,12 @@ def _websocket_authorized(websocket: WebSocket, session: StreamSession) -> bool:
 @app.websocket("/v1/realtime/{session_id}")
 async def realtime_stream(websocket: WebSocket, session_id: str) -> None:
     session = sessions.get(session_id)
-    if not session or not _websocket_authorized(websocket, session):
+    if not session or session.transport != "frame_ws" or not _websocket_authorized(websocket, session):
         await websocket.close(code=4401)
         return
     async with sessions_lock:
         current = sessions.get(session_id)
-        active_count = sum(1 for value in sessions.values() if value.connected)
+        active_count = sum(1 for value in sessions.values() if value.reserves_gpu_slot)
         if current is not session or session.connected or active_count >= MAX_SESSIONS:
             rejected = True
         else:

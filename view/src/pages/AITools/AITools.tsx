@@ -1,4 +1,5 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Card, Row, Col, Button, Spin, Tabs, Typography, Tag } from 'antd'
 import {
   AudioOutlined,
@@ -16,9 +17,27 @@ import './AITools.css'
 const DeepfakeStudio = lazy(() => import('./DeepfakeStudio'))
 
 const { Title, Paragraph } = Typography
+const TOOL_TAB_KEYS = new Set(['all', 'voice', 'image', 'video', 'deepfake'])
+
+function tabLabel(full: string, compact: string) {
+  return (
+    <>
+      <span className="tool-tab-label-full">{full}</span>
+      <span className="tool-tab-label-compact">{compact}</span>
+    </>
+  )
+}
 
 export default function AITools() {
-  const [activeTab, setActiveTab] = useState('all')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedTab = searchParams.get('tab') || 'all'
+  const activeTab = TOOL_TAB_KEYS.has(requestedTab) ? requestedTab : 'all'
+  const setActiveTab = (nextTab: string) => {
+    const next = new URLSearchParams(searchParams)
+    if (nextTab === 'all') next.delete('tab')
+    else next.set('tab', nextTab)
+    setSearchParams(next, { replace: true })
+  }
   const tools = [
     {
       icon: <AudioOutlined />,
@@ -69,7 +88,7 @@ export default function AITools() {
   const tabItems = [
     {
       key: 'all',
-      label: '全部工具',
+      label: tabLabel('全部工具', '全部'),
       children: (
         <Row gutter={[24, 24]}>
           {tools.map((tool, idx) => {
@@ -113,22 +132,22 @@ export default function AITools() {
     },
     {
       key: 'voice',
-      label: '语音工具',
+      label: tabLabel('语音工具', '语音'),
       children: <VoiceClone />,
     },
     {
       key: 'image',
-      label: '图像工具',
+      label: tabLabel('图像工具', '图像'),
       children: <BailianMedia mode="image" />,
     },
     {
       key: 'video',
-      label: '视频工具',
+      label: tabLabel('视频工具', '视频'),
       children: <BailianMedia mode="video" />,
     },
     {
       key: 'deepfake',
-      label: 'AI 换脸',
+      label: tabLabel('AI 换脸', '换脸'),
       children: (
         <Suspense fallback={<div className="deepfake-loading"><Spin /></div>}>
           <DeepfakeStudio />

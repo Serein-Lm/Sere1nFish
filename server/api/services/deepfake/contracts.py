@@ -63,6 +63,7 @@ class DeepfakeProvider(Protocol):
         sources: list[SourceImage],
         max_width: int,
         profile: str,
+        transport: str,
     ) -> dict[str, Any]: ...
 
     async def session_status(self, session_id: str) -> dict[str, Any]: ...

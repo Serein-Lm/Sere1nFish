@@ -1,0 +1,49 @@
+logLevel: info
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 1024
+udpReadBufferSize: 4194304
+
+authMethod: http
+authHTTPAddress: http://127.0.0.1:8443/internal/mediamtx/auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+
+api: true
+apiAddress: 127.0.0.1:9997
+metrics: true
+metricsAddress: 127.0.0.1:9998
+pprof: false
+playback: false
+moq: false
+
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+rtmp: false
+hls: false
+srt: false
+
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcEncryption: false
+webrtcAllowOrigins: ['*']
+webrtcTrustedProxies: ['127.0.0.1/32', '::1/128']
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: true
+webrtcAdditionalHosts: []
+webrtcHandshakeTimeout: 10s
+webrtcTrackGatherTimeout: 2s
+
+pathDefaults:
+  source: publisher
+  sourceOnDemand: false
+  maxReaders: 4
+  overridePublisher: false
+  record: false
+
+paths:
+  all_others:

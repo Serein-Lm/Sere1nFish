@@ -130,6 +130,7 @@ class FaceFusionGatewayProvider:
         sources: list[SourceImage],
         max_width: int,
         profile: str,
+        transport: str,
     ) -> dict[str, Any]:
         files = [
             ("source", (source.filename or "source.jpg", source.content, "application/octet-stream"))
@@ -139,7 +140,12 @@ class FaceFusionGatewayProvider:
             "POST",
             "/v1/sessions",
             files=files,
-            data={"authorized_use": "true", "max_width": str(max_width), "profile": profile},
+            data={
+                "authorized_use": "true",
+                "max_width": str(max_width),
+                "profile": profile,
+                "transport": transport,
+            },
         )
 
     async def session_status(self, session_id: str) -> dict[str, Any]:

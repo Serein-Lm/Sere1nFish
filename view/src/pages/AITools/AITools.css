@@ -12,6 +12,10 @@
   margin-bottom: 24px !important;
 }
 
+.tool-tab-label-compact {
+  display: none;
+}
+
 .tool-card {
   height: 100%;
   display: flex;
@@ -332,6 +336,14 @@
   gap: 16px;
 }
 
+.deepfake-transport-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+}
+
 .deepfake-session-controls {
   display: flex;
   align-items: flex-start;
@@ -412,6 +424,28 @@
   background: var(--card-bg, rgba(255, 255, 255, 0.7));
 }
 
+.deepfake-direct-output {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 8px;
+  background: var(--card-bg, rgba(255, 255, 255, 0.7));
+}
+
+.deepfake-direct-fields {
+  display: grid;
+  align-items: center;
+  grid-template-columns: 112px minmax(0, 1fr) auto;
+  gap: 10px 12px;
+}
+
+.deepfake-direct-fields .ant-input,
+.deepfake-direct-fields .ant-input-affix-wrapper {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .deepfake-remote-output-head {
   display: flex;
   align-items: center;
@@ -450,7 +484,19 @@
   }
   
   .custom-tabs .ant-tabs-nav {
-    padding: 0 16px;
+    padding: 0 8px;
+  }
+
+  .custom-tabs .ant-tabs-tab + .ant-tabs-tab {
+    margin-inline-start: 12px;
+  }
+
+  .tool-tab-label-full {
+    display: none;
+  }
+
+  .tool-tab-label-compact {
+    display: inline;
   }
   
   .tab-content {
@@ -512,6 +558,19 @@
 
   .deepfake-remote-output-head {
     align-items: flex-start;
+  }
+
+  .deepfake-transport-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .deepfake-direct-fields {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .deepfake-direct-fields > .ant-typography {
+    grid-column: 1 / -1;
   }
 
   .deepfake-remote-output-url {

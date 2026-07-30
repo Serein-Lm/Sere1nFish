@@ -22,6 +22,12 @@ export interface DeepfakeStatus {
   active_sessions: number
   session_count: number
   max_sessions: number
+  media_transport?: {
+    enabled: boolean
+    protocol: string
+    public_base_url: string
+    output_fps: number
+  }
   model_use: string
   gpu: {
     name: string
@@ -57,12 +63,44 @@ export interface DeepfakeSourceAnalysis {
 
 export interface DeepfakeSession {
   session_id: string
-  stream_path: string
+  stream_path?: string
   expires_in: number
   model: string
   max_width: number
   profile: string
+  transport: 'frame_ws' | 'obs_whip'
+  media?: DeepfakeDirectMedia
   source_analysis: DeepfakeSourceAnalysis
+}
+
+export interface DeepfakeDirectMedia {
+  publish_url: string
+  publish_token: string
+  viewer_url: string
+  whep_url: string
+  read_token: string
+  expires_in: number
+  recommended: {
+    width: number
+    fps: number
+    video_codec: string
+    keyframe_interval_seconds: number
+  }
+}
+
+export interface DeepfakeMediaStatus {
+  state: 'waiting_input' | 'starting' | 'live' | 'reconnecting' | 'stopped'
+  width: number
+  height: number
+  source_fps: number
+  output_fps: number
+  input_frames: number
+  processed_frames: number
+  output_frames: number
+  dropped_frames: number
+  reconnects: number
+  last_inference_ms: number
+  last_error: string
 }
 
 export interface DeepfakeSessionStatus {
@@ -73,6 +111,8 @@ export interface DeepfakeSessionStatus {
   measured_fps: number
   max_width: number
   profile: string
+  transport: 'frame_ws' | 'obs_whip'
+  media?: DeepfakeMediaStatus | null
   source_analysis: DeepfakeSourceAnalysis
 }
 
@@ -141,12 +181,14 @@ export async function createDeepfakeSession(
   sources: File[],
   maxWidth: number,
   profile = 'fast',
+  transport: 'frame_ws' | 'obs_whip' = 'frame_ws',
 ): Promise<DeepfakeSession> {
   const body = new FormData()
   sources.forEach((source) => body.append('source', source))
   body.append('authorized_use', 'true')
   body.append('max_width', String(maxWidth))
   body.append('profile', profile)
+  body.append('transport', transport)
   const response = await multipartRequest('/v1/deepfake/sessions', body)
   return (await response.json()) as DeepfakeSession
 }

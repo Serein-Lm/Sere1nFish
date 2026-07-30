@@ -41,6 +41,7 @@ import {
   openDeepfakeSocket,
   swapDeepfakeImage,
   type DeepfakeSessionStatus,
+  type DeepfakeSession,
   type DeepfakeStatus,
 } from '../../services/deepfakeService'
 import {
@@ -55,6 +56,7 @@ const { Text } = Typography
 
 type StudioMode = 'image' | 'realtime'
 type QualityProfile = 'quality' | 'balanced' | 'fast'
+type RealtimeTransport = 'obs_whip' | 'frame_ws'
 
 const PROFILE_OPTIONS = [
   { value: 'quality', label: '效果优先' },
@@ -70,39 +72,35 @@ const PROFILE_WIDTH_FALLBACK: Record<QualityProfile, number> = {
 
 const REALTIME_WIDTHS = [640, 960, 1280] as const
 
-function useFilePreview(file: File | null): string {
-  const [url, setUrl] = useState('')
-  useEffect(() => {
-    if (!file) {
-      setUrl('')
-      return
-    }
-    const next = URL.createObjectURL(file)
-    setUrl(next)
-    return () => URL.revokeObjectURL(next)
-  }, [file])
-  return url
+const MEDIA_STATE_LABELS: Record<string, string> = {
+  waiting_input: '等待 OBS',
+  starting: '正在启动',
+  live: '直连中',
+  reconnecting: '正在重连',
+  stopped: '已停止',
 }
 
-function useFilePreviews(files: File[]): string[] {
-  const [urls, setUrls] = useState<string[]>([])
+function FilePreviewImage({ file, alt }: { file: File; alt: string }) {
+  const imageRef = useRef<HTMLImageElement | null>(null)
   useEffect(() => {
-    const next = files.map((file) => URL.createObjectURL(file))
-    setUrls(next)
-    return () => next.forEach((url) => URL.revokeObjectURL(url))
-  }, [files])
-  return urls
+    const objectUrl = URL.createObjectURL(file)
+    const image = imageRef.current
+    if (image) image.src = objectUrl
+    return () => {
+      if (image) image.removeAttribute('src')
+      URL.revokeObjectURL(objectUrl)
+    }
+  }, [file])
+  return <img ref={imageRef} alt={alt} />
 }
 
 function ImagePicker({
   label,
   file,
-  preview,
   onChange,
 }: {
   label: string
   file: File | null
-  preview: string
   onChange: (file: File | null) => void
 }) {
   return (
@@ -122,7 +120,7 @@ function ImagePicker({
         </Upload>
       </div>
       <div className="deepfake-picker-preview">
-        {preview ? <img src={preview} alt={label} /> : <PictureOutlined />}
+        {file ? <FilePreviewImage file={file} alt={label} /> : <PictureOutlined />}
       </div>
       <Text type="secondary" ellipsis title={file?.name}>{file?.name || '未选择'}</Text>
     </div>
@@ -131,14 +129,12 @@ function ImagePicker({
 
 function IdentityPicker({
   files,
-  previews,
   maxCount,
   disabled,
   onAdd,
   onRemove,
 }: {
   files: File[]
-  previews: string[]
   maxCount: number
   disabled?: boolean
   onAdd: (file: File) => void
@@ -175,7 +171,7 @@ function IdentityPicker({
       <div className="deepfake-identity-grid">
         {files.length ? files.map((file, index) => (
           <div className="deepfake-identity-item" key={`${file.name}-${file.size}-${file.lastModified}`}>
-            <img src={previews[index]} alt={`身份图片 ${index + 1}`} />
+            <FilePreviewImage file={file} alt={`身份图片 ${index + 1}`} />
             <Tooltip title="移除">
               <Button
                 type="text"
@@ -214,16 +210,16 @@ export default function DeepfakeStudio() {
   const [imageSourceConsistency, setImageSourceConsistency] = useState(1)
   const [realtimeWidth, setRealtimeWidth] = useState(640)
   const [realtimeProfile, setRealtimeProfile] = useState<QualityProfile>('fast')
+  const [realtimeTransport, setRealtimeTransport] = useState<RealtimeTransport>('obs_whip')
   const [streamAspectRatio, setStreamAspectRatio] = useState(16 / 9)
   const [starting, setStarting] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [streamResult, setStreamResult] = useState('')
   const [sessionStatus, setSessionStatus] = useState<DeepfakeSessionStatus | null>(null)
+  const [directSession, setDirectSession] = useState<DeepfakeSession | null>(null)
   const [obsGuideOpen, setObsGuideOpen] = useState(false)
   const [obsCreating, setObsCreating] = useState(false)
   const [obsOutput, setObsOutput] = useState<RemoteMediaOutputSession | null>(null)
-  const sourcePreviews = useFilePreviews(sourceFiles)
-  const targetPreview = useFilePreview(targetFile)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const outputViewRef = useRef<HTMLDivElement | null>(null)
@@ -362,6 +358,7 @@ export default function DeepfakeStudio() {
     const sessionId = sessionIdRef.current
     sessionIdRef.current = ''
     setStreaming(false)
+    setDirectSession(null)
     setSessionStatus(null)
     if (sessionId) {
       try {
@@ -382,7 +379,7 @@ export default function DeepfakeStudio() {
   }, [stopRealtime])
 
   useEffect(() => {
-    if (!streaming || !sessionIdRef.current) return
+    if ((!streaming && !directSession) || !sessionIdRef.current) return
     const poll = window.setInterval(async () => {
       try {
         setSessionStatus(await getDeepfakeSession(sessionIdRef.current))
@@ -391,7 +388,7 @@ export default function DeepfakeStudio() {
       }
     }, 2000)
     return () => window.clearInterval(poll)
-  }, [streaming])
+  }, [directSession, streaming])
 
   const runImageSwap = async () => {
     if (!sourceFiles.length || !targetFile || !authorized) {
@@ -450,10 +447,11 @@ export default function DeepfakeStudio() {
       if (videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
         setStreamAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight)
       }
-      const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile)
+      const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile, 'frame_ws')
       effectiveRealtimeWidthRef.current = session.max_width
       if (session.max_width !== realtimeWidth) setRealtimeWidth(session.max_width)
       sessionIdRef.current = session.session_id
+      if (!session.stream_path) throw new Error('GPU 未返回浏览器实时流地址')
       const socket = openDeepfakeSocket(session.stream_path, output.session_id)
       socket.binaryType = 'blob'
       socketRef.current = socket
@@ -481,6 +479,33 @@ export default function DeepfakeStudio() {
     } catch (error) {
       await stopRealtime()
       messageApi.error(error instanceof Error ? error.message : '摄像头启动失败')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const startObsDirect = async () => {
+    if (!sourceFiles.length || !authorized) {
+      messageApi.warning('请选择身份图片并确认素材授权')
+      return
+    }
+    if (!status?.media_transport?.enabled) {
+      messageApi.error('GPU 尚未启用 OBS 直连媒体服务')
+      return
+    }
+    setStarting(true)
+    try {
+      const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile, 'obs_whip')
+      if (!session.media) throw new Error('GPU 未返回 OBS 直连配置')
+      effectiveRealtimeWidthRef.current = session.max_width
+      if (session.max_width !== realtimeWidth) setRealtimeWidth(session.max_width)
+      sessionIdRef.current = session.session_id
+      setDirectSession(session)
+      setSessionStatus(await getDeepfakeSession(session.session_id))
+      messageApi.success('OBS 直连会话已创建，等待 OBS 推流')
+    } catch (error) {
+      await stopRealtime()
+      messageApi.error(error instanceof Error ? error.message : 'OBS 直连会话创建失败')
     } finally {
       setStarting(false)
     }
@@ -522,12 +547,11 @@ export default function DeepfakeStudio() {
           <div className="deepfake-input-grid">
             <IdentityPicker
               files={sourceFiles}
-              previews={sourcePreviews}
               maxCount={maxSourceImages}
               onAdd={addSourceFile}
               onRemove={removeSourceFile}
             />
-            <ImagePicker label="目标图片" file={targetFile} preview={targetPreview} onChange={setTargetFile} />
+            <ImagePicker label="目标图片" file={targetFile} onChange={setTargetFile} />
           </div>
           <div className="deepfake-actions">
             <Space wrap>
@@ -561,12 +585,38 @@ export default function DeepfakeStudio() {
         </div>
       ) : (
         <div className="deepfake-workspace">
+          <div className="deepfake-transport-bar">
+            <Space wrap>
+              <Text strong>视频输入</Text>
+              <Segmented<RealtimeTransport>
+                value={realtimeTransport}
+                disabled={Boolean(directSession) || streaming || starting}
+                onChange={setRealtimeTransport}
+                options={[
+                  { value: 'obs_whip', label: 'OBS 直连', icon: <LaptopOutlined /> },
+                  { value: 'frame_ws', label: '浏览器测试', icon: <CameraOutlined /> },
+                ]}
+              />
+              {realtimeTransport === 'obs_whip' && (
+                <Tag color={status?.media_transport?.enabled ? 'success' : 'error'}>
+                  {status?.media_transport?.enabled ? 'GPU 媒体服务在线' : 'GPU 媒体服务未启用'}
+                </Tag>
+              )}
+            </Space>
+            <Tooltip title="OBS 接入说明">
+              <Button
+                type="text"
+                icon={<QuestionCircleOutlined />}
+                onClick={() => setObsGuideOpen(true)}
+                aria-label="查看 OBS 接入说明"
+              />
+            </Tooltip>
+          </div>
           <div className="deepfake-realtime-controls">
             <IdentityPicker
               files={sourceFiles}
-              previews={sourcePreviews}
               maxCount={maxSourceImages}
-              disabled={streaming || starting}
+              disabled={Boolean(directSession) || streaming || starting}
               onAdd={addSourceFile}
               onRemove={removeSourceFile}
             />
@@ -574,7 +624,7 @@ export default function DeepfakeStudio() {
               <Text strong>质量</Text>
               <Segmented<QualityProfile>
                 value={realtimeProfile}
-                disabled={streaming || starting}
+                disabled={Boolean(directSession) || streaming || starting}
                 onChange={(value) => {
                   const maxWidth = (
                     status?.profiles.find((profile) => profile.id === value)?.max_width
@@ -589,7 +639,7 @@ export default function DeepfakeStudio() {
               <Text strong>传输宽度</Text>
               <Segmented
                 value={realtimeWidth}
-                disabled={streaming || starting}
+                disabled={Boolean(directSession) || streaming || starting}
                 onChange={(value) => {
                   const width = Number(value)
                   setRealtimeWidth(width)
@@ -600,143 +650,211 @@ export default function DeepfakeStudio() {
               <Checkbox checked={authorized} onChange={(event) => setAuthorized(event.target.checked)}>
                 我确认已获得人脸素材授权
               </Checkbox>
-              {streaming ? (
+              {streaming || directSession ? (
                 <Button danger icon={<DisconnectOutlined />} onClick={() => void stopRealtime()}>
                   停止
                 </Button>
               ) : (
-                <Button type="primary" icon={<CameraOutlined />} loading={starting} onClick={startRealtime}>
-                  启动摄像头
+                <Button
+                  type="primary"
+                  icon={realtimeTransport === 'obs_whip' ? <LaptopOutlined /> : <CameraOutlined />}
+                  loading={starting}
+                  onClick={realtimeTransport === 'obs_whip' ? startObsDirect : startRealtime}
+                >
+                  {realtimeTransport === 'obs_whip' ? '创建 OBS 直连' : '启动浏览器摄像头'}
                 </Button>
               )}
             </div>
           </div>
-          <div
-            className="deepfake-stream-grid"
-            style={{ '--deepfake-stream-aspect': streamAspectRatio } as CSSProperties}
-          >
-            <div className="deepfake-stream-view deepfake-stream-source">
-              <video ref={videoRef} muted playsInline className="is-mirrored" />
-              <span className="deepfake-stream-label">原始画面</span>
-            </div>
-            <div ref={outputViewRef} className="deepfake-stream-view deepfake-stream-output">
-              {streamResult ? <img src={streamResult} alt="实时换脸画面" className="is-mirrored" /> : <CameraOutlined />}
-              <span className="deepfake-stream-label">换脸画面</span>
-              <Tooltip title="全屏查看换脸画面">
-                <Button
-                  type="text"
-                  icon={<FullscreenOutlined />}
-                  className="deepfake-stream-fullscreen"
-                  disabled={!streamResult}
-                  aria-label="全屏查看换脸画面"
-                  onClick={() => void openOutputFullscreen()}
-                />
-              </Tooltip>
-            </div>
-          </div>
-          <canvas ref={canvasRef} className="deepfake-capture-canvas" />
-          <Space wrap>
-            <Tag color={streaming ? 'success' : 'default'}>{streaming ? '已连接' : '未连接'}</Tag>
-            <Tag>{PROFILE_OPTIONS.find((item) => item.value === realtimeProfile)?.label}</Tag>
-            <Tag>{sourceFiles.length} 张参考图</Tag>
-            <Tag>{sessionStatus?.measured_fps?.toFixed(1) || '0.0'} FPS</Tag>
-            <Tag>{sessionStatus?.average_inference_ms?.toFixed(0) || '0'} ms</Tag>
-            <Tag>{sessionStatus?.frame_count || 0} 帧</Tag>
-          </Space>
+          {realtimeTransport === 'obs_whip' ? (
+            directSession?.media ? (
+              <>
+                <section className="deepfake-direct-output">
+                <div className="deepfake-remote-output-head">
+                  <Space wrap>
+                    <LaptopOutlined />
+                    <Text strong>OBS 与 GPU 直连</Text>
+                    <Tag color={sessionStatus?.media?.state === 'live' ? 'success' : 'processing'}>
+                      {MEDIA_STATE_LABELS[sessionStatus?.media?.state || 'waiting_input'] || '等待 OBS'}
+                    </Tag>
+                    <Tag>{directSession.media.recommended.width}px</Tag>
+                    <Tag>{directSession.media.recommended.fps} FPS</Tag>
+                  </Space>
+                </div>
 
-          <section className="deepfake-remote-output">
-            <div className="deepfake-remote-output-head">
-              <Space wrap>
-                <LaptopOutlined />
-                <Text strong>远端 OBS 输出</Text>
-                <Tag color={obsOutput ? 'success' : 'default'}>
-                  {obsOutput ? '已就绪' : '未创建'}
-                </Tag>
-                {obsOutput && (
-                  <Tag>{new Date(obsOutput.expires_at * 1000).toLocaleTimeString()} 到期</Tag>
-                )}
-              </Space>
-              <Tooltip title="OBS 接入说明">
-                <Button
-                  type="text"
-                  icon={<QuestionCircleOutlined />}
-                  onClick={() => setObsGuideOpen(true)}
-                  aria-label="查看 OBS 接入说明"
-                />
-              </Tooltip>
-            </div>
-            {obsOutput ? (
-              <div className="deepfake-remote-output-url">
-                <Input value={obsViewerUrl} readOnly aria-label="OBS 浏览器源地址" />
-                <Space wrap>
-                  <Button
-                    icon={<CopyOutlined />}
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(obsViewerUrl)
-                        messageApi.success('OBS 地址已复制')
-                      } catch {
-                        messageApi.error('复制失败，请手动复制地址')
-                      }
-                    }}
-                  >
-                    复制地址
-                  </Button>
-                  <Button
-                    icon={<LinkOutlined />}
-                    onClick={() => window.open(obsViewerUrl, '_blank', 'noopener,noreferrer')}
-                  >
-                    预览
-                  </Button>
-                  <Tooltip title={streaming ? '停止实时换脸后可关闭输出' : '立即使 OBS 地址失效'}>
+                <div className="deepfake-direct-fields">
+                  <Text type="secondary">WHIP 地址</Text>
+                  <Input value={directSession.media.publish_url} readOnly />
+                  <Tooltip title="复制 WHIP 地址">
                     <Button
-                      danger
-                      icon={<DeleteOutlined />}
-                      disabled={streaming}
-                      onClick={() => void closeObsOutput()}
-                      aria-label="关闭远端 OBS 输出"
+                      icon={<CopyOutlined />}
+                      aria-label="复制 WHIP 地址"
+                      onClick={() => void navigator.clipboard.writeText(directSession.media!.publish_url).then(
+                        () => messageApi.success('WHIP 地址已复制'),
+                        () => messageApi.error('复制失败'),
+                      )}
                     />
                   </Tooltip>
-                </Space>
-              </div>
-            ) : (
-              <Button
-                type="primary"
-                icon={<LaptopOutlined />}
-                loading={obsCreating}
-                onClick={() => void createObsOutput()}
-              >
-                创建 OBS 浏览器源
-              </Button>
-            )}
-          </section>
 
-          <Collapse
-            className="deepfake-output-voice"
-            items={[{
-              key: 'voice-output',
-              label: (
+                  <Text type="secondary">Bearer Token</Text>
+                  <Input.Password value={directSession.media.publish_token} readOnly visibilityToggle />
+                  <Tooltip title="复制 Bearer Token">
+                    <Button
+                      icon={<CopyOutlined />}
+                      aria-label="复制 Bearer Token"
+                      onClick={() => void navigator.clipboard.writeText(directSession.media!.publish_token).then(
+                        () => messageApi.success('Bearer Token 已复制'),
+                        () => messageApi.error('复制失败'),
+                      )}
+                    />
+                  </Tooltip>
+
+                  <Text type="secondary">换脸输出</Text>
+                  <Input value={directSession.media.viewer_url} readOnly />
+                  <Space.Compact>
+                    <Tooltip title="复制 OBS 浏览器源地址">
+                      <Button
+                        icon={<CopyOutlined />}
+                        aria-label="复制换脸输出地址"
+                        onClick={() => void navigator.clipboard.writeText(directSession.media!.viewer_url).then(
+                          () => messageApi.success('换脸输出地址已复制'),
+                          () => messageApi.error('复制失败'),
+                        )}
+                      />
+                    </Tooltip>
+                    <Tooltip title="打开输出预览">
+                      <Button
+                        icon={<LinkOutlined />}
+                        aria-label="预览换脸输出"
+                        onClick={() => window.open(directSession.media!.viewer_url, '_blank', 'noopener,noreferrer')}
+                      />
+                    </Tooltip>
+                  </Space.Compact>
+                </div>
+
                 <Space wrap>
-                  <AudioOutlined />
-                  <Text strong>目标音色与全双工对话</Text>
-                  <Tag color={obsOutput ? 'cyan' : 'default'}>
-                    {obsOutput ? '同步到 OBS' : '未绑定输出'}
-                  </Tag>
+                  <Tag>{sessionStatus?.media?.processed_frames || 0} 处理帧</Tag>
+                  <Tag>{sessionStatus?.media?.dropped_frames || 0} 丢弃帧</Tag>
+                  <Tag>{sessionStatus?.media?.last_inference_ms?.toFixed(0) || '0'} ms</Tag>
+                  <Tag>{sessionStatus?.media?.reconnects || 0} 次重连</Tag>
                 </Space>
-              ),
-              children: obsOutput ? (
-                <RealtimeVoicePanel outputSessionId={obsOutput.session_id} />
-              ) : (
-                <Button
-                  icon={<LaptopOutlined />}
-                  loading={obsCreating}
-                  onClick={() => void createObsOutput()}
-                >
-                  先创建 OBS 浏览器源
-                </Button>
-              ),
-            }]}
-          />
+                {sessionStatus?.media?.last_error && (
+                  <Alert type="warning" showIcon title={sessionStatus.media.last_error} />
+                )}
+                </section>
+                <Collapse
+                  className="deepfake-output-voice"
+                  items={[{
+                    key: 'direct-voice-output',
+                    label: (
+                      <Space wrap>
+                        <AudioOutlined />
+                        <Text strong>目标音色与全双工对话</Text>
+                        <Tag color={obsOutput ? 'cyan' : 'default'}>{obsOutput ? '独立音轨已就绪' : '未创建音轨'}</Tag>
+                      </Space>
+                    ),
+                    children: obsOutput ? (
+                      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                        <div className="deepfake-remote-output-url">
+                          <Input value={obsViewerUrl} readOnly aria-label="OBS 语音浏览器源地址" />
+                          <Tooltip title="复制 OBS 语音来源地址">
+                            <Button
+                              icon={<CopyOutlined />}
+                              onClick={() => void navigator.clipboard.writeText(obsViewerUrl).then(
+                                () => messageApi.success('语音来源地址已复制'),
+                                () => messageApi.error('复制失败'),
+                              )}
+                            >
+                              复制音轨地址
+                            </Button>
+                          </Tooltip>
+                        </div>
+                        <RealtimeVoicePanel outputSessionId={obsOutput.session_id} />
+                      </Space>
+                    ) : (
+                      <Button icon={<AudioOutlined />} loading={obsCreating} onClick={() => void createObsOutput()}>
+                        创建 OBS 语音来源
+                      </Button>
+                    ),
+                  }]}
+                />
+              </>
+            ) : null
+          ) : (
+            <>
+              <div
+                className="deepfake-stream-grid"
+                style={{ '--deepfake-stream-aspect': streamAspectRatio } as CSSProperties}
+              >
+                <div className="deepfake-stream-view deepfake-stream-source">
+                  <video ref={videoRef} muted playsInline className="is-mirrored" />
+                  <span className="deepfake-stream-label">原始画面</span>
+                </div>
+                <div ref={outputViewRef} className="deepfake-stream-view deepfake-stream-output">
+                  {streamResult ? <img src={streamResult} alt="实时换脸画面" className="is-mirrored" /> : <CameraOutlined />}
+                  <span className="deepfake-stream-label">换脸画面</span>
+                  <Tooltip title="全屏查看换脸画面">
+                    <Button
+                      type="text"
+                      icon={<FullscreenOutlined />}
+                      className="deepfake-stream-fullscreen"
+                      disabled={!streamResult}
+                      aria-label="全屏查看换脸画面"
+                      onClick={() => void openOutputFullscreen()}
+                    />
+                  </Tooltip>
+                </div>
+              </div>
+              <canvas ref={canvasRef} className="deepfake-capture-canvas" />
+              <Space wrap>
+                <Tag color={streaming ? 'success' : 'default'}>{streaming ? '已连接' : '未连接'}</Tag>
+                <Tag>{PROFILE_OPTIONS.find((item) => item.value === realtimeProfile)?.label}</Tag>
+                <Tag>{sourceFiles.length} 张参考图</Tag>
+                <Tag>{sessionStatus?.measured_fps?.toFixed(1) || '0.0'} FPS</Tag>
+                <Tag>{sessionStatus?.average_inference_ms?.toFixed(0) || '0'} ms</Tag>
+                <Tag>{sessionStatus?.frame_count || 0} 帧</Tag>
+              </Space>
+
+              <section className="deepfake-remote-output">
+                <div className="deepfake-remote-output-head">
+                  <Space wrap>
+                    <LaptopOutlined />
+                    <Text strong>兼容输出</Text>
+                    <Tag color={obsOutput ? 'success' : 'default'}>{obsOutput ? '已就绪' : '未创建'}</Tag>
+                  </Space>
+                </div>
+                {obsOutput ? (
+                  <div className="deepfake-remote-output-url">
+                    <Input value={obsViewerUrl} readOnly aria-label="OBS 浏览器源地址" />
+                    <Space wrap>
+                      <Button icon={<CopyOutlined />} onClick={() => void navigator.clipboard.writeText(obsViewerUrl)}>复制地址</Button>
+                      <Button icon={<LinkOutlined />} onClick={() => window.open(obsViewerUrl, '_blank', 'noopener,noreferrer')}>预览</Button>
+                      <Button danger icon={<DeleteOutlined />} disabled={streaming} onClick={() => void closeObsOutput()} aria-label="关闭兼容输出" />
+                    </Space>
+                  </div>
+                ) : (
+                  <Button type="primary" icon={<LaptopOutlined />} loading={obsCreating} onClick={() => void createObsOutput()}>
+                    创建兼容输出
+                  </Button>
+                )}
+              </section>
+
+              <Collapse
+                className="deepfake-output-voice"
+                items={[{
+                  key: 'voice-output',
+                  label: <Space wrap><AudioOutlined /><Text strong>目标音色与全双工对话</Text></Space>,
+                  children: obsOutput ? (
+                    <RealtimeVoicePanel outputSessionId={obsOutput.session_id} />
+                  ) : (
+                    <Button icon={<LaptopOutlined />} loading={obsCreating} onClick={() => void createObsOutput()}>
+                      先创建兼容输出
+                    </Button>
+                  ),
+                }]}
+              />
+            </>
+          )}
         </div>
       )}
 
@@ -745,15 +863,24 @@ export default function DeepfakeStudio() {
         open={obsGuideOpen}
         onCancel={() => setObsGuideOpen(false)}
         footer={<Button type="primary" onClick={() => setObsGuideOpen(false)}>知道了</Button>}
-        width={580}
+        width={640}
       >
-        <ol className="deepfake-obs-guide">
-          <li>创建远端输出并复制地址；启动摄像头后，换脸帧会直接进入该输出。</li>
-          <li>在本机 OBS 添加“浏览器”来源，把复制的 HTTPS 地址粘贴到 URL。</li>
-          <li>宽高建议填写 1280×720，并启用“通过 OBS 控制音频”。</li>
-          <li>展开“目标音色与全双工对话”并开始会话，AI 回答音频会进入同一浏览器源。</li>
-          <li>在 OBS 混音器确认浏览器源电平，再启动 OBS 虚拟摄像机。</li>
-        </ol>
+        {realtimeTransport === 'obs_whip' ? (
+          <ol className="deepfake-obs-guide">
+            <li>创建“原始摄像头”场景，只添加本机的视频采集设备，并保持它作为 OBS 节目画面。</li>
+            <li>在“设置 → 直播”选择 WHIP，分别填写页面生成的 WHIP 地址和 Bearer Token。</li>
+            <li>视频编码选择 H.264，输出分辨率和帧率按页面建议设置，然后点击“开始直播”。</li>
+            <li>创建“换脸输出”场景，添加浏览器来源并填写页面生成的换脸输出地址。</li>
+            <li>打开虚拟摄像机设置，输出类型选择“来源”，指定换脸浏览器源后启动虚拟摄像机。</li>
+            <li>不需要开始录制；节目画面保持原始摄像头，避免将换脸结果再次推回 GPU。</li>
+          </ol>
+        ) : (
+          <ol className="deepfake-obs-guide">
+            <li>浏览器测试模式由当前网页采集摄像头，并通过业务服务器中转逐帧结果。</li>
+            <li>创建兼容输出后，在 OBS 添加浏览器来源并粘贴输出地址。</li>
+            <li>该模式用于诊断摄像头和模型，不作为低延迟视频通话链路。</li>
+          </ol>
+        )}
       </Modal>
     </div>
   )

@@ -1,0 +1,50 @@
+{
+	admin 127.0.0.1:2019
+	auto_https disable_redirects
+}
+
+{$DEEPFAKE_PUBLIC_HOST} {
+	@internal path /internal/*
+	respond @internal 404
+
+	@media path /media/*
+	handle @media {
+		reverse_proxy 127.0.0.1:8889
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8443
+	}
+}
+
+https://{$DEEPFAKE_LEGACY_HOST} {
+	tls /etc/caddy/legacy/tls.crt /etc/caddy/legacy/tls.key
+
+	@internal path /internal/*
+	respond @internal 404
+
+	@media path /media/*
+	handle @media {
+		reverse_proxy 127.0.0.1:8889
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8443
+	}
+}
+
+https://{$DEEPFAKE_TUNNEL_HOST} {
+	tls /etc/caddy/legacy/tls.crt /etc/caddy/legacy/tls.key
+
+	@internal path /internal/*
+	respond @internal 404
+
+	@media path /media/*
+	handle @media {
+		reverse_proxy 127.0.0.1:8889
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8443
+	}
+}

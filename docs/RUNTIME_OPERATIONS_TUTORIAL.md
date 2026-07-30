@@ -186,11 +186,16 @@ server/docs/BAILIAN_AIGC_API.md
 | POST | `/api/v1/voice/synthesize` | 合成语音 |
 | GET | `/api/v1/voice/realtime/config` | 全双工模型、音色和音频格式 |
 | WS | `/api/v1/voice/realtime` | 16k PCM 输入、24k PCM 输出的全双工会话 |
-| POST | `/api/v1/media-output/sessions` | 创建短时远端 OBS 输出 |
-| GET | `/api/v1/media-output/view#<token>` | OBS 浏览器源页面，凭据仅在 URL fragment |
-| WS | `/api/v1/media-output/watch` | 换脸帧与 24k PCM 音频订阅 |
+| POST | `/api/v1/deepfake/sessions` | 创建浏览器测试或 OBS 直连换脸会话 |
+| GET | `/api/v1/deepfake/sessions/{session_id}` | 查询 GPU 推理、丢帧和重连状态 |
+| DELETE | `/api/v1/deepfake/sessions/{session_id}` | 停止会话并立即撤销媒体凭据 |
+| POST | `/api/v1/media-output/sessions` | 创建短时 OBS 全双工语音来源 |
+| GET | `/api/v1/media-output/view#<token>` | OBS 语音浏览器源页面，凭据仅在 URL fragment |
+| WS | `/api/v1/media-output/watch` | 24k PCM 音频订阅和兼容视频帧输出 |
 
-数字人场景在“AI 工具 -> AI 换脸 -> 实时摄像头”中统一操作：远端 GPU 换脸帧和全双工 AI 的目标音色回答进入同一个受保护的 OBS 浏览器源。该链路只使用现有 HTTPS/WSS `443`，无需为 OBS 新增安全组端口。
+数字人场景在“AI 工具 -> AI 换脸 -> 实时摄像头”中统一配置。正式视频链路由 OBS 通过 WHIP 直推 GPU，GPU 完成换脸后通过 WHEP 返回独立浏览器来源；视频不经过业务服务器。全双工 AI 的目标音色作为另一条短时 OBS 浏览器音轨接入，由 OBS 统一混音。浏览器逐帧中转仅保留为兼容测试模式。
+
+GPU 节点对 OBS 开放 `443/tcp` 和 WebRTC 媒体端口 `8189/tcp+udp`；业务服务器的公网安全组范围不变。GPU 内部的网关、RTSP、MediaMTX API 和指标端口不得对公网开放。
 
 详细教程见：
 

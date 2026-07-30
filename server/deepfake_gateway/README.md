@@ -6,8 +6,10 @@ state and realtime sessions are held in memory.
 
 Security requirements:
 
-- Bind only one TLS port (normally `443/tcp`) and restrict its security-group
-  source range where possible.
+- Caddy is the only public HTTP listener. Open `443/tcp` for WHIP/WHEP
+  signaling and `8189/udp` plus `8189/tcp` for WebRTC ICE. Keep gateway
+  `8443`, RTSP `8554`, WebRTC HTTP `8889`, API `9997` and metrics `9998`
+  bound to loopback.
 - Use a private CA or a public certificate with hostname verification. Never set
   TLS verification to false in the Sere1nFish provider.
 - Mount a random API token and TLS private key from root-only files. Do not put
@@ -45,8 +47,10 @@ API surface:
 - `POST /v1/swap/image`: authenticated source/target image inference with an
   optional `profile` field.
 - `POST /v1/sessions`: create an ephemeral realtime source session with an
-  optional `profile` field.
+  optional `profile` and `transport` (`frame_ws` or `obs_whip`) field.
 - `WS /v1/realtime/{session_id}`: JPEG frame input/output stream.
+- `POST /internal/mediamtx/auth`: loopback-only per-session media
+  authorization endpoint.
 - `GET|DELETE /v1/sessions/{session_id}`: session metrics and cleanup.
 
 Sere1nFish should call this service through `api.services.deepfake`; application
@@ -59,3 +63,8 @@ name so Compose v1 and v2 retain the same container identity:
 docker compose -p sere1nfish-deepfake -f compose.example.yaml config
 docker compose -p sere1nfish-deepfake -f compose.example.yaml up -d --build
 ```
+
+Before starting MediaMTX, install `sysctl-mediamtx.conf` under
+`/etc/sysctl.d/99-sere1nfish-mediamtx.conf` and run `sysctl --system`. Caddy
+keeps the legacy private-CA IP endpoint for Sere1nFish while automatically
+issuing a public certificate for `DEEPFAKE_PUBLIC_HOST`.

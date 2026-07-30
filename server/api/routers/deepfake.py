@@ -111,6 +111,7 @@ async def create_session(
     authorized_use: Annotated[bool, Form(...)],
     max_width: Annotated[int | None, Form()] = None,
     profile: Annotated[str, Form()] = "fast",
+    transport: Annotated[str, Form()] = "frame_ws",
     user: User = Depends(get_current_active_user),
 ):
     if not authorized_use:
@@ -127,6 +128,7 @@ async def create_session(
             sources=sources,
             max_width=max_width,
             profile=profile,
+            transport=transport,
         )
     except HTTPException:
         raise

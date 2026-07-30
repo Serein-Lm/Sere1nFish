@@ -20,6 +20,7 @@ class FakeProvider:
         self.session_max_width = 0
         self.session_profile = ""
         self.session_source_count = 0
+        self.session_transport = ""
 
     async def status(self):
         return {"ok": True}
@@ -31,11 +32,20 @@ class FakeProvider:
         self.session_max_width = kwargs["max_width"]
         self.session_profile = kwargs["profile"]
         self.session_source_count = len(kwargs["sources"])
-        return {
+        self.session_transport = kwargs["transport"]
+        payload = {
             "session_id": "session-test-owner",
             "ticket": "must-not-leak",
             "websocket_path": "/v1/realtime/session-test-owner",
+            "transport": kwargs["transport"],
         }
+        if kwargs["transport"] == "obs_whip":
+            payload["media"] = {
+                "publish_url": "https://gpu.example.test/media/input/test/whip",
+                "publish_token": "publish-once",
+                "viewer_url": "https://gpu.example.test/media/output/test?token=read-once",
+            }
+        return payload
 
     async def session_status(self, session_id: str):
         return {"session_id": session_id, "frame_count": 3}
@@ -118,11 +128,30 @@ async def test_session_ticket_is_hidden_and_owner_is_enforced() -> None:
     assert provider.session_max_width == 640
     assert provider.session_profile == "quality"
     assert provider.session_source_count == 1
+    assert provider.session_transport == "frame_ws"
     assert (await service.session_status("session-test-owner", "alice"))["frame_count"] == 3
     with pytest.raises(PermissionError):
         await service.session_status("session-test-owner", "bob")
     assert await service.delete_session("session-test-owner", "alice") == {"deleted": True}
     assert provider.deleted == ["session-test-owner"]
+
+
+@pytest.mark.asyncio
+async def test_obs_direct_session_preserves_short_lived_media_credentials() -> None:
+    provider = FakeProvider()
+    service = DeepfakeService(_config(), provider)
+    created = await service.create_session(
+        username="alice",
+        sources=[SourceImage(b"source", "source.jpg")],
+        max_width=640,
+        profile="fast",
+        transport="obs_whip",
+    )
+    assert created["transport"] == "obs_whip"
+    assert created["media"]["publish_token"] == "publish-once"
+    assert "ticket" not in created
+    assert "stream_path" not in created
+    assert provider.session_transport == "obs_whip"
 
 
 @pytest.mark.asyncio
@@ -158,6 +187,14 @@ async def test_source_count_and_profile_are_validated_before_provider_call() -> 
             sources=[SourceImage(b"one", "one.jpg")],
             max_width=640,
             profile="../../quality",
+        )
+    with pytest.raises(ValueError, match="transport"):
+        await service.create_session(
+            username="alice",
+            sources=[SourceImage(b"one", "one.jpg")],
+            max_width=640,
+            profile="fast",
+            transport="rtmp",
         )
 
 

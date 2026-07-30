@@ -86,6 +86,13 @@ class DeepfakeService:
             raise ValueError("quality profile is invalid")
         return value
 
+    @staticmethod
+    def normalize_transport(transport: str) -> str:
+        value = str(transport or "").strip().lower()
+        if value not in {"frame_ws", "obs_whip"}:
+            raise ValueError("realtime transport is invalid")
+        return value
+
     async def swap_image(
         self,
         *,
@@ -112,12 +119,14 @@ class DeepfakeService:
         sources: list[SourceImage],
         max_width: int | None,
         profile: str,
+        transport: str = "frame_ws",
     ) -> dict[str, Any]:
         self.validate_sources(sources)
         payload = await self.provider.create_session(
             sources=sources,
             max_width=min(1280, max(320, max_width or self.config.realtime_max_width)),
             profile=self.normalize_profile(profile),
+            transport=self.normalize_transport(transport),
         )
         session_id = str(payload.get("session_id") or "")
         if not session_id:
@@ -125,7 +134,8 @@ class DeepfakeService:
         async with _SESSION_OWNERS_LOCK:
             _SESSION_OWNERS[session_id] = SessionOwner(username=username)
         payload.pop("ticket", None)
-        payload["stream_path"] = f"/api/v1/deepfake/sessions/{session_id}/stream"
+        if payload.get("transport") == "frame_ws":
+            payload["stream_path"] = f"/api/v1/deepfake/sessions/{session_id}/stream"
         return payload
 
     async def _require_owner(self, session_id: str, username: str) -> None:
