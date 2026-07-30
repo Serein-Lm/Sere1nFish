@@ -904,6 +904,32 @@ export default function DeepfakeStudio() {
                     <Tag>{Math.round((sessionStatus?.media?.audio?.output_bytes || 0) / 1024)} KB AI 音频</Tag>
                   )}
                 </Space>
+                {sessionStatus?.media?.publish?.attempts === 0 && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    title="服务端尚未收到 OBS 的 WHIP 发布请求"
+                    description="请检查 OBS 版本、WHIP 服务器地址和本机安全软件；网页预览可访问只代表 WHEP 拉流正常。"
+                  />
+                )}
+                {(sessionStatus?.media?.publish?.attempts || 0) > 0
+                  && sessionStatus?.media?.publish?.last_authorized === false && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    title="OBS 已到达服务器，但 Bearer Token 鉴权失败"
+                    description="请从当前会话重新复制 Token，不要添加 Bearer 前缀，也不要使用上一次会话的 Token。"
+                  />
+                )}
+                {sessionStatus?.media?.publish?.last_authorized === true
+                  && sessionStatus?.media?.state === 'waiting_input' && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title="WHIP 鉴权成功，正在等待 WebRTC 媒体连接"
+                    description="请检查客户端到 GPU 节点 8189/TCP 和 8189/UDP 的放行规则。"
+                  />
+                )}
                 {sessionStatus?.media?.last_error && (
                   <Alert type="warning" showIcon title={sessionStatus.media.last_error} />
                 )}

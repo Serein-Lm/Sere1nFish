@@ -118,6 +118,14 @@ export interface DeepfakeMediaStatus {
   reconnects: number
   last_inference_ms: number
   last_error: string
+  publish?: {
+    attempts: number
+    authorized_attempts: number
+    last_authorized: boolean | null
+    last_attempt_at: string
+    last_ip: string
+    last_protocol: string
+  }
   audio?: {
     state: 'disabled' | 'connecting' | 'live' | 'reconnecting' | 'waiting_audio' | 'stopped'
     input_bytes: number

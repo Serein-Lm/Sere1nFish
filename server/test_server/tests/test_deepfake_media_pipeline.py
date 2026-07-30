@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from deepfake_gateway.media_pipeline import fit_even_dimensions, parse_frame_rate
+from deepfake_gateway.media_diagnostics import WhipPublishDiagnostics
 from deepfake_gateway.voice_bridge import (
     MediaVoiceBridge,
     MediaVoiceBridgeInputUnavailable,
@@ -28,6 +29,31 @@ def test_parse_frame_rate_handles_fractional_and_invalid_values() -> None:
     assert parse_frame_rate("15/1") == 15
     assert parse_frame_rate("0/0") == 0
     assert parse_frame_rate("not-a-rate") == 0
+
+
+def test_whip_publish_diagnostics_exposes_outcome_without_credentials() -> None:
+    diagnostics = WhipPublishDiagnostics()
+    diagnostics.record(
+        {
+            "ip": "203.0.113.8",
+            "protocol": "webrtc",
+            "token": "must-not-leak",
+            "password": "must-not-leak-either",
+        },
+        authorized=False,
+    )
+    diagnostics.record(
+        {"ip": "203.0.113.8", "protocol": "webrtc", "token": "accepted-secret"},
+        authorized=True,
+    )
+
+    payload = diagnostics.as_dict()
+    assert payload["attempts"] == 2
+    assert payload["authorized_attempts"] == 1
+    assert payload["last_authorized"] is True
+    assert payload["last_ip"] == "203.0.113.8"
+    assert payload["last_protocol"] == "webrtc"
+    assert "secret" not in str(payload)
 
 
 def test_pcm_output_buffer_keeps_latest_aligned_audio_and_pads_silence() -> None:

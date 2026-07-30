@@ -1,6 +1,6 @@
 services:
   gateway:
-    image: sere1nfish/deepfake-gateway:1.4.0
+    image: sere1nfish/deepfake-gateway:1.4.1
     build:
       context: .
       dockerfile: Dockerfile

@@ -61,6 +61,12 @@ API surface:
   authorization endpoint.
 - `GET|DELETE /v1/sessions/{session_id}`: session metrics and cleanup.
 
+OBS direct-session status includes a sanitized `media.publish` diagnostic block.
+It reports publish-attempt counts, authorization outcome, source IP and protocol,
+but never stores or returns the Bearer Token. Polling an owned session also keeps
+the pending endpoint alive; abandoned sessions still expire after the configured
+TTL.
+
 Sere1nFish should call this service through `api.services.deepfake`; application
 code must not call the gateway or FaceFusion directly.
 

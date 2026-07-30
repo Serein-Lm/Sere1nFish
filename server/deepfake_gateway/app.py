@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -28,6 +29,7 @@ import numpy
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import Response
 
+from .media_diagnostics import WhipPublishDiagnostics
 from .media_pipeline import MediaPipeline
 from .profiles import QUALITY_PROFILES, QualityProfile
 
@@ -54,6 +56,7 @@ MEDIA_RTSP_BASE_URL = os.getenv("DEEPFAKE_MEDIA_RTSP_BASE_URL", "rtsp://127.0.0.
 MEDIA_OUTPUT_FPS = min(30, max(5, int(os.getenv("DEEPFAKE_MEDIA_OUTPUT_FPS", "15"))))
 VOICE_BRIDGE_BASE_URL = os.getenv("DEEPFAKE_VOICE_BRIDGE_BASE_URL", "").strip().rstrip("/")
 VOICE_BRIDGE_CA_FILE = os.getenv("DEEPFAKE_VOICE_BRIDGE_CA_FILE", "").strip()
+logger = logging.getLogger("uvicorn.error")
 
 if MEDIA_ENABLED:
     media_public_url = urlsplit(MEDIA_PUBLIC_BASE_URL)
@@ -375,6 +378,7 @@ class StreamSession:
     profile_id: str
     transport: str = "frame_ws"
     media_publish_hash: str = ""
+    media_publish_diagnostics: WhipPublishDiagnostics = field(default_factory=WhipPublishDiagnostics)
     media_read_hash: str = ""
     media_internal_token: str = field(default="", repr=False)
     voice_bridge_id: str = field(default="", repr=False)
@@ -406,6 +410,10 @@ class StreamSession:
         return 1000.0 / (sum(self.recent_inference_ms) / len(self.recent_inference_ms))
 
     def as_dict(self) -> dict[str, Any]:
+        media = self.media_pipeline.stats.as_dict() if self.media_pipeline else None
+        if self.transport == "obs_whip":
+            media = media or {"state": "starting"}
+            media["publish"] = self.media_publish_diagnostics.as_dict()
         return {
             "session_id": self.session_id,
             "created_at": self.created_at,
@@ -416,7 +424,7 @@ class StreamSession:
             "max_width": self.max_width,
             "profile": self.profile_id,
             "transport": self.transport,
-            "media": self.media_pipeline.stats.as_dict() if self.media_pipeline else None,
+            "media": media,
             "source_analysis": self.source_analysis,
         }
 
@@ -519,7 +527,7 @@ async def lifespan(_: FastAPI):
     await asyncio.gather(*(_stop_media_session(session) for session in remaining))
 
 
-app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.4.0", lifespan=lifespan)
+app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.4.1", lifespan=lifespan)
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -808,20 +816,34 @@ def _media_request_authorized(payload: dict[str, Any]) -> bool:
     action = str(payload.get("action") or "")
     user = str(payload.get("user") or "")
     token = _media_auth_token(payload)
-    if not token:
-        return False
+    authorized = False
     if user == "worker":
         allowed = (direction, action) in {("input", "read"), ("output", "publish")}
-        return allowed and secrets.compare_digest(token, session.media_internal_token)
-    expected_hash = ""
-    if direction == "input" and action == "publish":
-        expected_hash = session.media_publish_hash
-    elif direction == "output" and action == "read":
-        expected_hash = session.media_read_hash
-    return bool(expected_hash) and secrets.compare_digest(
-        hashlib.sha256(token.encode()).hexdigest(),
-        expected_hash,
-    )
+        authorized = bool(token) and allowed and secrets.compare_digest(token, session.media_internal_token)
+    elif token:
+        expected_hash = ""
+        if direction == "input" and action == "publish":
+            expected_hash = session.media_publish_hash
+        elif direction == "output" and action == "read":
+            expected_hash = session.media_read_hash
+        authorized = bool(expected_hash) and secrets.compare_digest(
+            hashlib.sha256(token.encode()).hexdigest(),
+            expected_hash,
+        )
+    if direction == "input" and action == "publish" and user != "worker":
+        session.media_publish_diagnostics.record(payload, authorized=authorized)
+        if authorized:
+            session.last_used_monotonic = time.monotonic()
+        logger.log(
+            logging.INFO if authorized else logging.WARNING,
+            "WHIP publish authorization %s session=%s ip=%s protocol=%s attempt=%s",
+            "accepted" if authorized else "rejected",
+            session.session_id,
+            session.media_publish_diagnostics.last_ip or "unknown",
+            session.media_publish_diagnostics.last_protocol or "unknown",
+            session.media_publish_diagnostics.attempts,
+        )
+    return authorized
 
 
 @app.post("/internal/mediamtx/auth", include_in_schema=False)
@@ -842,6 +864,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    session.last_used_monotonic = time.monotonic()
     return session.as_dict()
 
 
