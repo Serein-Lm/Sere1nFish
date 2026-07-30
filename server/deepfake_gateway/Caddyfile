@@ -4,6 +4,12 @@
 }
 
 {$DEEPFAKE_PUBLIC_HOST} {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+
 	@internal path /internal/*
 	respond @internal 404
 

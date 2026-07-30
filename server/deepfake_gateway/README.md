@@ -75,7 +75,11 @@ docker compose -p sere1nfish-deepfake -f compose.example.yaml up -d --build
 Before starting MediaMTX, install `sysctl-mediamtx.conf` under
 `/etc/sysctl.d/99-sere1nfish-mediamtx.conf` and run `sysctl --system`. Caddy
 keeps the legacy private-CA IP endpoint for Sere1nFish while automatically
-issuing a public certificate for `DEEPFAKE_PUBLIC_HOST`.
+issuing a public certificate for `DEEPFAKE_PUBLIC_HOST`. The public site
+disables HTTP-01 and uses the TLS-ALPN-01 challenge on TCP `443`, so TCP `80`
+does not need to be exposed. Certificate-authority validators must still be
+able to reach TCP `443`; restrict application routes separately when the media
+service must remain limited to approved clients.
 
 The server-side SSH tunnel must additionally expose local nginx to GPU
 loopback. The complete forwarding set is:
