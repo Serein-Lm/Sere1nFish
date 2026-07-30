@@ -227,7 +227,7 @@ export default function DeepfakeStudio() {
   const [imageSourceConsistency, setImageSourceConsistency] = useState(1)
   const [realtimeWidth, setRealtimeWidth] = useState(640)
   const [realtimeProfile, setRealtimeProfile] = useState<QualityProfile>('fast')
-  const [realtimeTransport, setRealtimeTransport] = useState<RealtimeTransport>('obs_whip')
+  const [realtimeTransport, setRealtimeTransport] = useState<RealtimeTransport>('frame_ws')
   const [streamAspectRatio, setStreamAspectRatio] = useState(16 / 9)
   const [starting, setStarting] = useState(false)
   const [streaming, setStreaming] = useState(false)
@@ -671,14 +671,17 @@ export default function DeepfakeStudio() {
                 disabled={Boolean(directSession) || streaming || starting}
                 onChange={setRealtimeTransport}
                 options={[
-                  { value: 'obs_whip', label: 'OBS 直连', icon: <LaptopOutlined /> },
-                  { value: 'frame_ws', label: '浏览器测试', icon: <CameraOutlined /> },
+                  { value: 'frame_ws', label: '浏览器采集', icon: <CameraOutlined /> },
+                  { value: 'obs_whip', label: 'OBS WHIP', icon: <LaptopOutlined /> },
                 ]}
               />
               {realtimeTransport === 'obs_whip' && (
-                <Tag color={status?.media_transport?.enabled ? 'success' : 'error'}>
-                  {status?.media_transport?.enabled ? 'GPU 媒体服务在线' : 'GPU 媒体服务未启用'}
-                </Tag>
+                <Space size={4}>
+                  <Tag color="warning">实验模式</Tag>
+                  <Tag color={status?.media_transport?.enabled ? 'success' : 'error'}>
+                    {status?.media_transport?.enabled ? 'GPU 媒体服务在线' : 'GPU 媒体服务未启用'}
+                  </Tag>
+                </Space>
               )}
             </Space>
             <Tooltip title="OBS 接入说明">
@@ -978,7 +981,7 @@ export default function DeepfakeStudio() {
                 <div className="deepfake-remote-output-head">
                   <Space wrap>
                     <LaptopOutlined />
-                    <Text strong>兼容输出</Text>
+                    <Text strong>OBS 浏览器源输出</Text>
                     <Tag color={obsOutput ? 'success' : 'default'}>{obsOutput ? '已就绪' : '未创建'}</Tag>
                   </Space>
                 </div>
@@ -988,12 +991,12 @@ export default function DeepfakeStudio() {
                     <Space wrap>
                       <Button icon={<CopyOutlined />} onClick={() => void navigator.clipboard.writeText(obsViewerUrl)}>复制地址</Button>
                       <Button icon={<LinkOutlined />} onClick={() => window.open(obsViewerUrl, '_blank', 'noopener,noreferrer')}>预览</Button>
-                      <Button danger icon={<DeleteOutlined />} disabled={streaming} onClick={() => void closeObsOutput()} aria-label="关闭兼容输出" />
+                      <Button danger icon={<DeleteOutlined />} disabled={streaming} onClick={() => void closeObsOutput()} aria-label="关闭 OBS 浏览器源输出" />
                     </Space>
                   </div>
                 ) : (
                   <Button type="primary" icon={<LaptopOutlined />} loading={obsCreating} onClick={() => void createObsOutput()}>
-                    创建兼容输出
+                    创建 OBS 浏览器源输出
                   </Button>
                 )}
               </section>
@@ -1007,7 +1010,7 @@ export default function DeepfakeStudio() {
                     <RealtimeVoicePanel outputSessionId={obsOutput.session_id} />
                   ) : (
                     <Button icon={<LaptopOutlined />} loading={obsCreating} onClick={() => void createObsOutput()}>
-                      先创建兼容输出
+                      先创建 OBS 浏览器源输出
                     </Button>
                   ),
                 }]}
@@ -1036,9 +1039,10 @@ export default function DeepfakeStudio() {
           </ol>
         ) : (
           <ol className="deepfake-obs-guide">
-            <li>浏览器测试模式由当前网页采集摄像头，并通过业务服务器中转逐帧结果。</li>
-            <li>创建兼容输出后，在 OBS 添加浏览器来源并粘贴输出地址。</li>
-            <li>该模式用于诊断摄像头和模型，不作为低延迟视频通话链路。</li>
+            <li>选择身份图片并确认授权，点击“启动浏览器摄像头”，允许当前网页使用 Mac 摄像头。</li>
+            <li>页面会自动创建 OBS 浏览器源输出，并持续把摄像头画面送到 GPU 换脸。</li>
+            <li>复制“OBS 浏览器源输出”地址，在 OBS 添加浏览器来源并粘贴该地址。</li>
+            <li>OBS 启动虚拟摄像机即可供通话软件选择，不需要开始直播或录制。</li>
           </ol>
         )}
       </Modal>
