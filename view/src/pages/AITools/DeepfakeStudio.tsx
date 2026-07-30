@@ -79,6 +79,24 @@ const PROFILE_WIDTH_FALLBACK: Record<QualityProfile, number> = {
 }
 
 const REALTIME_WIDTHS = [640, 960, 1280] as const
+const CAMERA_ASPECT_RATIO = 16 / 9
+const OBS_CANVAS_SIZE = { width: 1280, height: 720 } as const
+
+type FrameDimensions = {
+  width: number
+  height: number
+}
+
+function fitFrameDimensions(
+  sourceWidth: number,
+  sourceHeight: number,
+  maxWidth: number,
+): FrameDimensions | null {
+  if (sourceWidth <= 0 || sourceHeight <= 0 || maxWidth <= 0) return null
+  const width = Math.max(2, Math.floor(Math.min(sourceWidth, maxWidth) / 2) * 2)
+  const height = Math.max(64, Math.round((sourceHeight * width / sourceWidth) / 2) * 2)
+  return { width, height }
+}
 
 const MEDIA_STATE_LABELS: Record<string, string> = {
   waiting_input: '等待 OBS',
@@ -228,7 +246,8 @@ export default function DeepfakeStudio() {
   const [realtimeWidth, setRealtimeWidth] = useState(640)
   const [realtimeProfile, setRealtimeProfile] = useState<QualityProfile>('fast')
   const [realtimeTransport, setRealtimeTransport] = useState<RealtimeTransport>('frame_ws')
-  const [streamAspectRatio, setStreamAspectRatio] = useState(16 / 9)
+  const [streamAspectRatio, setStreamAspectRatio] = useState(CAMERA_ASPECT_RATIO)
+  const [captureDimensions, setCaptureDimensions] = useState<FrameDimensions | null>(null)
   const [starting, setStarting] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [streamResult, setStreamResult] = useState('')
@@ -264,6 +283,10 @@ export default function DeepfakeStudio() {
   const realtimeWidthOptions = REALTIME_WIDTHS
     .filter((width) => width <= realtimeProfileMaxWidth)
     .map((width) => ({ value: width, label: String(width) }))
+  const displayedCaptureDimensions = captureDimensions || {
+    width: realtimeWidth,
+    height: Math.round(realtimeWidth / CAMERA_ASPECT_RATIO),
+  }
   const obsViewerUrl = obsOutput
     ? remoteMediaOutputViewerUrl(
       obsOutput,
@@ -398,13 +421,17 @@ export default function DeepfakeStudio() {
     const video = videoRef.current
     const canvas = canvasRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN || !video || !canvas || video.videoWidth === 0) return
-    const width = Math.min(effectiveRealtimeWidthRef.current, video.videoWidth)
-    const height = Math.max(64, Math.round(video.videoHeight * (width / video.videoWidth)))
-    canvas.width = width
-    canvas.height = height
+    const dimensions = fitFrameDimensions(
+      video.videoWidth,
+      video.videoHeight,
+      effectiveRealtimeWidthRef.current,
+    )
+    if (!dimensions) return
+    canvas.width = dimensions.width
+    canvas.height = dimensions.height
     const context = canvas.getContext('2d', { alpha: false })
     if (!context) return
-    context.drawImage(video, 0, 0, width, height)
+    context.drawImage(video, 0, 0, dimensions.width, dimensions.height)
     canvas.toBlob(async (blob) => {
       if (!blob || socket.readyState !== WebSocket.OPEN) return
       socket.send(await blob.arrayBuffer())
@@ -425,6 +452,7 @@ export default function DeepfakeStudio() {
     const sessionId = sessionIdRef.current
     sessionIdRef.current = ''
     setStreaming(false)
+    setCaptureDimensions(null)
     setDirectSession(null)
     setSessionStatus(null)
     if (sessionId) {
@@ -504,7 +532,12 @@ export default function DeepfakeStudio() {
       const output = await createObsOutput()
       if (!output) return
       const media = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: realtimeWidth }, height: { ideal: 720 }, facingMode: 'user' },
+        video: {
+          width: { ideal: realtimeWidth },
+          height: { ideal: Math.round(realtimeWidth / CAMERA_ASPECT_RATIO) },
+          aspectRatio: { ideal: CAMERA_ASPECT_RATIO },
+          facingMode: 'user',
+        },
         audio: false,
       })
       mediaRef.current = media
@@ -517,6 +550,11 @@ export default function DeepfakeStudio() {
       const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile, 'frame_ws')
       effectiveRealtimeWidthRef.current = session.max_width
       if (session.max_width !== realtimeWidth) setRealtimeWidth(session.max_width)
+      setCaptureDimensions(fitFrameDimensions(
+        videoRef.current.videoWidth,
+        videoRef.current.videoHeight,
+        session.max_width,
+      ))
       sessionIdRef.current = session.session_id
       if (!session.stream_path) throw new Error('GPU 未返回浏览器实时流地址')
       const socket = openDeepfakeSocket(session.stream_path, output.session_id)
@@ -976,6 +1014,9 @@ export default function DeepfakeStudio() {
               <Space wrap>
                 <Tag color={streaming ? 'success' : 'default'}>{streaming ? '已连接' : '未连接'}</Tag>
                 <Tag>{PROFILE_OPTIONS.find((item) => item.value === realtimeProfile)?.label}</Tag>
+                <Tag>
+                  {captureDimensions ? '当前帧' : '预计帧'} {displayedCaptureDimensions.width}×{displayedCaptureDimensions.height}
+                </Tag>
                 <Tag>{sourceFiles.length} 张参考图</Tag>
                 <Tag>{sessionStatus?.measured_fps?.toFixed(1) || '0.0'} FPS</Tag>
                 <Tag>{sessionStatus?.average_inference_ms?.toFixed(0) || '0'} ms</Tag>
@@ -988,6 +1029,7 @@ export default function DeepfakeStudio() {
                     <LaptopOutlined />
                     <Text strong>OBS 浏览器源输出</Text>
                     <Tag color={obsOutput ? 'success' : 'default'}>{obsOutput ? '已就绪' : '未创建'}</Tag>
+                    <Tag color="blue">OBS {OBS_CANVAS_SIZE.width}×{OBS_CANVAS_SIZE.height}</Tag>
                   </Space>
                 </div>
                 {obsOutput ? (
@@ -1046,7 +1088,9 @@ export default function DeepfakeStudio() {
           <ol className="deepfake-obs-guide">
             <li>选择身份图片并确认授权，点击“启动浏览器摄像头”，允许当前网页使用 Mac 摄像头。</li>
             <li>页面会自动创建 OBS 浏览器源输出，并持续把摄像头画面送到 GPU 换脸。</li>
-            <li>复制“OBS 浏览器源输出”地址，在 OBS 添加浏览器来源并粘贴该地址。</li>
+            <li>复制“OBS 浏览器源输出”地址，在 OBS 添加浏览器来源并粘贴该地址，宽度填写 1280、高度填写 720。</li>
+            <li>右键浏览器源选择“变换 → 重置变换”，再选择“适配屏幕”；裁剪的上、下、左、右均保持为 0。</li>
+            <li>输出会完整保留摄像头比例；摄像头实际为 4:3 时会出现黑边，这是完整显示而不是内容缺失。</li>
             <li>OBS 启动虚拟摄像机即可供通话软件选择，不需要开始直播或录制。</li>
           </ol>
         )}
