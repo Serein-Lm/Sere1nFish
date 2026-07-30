@@ -3,7 +3,10 @@ import {
   Alert,
   Button,
   Checkbox,
+  Collapse,
   Image,
+  Input,
+  Modal,
   Segmented,
   Space,
   Spin,
@@ -18,10 +21,16 @@ import {
   CameraOutlined,
   CloseOutlined,
   CloudUploadOutlined,
+  CopyOutlined,
+  DeleteOutlined,
   DisconnectOutlined,
   FullscreenOutlined,
+  LaptopOutlined,
+  LinkOutlined,
   PictureOutlined,
   ReloadOutlined,
+  QuestionCircleOutlined,
+  AudioOutlined,
   SwapOutlined,
 } from '@ant-design/icons'
 import {
@@ -34,6 +43,13 @@ import {
   type DeepfakeSessionStatus,
   type DeepfakeStatus,
 } from '../../services/deepfakeService'
+import {
+  createRemoteMediaOutput,
+  deleteRemoteMediaOutput,
+  remoteMediaOutputViewerUrl,
+  type RemoteMediaOutputSession,
+} from '../../services/mediaOutputService'
+import RealtimeVoicePanel from './RealtimeVoicePanel'
 
 const { Text } = Typography
 
@@ -203,6 +219,9 @@ export default function DeepfakeStudio() {
   const [streaming, setStreaming] = useState(false)
   const [streamResult, setStreamResult] = useState('')
   const [sessionStatus, setSessionStatus] = useState<DeepfakeSessionStatus | null>(null)
+  const [obsGuideOpen, setObsGuideOpen] = useState(false)
+  const [obsCreating, setObsCreating] = useState(false)
+  const [obsOutput, setObsOutput] = useState<RemoteMediaOutputSession | null>(null)
   const sourcePreviews = useFilePreviews(sourceFiles)
   const targetPreview = useFilePreview(targetFile)
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -212,6 +231,7 @@ export default function DeepfakeStudio() {
   const mediaRef = useRef<MediaStream | null>(null)
   const sessionIdRef = useRef('')
   const outputUrlRef = useRef('')
+  const obsOutputRef = useRef<RemoteMediaOutputSession | null>(null)
   const imageUrlRef = useRef('')
   const captureTimerRef = useRef<number | null>(null)
   const effectiveRealtimeWidthRef = useRef(640)
@@ -224,6 +244,7 @@ export default function DeepfakeStudio() {
   const realtimeWidthOptions = REALTIME_WIDTHS
     .filter((width) => width <= realtimeProfileMaxWidth)
     .map((width) => ({ value: width, label: String(width) }))
+  const obsViewerUrl = obsOutput ? remoteMediaOutputViewerUrl(obsOutput) : ''
 
   const addSourceFile = useCallback((file: File) => {
     setSourceFiles((current) => {
@@ -273,11 +294,41 @@ export default function DeepfakeStudio() {
   }, [loadStatus])
 
   const setOutputBlob = useCallback((blob: Blob) => {
-    if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current)
+    const previous = outputUrlRef.current
     const next = URL.createObjectURL(blob)
     outputUrlRef.current = next
     setStreamResult(next)
+    if (previous) window.setTimeout(() => URL.revokeObjectURL(previous), 1000)
   }, [])
+
+  const createObsOutput = useCallback(async (): Promise<RemoteMediaOutputSession | null> => {
+    if (obsOutputRef.current) return obsOutputRef.current
+    setObsCreating(true)
+    try {
+      const next = await createRemoteMediaOutput()
+      obsOutputRef.current = next
+      setObsOutput(next)
+      messageApi.success('远端 OBS 输出已创建')
+      return next
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : '远端 OBS 输出创建失败')
+      return null
+    } finally {
+      setObsCreating(false)
+    }
+  }, [messageApi])
+
+  const closeObsOutput = useCallback(async () => {
+    const current = obsOutputRef.current
+    if (!current) return
+    try {
+      await deleteRemoteMediaOutput(current.session_id)
+      obsOutputRef.current = null
+      setObsOutput(null)
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : '远端 OBS 输出关闭失败')
+    }
+  }, [messageApi])
 
   const captureFrame = useCallback(() => {
     const socket = socketRef.current
@@ -325,6 +376,9 @@ export default function DeepfakeStudio() {
     void stopRealtime()
     if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current)
     if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current)
+    const output = obsOutputRef.current
+    obsOutputRef.current = null
+    if (output) void deleteRemoteMediaOutput(output.session_id, true)
   }, [stopRealtime])
 
   useEffect(() => {
@@ -383,6 +437,8 @@ export default function DeepfakeStudio() {
     }
     setStarting(true)
     try {
+      const output = await createObsOutput()
+      if (!output) return
       const media = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: realtimeWidth }, height: { ideal: 720 }, facingMode: 'user' },
         audio: false,
@@ -398,7 +454,7 @@ export default function DeepfakeStudio() {
       effectiveRealtimeWidthRef.current = session.max_width
       if (session.max_width !== realtimeWidth) setRealtimeWidth(session.max_width)
       sessionIdRef.current = session.session_id
-      const socket = openDeepfakeSocket(session.stream_path)
+      const socket = openDeepfakeSocket(session.stream_path, output.session_id)
       socket.binaryType = 'blob'
       socketRef.current = socket
       socket.onmessage = (event) => {
@@ -587,8 +643,118 @@ export default function DeepfakeStudio() {
             <Tag>{sessionStatus?.average_inference_ms?.toFixed(0) || '0'} ms</Tag>
             <Tag>{sessionStatus?.frame_count || 0} 帧</Tag>
           </Space>
+
+          <section className="deepfake-remote-output">
+            <div className="deepfake-remote-output-head">
+              <Space wrap>
+                <LaptopOutlined />
+                <Text strong>远端 OBS 输出</Text>
+                <Tag color={obsOutput ? 'success' : 'default'}>
+                  {obsOutput ? '已就绪' : '未创建'}
+                </Tag>
+                {obsOutput && (
+                  <Tag>{new Date(obsOutput.expires_at * 1000).toLocaleTimeString()} 到期</Tag>
+                )}
+              </Space>
+              <Tooltip title="OBS 接入说明">
+                <Button
+                  type="text"
+                  icon={<QuestionCircleOutlined />}
+                  onClick={() => setObsGuideOpen(true)}
+                  aria-label="查看 OBS 接入说明"
+                />
+              </Tooltip>
+            </div>
+            {obsOutput ? (
+              <div className="deepfake-remote-output-url">
+                <Input value={obsViewerUrl} readOnly aria-label="OBS 浏览器源地址" />
+                <Space wrap>
+                  <Button
+                    icon={<CopyOutlined />}
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(obsViewerUrl)
+                        messageApi.success('OBS 地址已复制')
+                      } catch {
+                        messageApi.error('复制失败，请手动复制地址')
+                      }
+                    }}
+                  >
+                    复制地址
+                  </Button>
+                  <Button
+                    icon={<LinkOutlined />}
+                    onClick={() => window.open(obsViewerUrl, '_blank', 'noopener,noreferrer')}
+                  >
+                    预览
+                  </Button>
+                  <Tooltip title={streaming ? '停止实时换脸后可关闭输出' : '立即使 OBS 地址失效'}>
+                    <Button
+                      danger
+                      icon={<DeleteOutlined />}
+                      disabled={streaming}
+                      onClick={() => void closeObsOutput()}
+                      aria-label="关闭远端 OBS 输出"
+                    />
+                  </Tooltip>
+                </Space>
+              </div>
+            ) : (
+              <Button
+                type="primary"
+                icon={<LaptopOutlined />}
+                loading={obsCreating}
+                onClick={() => void createObsOutput()}
+              >
+                创建 OBS 浏览器源
+              </Button>
+            )}
+          </section>
+
+          <Collapse
+            className="deepfake-output-voice"
+            items={[{
+              key: 'voice-output',
+              label: (
+                <Space wrap>
+                  <AudioOutlined />
+                  <Text strong>目标音色与全双工对话</Text>
+                  <Tag color={obsOutput ? 'cyan' : 'default'}>
+                    {obsOutput ? '同步到 OBS' : '未绑定输出'}
+                  </Tag>
+                </Space>
+              ),
+              children: obsOutput ? (
+                <RealtimeVoicePanel outputSessionId={obsOutput.session_id} />
+              ) : (
+                <Button
+                  icon={<LaptopOutlined />}
+                  loading={obsCreating}
+                  onClick={() => void createObsOutput()}
+                >
+                  先创建 OBS 浏览器源
+                </Button>
+              ),
+            }]}
+          />
         </div>
       )}
+
+      <Modal
+        title={<Space><LaptopOutlined />远端 OBS 接入</Space>}
+        open={obsGuideOpen}
+        onCancel={() => setObsGuideOpen(false)}
+        footer={<Button type="primary" onClick={() => setObsGuideOpen(false)}>知道了</Button>}
+        width={580}
+      >
+        <ol className="deepfake-obs-guide">
+          <li>创建远端输出并复制地址；启动摄像头后，换脸帧会直接进入该输出。</li>
+          <li>在本机 OBS 添加“浏览器”来源，把复制的 HTTPS 地址粘贴到 URL。</li>
+          <li>宽高建议填写 1280×720，并启用“通过 OBS 控制音频”。</li>
+          <li>展开“目标音色与全双工对话”并开始会话，AI 回答音频会进入同一浏览器源。</li>
+          <li>在 OBS 混音器确认浏览器源电平，再启动 OBS 虚拟摄像机。</li>
+        </ol>
+      </Modal>
     </div>
   )
 }

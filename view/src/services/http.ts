@@ -13,6 +13,17 @@ export function clearToken(): void {
   localStorage.removeItem('userInfo')
 }
 
+export function openAuthenticatedWebSocket(pathOrUrl: string): WebSocket {
+  const token = getToken()
+  if (!token) throw new Error('登录状态已失效')
+  const target = pathOrUrl.startsWith('/api/')
+    ? pathOrUrl
+    : `${API_CONFIG.BASE_URL}${pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`}`
+  const url = new URL(target, window.location.origin)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return new WebSocket(url, ['sere1nfish', `sere1nfish.auth.${token}`])
+}
+
 export async function apiFetchResponse(
   path: string,
   init: RequestInit = {},

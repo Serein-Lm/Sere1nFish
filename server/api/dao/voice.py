@@ -12,8 +12,13 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-CLONES_COLLECTION = "voice_clones"
-SYNTHESIS_COLLECTION = "voice_synthesis_records"
+from api.db.collections import (
+    VOICE_CLONES_COLLECTION,
+    VOICE_SYNTHESIS_RECORDS_COLLECTION,
+)
+
+CLONES_COLLECTION = VOICE_CLONES_COLLECTION
+SYNTHESIS_COLLECTION = VOICE_SYNTHESIS_RECORDS_COLLECTION
 
 
 # ==================== 索引 ====================
@@ -91,6 +96,7 @@ async def list_clones(
     *,
     prefix: str | None = None,
     status: str | None = None,
+    model: str | None = None,
     skip: int = 0,
     limit: int = 20,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -99,6 +105,8 @@ async def list_clones(
         q["prefix"] = prefix
     if status:
         q["status"] = status
+    if model:
+        q["model"] = model
     coll = db[CLONES_COLLECTION]
     total = await coll.count_documents(q)
     cursor = coll.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)

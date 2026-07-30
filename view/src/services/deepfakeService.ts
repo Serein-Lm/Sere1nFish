@@ -1,5 +1,10 @@
 import { API_CONFIG } from '../config/api'
-import { apiFetch, clearToken, getToken } from './http'
+import {
+  apiFetch,
+  clearToken,
+  getToken,
+  openAuthenticatedWebSocket,
+} from './http'
 import { redirectToLogin } from '../utils/authNavigation'
 
 export interface DeepfakeStatus {
@@ -156,10 +161,11 @@ export function deleteDeepfakeSession(sessionId: string): Promise<{ deleted: boo
   })
 }
 
-export function openDeepfakeSocket(streamPath: string): WebSocket {
-  const token = getToken()
-  if (!token) throw new Error('登录状态已失效')
+export function openDeepfakeSocket(
+  streamPath: string,
+  outputSessionId?: string,
+): WebSocket {
   const url = new URL(streamPath, window.location.origin)
-  url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return new WebSocket(url, ['sere1nfish', `sere1nfish.auth.${token}`])
+  if (outputSessionId) url.searchParams.set('output_session_id', outputSessionId)
+  return openAuthenticatedWebSocket(`${url.pathname}${url.search}`)
 }

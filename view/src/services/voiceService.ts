@@ -8,6 +8,7 @@ export interface VoiceCreateReq {
   language_hints?: string[]
   max_prompt_audio_length?: number
   enable_preprocess?: boolean
+  model?: string
   authorized_use: boolean
 }
 
@@ -131,12 +132,14 @@ export async function createVoice(req: VoiceCreateReq): Promise<VoiceCreateResp>
 export async function listVoices(params?: {
   prefix?: string
   status?: string
+  model?: string
   page?: number
   page_size?: number
 }): Promise<PageResp<VoiceClone>> {
   const query = new URLSearchParams()
   if (params?.prefix) query.set('prefix', params.prefix)
   if (params?.status) query.set('status', params.status)
+  if (params?.model) query.set('model', params.model)
   if (params?.page !== undefined) query.set('page', String(params.page))
   if (params?.page_size !== undefined) query.set('page_size', String(params.page_size))
   const qs = query.toString()

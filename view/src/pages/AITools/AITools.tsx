@@ -22,8 +22,8 @@ export default function AITools() {
   const tools = [
     {
       icon: <AudioOutlined />,
-      title: 'AI-TTS 语音合成',
-      description: '文字转语音，支持多种语音模板',
+      title: 'AI 实时语音',
+      description: '全双工对话、声音复刻与流式语音合成',
       color: '#1890ff',
       tabKey: 'voice',
     },
@@ -96,7 +96,10 @@ export default function AITools() {
                     block
                     className="tool-btn"
                     icon={<ArrowRightOutlined />}
-                    onClick={() => tool.tabKey && setActiveTab(tool.tabKey)}
+                    onClick={(event) => {
+                      event.currentTarget.blur()
+                      if (tool.tabKey) setActiveTab(tool.tabKey)
+                    }}
                     disabled={!tool.tabKey}
                   >
                     {tool.tabKey ? '立即使用' : '未接入'}

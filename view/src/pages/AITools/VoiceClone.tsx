@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { lazy, Suspense, useState, useEffect, useRef, useCallback } from 'react'
 import {
   Card, Row, Col, Button, Input, Table, Tag, Space, Modal,
   Form, Select, InputNumber, Switch, Typography, Empty,
@@ -11,6 +11,7 @@ import {
   HistoryOutlined, InfoCircleOutlined, CheckCircleOutlined,
   CloseCircleOutlined, LoadingOutlined, CloudUploadOutlined,
   StopOutlined,
+  MessageOutlined,
 } from '@ant-design/icons'
 import {
   createVoice, listVoices, deleteVoice, streamSpeech, listRecords,
@@ -19,6 +20,8 @@ import {
   type VoiceStreamMetadata,
 } from '../../services/voiceService'
 import './VoiceClone.css'
+
+const RealtimeVoicePanel = lazy(() => import('./RealtimeVoicePanel'))
 
 const { Title, Paragraph, Text } = Typography
 const { TextArea } = Input
@@ -116,10 +119,12 @@ export default function VoiceClone() {
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null)
   const [uploadMode, setUploadMode] = useState<'url' | 'file'>('file')
   const [form] = Form.useForm()
+  const cloneModel = Form.useWatch('model', form) || 'qwen-audio-3.0-realtime-plus'
 
   const [synthText, setSynthText] = useState('')
   const [synthInstruction, setSynthInstruction] = useState('')
   const [selectedVoice, setSelectedVoice] = useState<string | null>(null)
+  const [preferredRealtimeVoice, setPreferredRealtimeVoice] = useState<string | null>(null)
   const [synthesizing, setSynthesizing] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -131,7 +136,8 @@ export default function VoiceClone() {
   const realtimePlaybackRef = useRef(false)
   const synthesisRunRef = useRef(0)
 
-  const [activeSection, setActiveSection] = useState<'voices' | 'synthesize' | 'history'>('synthesize')
+  const [activeSection, setActiveSection] = useState<'realtime' | 'voices' | 'synthesize' | 'history'>('realtime')
+  const ttsVoices = voices.filter(voice => !voice.model.includes('-realtime-'))
 
   const loadVoices = useCallback(async (page = 0) => {
     setVoicesLoading(true)
@@ -196,6 +202,7 @@ export default function VoiceClone() {
         language_hints: (values.language_hints as string[]) || undefined,
         max_prompt_audio_length: (values.max_prompt_audio_length as number) || undefined,
         enable_preprocess: values.enable_preprocess as boolean | undefined,
+        model: (values.model as string) || undefined,
         authorized_use: values.authorized_use === true,
       })
       messageApi.success(`音色创建成功: ${resp.voice_id}`)
@@ -472,13 +479,18 @@ export default function VoiceClone() {
         <Space>
           <Button
             type="link" size="small"
-            icon={<SoundOutlined />}
+            icon={record.model.includes('-realtime-') ? <MessageOutlined /> : <SoundOutlined />}
             onClick={() => {
-              setSelectedVoice(record.voice_id)
-              setActiveSection('synthesize')
+              if (record.model.includes('-realtime-')) {
+                setPreferredRealtimeVoice(record.voice_id)
+                setActiveSection('realtime')
+              } else {
+                setSelectedVoice(record.voice_id)
+                setActiveSection('synthesize')
+              }
             }}
           >
-            合成
+            {record.model.includes('-realtime-') ? '对话' : '合成'}
           </Button>
           <Popconfirm title="确定删除此音色？" onConfirm={() => handleDelete(record.voice_id)}>
             <Button type="link" size="small" danger icon={<DeleteOutlined />} />
@@ -569,6 +581,7 @@ export default function VoiceClone() {
   ]
 
   const sectionNav = [
+    { key: 'realtime', label: '全双工对话', icon: <MessageOutlined /> },
     { key: 'synthesize', label: '语音合成', icon: <SoundOutlined /> },
     { key: 'voices', label: '音色管理', icon: <AudioOutlined /> },
     { key: 'history', label: '合成历史', icon: <HistoryOutlined /> },
@@ -591,6 +604,14 @@ export default function VoiceClone() {
           </div>
         ))}
       </div>
+
+      {activeSection === 'realtime' && (
+        <div className="vc-section slide-up stagger-1">
+          <Suspense fallback={<div className="vc-realtime-loading"><LoadingOutlined /></div>}>
+            <RealtimeVoicePanel preferredVoice={preferredRealtimeVoice} />
+          </Suspense>
+        </div>
+      )}
 
       {/* 语音合成 */}
       {activeSection === 'synthesize' && (
@@ -631,12 +652,12 @@ export default function VoiceClone() {
                       allowClear
                       showSearch
                       optionFilterProp="label"
-                      options={voices.map(v => ({
+                      options={ttsVoices.map(v => ({
                         value: v.voice_id,
                         label: `${v.prefix} (${v.voice_id.slice(-8)})`,
                       }))}
                       notFoundContent={
-                        voices.length === 0
+                        ttsVoices.length === 0
                           ? <Empty description="暂无音色，请先创建" image={Empty.PRESENTED_IMAGE_SIMPLE} />
                           : undefined
                       }
@@ -815,12 +836,28 @@ export default function VoiceClone() {
           layout="vertical"
           onFinish={handleCreate}
           initialValues={{
+            model: 'qwen-audio-3.0-realtime-plus',
             language_hints: ['zh'],
             max_prompt_audio_length: 20,
             enable_preprocess: false,
             authorized_use: false,
           }}
         >
+          <Form.Item name="model" label="使用场景">
+            <Select
+              options={[
+                {
+                  value: 'qwen-audio-3.0-realtime-plus',
+                  label: '全双工对话 · qwen-audio-3.0-realtime-plus',
+                },
+                {
+                  value: 'qwen-audio-3.0-tts-flash',
+                  label: '文本转语音 · qwen-audio-3.0-tts-flash',
+                },
+              ]}
+            />
+          </Form.Item>
+
           <Form.Item label="音频来源">
             <Space>
               <Button
@@ -902,7 +939,7 @@ export default function VoiceClone() {
             <Input placeholder="user01" maxLength={10} />
           </Form.Item>
 
-          <Row gutter={16}>
+          {!cloneModel.includes('-realtime-') && <Row gutter={16}>
             <Col span={12}>
               <Form.Item name="language_hints" label="语种提示">
                 <Select
@@ -918,14 +955,18 @@ export default function VoiceClone() {
                 <InputNumber min={3} max={60} step={0.5} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
-          </Row>
+          </Row>}
 
-          <Form.Item name="enable_preprocess" label="音频预处理" valuePropName="checked">
-            <Switch checkedChildren="开启" unCheckedChildren="关闭" />
-          </Form.Item>
-          <Paragraph type="secondary" style={{ marginTop: -16, marginBottom: 16, fontSize: 12 }}>
-            降噪 + 音频增强 + 音量规整。有背景噪音时建议开启
-          </Paragraph>
+          {!cloneModel.includes('-realtime-') && (
+            <>
+              <Form.Item name="enable_preprocess" label="音频预处理" valuePropName="checked">
+                <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+              </Form.Item>
+              <Paragraph type="secondary" style={{ marginTop: -16, marginBottom: 16, fontSize: 12 }}>
+                降噪 + 音频增强 + 音量规整。有背景噪音时建议开启
+              </Paragraph>
+            </>
+          )}
 
           <Form.Item
             name="authorized_use"

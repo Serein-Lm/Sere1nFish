@@ -1,8 +1,9 @@
-# 百炼实时语音复刻 API
+# 百炼全双工语音与声音复刻 API
 
 ## 能力边界
 
 - 默认模型：`qwen-audio-3.0-tts-flash`。
+- 全双工模型：`qwen-audio-3.0-realtime-plus`。
 - 高质量备选：`qwen-audio-3.0-tts-plus`。
 - 接口前缀：`/api/v1/voice`。
 - 所有接口要求 Bearer Token；删除音色要求管理员权限。
@@ -10,6 +11,7 @@
 - 音色创建模型与合成模型必须完全一致。历史音色继续使用其创建时记录的模型，不随默认模型切换。
 - 实时链路使用预热 WebSocket 连接池，服务端输出 24kHz、单声道、16-bit little-endian PCM；前端边接收边播放，并在完成后封装为 WAV 供回放。
 - 完整 MP3 接口保留，用于不需要实时播放的兼容场景。
+- 全双工链路使用独立安全 WebSocket 代理，支持 `smart_turn`、`server_vad` 和手动按住说话。
 
 官方资料：
 
@@ -17,6 +19,7 @@
 - [实时语音合成](https://help.aliyun.com/zh/model-studio/realtime-tts-user-guide)
 - [声音复刻](https://help.aliyun.com/zh/model-studio/voice-cloning-user-guide)
 - [Qwen-Audio-TTS 音色列表](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-voice-list)
+- [Qwen-Audio 全双工实时语音](https://www.alibabacloud.com/help/en/model-studio/qwen-audio-realtime-user-guides)
 
 ## 运行配置
 
@@ -35,7 +38,11 @@
     "max_prompt_audio_length": 20,
     "enable_preprocess": false,
     "pool_size": 4,
-    "stream_sample_rate": 24000
+    "stream_sample_rate": 24000,
+    "realtime_model": "qwen-audio-3.0-realtime-plus",
+    "realtime_voice": "longanqian",
+    "realtime_turn_detection": "smart_turn",
+    "realtime_max_history_turns": 20
   }
 }
 ```
@@ -53,6 +60,10 @@
 | `enable_preprocess` | `false` | 是否启用降噪、增强和音量规整 |
 | `pool_size` | `2` | WebSocket 预热连接数，服务端限幅为 1-8 |
 | `stream_sample_rate` | `24000` | 可选 16000、24000、48000 |
+| `realtime_model` | `qwen-audio-3.0-realtime-plus` | 全双工对话模型 |
+| `realtime_voice` | `longanqian` | 默认系统音色 |
+| `realtime_turn_detection` | `smart_turn` | 智能轮次、服务端 VAD 或手动模式 |
+| `realtime_max_history_turns` | `20` | 上下文轮次，范围 1-50 |
 
 当前部署使用 `pool_size=4` 与 `stream_sample_rate=24000`。
 
@@ -84,6 +95,7 @@ Content-Type: application/json
 {
   "url": "https://signed.example.com/reference.wav",
   "prefix": "user01",
+  "model": "qwen-audio-3.0-realtime-plus",
   "language_hints": ["zh"],
   "max_prompt_audio_length": 20,
   "enable_preprocess": false,
@@ -92,6 +104,8 @@ Content-Type: application/json
 ```
 
 `authorized_use` 必须为 `true`。服务端同时记录确认账号与确认时间。
+
+`model` 决定音色用途。全双工对话与文本转语音的音色模型必须分别创建，不可混用。
 
 ```json
 {
@@ -147,6 +161,32 @@ X-Synthetic-Media: true
 - `view/src/pages/AITools/VoiceClone.tsx`
 
 客户端断开或主动停止时，服务端调用百炼取消方法、释放连接池对象，并将记录标记为 `cancelled`。
+
+## 全双工对话
+
+```http
+GET /api/v1/voice/realtime/config
+WS  /api/v1/voice/realtime
+```
+
+浏览器通过 `sere1nfish.auth.<token>` WebSocket 子协议完成鉴权。连接成功后先发送：
+
+```json
+{
+  "type": "session.start",
+  "model": "qwen-audio-3.0-realtime-plus",
+  "voice": "longanqian",
+  "mode": "smart_turn",
+  "max_history_turns": 20,
+  "output_session_id": "media-optional"
+}
+```
+
+此后浏览器以二进制帧发送 16kHz PCM。后端以二进制帧返回 24kHz PCM，并以 JSON 返回实时转写、说话开始/结束、响应状态和错误事件。`input_audio_buffer.speech_started` 会立即取消旧响应并清空浏览器播放队列。
+
+手动模式在录音结束后依次发送 `input_audio_buffer.commit` 与 `response.create`。浏览器不得直接发送 `session.update` 或任意百炼事件，所有允许的控制事件由代理白名单校验。
+
+`output_session_id` 可选。它必须由当前用户通过 `POST /api/v1/media-output/sessions` 创建；设置后，模型回答的 24kHz PCM 会同时发布到对应 OBS 浏览器源。该能力输出的是 AI 回答音色，不是麦克风原话的实时 Voice Conversion。
 
 ## 完整 MP3 合成
 

@@ -173,22 +173,30 @@ AI 工具 -> 百炼视频工具
 server/docs/BAILIAN_AIGC_API.md
 ```
 
-## 5. TTS / 音色克隆
+## 5. 全双工语音 / TTS / 音色克隆
 
-CosyVoice 配置从前端“运行配置”写入 `cosyvoice` 配置段。上传本地音频后，后端会根据反向代理 `Host` 和 `X-Forwarded-Proto` 生成公网绝对 URL，供百炼服务端拉取。
+百炼语音配置从前端“运行配置”写入 `cosyvoice` 配置段。全双工模型使用安全 WebSocket 代理连接本机麦克风与扬声器；上传本地音频后，后端生成短时对象存储地址供百炼创建复刻音色。
 
 常用接口：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v1/voice/uploads` | 上传音频，返回公网 URL |
+| POST | `/api/v1/voice/upload` | 上传音频，返回短时访问 URL |
 | POST | `/api/v1/voice/voices` | 创建/登记音色 |
 | POST | `/api/v1/voice/synthesize` | 合成语音 |
+| GET | `/api/v1/voice/realtime/config` | 全双工模型、音色和音频格式 |
+| WS | `/api/v1/voice/realtime` | 16k PCM 输入、24k PCM 输出的全双工会话 |
+| POST | `/api/v1/media-output/sessions` | 创建短时远端 OBS 输出 |
+| GET | `/api/v1/media-output/view#<token>` | OBS 浏览器源页面，凭据仅在 URL fragment |
+| WS | `/api/v1/media-output/watch` | 换脸帧与 24k PCM 音频订阅 |
+
+数字人场景在“AI 工具 -> AI 换脸 -> 实时摄像头”中统一操作：远端 GPU 换脸帧和全双工 AI 的目标音色回答进入同一个受保护的 OBS 浏览器源。该链路只使用现有 HTTPS/WSS `443`，无需为 OBS 新增安全组端口。
 
 详细教程见：
 
 ```text
 server/docs/VOICE_CLONE_API.md
+docs/REALTIME_VOICE_OBS_GUIDE.md
 ```
 
 ## 6. Token 观测和日志

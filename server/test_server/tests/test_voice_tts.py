@@ -51,7 +51,7 @@ def test_voice_config_prefers_cosyvoice_and_builds_workspace_endpoint(
     assert config.pool_size == 3
 
 
-def test_voice_config_defaults_to_latest_realtime_clone_model(monkeypatch) -> None:
+def test_voice_config_defaults_to_latest_tts_model(monkeypatch) -> None:
     from api.services import voice_runtime
 
     async def fake_app_config():
@@ -66,7 +66,7 @@ def test_voice_config_defaults_to_latest_realtime_clone_model(monkeypatch) -> No
     monkeypatch.setattr(voice_runtime, "get_runtime_config_section", fake_section)
 
     config = asyncio.run(voice_runtime.load_voice_runtime_config())
-    assert config.model == voice_runtime.LATEST_REALTIME_VOICE_MODEL
+    assert config.model == voice_runtime.LATEST_TTS_VOICE_MODEL
     assert config.model == "qwen-audio-3.0-tts-flash"
 
 
@@ -253,6 +253,27 @@ def test_voice_runtime_rejects_clone_model_mismatch(monkeypatch) -> None:
                 "db",
                 voice_id="voice-legacy",
                 requested_model="qwen-audio-3.0-tts-flash",
+            )
+        )
+
+
+def test_voice_runtime_rejects_realtime_clone_for_tts(monkeypatch) -> None:
+    from api.services import voice_runtime
+
+    service = voice_runtime.VoiceRuntimeService()
+
+    async def fake_clone(db, voice_id: str):
+        return {"model": "qwen-audio-3.0-realtime-plus"}
+
+    monkeypatch.setattr(voice_runtime.voice_dao, "get_clone", fake_clone)
+
+    with pytest.raises(voice_runtime.VoiceModelMismatchError, match="全双工"):
+        asyncio.run(
+            service.resolve_model(
+                "db",
+                voice_id="realtime-clone",
+                requested_model=None,
+                default_model="qwen-audio-3.0-tts-flash",
             )
         )
 

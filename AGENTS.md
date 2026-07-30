@@ -101,6 +101,8 @@
 - 手机附件、图片和音频传递统一通过 `api.services.mobile_transfer` 接入：先写私有对象存储留档，再按媒体类型推送到 Android 公共媒体目录并触发媒体扫描；上传临时文件必须在成功、失败和取消分支释放，页面不得直接执行 ADB。
 - 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。
 - 截图、Word 产物、语音上传和受保护下载文件统一通过 `api.storage.ObjectStorageService` 写入；业务集合只保存 `storage_object_id`，不得直接调用 OSS SDK 或拼接 Object Key。读取按对象元数据选择 Provider，允许迁移期本地与 OSS 对象并存。
+- 百炼全双工语音统一通过 `api.services.voice_realtime` 的 Provider/Factory/Service 接入：浏览器只连接鉴权代理并传输 16kHz PCM，后端返回 24kHz PCM 和白名单事件；API Key 不得下发前端。TTS 与全双工复刻音色按目标模型隔离，禁止跨模型混用。
+- 远端音视频合流统一通过 `api.services.media_output` 的短时会话接入。Deepfake 和全双工语音只按 `output_session_id` 发布领域媒体，不自行实现 OBS、观看端、票据或广播逻辑；观看凭据只允许通过 URL fragment 和 WebSocket subprotocol 传递，服务端仅保存摘要，不持久化原始音视频。
 - 对象存储 Bucket 必须为私有读写，服务端使用内网 Endpoint，浏览器下载使用短时签名 URL，图片通过鉴权 API 读取。AK/SK 只存 MongoDB 加密配置，不写入环境文件、日志、迁移报告或 Git。
 - 观测能力通过 `core/observability`、`Sere1nGraph` token tracker 或统一日志入口接入；新增长流程应记录开始、结束、失败和关键资源标识。
 - LLM token 归因必须通过 `core.observability.observation_context` 包裹 AI 调用(浏览器 agent、结构化解析、修复重试),携带 `project_id/task_id/phase/agent/task_type`;不要直接操作 `TokenTracker`。凡是新接入的 AI 链路(人设采集、公司规范化、采集分析、手机规划等)都要确认 token 与日志观测已连通,可在 Observability/Dashboard 看到归因。
@@ -132,6 +134,7 @@
 - 表单、表格、弹窗、抽屉、筛选器、分页、状态标签和错误提示优先遵循 Ant Design 交互范式，保证加载态、空态、错误态和禁用态完整。
 - 页面元素应有稳定尺寸和响应式约束，避免按钮文字、表格列、卡片内容在桌面或移动视口互相遮挡。
 - 前端相关变更需要使用 Codex `chrome-devtools` 打开 `https://127.0.0.1/` 验证页面渲染、交互、控制台错误、网络请求和响应式表现。
+- 本机媒体接入由前端 service 管理设备权限、采集、重采样、播放和资源释放。远端 Deepfake 与全双工语音接入 OBS 使用统一的短时 HTTPS 浏览器源；前端只负责创建、复制和关闭输出会话，不向 OBS 暴露 GPU Gateway Token、百炼 API Key 或后端内部地址。
 - 不提交生成的 `dist` 输出、`node_modules` 或本地运行缓存。
 
 ## 测试与验证范式

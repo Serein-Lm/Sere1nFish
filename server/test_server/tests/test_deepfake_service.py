@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from api.routers import deepfake as deepfake_router
 from api.services.deepfake.contracts import DeepfakeConfig, ImageSwapResult, SourceImage
 from api.services.deepfake.service import (
     DeepfakeConfigurationError,
@@ -158,3 +159,92 @@ async def test_source_count_and_profile_are_validated_before_provider_call() -> 
             max_width=640,
             profile="../../quality",
         )
+
+
+@pytest.mark.asyncio
+async def test_realtime_frame_is_relayed_to_bound_media_output(monkeypatch) -> None:
+    class FakeRemote:
+        def __init__(self) -> None:
+            self.responses = ['{"type":"ready"}', b"swapped-frame"]
+            self.sent: list[bytes | str] = []
+
+        async def recv(self):
+            return self.responses.pop(0)
+
+        async def send(self, payload):
+            self.sent.append(payload)
+
+    remote = FakeRemote()
+
+    class FakeDeepfakeService:
+        async def open_stream(self, session_id: str, username: str):
+            assert session_id == "deepfake-session"
+            assert username == "alice"
+
+            @asynccontextmanager
+            async def context():
+                yield remote
+
+            return context()
+
+    class FakeMediaOutput:
+        def __init__(self) -> None:
+            self.frames: list[tuple[str, str, bytes]] = []
+
+        async def require_owner(self, session_id: str, owner: str) -> None:
+            assert (session_id, owner) == ("media-session", "alice")
+
+        async def publish_video(self, session_id: str, owner: str, data: bytes) -> None:
+            self.frames.append((session_id, owner, data))
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.messages = [
+                {"type": "websocket.receive", "bytes": b"camera-frame"},
+                {"type": "websocket.disconnect"},
+            ]
+            self.accepted_subprotocol = ""
+            self.sent_text: list[str] = []
+            self.sent_bytes: list[bytes] = []
+
+        async def accept(self, *, subprotocol: str) -> None:
+            self.accepted_subprotocol = subprotocol
+
+        async def receive(self):
+            return self.messages.pop(0)
+
+        async def send_text(self, payload: str) -> None:
+            self.sent_text.append(payload)
+
+        async def send_bytes(self, payload: bytes) -> None:
+            self.sent_bytes.append(payload)
+
+        async def close(self, *, code: int) -> None:
+            pass
+
+    media = FakeMediaOutput()
+
+    async def authenticated_username(_websocket) -> str:
+        return "alice"
+
+    async def deepfake_service():
+        return FakeDeepfakeService()
+
+    monkeypatch.setattr(
+        deepfake_router,
+        "authenticated_websocket_username",
+        authenticated_username,
+    )
+    monkeypatch.setattr(deepfake_router, "get_deepfake_service", deepfake_service)
+    monkeypatch.setattr(deepfake_router, "get_media_output_service", lambda: media)
+
+    websocket = FakeWebSocket()
+    await deepfake_router.stream_session(
+        websocket,
+        "deepfake-session",
+        "media-session",
+    )
+
+    assert remote.sent == [b"camera-frame"]
+    assert websocket.sent_bytes == [b"swapped-frame"]
+    assert media.frames == [("media-session", "alice", b"swapped-frame")]

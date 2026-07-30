@@ -10,13 +10,15 @@ from fastapi.responses import Response
 from starlette.websockets import WebSocketDisconnect
 
 from api.auth import User, get_current_active_user
-from api.auth_store import TOKEN_STORE
-from api.dao import users as users_dao
-from api.db.mongodb import get_db
 from api.services.deepfake import get_deepfake_service
 from api.services.deepfake.adapters import DeepfakeProviderError
 from api.services.deepfake.contracts import SourceImage
 from api.services.deepfake.service import DeepfakeConfigurationError
+from api.services.media_output import MediaOutputError, get_media_output_service
+from api.services.websocket_auth import (
+    PUBLIC_SUBPROTOCOL,
+    authenticated_websocket_username,
+)
 
 router = APIRouter()
 
@@ -148,46 +150,55 @@ async def delete_session(session_id: str, user: User = Depends(get_current_activ
         _raise_service_error(exc)
 
 
-def _websocket_token(websocket: WebSocket) -> str:
-    prefix = "sere1nfish.auth."
-    for protocol in websocket.headers.get("sec-websocket-protocol", "").split(","):
-        value = protocol.strip()
-        if value.startswith(prefix):
-            return value[len(prefix) :]
-    return ""
-
-
-async def _websocket_username(websocket: WebSocket) -> str:
-    token = _websocket_token(websocket)
-    username = TOKEN_STORE.get_username(token) if token else None
-    if not username:
-        return ""
-    user = await users_dao.get_user(get_db(), username)
-    if not user or user.get("disabled"):
-        return ""
-    return str(user.get("username") or "")
-
-
 @router.websocket("/sessions/{session_id}/stream")
-async def stream_session(websocket: WebSocket, session_id: str) -> None:
-    username = await _websocket_username(websocket)
+async def stream_session(
+    websocket: WebSocket,
+    session_id: str,
+    output_session_id: str = "",
+) -> None:
+    username = await authenticated_websocket_username(websocket)
     if not username:
         await websocket.close(code=4401)
         return
     try:
         service = await get_deepfake_service()
         stream_context = await service.open_stream(session_id, username)
+        if output_session_id:
+            await get_media_output_service().require_owner(
+                output_session_id,
+                username,
+            )
     except Exception:
         await websocket.close(code=4404)
         return
-    await websocket.accept(subprotocol="sere1nfish")
+    await websocket.accept(subprotocol=PUBLIC_SUBPROTOCOL)
+
+    async def send_remote_result(result: bytes | str) -> None:
+        nonlocal output_session_id
+        if isinstance(result, bytes):
+            if output_session_id:
+                try:
+                    await get_media_output_service().publish_video(
+                        output_session_id,
+                        username,
+                        result,
+                    )
+                except MediaOutputError:
+                    output_session_id = ""
+            await websocket.send_bytes(result)
+            return
+        try:
+            json.loads(result)
+        except (TypeError, ValueError):
+            result = json.dumps(
+                {"type": "error", "message": "GPU returned invalid stream metadata"}
+            )
+        await websocket.send_text(result)
+
     try:
         async with stream_context as remote:
             ready = await remote.recv()
-            if isinstance(ready, bytes):
-                await websocket.send_bytes(ready)
-            else:
-                await websocket.send_text(ready)
+            await send_remote_result(ready)
             while True:
                 message = await websocket.receive()
                 if message.get("type") == "websocket.disconnect":
@@ -199,14 +210,7 @@ async def stream_session(websocket: WebSocket, session_id: str) -> None:
                     continue
                 await remote.send(payload)
                 result = await remote.recv()
-                if isinstance(result, bytes):
-                    await websocket.send_bytes(result)
-                else:
-                    try:
-                        json.loads(result)
-                    except (TypeError, ValueError):
-                        result = json.dumps({"type": "error", "message": "GPU returned invalid stream metadata"})
-                    await websocket.send_text(result)
+                await send_remote_result(result)
     except WebSocketDisconnect:
         pass
     except Exception:

@@ -38,6 +38,7 @@ from api.routers import (
     dingtalk,
     source_documents,
     deepfake,
+    media_output,
 )
 from api.config import get_settings
 from api.auth import get_current_active_user, User
@@ -362,29 +363,45 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"钉钉 Stream Mode 启动失败(不影响运行): {e}")
 
-    # 启动时：预热百炼实时语音 WebSocket 连接池，消除首请求建连开销。
+    # 启动时：预热百炼流式 TTS 连接池，消除首请求建连开销。
     try:
         from api.services.voice_runtime import warmup_voice_runtime
 
         voice_config = await warmup_voice_runtime()
         logger.info(
-            "百炼实时语音连接池已预热: model=%s pool=%s",
+            "百炼流式 TTS 连接池已预热: model=%s pool=%s",
             voice_config.model,
             voice_config.pool_size,
         )
     except Exception as e:
-        logger.warning(f"百炼实时语音预热失败(不影响运行): {e}")
+        logger.warning(f"百炼流式 TTS 预热失败(不影响运行): {e}")
 
     yield
 
-    # 关闭时：先释放百炼 WebSocket 连接与维护线程。
+    # 关闭时：先释放全双工会话和流式 TTS 连接池。
+    try:
+        from api.services.voice_realtime import shutdown_realtime_voice_service
+
+        await shutdown_realtime_voice_service()
+        logger.info("百炼全双工语音会话已停止")
+    except Exception as e:
+        logger.warning(f"百炼全双工语音会话停止失败: {e}")
+
     try:
         from api.services.voice_runtime import shutdown_voice_runtime
 
         await shutdown_voice_runtime()
-        logger.info("百炼实时语音连接池已停止")
+        logger.info("百炼流式 TTS 连接池已停止")
     except Exception as e:
-        logger.warning(f"百炼实时语音连接池停止失败: {e}")
+        logger.warning(f"百炼流式 TTS 连接池停止失败: {e}")
+
+    try:
+        from api.services.media_output import shutdown_media_output_service
+
+        await shutdown_media_output_service()
+        logger.info("远端媒体输出会话已停止")
+    except Exception as e:
+        logger.warning(f"远端媒体输出会话停止失败: {e}")
 
     # 关闭时：停止任务异常监控；执行中的持久任务会退回待恢复状态。
     try:
@@ -535,6 +552,7 @@ app.include_router(aigc.router, prefix="/api/v1/aigc", tags=["AIGC"])
 app.include_router(dingtalk.router, prefix="/api/v1/dingtalk", tags=["钉钉机器人"])
 app.include_router(source_documents.router, prefix="/api/v1", tags=["来源文档与目标"])
 app.include_router(deepfake.router, prefix="/api/v1/deepfake", tags=["Deepfake"])
+app.include_router(media_output.router, prefix="/api/v1/media-output", tags=["远端媒体输出"])
 
 
 @app.get("/")

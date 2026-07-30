@@ -32,22 +32,19 @@ from api.services.runtime_config import (
     get_runtime_app_config,
     get_runtime_config_section,
 )
+from api.services.voice_models import (
+    LATEST_TTS_VOICE_MODEL,
+    SUPPORTED_TTS_VOICE_MODELS,
+    SUPPORTED_VOICE_ENROLLMENT_MODELS,
+    is_realtime_voice_model,
+    is_tts_voice_model,
+)
 from core.logger import get_logger
 
 
 logger = get_logger("api.services.voice_runtime")
 
-LATEST_REALTIME_VOICE_MODEL = "qwen-audio-3.0-tts-flash"
 DEFAULT_STREAM_SAMPLE_RATE = 24000
-SUPPORTED_VOICE_MODELS = {
-    "qwen-audio-3.0-tts-flash",
-    "qwen-audio-3.0-tts-plus",
-    "cosyvoice-v3.5-flash",
-    "cosyvoice-v3.5-plus",
-    "cosyvoice-v3-flash",
-    "cosyvoice-v3-plus",
-    "cosyvoice-v2",
-}
 SUPPORTED_LANGUAGE_HINTS = {
     "zh",
     "en",
@@ -203,10 +200,10 @@ async def load_voice_runtime_config() -> VoiceRuntimeConfig:
         raise VoiceConfigurationError(str(exc)) from exc
 
     model = str(
-        cosyvoice.get("model") or LATEST_REALTIME_VOICE_MODEL
+        cosyvoice.get("model") or LATEST_TTS_VOICE_MODEL
     ).strip()
-    if model not in SUPPORTED_VOICE_MODELS:
-        raise VoiceConfigurationError(f"不支持的实时声音复刻模型: {model}")
+    if model not in SUPPORTED_TTS_VOICE_MODELS:
+        raise VoiceConfigurationError(f"不支持的文本转语音模型: {model}")
 
     try:
         pool_size = max(1, min(8, int(cosyvoice.get("pool_size", 2))))
@@ -464,15 +461,23 @@ class DashScopeVoiceAdapter:
         enable_preprocess: bool,
     ) -> VoiceEnrollmentResult:
         service = self._enrollment_service()
+        create_options: dict[str, Any] = {
+            "target_model": model,
+            "prefix": prefix,
+            "url": url,
+        }
+        if not is_realtime_voice_model(model):
+            create_options.update(
+                {
+                    "language_hints": language_hints,
+                    "max_prompt_audio_length": max_prompt_audio_length,
+                    "enable_preprocess": enable_preprocess,
+                }
+            )
         try:
             voice_id = await asyncio.to_thread(
                 service.create_voice,
-                target_model=model,
-                prefix=prefix,
-                url=url,
-                language_hints=language_hints,
-                max_prompt_audio_length=max_prompt_audio_length,
-                enable_preprocess=enable_preprocess,
+                **create_options,
             )
         except Exception as exc:
             raise VoiceProviderError(f"创建音色失败: {exc}") from exc
@@ -636,14 +641,23 @@ class VoiceRuntimeService:
         language_hints: list[str] | None,
         max_prompt_audio_length: float | None,
         enable_preprocess: bool | None,
+        target_model: str | None,
         authorized_by: str,
     ) -> VoiceEnrollmentResult:
         config, adapter = await self._get_runtime()
+        model = str(target_model or config.model).strip()
+        if model not in SUPPORTED_VOICE_ENROLLMENT_MODELS:
+            raise VoiceConfigurationError(f"不支持的声音复刻目标模型: {model}")
+        selected_language_hints = (
+            []
+            if is_realtime_voice_model(model)
+            else language_hints or config.language_hints
+        )
         result = await adapter.create_voice(
-            model=config.model,
+            model=model,
             prefix=prefix or config.prefix,
             url=url,
-            language_hints=language_hints or config.language_hints,
+            language_hints=selected_language_hints,
             max_prompt_audio_length=(
                 max_prompt_audio_length or config.max_prompt_audio_length
             ),
@@ -659,7 +673,7 @@ class VoiceRuntimeService:
             model=result.model,
             prefix=prefix or config.prefix,
             url=_stored_source_url(url),
-            language_hints=language_hints or config.language_hints,
+            language_hints=selected_language_hints,
             request_id=result.request_id,
             authorized_by=authorized_by,
         )
@@ -728,7 +742,12 @@ class VoiceRuntimeService:
             raise VoiceModelMismatchError(
                 f"音色 {voice_id} 绑定模型 {clone_model}，不能使用 {requested_model}"
             )
-        return requested_model or clone_model or default_model
+        model = requested_model or clone_model or default_model
+        if not is_tts_voice_model(model):
+            raise VoiceModelMismatchError(
+                f"模型 {model} 是全双工对话音色，不能用于文本转语音"
+            )
+        return model
 
     async def synthesize(
         self,

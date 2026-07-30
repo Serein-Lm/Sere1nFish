@@ -2,12 +2,23 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.websockets import WebSocketState
 
 from api.auth import get_current_active_user, require_admin, User
 from api.db.mongodb import get_db
@@ -17,6 +28,13 @@ from api.services.voice_runtime import (
     VoiceModelMismatchError,
     VoiceProviderError,
     get_voice_runtime_service,
+)
+from api.services.voice_models import SUPPORTED_VOICE_ENROLLMENT_MODELS
+from api.services.voice_realtime import get_realtime_voice_service
+from api.services.voice_realtime.config import RealtimeVoiceConfigurationError
+from api.services.websocket_auth import (
+    PUBLIC_SUBPROTOCOL,
+    authenticated_websocket_username,
 )
 from core.logger import get_logger
 
@@ -53,6 +71,10 @@ class VoiceCreateReq(BaseModel):
     language_hints: list[str] | None = Field(None, description="语种提示 zh/en/ja/ko/…")
     max_prompt_audio_length: float | None = Field(None, ge=3.0, le=60.0, description="参考音频最大时长(秒)")
     enable_preprocess: bool | None = Field(None, description="开启降噪/增强/音量规整")
+    model: str | None = Field(
+        None,
+        description="目标模型；全双工对话使用 qwen-audio-3.0-realtime-plus",
+    )
     authorized_use: bool = Field(
         ...,
         description="确认已获得该声音所有者授权，且仅用于合法合成",
@@ -221,6 +243,8 @@ async def create_voice(
     """
     if not body.authorized_use:
         raise HTTPException(403, "创建复刻音色前必须确认已获得声音所有者授权")
+    if body.model and body.model not in SUPPORTED_VOICE_ENROLLMENT_MODELS:
+        raise HTTPException(422, f"不支持的声音复刻目标模型: {body.model}")
     try:
         result = await get_voice_runtime_service().create_voice(
             get_db(),
@@ -229,6 +253,7 @@ async def create_voice(
             language_hints=body.language_hints,
             max_prompt_audio_length=body.max_prompt_audio_length,
             enable_preprocess=body.enable_preprocess,
+            target_model=body.model,
             authorized_by=user.username,
         )
     except VoiceConfigurationError as exc:
@@ -250,6 +275,7 @@ async def create_voice(
 async def list_voices(
     prefix: str | None = Query(None, description="按前缀筛选"),
     status: str | None = Query(None, description="按状态筛选 active/deleted"),
+    model: str | None = Query(None, description="按绑定模型筛选"),
     page: int = Query(0, ge=0, description="页码（从 0 开始）"),
     page_size: int = Query(20, ge=1, le=100, description="每页条数"),
     _: User = Depends(get_current_active_user),
@@ -257,7 +283,12 @@ async def list_voices(
     """分页查询已创建的音色记录。"""
     db = get_db()
     items, total = await voice_dao.list_clones(
-        db, prefix=prefix, status=status, skip=page * page_size, limit=page_size,
+        db,
+        prefix=prefix,
+        status=status,
+        model=model,
+        skip=page * page_size,
+        limit=page_size,
     )
     return PageResp(items=items, total=total, page=page, page_size=page_size)
 
@@ -402,7 +433,38 @@ async def synthesize_stream(
     )
 
 
-# ==================== 三、进度回顾（合成历史） ====================
+# ==================== 三、全双工语音对话 ====================
+
+@router.get("/realtime/config", summary="全双工语音会话配置")
+async def realtime_config(_: User = Depends(get_current_active_user)):
+    """Return public model/audio metadata and compatible voices."""
+    try:
+        return await get_realtime_voice_service().metadata(get_db())
+    except RealtimeVoiceConfigurationError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@router.websocket("/realtime")
+async def realtime_voice_session(websocket: WebSocket) -> None:
+    """Secure browser-to-Bailian full-duplex PCM proxy."""
+    username = await authenticated_websocket_username(websocket)
+    if not username:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept(subprotocol=PUBLIC_SUBPROTOCOL)
+    try:
+        await get_realtime_voice_service().run(
+            websocket,
+            get_db(),
+            username=username,
+        )
+    finally:
+        if websocket.client_state == WebSocketState.CONNECTED:
+            with suppress(Exception):
+                await websocket.close(code=1000)
+
+
+# ==================== 四、进度回顾（合成历史） ====================
 
 @router.get("/records", response_model=PageResp, summary="合成记录列表")
 async def list_records(

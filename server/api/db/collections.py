@@ -107,3 +107,7 @@ ARTIFACTS_COLLECTION = "artifacts"
 # 统一对象存储元数据。领域集合仅保存 storage_object_id，不感知 OSS/本地实现。
 STORAGE_OBJECTS_COLLECTION = "storage_objects"
 STORAGE_MIGRATIONS_COLLECTION = "storage_migrations"
+
+# 百炼声音复刻与文本合成历史。
+VOICE_CLONES_COLLECTION = "voice_clones"
+VOICE_SYNTHESIS_RECORDS_COLLECTION = "voice_synthesis_records"
