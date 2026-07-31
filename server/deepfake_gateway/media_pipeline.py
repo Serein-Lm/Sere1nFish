@@ -23,6 +23,7 @@ from .voice_bridge import (
     PcmOutputBuffer,
     validate_voice_bridge_environment,
 )
+from .subprocesses import terminate_subprocess
 
 
 class MediaPipelineError(RuntimeError):
@@ -89,6 +90,8 @@ class MediaPipeline:
         voice_bridge_url: str = "",
         voice_bridge_token: str = "",
         voice_bridge_ca_file: str = "",
+        voice_bridge_provider: str = "",
+        voice_bridge_sample_rate: int = 16000,
     ) -> None:
         self.input_url = input_url
         self.output_url = output_url
@@ -98,7 +101,14 @@ class MediaPipeline:
         self.stats = MediaPipelineStats(output_fps=self.output_fps)
         self._stopping = asyncio.Event()
         self._processes: set[asyncio.subprocess.Process] = set()
-        self._audio_buffer = PcmOutputBuffer()
+        audio_buffer_ms = max(
+            200,
+            min(1000, int(os.getenv("DEEPFAKE_MEDIA_AUDIO_BUFFER_MS", "300"))),
+        )
+        self._audio_buffer = PcmOutputBuffer(
+            sample_rate=voice_bridge_sample_rate,
+            max_seconds=audio_buffer_ms / 1000,
+        )
         self._voice_bridge: MediaVoiceBridge | None = None
         if voice_bridge_url or voice_bridge_token:
             validate_voice_bridge_environment(
@@ -111,6 +121,8 @@ class MediaPipeline:
                 websocket_url=voice_bridge_url,
                 token=voice_bridge_token,
                 ca_file=voice_bridge_ca_file,
+                provider=voice_bridge_provider,
+                output_sample_rate=voice_bridge_sample_rate,
                 output_buffer=self._audio_buffer,
                 stats=self.stats.audio,
             )
@@ -206,6 +218,7 @@ class MediaPipeline:
             width,
             height,
             audio_enabled=self._voice_bridge is not None,
+            audio_sample_rate=self._audio_buffer.sample_rate,
         )
         frame_size = width * height * 3
         latest_input: bytes | None = None
@@ -274,7 +287,7 @@ class MediaPipeline:
                 return
             loop = asyncio.get_running_loop()
             interval = 0.02
-            frame_bytes = 24000 * 2 * 20 // 1000
+            frame_bytes = self._audio_buffer.sample_rate * 2 * 20 // 1000
             deadline = loop.time()
             while not self._stopping.is_set():
                 chunk = self._audio_buffer.take_or_silence(frame_bytes)
@@ -356,6 +369,7 @@ class MediaPipeline:
         height: int,
         *,
         audio_enabled: bool,
+        audio_sample_rate: int,
     ) -> tuple[asyncio.subprocess.Process, int | None]:
         encoder = os.getenv("DEEPFAKE_MEDIA_ENCODER", "h264_nvenc").strip() or "h264_nvenc"
         bitrate = os.getenv("DEEPFAKE_MEDIA_VIDEO_BITRATE", "1800k").strip() or "1800k"
@@ -380,7 +394,7 @@ class MediaPipeline:
                 "-f",
                 "s16le",
                 "-ar",
-                "24000",
+                str(audio_sample_rate),
                 "-ac",
                 "1",
                 "-i",
@@ -465,11 +479,4 @@ class MediaPipeline:
 
     @staticmethod
     async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
+        await terminate_subprocess(process)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
   Alert,
   Button,
@@ -6,10 +6,8 @@ import {
   Collapse,
   Image,
   Input,
-  InputNumber,
   Modal,
   Segmented,
-  Select,
   Space,
   Spin,
   Statistic,
@@ -53,12 +51,6 @@ import {
   remoteMediaOutputViewerUrl,
   type RemoteMediaOutputSession,
 } from '../../services/mediaOutputService'
-import RealtimeVoicePanel from './RealtimeVoicePanel'
-import {
-  getRealtimeVoiceConfig,
-  type RealtimeTurnMode,
-  type RealtimeVoiceConfig,
-} from '../../services/voiceRealtimeService'
 
 const { Text } = Typography
 
@@ -108,9 +100,9 @@ const MEDIA_STATE_LABELS: Record<string, string> = {
 
 const AUDIO_STATE_LABELS: Record<string, string> = {
   disabled: '未启用',
-  connecting: '连接语音服务',
-  live: 'AI 音轨在线',
-  reconnecting: '语音重连中',
+  connecting: '连接变声服务',
+  live: 'MeanVC 音轨在线',
+  reconnecting: '变声服务重连中',
   waiting_audio: '等待 OBS 麦克风',
   stopped: '已停止',
 }
@@ -253,13 +245,9 @@ export default function DeepfakeStudio() {
   const [streamResult, setStreamResult] = useState('')
   const [sessionStatus, setSessionStatus] = useState<DeepfakeSessionStatus | null>(null)
   const [directSession, setDirectSession] = useState<DeepfakeSession | null>(null)
-  const [voiceConfig, setVoiceConfig] = useState<RealtimeVoiceConfig | null>(null)
-  const [voiceConfigLoading, setVoiceConfigLoading] = useState(false)
   const [integratedVoice, setIntegratedVoice] = useState(true)
-  const [integratedVoiceId, setIntegratedVoiceId] = useState('')
-  const [integratedVoiceMode, setIntegratedVoiceMode] = useState<Exclude<RealtimeTurnMode, 'manual'>>('smart_turn')
-  const [integratedVoiceInstructions, setIntegratedVoiceInstructions] = useState('')
-  const [integratedVoiceHistory, setIntegratedVoiceHistory] = useState(20)
+  const [voiceReference, setVoiceReference] = useState<File | null>(null)
+  const [voiceSteps, setVoiceSteps] = useState<1 | 2>(2)
   const [obsGuideOpen, setObsGuideOpen] = useState(false)
   const [obsCreating, setObsCreating] = useState(false)
   const [obsOutput, setObsOutput] = useState<RemoteMediaOutputSession | null>(null)
@@ -293,26 +281,6 @@ export default function DeepfakeStudio() {
       status?.media_transport?.public_base_url || window.location.origin,
     )
     : ''
-  const integratedVoiceOptions = useMemo(() => {
-    if (!voiceConfig) return []
-    return [
-      {
-        label: '系统音色',
-        options: voiceConfig.system_voices.map((item) => ({
-          value: item.voice_id,
-          label: item.label,
-        })),
-      },
-      ...(voiceConfig.cloned_voices.length ? [{
-        label: '复刻音色',
-        options: voiceConfig.cloned_voices.map((item) => ({
-          value: item.voice_id,
-          label: item.label,
-        })),
-      }] : []),
-    ]
-  }, [voiceConfig])
-
   const addSourceFile = useCallback((file: File) => {
     setSourceFiles((current) => {
       if (current.length >= maxSourceImages) return current
@@ -357,27 +325,9 @@ export default function DeepfakeStudio() {
     }
   }, [messageApi])
 
-  const loadVoiceConfig = useCallback(async () => {
-    setVoiceConfigLoading(true)
-    try {
-      const next = await getRealtimeVoiceConfig()
-      setVoiceConfig(next)
-      setIntegratedVoiceId((current) => current || next.default_voice)
-      setIntegratedVoiceMode(next.default_mode === 'server_vad' ? 'server_vad' : 'smart_turn')
-      setIntegratedVoiceInstructions(next.default_instructions || '')
-      setIntegratedVoiceHistory(next.max_history_turns)
-    } catch (error) {
-      setIntegratedVoice(false)
-      messageApi.error(error instanceof Error ? error.message : '全双工语音配置加载失败')
-    } finally {
-      setVoiceConfigLoading(false)
-    }
-  }, [messageApi])
-
   useEffect(() => {
     void loadStatus()
-    void loadVoiceConfig()
-  }, [loadStatus, loadVoiceConfig])
+  }, [loadStatus])
 
   const setOutputBlob = useCallback((blob: Blob) => {
     const previous = outputUrlRef.current
@@ -598,8 +548,11 @@ export default function DeepfakeStudio() {
       messageApi.error('GPU 尚未启用 OBS 直连媒体服务')
       return
     }
-    if (integratedVoice && (!status.media_transport.audio_supported || !voiceConfig || !integratedVoiceId)) {
-      messageApi.error('GPU 音频桥接或全双工音色尚未就绪')
+    if (integratedVoice && (!status.media_transport.audio_supported || !voiceReference)) {
+      messageApi.error(
+        status.media_transport.voice_conversion?.last_error
+        || 'MeanVC 尚未就绪或未选择目标声音样本',
+      )
       return
     }
     setStarting(true)
@@ -609,12 +562,10 @@ export default function DeepfakeStudio() {
         realtimeWidth,
         realtimeProfile,
         'obs_whip',
-        integratedVoice && voiceConfig ? {
-          model: voiceConfig.model,
-          voice: integratedVoiceId,
-          mode: integratedVoiceMode,
-          instructions: integratedVoiceInstructions,
-          maxHistoryTurns: integratedVoiceHistory,
+        integratedVoice && voiceReference ? {
+          provider: 'meanvc',
+          reference: voiceReference,
+          steps: voiceSteps,
         } : undefined,
       )
       if (!session.media) throw new Error('GPU 未返回 OBS 直连配置')
@@ -799,69 +750,73 @@ export default function DeepfakeStudio() {
                 label: (
                   <Space wrap>
                     <AudioOutlined />
-                    <Text strong>音频合流</Text>
-                    <Tag color={integratedVoice ? 'cyan' : 'default'}>{integratedVoice ? 'AI 音轨' : '静音输出'}</Tag>
-                    {voiceConfig?.model && integratedVoice && <Tag>{voiceConfig.model}</Tag>}
+                    <Text strong>实时变声</Text>
+                    <Tag color={integratedVoice ? 'cyan' : 'default'}>
+                      {integratedVoice ? 'MeanVC' : '静音输出'}
+                    </Tag>
+                    {status?.media_transport?.voice_conversion?.device && integratedVoice && (
+                      <Tag className="deepfake-voice-device-tag">
+                        {status.media_transport.voice_conversion.device}
+                      </Tag>
+                    )}
                   </Space>
                 ),
                 extra: (
                   <Switch
                     checked={integratedVoice}
-                    disabled={starting || voiceConfigLoading || !status?.media_transport?.audio_supported}
-                    loading={voiceConfigLoading}
+                    disabled={starting || !status?.media_transport?.audio_supported}
                     onChange={setIntegratedVoice}
-                    aria-label="启用 AI 音频合流"
+                    aria-label="启用 MeanVC 实时变声"
                     onClick={(_, event) => event.stopPropagation()}
                   />
                 ),
                 children: integratedVoice ? (
                   <div className="deepfake-voice-settings">
+                    <div className="deepfake-voice-reference">
+                      <Text type="secondary">目标声音样本</Text>
+                      <Space wrap>
+                        <Upload
+                          accept="audio/wav,audio/x-wav,audio/mpeg,audio/flac,audio/ogg"
+                          maxCount={1}
+                          showUploadList={false}
+                          beforeUpload={(file) => {
+                            if (file.size > 20 * 1024 * 1024) {
+                              messageApi.error('声音样本不能超过 20 MB')
+                              return Upload.LIST_IGNORE
+                            }
+                            setVoiceReference(file)
+                            return false
+                          }}
+                        >
+                          <Button
+                            icon={<CloudUploadOutlined />}
+                            disabled={starting}
+                          >
+                            选择音频
+                          </Button>
+                        </Upload>
+                        {voiceReference ? (
+                          <Tag
+                            closable={!starting}
+                            onClose={() => setVoiceReference(null)}
+                          >
+                            {voiceReference.name}
+                          </Tag>
+                        ) : (
+                          <Text type="secondary">3-15 秒清晰单人语音</Text>
+                        )}
+                      </Space>
+                    </div>
                     <label>
-                      <Text type="secondary">输出音色</Text>
-                      <Select
-                        value={integratedVoiceId || undefined}
-                        options={integratedVoiceOptions}
-                        onChange={setIntegratedVoiceId}
+                      <Text type="secondary">转换档位</Text>
+                      <Segmented
+                        value={voiceSteps}
                         disabled={starting}
-                        loading={voiceConfigLoading}
-                        showSearch
-                        optionFilterProp="label"
-                      />
-                    </label>
-                    <label>
-                      <Text type="secondary">轮次检测</Text>
-                      <Select
-                        value={integratedVoiceMode}
-                        onChange={setIntegratedVoiceMode}
-                        disabled={starting}
+                        onChange={(value) => setVoiceSteps(value as 1 | 2)}
                         options={[
-                          { value: 'smart_turn', label: '智能轮次' },
-                          { value: 'server_vad', label: '快速检测' },
+                          { value: 1, label: '低延迟' },
+                          { value: 2, label: '效果优先' },
                         ]}
-                      />
-                    </label>
-                    <label>
-                      <Text type="secondary">历史轮次</Text>
-                      <InputNumber
-                        id="deepfake-voice-history"
-                        name="deepfake_voice_history"
-                        min={1}
-                        max={50}
-                        value={integratedVoiceHistory}
-                        onChange={(value) => setIntegratedVoiceHistory(value || 20)}
-                        disabled={starting}
-                      />
-                    </label>
-                    <label className="deepfake-voice-instructions">
-                      <Text type="secondary">会话指令</Text>
-                      <Input.TextArea
-                        id="deepfake-voice-instructions"
-                        name="deepfake_voice_instructions"
-                        value={integratedVoiceInstructions}
-                        onChange={(event) => setIntegratedVoiceInstructions(event.target.value)}
-                        maxLength={4000}
-                        autoSize={{ minRows: 2, maxRows: 4 }}
-                        disabled={starting}
                       />
                     </label>
                   </div>
@@ -1048,20 +1003,6 @@ export default function DeepfakeStudio() {
                 )}
               </section>
 
-              <Collapse
-                className="deepfake-output-voice"
-                items={[{
-                  key: 'voice-output',
-                  label: <Space wrap><AudioOutlined /><Text strong>目标音色与全双工对话</Text></Space>,
-                  children: obsOutput ? (
-                    <RealtimeVoicePanel outputSessionId={obsOutput.session_id} />
-                  ) : (
-                    <Button icon={<LaptopOutlined />} loading={obsCreating} onClick={() => void createObsOutput()}>
-                      先创建 OBS 浏览器源输出
-                    </Button>
-                  ),
-                }]}
-              />
             </>
           )}
         </div>

@@ -1,4 +1,4 @@
-"""Secure PCM bridge between the GPU media plane and Sere1nFish voice runtime."""
+"""Secure PCM bridge between OBS audio and a local conversion provider."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import websockets
+
+from .subprocesses import terminate_subprocess
 
 
 class MediaVoiceBridgeError(RuntimeError):
@@ -23,6 +25,8 @@ class MediaVoiceBridgeInputUnavailable(MediaVoiceBridgeError):
 @dataclass(slots=True)
 class MediaVoiceBridgeStats:
     state: str = "disabled"
+    provider: str = ""
+    sample_rate: int = 0
     input_bytes: int = 0
     output_bytes: int = 0
     buffered_ms: int = 0
@@ -37,7 +41,7 @@ class MediaVoiceBridgeStats:
 class PcmOutputBuffer:
     """Bounded latest-audio buffer used to prevent stale speech latency."""
 
-    def __init__(self, *, sample_rate: int = 24000, max_seconds: float = 2.0) -> None:
+    def __init__(self, *, sample_rate: int = 16000, max_seconds: float = 1.0) -> None:
         self.sample_rate = sample_rate
         self.max_bytes = int(sample_rate * 2 * max_seconds)
         self._data = bytearray()
@@ -72,7 +76,7 @@ class PcmOutputBuffer:
 
 
 class MediaVoiceBridge:
-    """Reconnectable OBS-audio to provider bridge with no long-lived API key."""
+    """Reconnectable OBS-audio to conversion provider bridge."""
 
     def __init__(
         self,
@@ -81,6 +85,8 @@ class MediaVoiceBridge:
         websocket_url: str,
         token: str,
         ca_file: str,
+        provider: str,
+        output_sample_rate: int,
         output_buffer: PcmOutputBuffer,
         stats: MediaVoiceBridgeStats,
     ) -> None:
@@ -88,8 +94,12 @@ class MediaVoiceBridge:
         self.websocket_url = websocket_url
         self.token = token
         self.ca_file = ca_file
+        self.provider = provider
+        self.output_sample_rate = output_sample_rate
         self.output_buffer = output_buffer
         self.stats = stats
+        self.stats.provider = provider
+        self.stats.sample_rate = output_sample_rate
         self._stopping = asyncio.Event()
         self._decoder: asyncio.subprocess.Process | None = None
 
@@ -134,7 +144,8 @@ class MediaVoiceBridge:
         except TimeoutError as exc:
             raise MediaVoiceBridgeInputUnavailable from exc
         self.stats.state = "connecting" if not self.stats.reconnects else "reconnecting"
-        context = ssl.create_default_context(cafile=self.ca_file)
+        secure = self.websocket_url.startswith("wss://")
+        context = ssl.create_default_context(cafile=self.ca_file) if secure else None
         try:
             async with websockets.connect(
                 self.websocket_url,
@@ -158,6 +169,9 @@ class MediaVoiceBridge:
                 if ready_event.get("type") != "session.ready":
                     message = ready_event.get("message") or "Voice bridge did not become ready"
                     raise MediaVoiceBridgeError(str(message))
+                ready_sample_rate = int(ready_event.get("sample_rate") or self.output_sample_rate)
+                if ready_sample_rate != self.output_sample_rate:
+                    raise MediaVoiceBridgeError("Voice provider returned an unexpected sample rate")
 
                 self.stats.state = "live"
                 self.stats.last_event = "session.ready"
@@ -272,14 +286,7 @@ class MediaVoiceBridge:
     async def _terminate_decoder(self) -> None:
         decoder = self._decoder
         self._decoder = None
-        if decoder is None or decoder.returncode is not None:
-            return
-        decoder.terminate()
-        try:
-            await asyncio.wait_for(decoder.wait(), timeout=2)
-        except TimeoutError:
-            decoder.kill()
-            await decoder.wait()
+        await terminate_subprocess(decoder)
 
     async def _sleep_or_stop(self, seconds: float) -> None:
         try:
@@ -289,9 +296,18 @@ class MediaVoiceBridge:
 
 
 def validate_voice_bridge_environment(websocket_url: str, token: str, ca_file: str) -> None:
-    if not websocket_url.startswith("wss://localhost:"):
-        raise ValueError("Voice bridge URL must use the local TLS tunnel")
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(websocket_url)
+    if (
+        parsed.scheme not in {"ws", "wss"}
+        or parsed.hostname not in {"localhost", "127.0.0.1"}
+        or not parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Voice bridge URL must use a local WebSocket")
     if len(token) < 32:
         raise ValueError("Voice bridge token is invalid")
-    if not ca_file or not os.path.isfile(ca_file):
+    if parsed.scheme == "wss" and (not ca_file or not os.path.isfile(ca_file)):
         raise ValueError("Voice bridge CA file is unavailable")

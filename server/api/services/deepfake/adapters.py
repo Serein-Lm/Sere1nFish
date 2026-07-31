@@ -14,7 +14,7 @@ import websockets
 from .contracts import (
     DeepfakeConfig,
     DeepfakeStream,
-    DeepfakeVoiceBridge,
+    DeepfakeVoiceOptions,
     ImageSwapResult,
     SourceImage,
 )
@@ -55,10 +55,11 @@ class FaceFusionGatewayProvider:
         return urlunsplit((scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
     async def _json_request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        request_timeout = float(kwargs.pop("request_timeout", self.config.timeout_seconds))
         try:
             async with httpx.AsyncClient(
                 verify=self._ssl_context,
-                timeout=self.config.timeout_seconds,
+                timeout=request_timeout,
                 follow_redirects=False,
             ) as client:
                 response = await client.request(method, self._url(path), headers=self._headers, **kwargs)
@@ -137,7 +138,7 @@ class FaceFusionGatewayProvider:
         max_width: int,
         profile: str,
         transport: str,
-        voice_bridge: DeepfakeVoiceBridge | None = None,
+        voice_options: DeepfakeVoiceOptions | None = None,
     ) -> dict[str, Any]:
         files = [
             ("source", (source.filename or "source.jpg", source.content, "application/octet-stream"))
@@ -149,18 +150,32 @@ class FaceFusionGatewayProvider:
             "profile": profile,
             "transport": transport,
         }
-        if voice_bridge is not None:
+        if voice_options is not None:
+            files.append(
+                (
+                    "voice_reference",
+                    (
+                        voice_options.reference.filename or "target-voice.wav",
+                        voice_options.reference.content,
+                        voice_options.reference.content_type or "application/octet-stream",
+                    ),
+                )
+            )
             data.update(
                 {
-                    "voice_bridge_id": voice_bridge.bridge_id,
-                    "voice_bridge_token": voice_bridge.token,
+                    "voice_enabled": "true",
+                    "voice_provider": voice_options.provider,
+                    "voice_steps": str(voice_options.steps),
                 }
             )
+        else:
+            data["voice_enabled"] = "false"
         return await self._json_request(
             "POST",
             "/v1/sessions",
             files=files,
             data=data,
+            request_timeout=max(60.0, self.config.timeout_seconds),
         )
 
     async def session_status(self, session_id: str) -> dict[str, Any]:

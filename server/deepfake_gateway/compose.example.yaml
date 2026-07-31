@@ -1,6 +1,48 @@
+version: "2.4"
+
 services:
+  meanvc:
+    image: sere1nfish/meanvc-runtime:1.0.0
+    build:
+      context: ../meanvc_runtime
+      dockerfile: Dockerfile
+      network: host
+      args:
+        HTTP_PROXY: ${HTTP_PROXY-http://127.0.0.1:17890}
+        HTTPS_PROXY: ${HTTPS_PROXY-http://127.0.0.1:17890}
+    restart: unless-stopped
+    network_mode: host
+    runtime: nvidia
+    shm_size: 2gb
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY-http://127.0.0.1:17890}
+      HTTPS_PROXY: ${HTTPS_PROXY-http://127.0.0.1:17890}
+      NO_PROXY: localhost,127.0.0.1,::1
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      MEANVC_API_TOKEN_FILE: /run/secrets/meanvc_api_token
+      MEANVC_MODEL_DIR: /models
+      HOME: /models
+      MEANVC_DEVICE: ${MEANVC_DEVICE-auto}
+      MEANVC_CPU_THREADS: ${MEANVC_CPU_THREADS-2}
+      MEANVC_MAX_SESSIONS: ${DEEPFAKE_MAX_SESSIONS-2}
+      MEANVC_SESSION_TTL_SECONDS: ${DEEPFAKE_SESSION_TTL_SECONDS-900}
+    volumes:
+      - ${MEANVC_MODELS_DIR-../data/meanvc}:/models
+      - ${MEANVC_TOKEN_FILE-../secrets/meanvc-token}:/run/secrets/meanvc_api_token:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 300s
+
   gateway:
-    image: sere1nfish/deepfake-gateway:1.4.1
+    image: sere1nfish/deepfake-gateway:1.5.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,9 +50,12 @@ services:
     network_mode: host
     runtime: nvidia
     shm_size: 2gb
+    depends_on:
+      meanvc:
+        condition: service_started
     environment:
-      HTTP_PROXY: ${HTTP_PROXY}
-      HTTPS_PROXY: ${HTTPS_PROXY}
+      HTTP_PROXY: ${HTTP_PROXY-http://127.0.0.1:17890}
+      HTTPS_PROXY: ${HTTPS_PROXY-http://127.0.0.1:17890}
       NO_PROXY: localhost,127.0.0.1,::1
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -27,14 +72,16 @@ services:
       DEEPFAKE_MEDIA_ENCODER: ${DEEPFAKE_MEDIA_ENCODER:-h264_nvenc}
       DEEPFAKE_MEDIA_VIDEO_BITRATE: ${DEEPFAKE_MEDIA_VIDEO_BITRATE:-1800k}
       DEEPFAKE_MEDIA_AUDIO_BITRATE: ${DEEPFAKE_MEDIA_AUDIO_BITRATE:-64k}
-      DEEPFAKE_VOICE_BRIDGE_BASE_URL: ${DEEPFAKE_VOICE_BRIDGE_BASE_URL:-wss://localhost:18444/api/v1/voice/realtime/media-bridge}
-      DEEPFAKE_VOICE_BRIDGE_CA_FILE: /run/secrets/server-ca.crt
+      DEEPFAKE_MEDIA_AUDIO_BUFFER_MS: ${DEEPFAKE_MEDIA_AUDIO_BUFFER_MS:-300}
+      DEEPFAKE_MEDIA_SHUTDOWN_TIMEOUT_SECONDS: ${DEEPFAKE_MEDIA_SHUTDOWN_TIMEOUT_SECONDS:-6}
+      DEEPFAKE_VOICE_CONVERTER_BASE_URL: http://127.0.0.1:8766
+      DEEPFAKE_VOICE_CONVERTER_TOKEN_FILE: /run/secrets/meanvc_api_token
     volumes:
       - ${DEEPFAKE_ASSETS_DIR:-../data/assets}:/opt/facefusion/.assets
       - ${DEEPFAKE_CACHE_DIR:-../data/cache}:/opt/facefusion/.caches
       - ${DEEPFAKE_FACEFUSION_CONFIG_FILE:-./facefusion.ini}:/opt/facefusion/facefusion.ini:ro
       - ${DEEPFAKE_TOKEN_FILE:-../secrets/api-token}:/run/secrets/deepfake_api_token:ro
-      - ${DEEPFAKE_SERVER_CA_FILE:-../secrets/server-ca.crt}:/run/secrets/server-ca.crt:ro
+      - ${MEANVC_TOKEN_FILE-../secrets/meanvc-token}:/run/secrets/meanvc_api_token:ro
     command:
       - --host
       - 127.0.0.1

@@ -75,6 +75,8 @@ def test_media_voice_bridge_treats_missing_initial_audio_as_waiting() -> None:
             websocket_url="wss://localhost:18444/bridge",
             token="x" * 48,
             ca_file="/tmp/ca.crt",
+            provider="meanvc",
+            output_sample_rate=16000,
             output_buffer=PcmOutputBuffer(),
             stats=stats,
         )

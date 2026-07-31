@@ -7,9 +7,9 @@ from api.services.deepfake.contracts import (
     DeepfakeConfig,
     DeepfakeVoiceOptions,
     ImageSwapResult,
+    SourceAudio,
     SourceImage,
 )
-from api.services.deepfake import service as deepfake_service_module
 from api.services.deepfake.service import (
     DeepfakeConfigurationError,
     DeepfakeService,
@@ -27,7 +27,7 @@ class FakeProvider:
         self.session_profile = ""
         self.session_source_count = 0
         self.session_transport = ""
-        self.session_voice_bridge = None
+        self.session_voice_options = None
 
     async def status(self):
         return {"ok": True}
@@ -40,7 +40,7 @@ class FakeProvider:
         self.session_profile = kwargs["profile"]
         self.session_source_count = len(kwargs["sources"])
         self.session_transport = kwargs["transport"]
-        self.session_voice_bridge = kwargs.get("voice_bridge")
+        self.session_voice_options = kwargs.get("voice_options")
         payload = {
             "session_id": "session-test-owner",
             "ticket": "must-not-leak",
@@ -76,6 +76,7 @@ def _config(**overrides) -> DeepfakeConfig:
         "timeout_seconds": 15.0,
         "max_image_bytes": 1024 * 1024,
         "max_source_images": 4,
+        "max_voice_reference_bytes": 20 * 1024 * 1024,
         "realtime_max_width": 960,
     }
     values.update(overrides)
@@ -163,30 +164,7 @@ async def test_obs_direct_session_preserves_short_lived_media_credentials() -> N
 
 
 @pytest.mark.asyncio
-async def test_obs_direct_voice_bridge_is_private_and_released(monkeypatch) -> None:
-    class VoiceService:
-        def __init__(self) -> None:
-            self.deleted: list[str] = []
-
-        async def reserve_media_bridge(self, db, *, username, payload):
-            assert db == "db"
-            assert username == "alice"
-            assert payload["voice"] == "longanqian"
-            return type(
-                "Reservation",
-                (),
-                {"bridge_id": "mvoice-test", "token": "bridge-secret"},
-            )()
-
-        async def delete_media_bridge(self, bridge_id: str):
-            self.deleted.append(bridge_id)
-
-    voice_service = VoiceService()
-    monkeypatch.setattr(
-        deepfake_service_module,
-        "get_realtime_voice_service",
-        lambda: voice_service,
-    )
+async def test_obs_direct_voice_conversion_is_forwarded_without_leaking_reference() -> None:
     provider = FakeProvider()
     service = DeepfakeService(_config(), provider)
     created = await service.create_session(
@@ -195,50 +173,65 @@ async def test_obs_direct_voice_bridge_is_private_and_released(monkeypatch) -> N
         max_width=640,
         profile="fast",
         transport="obs_whip",
-        db="db",
         voice_options=DeepfakeVoiceOptions(
-            model="qwen-audio-3.0-realtime-plus",
-            voice="longanqian",
-            mode="smart_turn",
-            instructions="",
-            max_history_turns=20,
+            provider="meanvc",
+            reference=SourceAudio(
+                content=b"private-reference-audio",
+                filename="voice.wav",
+                content_type="audio/wav",
+            ),
+            steps=2,
         ),
     )
-    assert "bridge-secret" not in str(created)
-    assert provider.session_voice_bridge.bridge_id == "mvoice-test"
-    assert provider.session_voice_bridge.token == "bridge-secret"
+    assert "private-reference-audio" not in str(created)
+    assert provider.session_voice_options.provider == "meanvc"
+    assert provider.session_voice_options.reference.filename == "voice.wav"
+    assert provider.session_voice_options.steps == 2
     await service.delete_session(created["session_id"], "alice")
-    assert voice_service.deleted == ["mvoice-test"]
 
 
 @pytest.mark.asyncio
-async def test_obs_direct_voice_validation_error_is_exposed_as_request_error(monkeypatch) -> None:
-    from api.services.voice_realtime import RealtimeVoiceError
-
-    class VoiceService:
-        async def reserve_media_bridge(self, *_args, **_kwargs):
-            raise RealtimeVoiceError("invalid voice")
-
-    monkeypatch.setattr(
-        deepfake_service_module,
-        "get_realtime_voice_service",
-        lambda: VoiceService(),
-    )
+async def test_voice_conversion_rejects_invalid_transport_provider_and_size() -> None:
     service = DeepfakeService(_config(), FakeProvider())
-    with pytest.raises(ValueError, match="invalid voice"):
+    valid_reference = SourceAudio(b"reference", "voice.wav", "audio/wav")
+    with pytest.raises(ValueError, match="OBS direct"):
+        await service.create_session(
+            username="alice",
+            sources=[SourceImage(b"source", "source.jpg")],
+            max_width=640,
+            profile="fast",
+            transport="frame_ws",
+            voice_options=DeepfakeVoiceOptions(
+                provider="meanvc",
+                reference=valid_reference,
+            ),
+        )
+    with pytest.raises(ValueError, match="provider"):
         await service.create_session(
             username="alice",
             sources=[SourceImage(b"source", "source.jpg")],
             max_width=640,
             profile="fast",
             transport="obs_whip",
-            db="db",
             voice_options=DeepfakeVoiceOptions(
-                model="qwen-audio-3.0-realtime-plus",
-                voice="missing",
-                mode="smart_turn",
-                instructions="",
-                max_history_turns=20,
+                provider="conversation",
+                reference=valid_reference,
+            ),
+        )
+    limited = DeepfakeService(
+        _config(max_voice_reference_bytes=4),
+        FakeProvider(),
+    )
+    with pytest.raises(ValueError, match="size limit"):
+        await limited.create_session(
+            username="alice",
+            sources=[SourceImage(b"source", "source.jpg")],
+            max_width=640,
+            profile="fast",
+            transport="obs_whip",
+            voice_options=DeepfakeVoiceOptions(
+                provider="meanvc",
+                reference=SourceAudio(b"12345", "voice.wav", "audio/wav"),
             ),
         )
 

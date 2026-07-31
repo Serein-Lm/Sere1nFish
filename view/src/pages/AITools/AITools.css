@@ -464,38 +464,30 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-.deepfake-output-voice {
-  border-radius: 8px;
-}
-
-.deepfake-output-voice .vc-realtime-panel {
-  padding: 0;
-}
-
 .deepfake-integrated-voice {
   border-radius: 8px;
 }
 
 .deepfake-voice-settings {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.72fr) minmax(110px, 0.4fr);
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  align-items: end;
   gap: 14px;
 }
 
-.deepfake-voice-settings label {
+.deepfake-voice-settings label,
+.deepfake-voice-reference {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 6px;
 }
 
-.deepfake-voice-settings .ant-select,
-.deepfake-voice-settings .ant-input-number {
-  width: 100%;
-}
-
-.deepfake-voice-instructions {
-  grid-column: 1 / -1;
+.deepfake-voice-reference .ant-tag {
+  max-width: min(100%, 360px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .deepfake-obs-guide {
@@ -607,7 +599,8 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .deepfake-voice-instructions {
-    grid-column: auto;
+  .deepfake-voice-device-tag {
+    display: none;
   }
+
 }

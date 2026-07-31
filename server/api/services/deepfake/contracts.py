@@ -6,6 +6,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+
 @dataclass(slots=True, frozen=True)
 class DeepfakeConfig:
     provider: str
@@ -15,6 +16,7 @@ class DeepfakeConfig:
     timeout_seconds: float
     max_image_bytes: int
     max_source_images: int
+    max_voice_reference_bytes: int
     realtime_max_width: int
 
 
@@ -25,18 +27,17 @@ class SourceImage:
 
 
 @dataclass(slots=True, frozen=True)
-class DeepfakeVoiceOptions:
-    model: str
-    voice: str
-    mode: str
-    instructions: str
-    max_history_turns: int
+class SourceAudio:
+    content: bytes
+    filename: str
+    content_type: str
 
 
 @dataclass(slots=True, frozen=True)
-class DeepfakeVoiceBridge:
-    bridge_id: str
-    token: str
+class DeepfakeVoiceOptions:
+    provider: str
+    reference: SourceAudio
+    steps: int = 2
 
 
 @dataclass(slots=True)
@@ -78,7 +79,7 @@ class DeepfakeProvider(Protocol):
         max_width: int,
         profile: str,
         transport: str,
-        voice_bridge: DeepfakeVoiceBridge | None,
+        voice_options: DeepfakeVoiceOptions | None,
     ) -> dict[str, Any]: ...
 
     async def session_status(self, session_id: str) -> dict[str, Any]: ...

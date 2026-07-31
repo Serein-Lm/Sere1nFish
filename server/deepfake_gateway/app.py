@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 import subprocess
 import time
@@ -32,12 +31,20 @@ from fastapi.responses import Response
 from .media_diagnostics import WhipPublishDiagnostics
 from .media_pipeline import MediaPipeline
 from .profiles import QUALITY_PROFILES, QualityProfile
+from .voice_conversion import MeanVCVoiceConverter, VoiceConversionSession
 
 MAX_IMAGE_BYTES = int(os.getenv("DEEPFAKE_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
 MAX_FRAME_BYTES = int(os.getenv("DEEPFAKE_MAX_FRAME_BYTES", str(4 * 1024 * 1024)))
 MAX_IMAGE_PIXELS = int(os.getenv("DEEPFAKE_MAX_IMAGE_PIXELS", str(3840 * 2160)))
 MAX_SOURCE_IMAGES = min(8, max(1, int(os.getenv("DEEPFAKE_MAX_SOURCE_IMAGES", "4"))))
 MAX_SOURCE_WIDTH = min(2560, max(512, int(os.getenv("DEEPFAKE_MAX_SOURCE_WIDTH", "1600"))))
+MAX_VOICE_REFERENCE_BYTES = min(
+    30 * 1024 * 1024,
+    max(
+        1024 * 1024,
+        int(os.getenv("DEEPFAKE_MAX_VOICE_REFERENCE_BYTES", str(20 * 1024 * 1024))),
+    ),
+)
 SESSION_TTL_SECONDS = max(60, int(os.getenv("DEEPFAKE_SESSION_TTL_SECONDS", "900")))
 MAX_SESSIONS = max(1, int(os.getenv("DEEPFAKE_MAX_SESSIONS", "2")))
 MAX_STORED_SESSIONS = max(
@@ -54,8 +61,10 @@ MEDIA_ENABLED = os.getenv("DEEPFAKE_MEDIA_ENABLED", "0").lower() in {"1", "true"
 MEDIA_PUBLIC_BASE_URL = os.getenv("DEEPFAKE_MEDIA_PUBLIC_BASE_URL", "").strip().rstrip("/")
 MEDIA_RTSP_BASE_URL = os.getenv("DEEPFAKE_MEDIA_RTSP_BASE_URL", "rtsp://127.0.0.1:8554").strip().rstrip("/")
 MEDIA_OUTPUT_FPS = min(30, max(5, int(os.getenv("DEEPFAKE_MEDIA_OUTPUT_FPS", "15"))))
-VOICE_BRIDGE_BASE_URL = os.getenv("DEEPFAKE_VOICE_BRIDGE_BASE_URL", "").strip().rstrip("/")
-VOICE_BRIDGE_CA_FILE = os.getenv("DEEPFAKE_VOICE_BRIDGE_CA_FILE", "").strip()
+MEDIA_SHUTDOWN_TIMEOUT_SECONDS = max(
+    2.0,
+    min(15.0, float(os.getenv("DEEPFAKE_MEDIA_SHUTDOWN_TIMEOUT_SECONDS", "6"))),
+)
 logger = logging.getLogger("uvicorn.error")
 
 if MEDIA_ENABLED:
@@ -64,18 +73,6 @@ if MEDIA_ENABLED:
         raise RuntimeError("DEEPFAKE_MEDIA_PUBLIC_BASE_URL must be a valid HTTPS URL")
     if urlsplit(MEDIA_RTSP_BASE_URL).scheme != "rtsp":
         raise RuntimeError("DEEPFAKE_MEDIA_RTSP_BASE_URL must be a valid RTSP URL")
-    if VOICE_BRIDGE_BASE_URL:
-        voice_bridge_url = urlsplit(VOICE_BRIDGE_BASE_URL)
-        if (
-            voice_bridge_url.scheme != "wss"
-            or voice_bridge_url.hostname not in {"localhost", "127.0.0.1"}
-            or not voice_bridge_url.path
-            or voice_bridge_url.query
-            or voice_bridge_url.fragment
-        ):
-            raise RuntimeError("DEEPFAKE_VOICE_BRIDGE_BASE_URL must use the local WSS tunnel")
-        if not VOICE_BRIDGE_CA_FILE or not Path(VOICE_BRIDGE_CA_FILE).is_file():
-            raise RuntimeError("DEEPFAKE_VOICE_BRIDGE_CA_FILE is unavailable")
 
 QUALITY_PROFILES.get(DEFAULT_IMAGE_PROFILE)
 QUALITY_PROFILES.get(DEFAULT_REALTIME_PROFILE)
@@ -381,8 +378,7 @@ class StreamSession:
     media_publish_diagnostics: WhipPublishDiagnostics = field(default_factory=WhipPublishDiagnostics)
     media_read_hash: str = ""
     media_internal_token: str = field(default="", repr=False)
-    voice_bridge_id: str = field(default="", repr=False)
-    voice_bridge_token: str = field(default="", repr=False)
+    voice_conversion: VoiceConversionSession | None = field(default=None, repr=False)
     media_pipeline: MediaPipeline | None = field(default=None, repr=False)
     media_task: asyncio.Task[None] | None = field(default=None, repr=False)
     created_at: str = field(default_factory=_now_iso)
@@ -430,6 +426,7 @@ class StreamSession:
 
 
 runtime = FaceFusionRuntime()
+voice_converter = MeanVCVoiceConverter.from_environment()
 sessions: dict[str, StreamSession] = {}
 sessions_lock = asyncio.Lock()
 cleanup_task: asyncio.Task[None] | None = None
@@ -464,19 +461,18 @@ async def _run_media_session(session: StreamSession) -> None:
         session.last_used_monotonic = time.monotonic()
         return output, inference_ms
 
+    conversion = session.voice_conversion
     pipeline = MediaPipeline(
         input_url=_rtsp_session_url(f"media/input/{session.session_id}", session.media_internal_token),
         output_url=_rtsp_session_url(f"media/output/{session.session_id}", session.media_internal_token),
         max_width=session.max_width,
         output_fps=MEDIA_OUTPUT_FPS,
         processor=process_frame,
-        voice_bridge_url=(
-            f"{VOICE_BRIDGE_BASE_URL}/{session.voice_bridge_id}"
-            if session.voice_bridge_id
-            else ""
-        ),
-        voice_bridge_token=session.voice_bridge_token,
-        voice_bridge_ca_file=VOICE_BRIDGE_CA_FILE,
+        voice_bridge_url=conversion.websocket_url if conversion else "",
+        voice_bridge_token=conversion.token if conversion else "",
+        voice_bridge_ca_file="",
+        voice_bridge_provider=conversion.provider if conversion else "",
+        voice_bridge_sample_rate=conversion.sample_rate if conversion else 16000,
     )
     session.media_pipeline = pipeline
     try:
@@ -487,13 +483,49 @@ async def _run_media_session(session: StreamSession) -> None:
 
 
 async def _stop_media_session(session: StreamSession) -> None:
-    if session.media_pipeline:
-        await session.media_pipeline.stop()
+    pipeline = session.media_pipeline
+    session.media_pipeline = None
     task = session.media_task
     session.media_task = None
-    if task and not task.done():
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    conversion = session.voice_conversion
+    session.voice_conversion = None
+    try:
+        if task:
+            if not task.done():
+                task.cancel()
+                done, _ = await asyncio.wait(
+                    {task},
+                    timeout=MEDIA_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+                if task not in done:
+                    logger.warning(
+                        "Media task cancellation timed out session=%s timeout_seconds=%.1f",
+                        session.session_id,
+                        MEDIA_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+            if task.done():
+                await asyncio.gather(task, return_exceptions=True)
+        if pipeline:
+            stop_task = asyncio.create_task(
+                pipeline.stop(),
+                name=f"deepfake-media-stop-{session.session_id}",
+            )
+            done, _ = await asyncio.wait(
+                {stop_task},
+                timeout=MEDIA_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            if stop_task in done:
+                await asyncio.gather(stop_task, return_exceptions=True)
+            else:
+                stop_task.cancel()
+                logger.warning(
+                    "Media pipeline stop timed out session=%s timeout_seconds=%.1f",
+                    session.session_id,
+                    MEDIA_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+    finally:
+        if conversion and voice_converter:
+            await voice_converter.delete_session(conversion.session_id)
 
 
 async def _cleanup_sessions() -> None:
@@ -527,7 +559,7 @@ async def lifespan(_: FastAPI):
     await asyncio.gather(*(_stop_media_session(session) for session in remaining))
 
 
-app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.4.1", lifespan=lifespan)
+app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.5.0", lifespan=lifespan)
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -565,6 +597,11 @@ async def health() -> dict[str, Any]:
 
 @app.get("/v1/status", dependencies=[Depends(require_api_token)])
 async def status() -> dict[str, Any]:
+    voice_status = (
+        await voice_converter.status()
+        if voice_converter
+        else {"ok": False, "provider": "meanvc", "last_error": "MeanVC runtime is not configured"}
+    )
     return {
         "ok": runtime.ready,
         "model": runtime.model,
@@ -584,8 +621,9 @@ async def status() -> dict[str, Any]:
             "protocol": "whip_whep" if MEDIA_ENABLED else "",
             "public_base_url": MEDIA_PUBLIC_BASE_URL if MEDIA_ENABLED else "",
             "output_fps": MEDIA_OUTPUT_FPS if MEDIA_ENABLED else 0,
-            "audio_supported": bool(MEDIA_ENABLED and VOICE_BRIDGE_BASE_URL),
-            "audio_codec": "Opus" if MEDIA_ENABLED and VOICE_BRIDGE_BASE_URL else "",
+            "audio_supported": bool(MEDIA_ENABLED and voice_status.get("ok")),
+            "audio_codec": "Opus" if MEDIA_ENABLED and voice_status.get("ok") else "",
+            "voice_conversion": voice_status,
         },
         "gpu": _gpu_status(),
         "model_use": "authorized_non_commercial",
@@ -661,12 +699,14 @@ async def swap_image(
 @app.post("/v1/sessions", dependencies=[Depends(require_api_token)])
 async def create_session(
     source: list[UploadFile] = File(...),
+    voice_reference: UploadFile | None = File(default=None),
     authorized_use: bool = Form(...),
     max_width: int = Form(default=960, ge=320, le=1280),
     profile: str = Form(default=DEFAULT_REALTIME_PROFILE),
     transport: str = Form(default="frame_ws"),
-    voice_bridge_id: str = Form(default=""),
-    voice_bridge_token: str = Form(default=""),
+    voice_enabled: bool = Form(default=False),
+    voice_provider: str = Form(default="meanvc"),
+    voice_steps: int = Form(default=2, ge=1, le=2),
 ) -> dict[str, Any]:
     if not authorized_use:
         raise HTTPException(status_code=403, detail="Explicit authorization is required")
@@ -679,19 +719,16 @@ async def create_session(
         raise HTTPException(status_code=422, detail="Unknown realtime transport")
     if transport == "obs_whip" and not MEDIA_ENABLED:
         raise HTTPException(status_code=503, detail="OBS direct media transport is not configured")
-    voice_bridge_id = voice_bridge_id.strip()
-    voice_bridge_token = voice_bridge_token.strip()
-    if bool(voice_bridge_id) != bool(voice_bridge_token):
-        raise HTTPException(status_code=422, detail="Voice bridge credentials are incomplete")
-    if voice_bridge_id:
+    voice_provider = voice_provider.strip().lower()
+    if voice_enabled:
         if transport != "obs_whip":
-            raise HTTPException(status_code=422, detail="Voice bridge requires OBS direct transport")
-        if not VOICE_BRIDGE_BASE_URL:
-            raise HTTPException(status_code=503, detail="Voice bridge is not configured")
-        if not re.fullmatch(r"mvoice-[a-f0-9]{32}", voice_bridge_id):
-            raise HTTPException(status_code=422, detail="Voice bridge ID is invalid")
-        if len(voice_bridge_token) < 32:
-            raise HTTPException(status_code=422, detail="Voice bridge token is invalid")
+            raise HTTPException(status_code=422, detail="Voice conversion requires OBS direct transport")
+        if voice_provider != "meanvc":
+            raise HTTPException(status_code=422, detail="Unknown voice conversion provider")
+        if not voice_converter:
+            raise HTTPException(status_code=503, detail="MeanVC runtime is not configured")
+        if voice_reference is None:
+            raise HTTPException(status_code=422, detail="Target voice sample is required")
     source_frames = await _decode_source_uploads(source)
     try:
         source_analysis, source_face_sets = await runtime.validate_source(
@@ -700,6 +737,20 @@ async def create_session(
         )
     except GatewayError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    conversion: VoiceConversionSession | None = None
+    if voice_enabled and voice_reference and voice_converter:
+        reference = await voice_reference.read(MAX_VOICE_REFERENCE_BYTES + 1)
+        if len(reference) > MAX_VOICE_REFERENCE_BYTES:
+            raise HTTPException(status_code=413, detail="Target voice sample exceeds the size limit")
+        try:
+            conversion = await voice_converter.create_session(
+                reference=reference,
+                filename=voice_reference.filename or "target-voice.wav",
+                content_type=voice_reference.content_type or "application/octet-stream",
+                steps=voice_steps,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
     removed_sessions: list[StreamSession] = []
     session: StreamSession | None = None
     capacity_error = ""
@@ -734,8 +785,7 @@ async def create_session(
                 media_publish_hash=hashlib.sha256(media_publish_token.encode()).hexdigest() if media_publish_token else "",
                 media_read_hash=hashlib.sha256(media_read_token.encode()).hexdigest() if media_read_token else "",
                 media_internal_token=media_internal_token,
-                voice_bridge_id=voice_bridge_id,
-                voice_bridge_token=voice_bridge_token,
+                voice_conversion=conversion,
             )
             sessions[session_id] = session
             if transport == "obs_whip":
@@ -746,8 +796,12 @@ async def create_session(
     if removed_sessions:
         await asyncio.gather(*(_stop_media_session(value) for value in removed_sessions))
     if capacity_error:
+        if conversion and voice_converter:
+            await voice_converter.delete_session(conversion.session_id)
         raise HTTPException(status_code=429, detail=capacity_error)
     if session is None:
+        if conversion and voice_converter:
+            await voice_converter.delete_session(conversion.session_id)
         raise HTTPException(status_code=500, detail="Unable to create the GPU session")
     payload: dict[str, Any] = {
         "session_id": session_id,
@@ -778,13 +832,16 @@ async def create_session(
                 "fps": MEDIA_OUTPUT_FPS,
                 "video_codec": "H264",
                 "keyframe_interval_seconds": 1,
-                "audio_codec": "Opus" if voice_bridge_id else "",
-                "audio_sample_rate": 48000 if voice_bridge_id else 0,
+                "audio_codec": "Opus" if conversion else "",
+                "audio_sample_rate": 48000 if conversion else 0,
             },
             "audio": {
-                "enabled": bool(voice_bridge_id),
+                "enabled": bool(conversion),
                 "input": "OBS microphone",
-                "output": "Bailian full-duplex voice",
+                "output": "MeanVC converted voice",
+                "provider": conversion.provider if conversion else "",
+                "processing_sample_rate": conversion.sample_rate if conversion else 0,
+                "chunk_ms": conversion.chunk_ms if conversion else 0,
             },
         }
     return payload

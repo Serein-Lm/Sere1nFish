@@ -29,6 +29,21 @@ export interface DeepfakeStatus {
     output_fps: number
     audio_supported?: boolean
     audio_codec?: string
+    voice_conversion?: {
+      ok: boolean
+      provider: string
+      device?: string
+      sample_rate?: number
+      chunk_samples?: number
+      active_sessions?: number
+      session_count?: number
+      max_sessions?: number
+      last_error?: string
+      reference_seconds?: {
+        minimum: number
+        maximum: number
+      }
+    }
   }
   model_use: string
   gpu: {
@@ -94,15 +109,16 @@ export interface DeepfakeDirectMedia {
     enabled: boolean
     input: string
     output: string
+    provider?: string
+    processing_sample_rate?: number
+    chunk_ms?: number
   }
 }
 
 export interface DeepfakeVoiceSessionOptions {
-  model: string
-  voice: string
-  mode: 'smart_turn' | 'server_vad'
-  instructions?: string
-  maxHistoryTurns?: number
+  provider: 'meanvc'
+  reference: File
+  steps?: 1 | 2
 }
 
 export interface DeepfakeMediaStatus {
@@ -226,11 +242,9 @@ export async function createDeepfakeSession(
   body.append('transport', transport)
   body.append('voice_enabled', String(Boolean(voiceOptions)))
   if (voiceOptions) {
-    body.append('voice_model', voiceOptions.model)
-    body.append('voice', voiceOptions.voice)
-    body.append('voice_mode', voiceOptions.mode)
-    body.append('voice_instructions', voiceOptions.instructions?.trim() || '')
-    body.append('voice_max_history_turns', String(voiceOptions.maxHistoryTurns || 20))
+    body.append('voice_provider', voiceOptions.provider)
+    body.append('voice_steps', String(voiceOptions.steps || 2))
+    body.append('voice_reference', voiceOptions.reference)
   }
   const response = await multipartRequest('/v1/deepfake/sessions', body)
   return (await response.json()) as DeepfakeSession

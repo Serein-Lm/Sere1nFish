@@ -10,10 +10,9 @@ from fastapi.responses import Response
 from starlette.websockets import WebSocketDisconnect
 
 from api.auth import User, get_current_active_user
-from api.db.mongodb import get_db
 from api.services.deepfake import get_deepfake_service
 from api.services.deepfake.adapters import DeepfakeProviderError
-from api.services.deepfake.contracts import DeepfakeVoiceOptions, SourceImage
+from api.services.deepfake.contracts import DeepfakeVoiceOptions, SourceAudio, SourceImage
 from api.services.deepfake.service import DeepfakeConfigurationError
 from api.services.media_output import MediaOutputError, get_media_output_service
 from api.services.websocket_auth import (
@@ -110,15 +109,13 @@ async def swap_image(
 async def create_session(
     source: Annotated[list[UploadFile], File(...)],
     authorized_use: Annotated[bool, Form(...)],
+    voice_reference: Annotated[UploadFile | None, File()] = None,
     max_width: Annotated[int | None, Form()] = None,
     profile: Annotated[str, Form()] = "fast",
     transport: Annotated[str, Form()] = "frame_ws",
     voice_enabled: Annotated[bool, Form()] = False,
-    voice_model: Annotated[str, Form()] = "",
-    voice: Annotated[str, Form()] = "",
-    voice_mode: Annotated[str, Form()] = "smart_turn",
-    voice_instructions: Annotated[str, Form(max_length=4000)] = "",
-    voice_max_history_turns: Annotated[int, Form(ge=1, le=50)] = 20,
+    voice_provider: Annotated[str, Form()] = "meanvc",
+    voice_steps: Annotated[int, Form(ge=1, le=2)] = 2,
     user: User = Depends(get_current_active_user),
 ):
     if not authorized_use:
@@ -130,24 +127,28 @@ async def create_session(
             max_bytes=service.config.max_image_bytes,
             max_count=service.config.max_source_images,
         )
+        voice_options = None
+        if voice_enabled:
+            if voice_reference is None:
+                raise ValueError("请选择目标声音样本")
+            voice_options = DeepfakeVoiceOptions(
+                provider=voice_provider,
+                reference=SourceAudio(
+                    content=await voice_reference.read(
+                        service.config.max_voice_reference_bytes + 1
+                    ),
+                    filename=voice_reference.filename or "target-voice.wav",
+                    content_type=voice_reference.content_type or "application/octet-stream",
+                ),
+                steps=voice_steps,
+            )
         return await service.create_session(
             username=user.username,
             sources=sources,
             max_width=max_width,
             profile=profile,
             transport=transport,
-            db=get_db(),
-            voice_options=(
-                DeepfakeVoiceOptions(
-                    model=voice_model,
-                    voice=voice,
-                    mode=voice_mode,
-                    instructions=voice_instructions,
-                    max_history_turns=voice_max_history_turns,
-                )
-                if voice_enabled
-                else None
-            ),
+            voice_options=voice_options,
         )
     except HTTPException:
         raise

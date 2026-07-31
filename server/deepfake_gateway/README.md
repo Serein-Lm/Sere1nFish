@@ -15,12 +15,18 @@ Security requirements:
 - Mount a random API token and TLS private key from root-only files. Do not put
   either value in Compose, Git, logs, or frontend code.
 - OBS publishes the camera and microphone in one WHIP session. The gateway
-  decodes microphone audio to 16 kHz PCM, sends it through a short-lived WSS
-  tunnel to Sere1nFish, and muxes returned AI speech as Opus into the processed
-  H.264 output. The Bailian API key remains on Sere1nFish.
-- The GPU-to-Sere1nFish WSS endpoint uses a loopback reverse SSH tunnel. Mount
-  the Sere1nFish nginx CA certificate read-only as
-  `/run/secrets/server-ca.crt`; never disable TLS verification.
+  decodes microphone audio to 16 kHz PCM, sends it to the loopback-only MeanVC
+  runtime, and muxes converted speech as Opus into the processed H.264 output.
+  The input words are preserved; this path does not call a conversational model.
+- Converted audio retains only the latest 300 ms by default
+  (`DEEPFAKE_MEDIA_AUDIO_BUFFER_MS`), so reconnect and startup bursts cannot
+  leave a persistent stale-audio delay.
+- Session deletion bounds media shutdown with
+  `DEEPFAKE_MEDIA_SHUTDOWN_TIMEOUT_SECONDS` and releases the private MeanVC
+  session even when an FFmpeg or WebSocket child does not stop promptly.
+- MeanVC accepts a short-lived authorized reference sample when the session is
+  created. Reference audio and microphone PCM remain in memory and are released
+  with the session.
 - `hyperswap_1a_256` is configured for authorized research use. The gateway
   owns named quality profiles so API callers do not depend on FaceFusion
   processor names or model arguments.
@@ -54,8 +60,8 @@ API surface:
 - `POST /v1/swap/image`: authenticated source/target image inference with an
   optional `profile` field.
 - `POST /v1/sessions`: create an ephemeral realtime source session with an
-  optional `profile`, `transport` (`frame_ws` or `obs_whip`) and private voice
-  bridge credentials supplied by the Sere1nFish adapter.
+  optional `profile`, `transport` (`frame_ws` or `obs_whip`) and authorized
+  `voice_reference` sample for MeanVC conversion.
 - `WS /v1/realtime/{session_id}`: JPEG frame input/output stream.
 - `POST /internal/mediamtx/auth`: loopback-only per-session media
   authorization endpoint.
@@ -100,7 +106,4 @@ loopback. The complete forwarding set is:
 ```text
 -L 172.18.0.1:18443:127.0.0.1:443
 -R 127.0.0.1:17890:43.106.0.54:18818
--R 127.0.0.1:18444:127.0.0.1:443
 ```
-
-`18444` remains loopback-only on the GPU and is not a security-group port.
