@@ -51,6 +51,10 @@ import {
   remoteMediaOutputViewerUrl,
   type RemoteMediaOutputSession,
 } from '../../services/mediaOutputService'
+import {
+  DeepfakeBrowserVoiceClient,
+  type DeepfakeVoiceState,
+} from '../../services/deepfakeVoiceService'
 
 const { Text } = Typography
 
@@ -105,6 +109,13 @@ const AUDIO_STATE_LABELS: Record<string, string> = {
   reconnecting: '变声服务重连中',
   waiting_audio: '等待 OBS 麦克风',
   stopped: '已停止',
+}
+
+const BROWSER_VOICE_STATE_LABELS: Record<DeepfakeVoiceState, string> = {
+  idle: '变声未启动',
+  connecting: '连接变声服务',
+  live: 'MeanVC 音轨在线',
+  error: '变声音轨异常',
 }
 
 function FilePreviewImage({ file, alt }: { file: File; alt: string }) {
@@ -248,6 +259,8 @@ export default function DeepfakeStudio() {
   const [integratedVoice, setIntegratedVoice] = useState(true)
   const [voiceReference, setVoiceReference] = useState<File | null>(null)
   const [voiceSteps, setVoiceSteps] = useState<1 | 2>(2)
+  const [browserVoiceState, setBrowserVoiceState] = useState<DeepfakeVoiceState>('idle')
+  const [browserVoiceOutputBytes, setBrowserVoiceOutputBytes] = useState(0)
   const [obsGuideOpen, setObsGuideOpen] = useState(false)
   const [obsCreating, setObsCreating] = useState(false)
   const [obsOutput, setObsOutput] = useState<RemoteMediaOutputSession | null>(null)
@@ -255,6 +268,7 @@ export default function DeepfakeStudio() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const outputViewRef = useRef<HTMLDivElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
+  const browserVoiceRef = useRef<DeepfakeBrowserVoiceClient | null>(null)
   const mediaRef = useRef<MediaStream | null>(null)
   const sessionIdRef = useRef('')
   const outputUrlRef = useRef('')
@@ -396,6 +410,9 @@ export default function DeepfakeStudio() {
     const socket = socketRef.current
     socketRef.current = null
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'client stop')
+    const browserVoice = browserVoiceRef.current
+    browserVoiceRef.current = null
+    if (browserVoice) await browserVoice.stop()
     mediaRef.current?.getTracks().forEach((track) => track.stop())
     mediaRef.current = null
     if (videoRef.current) videoRef.current.srcObject = null
@@ -405,6 +422,8 @@ export default function DeepfakeStudio() {
     setCaptureDimensions(null)
     setDirectSession(null)
     setSessionStatus(null)
+    setBrowserVoiceState('idle')
+    setBrowserVoiceOutputBytes(0)
     if (sessionId) {
       try {
         await deleteDeepfakeSession(sessionId)
@@ -477,6 +496,13 @@ export default function DeepfakeStudio() {
       messageApi.warning('请选择身份图片并确认素材授权')
       return
     }
+    if (integratedVoice && (!status?.media_transport?.audio_supported || !voiceReference)) {
+      messageApi.error(
+        status?.media_transport?.voice_conversion?.last_error
+        || 'MeanVC 尚未就绪或未选择目标声音样本',
+      )
+      return
+    }
     setStarting(true)
     try {
       const output = await createObsOutput()
@@ -488,7 +514,12 @@ export default function DeepfakeStudio() {
           aspectRatio: { ideal: CAMERA_ASPECT_RATIO },
           facingMode: 'user',
         },
-        audio: false,
+        audio: integratedVoice ? {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false,
+        } : false,
       })
       mediaRef.current = media
       if (!videoRef.current) throw new Error('摄像头预览未初始化')
@@ -497,7 +528,17 @@ export default function DeepfakeStudio() {
       if (videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
         setStreamAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight)
       }
-      const session = await createDeepfakeSession(sourceFiles, realtimeWidth, realtimeProfile, 'frame_ws')
+      const session = await createDeepfakeSession(
+        sourceFiles,
+        realtimeWidth,
+        realtimeProfile,
+        'frame_ws',
+        integratedVoice && voiceReference ? {
+          provider: 'meanvc',
+          reference: voiceReference,
+          steps: voiceSteps,
+        } : undefined,
+      )
       effectiveRealtimeWidthRef.current = session.max_width
       if (session.max_width !== realtimeWidth) setRealtimeWidth(session.max_width)
       setCaptureDimensions(fitFrameDimensions(
@@ -531,6 +572,16 @@ export default function DeepfakeStudio() {
       }
       socket.onerror = () => messageApi.error('实时流连接失败')
       socket.onclose = () => setStreaming(false)
+      if (integratedVoice) {
+        if (!session.voice_stream_path) throw new Error('GPU 未返回浏览器 MeanVC 音频流地址')
+        const browserVoice = new DeepfakeBrowserVoiceClient({
+          onState: setBrowserVoiceState,
+          onProgress: progress => setBrowserVoiceOutputBytes(progress.outputBytes),
+          onError: error => messageApi.error(error.message),
+        })
+        browserVoiceRef.current = browserVoice
+        await browserVoice.start(session.voice_stream_path, output.session_id, media)
+      }
     } catch (error) {
       await stopRealtime()
       messageApi.error(error instanceof Error ? error.message : '摄像头启动失败')
@@ -741,7 +792,7 @@ export default function DeepfakeStudio() {
               )}
             </div>
           </div>
-          {realtimeTransport === 'obs_whip' && !directSession && (
+          {!directSession && !streaming && (
             <Collapse
               className="deepfake-integrated-voice"
               defaultActiveKey={['integrated-voice']}
@@ -752,7 +803,7 @@ export default function DeepfakeStudio() {
                     <AudioOutlined />
                     <Text strong>实时变声</Text>
                     <Tag color={integratedVoice ? 'cyan' : 'default'}>
-                      {integratedVoice ? 'MeanVC' : '静音输出'}
+                      {integratedVoice ? 'MeanVC' : '仅视频'}
                     </Tag>
                     {status?.media_transport?.voice_conversion?.device && integratedVoice && (
                       <Tag className="deepfake-voice-device-tag">
@@ -976,6 +1027,14 @@ export default function DeepfakeStudio() {
                 <Tag>{sessionStatus?.measured_fps?.toFixed(1) || '0.0'} FPS</Tag>
                 <Tag>{sessionStatus?.average_inference_ms?.toFixed(0) || '0'} ms</Tag>
                 <Tag>{sessionStatus?.frame_count || 0} 帧</Tag>
+                {integratedVoice && (
+                  <Tag color={browserVoiceState === 'live' ? 'cyan' : browserVoiceState === 'error' ? 'error' : 'processing'}>
+                    {BROWSER_VOICE_STATE_LABELS[browserVoiceState]}
+                  </Tag>
+                )}
+                {integratedVoice && browserVoiceOutputBytes > 0 && (
+                  <Tag>{Math.round(browserVoiceOutputBytes / 1024)} KB 变声音频</Tag>
+                )}
               </Space>
 
               <section className="deepfake-remote-output">
@@ -1027,12 +1086,13 @@ export default function DeepfakeStudio() {
           </ol>
         ) : (
           <ol className="deepfake-obs-guide">
-            <li>选择身份图片并确认授权，点击“启动浏览器摄像头”，允许当前网页使用 Mac 摄像头。</li>
-            <li>页面会自动创建 OBS 浏览器源输出，并持续把摄像头画面送到 GPU 换脸。</li>
+            <li>选择身份图片和目标声音，确认授权后点击“启动浏览器摄像头”，允许网页使用 Mac 摄像头与麦克风。</li>
+            <li>页面会把摄像头送到 GPU 换脸、把麦克风送到 MeanVC 变声，并合并到同一个 OBS 浏览器源输出。</li>
             <li>复制“OBS 浏览器源输出”地址，在 OBS 添加浏览器来源并粘贴该地址，宽度填写 1280、高度填写 720。</li>
+            <li>启用“通过 OBS 控制音频”，在高级音频属性中把浏览器源设为“仅监听（输出静音）”，监听设备选择 BlackHole 2ch。</li>
             <li>右键浏览器源选择“变换 → 重置变换”，再选择“适配屏幕”；裁剪的上、下、左、右均保持为 0。</li>
-            <li>输出会完整保留摄像头比例；摄像头实际为 4:3 时会出现黑边，这是完整显示而不是内容缺失。</li>
-            <li>OBS 启动虚拟摄像机即可供通话软件选择，不需要开始直播或录制。</li>
+            <li>虚拟摄像机选择该浏览器来源，通话软件的视频选择 OBS Virtual Camera、麦克风选择 BlackHole 2ch。</li>
+            <li>不需要开始直播或录制；保持网页采集运行即可。</li>
           </ol>
         )}
       </Modal>

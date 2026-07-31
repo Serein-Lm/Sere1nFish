@@ -379,6 +379,11 @@ class StreamSession:
     media_read_hash: str = ""
     media_internal_token: str = field(default="", repr=False)
     voice_conversion: VoiceConversionSession | None = field(default=None, repr=False)
+    voice_connected: bool = False
+    voice_input_bytes: int = 0
+    voice_output_bytes: int = 0
+    voice_chunks: int = 0
+    voice_last_error: str = ""
     media_pipeline: MediaPipeline | None = field(default=None, repr=False)
     media_task: asyncio.Task[None] | None = field(default=None, repr=False)
     created_at: str = field(default_factory=_now_iso)
@@ -390,14 +395,14 @@ class StreamSession:
 
     @property
     def active(self) -> bool:
-        return self.connected or bool(
+        return self.connected or self.voice_connected or bool(
             self.media_pipeline
             and self.media_pipeline.stats.state in {"starting", "live", "reconnecting"}
         )
 
     @property
     def reserves_gpu_slot(self) -> bool:
-        return self.connected or self.transport == "obs_whip"
+        return self.connected or self.voice_connected or self.transport == "obs_whip"
 
     @property
     def measured_fps(self) -> float:
@@ -410,7 +415,7 @@ class StreamSession:
         if self.transport == "obs_whip":
             media = media or {"state": "starting"}
             media["publish"] = self.media_publish_diagnostics.as_dict()
-        return {
+        payload = {
             "session_id": self.session_id,
             "created_at": self.created_at,
             "connected": self.connected,
@@ -423,6 +428,19 @@ class StreamSession:
             "media": media,
             "source_analysis": self.source_analysis,
         }
+        if self.voice_conversion:
+            payload["voice_conversion"] = {
+                "enabled": True,
+                "provider": self.voice_conversion.provider,
+                "connected": self.voice_connected,
+                "sample_rate": self.voice_conversion.sample_rate,
+                "chunk_ms": self.voice_conversion.chunk_ms,
+                "input_bytes": self.voice_input_bytes,
+                "output_bytes": self.voice_output_bytes,
+                "chunks": self.voice_chunks,
+                "last_error": self.voice_last_error,
+            }
+        return payload
 
 
 runtime = FaceFusionRuntime()
@@ -559,7 +577,7 @@ async def lifespan(_: FastAPI):
     await asyncio.gather(*(_stop_media_session(session) for session in remaining))
 
 
-app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.5.0", lifespan=lifespan)
+app = FastAPI(title="Sere1nFish Deepfake Gateway", version="1.5.1", lifespan=lifespan)
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -721,8 +739,6 @@ async def create_session(
         raise HTTPException(status_code=503, detail="OBS direct media transport is not configured")
     voice_provider = voice_provider.strip().lower()
     if voice_enabled:
-        if transport != "obs_whip":
-            raise HTTPException(status_code=422, detail="Voice conversion requires OBS direct transport")
         if voice_provider != "meanvc":
             raise HTTPException(status_code=422, detail="Unknown voice conversion provider")
         if not voice_converter:
@@ -756,7 +772,11 @@ async def create_session(
     capacity_error = ""
     async with sessions_lock:
         cutoff = time.monotonic() - SESSION_TTL_SECONDS
-        expired = [key for key, value in sessions.items() if not value.connected and value.last_used_monotonic < cutoff]
+        expired = [
+            key
+            for key, value in sessions.items()
+            if not value.active and value.last_used_monotonic < cutoff
+        ]
         for key in expired:
             removed = sessions.pop(key, None)
             if removed:
@@ -814,6 +834,15 @@ async def create_session(
         "transport": transport,
         "source_analysis": source_analysis,
     }
+    if conversion:
+        payload["voice_conversion"] = {
+            "enabled": True,
+            "provider": conversion.provider,
+            "sample_rate": conversion.sample_rate,
+            "chunk_ms": conversion.chunk_ms,
+        }
+        if transport == "frame_ws":
+            payload["voice_websocket_path"] = f"/v1/realtime/{session_id}/voice"
     if transport == "obs_whip":
         input_path = f"media/input/{session_id}"
         output_path = f"media/output/{session_id}"
@@ -932,7 +961,7 @@ async def delete_session(session_id: str) -> dict[str, bool]:
         session = sessions.get(session_id)
         if not session:
             return {"deleted": False}
-        if session.connected:
+        if session.connected or session.voice_connected:
             raise HTTPException(status_code=409, detail="Disconnect the realtime stream before deleting the session")
         removed = sessions.pop(session_id, None)
     if removed:
@@ -969,8 +998,12 @@ async def realtime_stream(websocket: WebSocket, session_id: str) -> None:
         return
     async with sessions_lock:
         current = sessions.get(session_id)
-        active_count = sum(1 for value in sessions.values() if value.reserves_gpu_slot)
-        if current is not session or session.connected or active_count >= MAX_SESSIONS:
+        other_active_count = sum(
+            1
+            for value in sessions.values()
+            if value is not session and value.reserves_gpu_slot
+        )
+        if current is not session or session.connected or other_active_count >= MAX_SESSIONS:
             rejected = True
         else:
             session.connected = True
@@ -1016,4 +1049,110 @@ async def realtime_stream(websocket: WebSocket, session_id: str) -> None:
     finally:
         async with sessions_lock:
             session.connected = False
+            session.last_used_monotonic = time.monotonic()
+
+
+@app.websocket("/v1/realtime/{session_id}/voice")
+async def realtime_voice_stream(websocket: WebSocket, session_id: str) -> None:
+    session = sessions.get(session_id)
+    if (
+        not session
+        or session.transport != "frame_ws"
+        or not session.voice_conversion
+        or not voice_converter
+        or not _websocket_authorized(websocket, session)
+    ):
+        await websocket.close(code=4401)
+        return
+    async with sessions_lock:
+        current = sessions.get(session_id)
+        other_active_count = sum(
+            1
+            for value in sessions.values()
+            if value is not session and value.reserves_gpu_slot
+        )
+        if (
+            current is not session
+            or session.voice_connected
+            or other_active_count >= MAX_SESSIONS
+        ):
+            rejected = True
+        else:
+            session.voice_connected = True
+            session.voice_last_error = ""
+            rejected = False
+    if rejected:
+        await websocket.close(code=4429)
+        return
+
+    conversion = session.voice_conversion
+    await websocket.accept(subprotocol="sere1nfish")
+
+    async def browser_to_converter(remote: Any) -> None:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+            payload = message.get("bytes")
+            if payload is None:
+                if message.get("text") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+                continue
+            if len(payload) > 128 * 1024 or len(payload) % 2:
+                raise GatewayError("PCM audio chunk is invalid")
+            session.voice_input_bytes += len(payload)
+            session.last_used_monotonic = time.monotonic()
+            await remote.send(payload)
+
+    async def converter_to_browser(remote: Any) -> None:
+        while True:
+            payload = await remote.recv()
+            if isinstance(payload, bytes):
+                session.voice_output_bytes += len(payload)
+                session.voice_chunks += 1
+                session.last_used_monotonic = time.monotonic()
+                await websocket.send_bytes(payload)
+            else:
+                await websocket.send_text(payload)
+
+    try:
+        async with voice_converter.open_stream(conversion) as remote:
+            tasks = {
+                asyncio.create_task(
+                    browser_to_converter(remote),
+                    name=f"deepfake-browser-voice-upload-{session_id}",
+                ),
+                asyncio.create_task(
+                    converter_to_browser(remote),
+                    name=f"deepfake-browser-voice-download-{session_id}",
+                ),
+            }
+            try:
+                done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        session.voice_last_error = str(exc)[:300]
+        logger.warning("Browser MeanVC stream failed session=%s error=%s", session_id, exc)
+        try:
+            await websocket.send_text(
+                json.dumps({"type": "error", "message": session.voice_last_error})
+            )
+        except Exception:
+            pass
+    finally:
+        async with sessions_lock:
+            session.voice_connected = False
             session.last_used_monotonic = time.monotonic()

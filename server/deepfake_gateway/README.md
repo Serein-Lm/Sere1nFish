@@ -18,6 +18,12 @@ Security requirements:
   decodes microphone audio to 16 kHz PCM, sends it to the loopback-only MeanVC
   runtime, and muxes converted speech as Opus into the processed H.264 output.
   The input words are preserved; this path does not call a conversational model.
+- The default compatibility path does not require WHIP. The Sere1nFish browser
+  captures camera frames and microphone audio, resamples the microphone to
+  16 kHz PCM, and uses separate authenticated video and voice WebSockets. The
+  application media-output bus combines processed JPEG frames and converted PCM
+  in one protected OBS Browser Source. This path only needs application HTTPS;
+  OBS does not start a stream or connect to WebRTC port 8189.
 - Converted audio retains only the latest 300 ms by default
   (`DEEPFAKE_MEDIA_AUDIO_BUFFER_MS`), so reconnect and startup bursts cannot
   leave a persistent stale-audio delay.
@@ -63,6 +69,8 @@ API surface:
   optional `profile`, `transport` (`frame_ws` or `obs_whip`) and authorized
   `voice_reference` sample for MeanVC conversion.
 - `WS /v1/realtime/{session_id}`: JPEG frame input/output stream.
+- `WS /v1/realtime/{session_id}/voice`: 16 kHz PCM input and converted PCM
+  output for browser-capture sessions with MeanVC enabled.
 - `POST /internal/mediamtx/auth`: loopback-only per-session media
   authorization endpoint.
 - `GET|DELETE /v1/sessions/{session_id}`: session metrics and cleanup.

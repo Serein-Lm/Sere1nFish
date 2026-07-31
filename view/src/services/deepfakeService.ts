@@ -81,12 +81,19 @@ export interface DeepfakeSourceAnalysis {
 export interface DeepfakeSession {
   session_id: string
   stream_path?: string
+  voice_stream_path?: string
   expires_in: number
   model: string
   max_width: number
   profile: string
   transport: 'frame_ws' | 'obs_whip'
   media?: DeepfakeDirectMedia
+  voice_conversion?: {
+    enabled: boolean
+    provider: string
+    sample_rate: number
+    chunk_ms: number
+  }
   source_analysis: DeepfakeSourceAnalysis
 }
 
@@ -163,6 +170,17 @@ export interface DeepfakeSessionStatus {
   profile: string
   transport: 'frame_ws' | 'obs_whip'
   media?: DeepfakeMediaStatus | null
+  voice_conversion?: {
+    enabled: boolean
+    provider: string
+    connected: boolean
+    sample_rate: number
+    chunk_ms: number
+    input_bytes: number
+    output_bytes: number
+    chunks: number
+    last_error: string
+  }
   source_analysis: DeepfakeSourceAnalysis
 }
 

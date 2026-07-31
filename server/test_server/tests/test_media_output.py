@@ -6,7 +6,9 @@ import pytest
 
 from api.services.media_output import (
     MEDIA_PACKET_AUDIO,
+    MEDIA_PACKET_AUDIO_16K,
     MEDIA_PACKET_VIDEO,
+    MediaOutputError,
     MediaOutputNotFound,
     MediaOutputPermissionError,
     MediaOutputService,
@@ -36,12 +38,19 @@ async def test_output_session_fans_video_and_audio_to_viewer() -> None:
 
     await service.publish_video(created["session_id"], "alice", b"jpeg-frame")
     await service.publish_audio(created["session_id"], "alice", b"\x01\x00\x02\x00")
+    await service.publish_audio(
+        created["session_id"],
+        "alice",
+        b"\x03\x00\x04\x00",
+        sample_rate=16000,
+    )
 
     assert await subscription.queue.get() == bytes((MEDIA_PACKET_VIDEO,)) + b"jpeg-frame"
     assert await subscription.queue.get() == bytes((MEDIA_PACKET_AUDIO,)) + b"\x01\x00\x02\x00"
+    assert await subscription.queue.get() == bytes((MEDIA_PACKET_AUDIO_16K,)) + b"\x03\x00\x04\x00"
     metadata = await service.get(created["session_id"], "alice")
     assert metadata["video_frames"] == 1
-    assert metadata["audio_chunks"] == 1
+    assert metadata["audio_chunks"] == 2
     assert metadata["viewer_count"] == 1
 
     await service.delete(created["session_id"], "alice")
@@ -60,6 +69,20 @@ async def test_slow_viewer_is_moved_to_latest_packet() -> None:
 
     assert await subscription.queue.get() == bytes((MEDIA_PACKET_VIDEO,)) + b"frame-3"
     assert subscription.queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_output_session_rejects_unknown_audio_sample_rate() -> None:
+    service = MediaOutputService()
+    created = await service.create("alice", ttl_seconds=900)
+
+    with pytest.raises(MediaOutputError, match="采样率"):
+        await service.publish_audio(
+            created["session_id"],
+            "alice",
+            b"\x01\x00",
+            sample_rate=22050,
+        )
 
 
 def test_viewer_token_uses_fragment_safe_websocket_subprotocol() -> None:

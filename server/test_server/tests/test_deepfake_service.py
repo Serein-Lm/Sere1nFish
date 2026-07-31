@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -47,6 +48,16 @@ class FakeProvider:
             "websocket_path": "/v1/realtime/session-test-owner",
             "transport": kwargs["transport"],
         }
+        if kwargs.get("voice_options"):
+            payload["voice_conversion"] = {
+                "enabled": True,
+                "provider": "meanvc",
+                "sample_rate": 16000,
+                "chunk_ms": 200,
+            }
+            payload["voice_websocket_path"] = (
+                "/v1/realtime/session-test-owner/voice"
+            )
         if kwargs["transport"] == "obs_whip":
             payload["media"] = {
                 "publish_url": "https://gpu.example.test/media/input/test/whip",
@@ -64,6 +75,10 @@ class FakeProvider:
 
     @asynccontextmanager
     async def open_stream(self, _session_id: str):
+        yield object()
+
+    @asynccontextmanager
+    async def open_voice_stream(self, _session_id: str):
         yield object()
 
 
@@ -191,21 +206,31 @@ async def test_obs_direct_voice_conversion_is_forwarded_without_leaking_referenc
 
 
 @pytest.mark.asyncio
-async def test_voice_conversion_rejects_invalid_transport_provider_and_size() -> None:
+async def test_browser_voice_conversion_exposes_authenticated_proxy_path() -> None:
+    provider = FakeProvider()
+    service = DeepfakeService(_config(), provider)
+    created = await service.create_session(
+        username="alice",
+        sources=[SourceImage(b"source", "source.jpg")],
+        max_width=640,
+        profile="fast",
+        transport="frame_ws",
+        voice_options=DeepfakeVoiceOptions(
+            provider="meanvc",
+            reference=SourceAudio(b"reference", "voice.wav", "audio/wav"),
+        ),
+    )
+
+    assert created["voice_stream_path"].endswith("/session-test-owner/voice")
+    assert "voice_websocket_path" not in created
+    assert created["voice_conversion"]["sample_rate"] == 16000
+    await service.delete_session(created["session_id"], "alice")
+
+
+@pytest.mark.asyncio
+async def test_voice_conversion_rejects_invalid_provider_and_size() -> None:
     service = DeepfakeService(_config(), FakeProvider())
     valid_reference = SourceAudio(b"reference", "voice.wav", "audio/wav")
-    with pytest.raises(ValueError, match="OBS direct"):
-        await service.create_session(
-            username="alice",
-            sources=[SourceImage(b"source", "source.jpg")],
-            max_width=640,
-            profile="fast",
-            transport="frame_ws",
-            voice_options=DeepfakeVoiceOptions(
-                provider="meanvc",
-                reference=valid_reference,
-            ),
-        )
     with pytest.raises(ValueError, match="provider"):
         await service.create_session(
             username="alice",
@@ -367,3 +392,108 @@ async def test_realtime_frame_is_relayed_to_bound_media_output(monkeypatch) -> N
     assert remote.sent == [b"camera-frame"]
     assert websocket.sent_bytes == [b"swapped-frame"]
     assert media.frames == [("media-session", "alice", b"swapped-frame")]
+
+
+@pytest.mark.asyncio
+async def test_browser_voice_is_relayed_to_bound_media_output(monkeypatch) -> None:
+    published = asyncio.Event()
+
+    class FakeRemote:
+        def __init__(self) -> None:
+            self.receive_count = 0
+            self.sent: list[bytes | str] = []
+            self.input_received = asyncio.Event()
+
+        async def recv(self):
+            self.receive_count += 1
+            if self.receive_count == 1:
+                return '{"type":"session.ready","sample_rate":16000}'
+            if self.receive_count == 2:
+                await self.input_received.wait()
+                return b"\x01\x00\x02\x00"
+            await asyncio.Future()
+
+        async def send(self, payload):
+            self.sent.append(payload)
+            self.input_received.set()
+
+    remote = FakeRemote()
+
+    class FakeDeepfakeService:
+        async def open_voice_stream(self, session_id: str, username: str):
+            assert (session_id, username) == ("deepfake-session", "alice")
+
+            @asynccontextmanager
+            async def context():
+                yield remote
+
+            return context()
+
+    class FakeMediaOutput:
+        def __init__(self) -> None:
+            self.audio: list[tuple[str, str, bytes, int]] = []
+
+        async def require_owner(self, session_id: str, owner: str) -> None:
+            assert (session_id, owner) == ("media-session", "alice")
+
+        async def publish_audio(
+            self,
+            session_id: str,
+            owner: str,
+            data: bytes,
+            *,
+            sample_rate: int,
+        ) -> None:
+            self.audio.append((session_id, owner, data, sample_rate))
+            published.set()
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.receive_count = 0
+            self.accepted_subprotocol = ""
+            self.sent_text: list[str] = []
+
+        async def accept(self, *, subprotocol: str) -> None:
+            self.accepted_subprotocol = subprotocol
+
+        async def receive(self):
+            self.receive_count += 1
+            if self.receive_count == 1:
+                return {"type": "websocket.receive", "bytes": b"\x03\x00\x04\x00"}
+            await asyncio.wait_for(published.wait(), timeout=1)
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, payload: str) -> None:
+            self.sent_text.append(payload)
+
+        async def close(self, *, code: int) -> None:
+            pass
+
+    media = FakeMediaOutput()
+
+    async def authenticated_username(_websocket) -> str:
+        return "alice"
+
+    async def deepfake_service():
+        return FakeDeepfakeService()
+
+    monkeypatch.setattr(
+        deepfake_router,
+        "authenticated_websocket_username",
+        authenticated_username,
+    )
+    monkeypatch.setattr(deepfake_router, "get_deepfake_service", deepfake_service)
+    monkeypatch.setattr(deepfake_router, "get_media_output_service", lambda: media)
+
+    websocket = FakeWebSocket()
+    await deepfake_router.stream_voice_session(
+        websocket,
+        "deepfake-session",
+        "media-session",
+    )
+
+    assert remote.sent == [b"\x03\x00\x04\x00"]
+    assert media.audio == [
+        ("media-session", "alice", b"\x01\x00\x02\x00", 16000)
+    ]
+    assert '"type":"session.ready"' in websocket.sent_text[0]

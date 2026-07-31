@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+import websockets
 
 
 class VoiceConversionError(RuntimeError):
@@ -169,3 +171,23 @@ class MeanVCVoiceConverter:
             return
         if response.status_code not in {200, 404, 409}:
             raise self._response_error(response)
+
+    @asynccontextmanager
+    async def open_stream(self, session: VoiceConversionSession) -> AsyncIterator[Any]:
+        try:
+            async with websockets.connect(
+                session.websocket_url,
+                additional_headers={"Authorization": f"Bearer {session.token}"},
+                open_timeout=10,
+                close_timeout=5,
+                ping_interval=20,
+                ping_timeout=20,
+                max_size=4 * 1024 * 1024,
+                compression=None,
+                proxy=None,
+            ) as websocket:
+                yield websocket
+        except VoiceConversionError:
+            raise
+        except Exception as exc:
+            raise VoiceConversionError(f"MeanVC stream is unavailable: {exc}") from exc

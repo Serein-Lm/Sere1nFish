@@ -1,4 +1,5 @@
 import { apiFetch, openAuthenticatedWebSocket } from './http'
+import { PcmMicrophoneCapture } from './pcmAudio'
 
 export type RealtimeTurnMode = 'smart_turn' | 'server_vad' | 'manual'
 export type RealtimeSessionState = 'idle' | 'connecting' | 'listening' | 'speaking' | 'error'
@@ -78,147 +79,6 @@ export interface LocalAudioDevice {
   deviceId: string
   label: string
   kind: 'audioinput' | 'audiooutput'
-}
-
-const CAPTURE_PROCESSOR = `
-class Sere1nFishPcmCapture extends AudioWorkletProcessor {
-  constructor() {
-    super()
-    this.batchSize = Math.max(128, Math.round(sampleRate * 0.04))
-    this.buffer = new Float32Array(this.batchSize)
-    this.offset = 0
-  }
-  process(inputs) {
-    const channel = inputs[0] && inputs[0][0]
-    if (!channel) return true
-    let sourceOffset = 0
-    while (sourceOffset < channel.length) {
-      const length = Math.min(channel.length - sourceOffset, this.batchSize - this.offset)
-      this.buffer.set(channel.subarray(sourceOffset, sourceOffset + length), this.offset)
-      this.offset += length
-      sourceOffset += length
-      if (this.offset === this.batchSize) {
-        const payload = this.buffer
-        this.port.postMessage(payload, [payload.buffer])
-        this.buffer = new Float32Array(this.batchSize)
-        this.offset = 0
-      }
-    }
-    return true
-  }
-}
-registerProcessor('sere1nfish-pcm-capture', Sere1nFishPcmCapture)
-`
-
-function floatToPcm16(samples: Float32Array): ArrayBuffer {
-  const output = new ArrayBuffer(samples.length * 2)
-  const view = new DataView(output)
-  for (let index = 0; index < samples.length; index += 1) {
-    const sample = Math.max(-1, Math.min(1, samples[index]))
-    view.setInt16(index * 2, sample < 0 ? sample * 32768 : sample * 32767, true)
-  }
-  return output
-}
-
-class StreamingResampler {
-  private carry = new Float32Array(0)
-  private position = 0
-  private readonly inputRate: number
-  private readonly outputRate: number
-
-  constructor(inputRate: number, outputRate: number) {
-    this.inputRate = inputRate
-    this.outputRate = outputRate
-  }
-
-  process(chunk: Float32Array): ArrayBuffer | null {
-    if (this.inputRate === this.outputRate) return floatToPcm16(chunk)
-    const input = new Float32Array(this.carry.length + chunk.length)
-    input.set(this.carry)
-    input.set(chunk, this.carry.length)
-    const ratio = this.inputRate / this.outputRate
-    const output: number[] = []
-    while (this.position + 1 < input.length) {
-      const left = Math.floor(this.position)
-      const fraction = this.position - left
-      output.push(input[left] + (input[left + 1] - input[left]) * fraction)
-      this.position += ratio
-    }
-    const consumed = Math.floor(this.position)
-    this.carry = input.slice(consumed)
-    this.position -= consumed
-    return output.length ? floatToPcm16(Float32Array.from(output)) : null
-  }
-}
-
-class MicrophoneCapture {
-  private context: AudioContext | null = null
-  private stream: MediaStream | null = null
-  private source: MediaStreamAudioSourceNode | null = null
-  private processor: AudioWorkletNode | null = null
-  private silentGain: GainNode | null = null
-
-  async start(
-    targetSampleRate: number,
-    inputDeviceId: string | undefined,
-    onPcm: (pcm: ArrayBuffer) => void,
-  ): Promise<void> {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        ...(inputDeviceId ? { deviceId: { exact: inputDeviceId } } : {}),
-      },
-      video: false,
-    })
-    const context = new AudioContext({ latencyHint: 'interactive' })
-    const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_PROCESSOR], { type: 'text/javascript' }))
-    try {
-      await context.audioWorklet.addModule(moduleUrl)
-    } finally {
-      URL.revokeObjectURL(moduleUrl)
-    }
-    const source = context.createMediaStreamSource(stream)
-    const processor = new AudioWorkletNode(context, 'sere1nfish-pcm-capture', {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      outputChannelCount: [1],
-    })
-    const silentGain = context.createGain()
-    silentGain.gain.value = 0
-    const resampler = new StreamingResampler(context.sampleRate, targetSampleRate)
-    processor.port.onmessage = (event: MessageEvent<Float32Array>) => {
-      const pcm = resampler.process(event.data)
-      if (pcm?.byteLength) onPcm(pcm)
-    }
-    source.connect(processor)
-    processor.connect(silentGain)
-    silentGain.connect(context.destination)
-    await context.resume()
-
-    this.context = context
-    this.stream = stream
-    this.source = source
-    this.processor = processor
-    this.silentGain = silentGain
-  }
-
-  async stop(): Promise<void> {
-    this.processor?.port.close()
-    this.processor?.disconnect()
-    this.source?.disconnect()
-    this.silentGain?.disconnect()
-    this.stream?.getTracks().forEach(track => track.stop())
-    const context = this.context
-    this.context = null
-    this.stream = null
-    this.source = null
-    this.processor = null
-    this.silentGain = null
-    if (context && context.state !== 'closed') await context.close()
-  }
 }
 
 type AudioContextWithSink = AudioContext & {
@@ -318,7 +178,7 @@ export async function listLocalAudioDevices(): Promise<LocalAudioDevice[]> {
 
 export class RealtimeVoiceClient {
   private socket: WebSocket | null = null
-  private capture = new MicrophoneCapture()
+  private capture = new PcmMicrophoneCapture()
   private playback = new PcmPlaybackQueue()
   private options: RealtimeVoiceStartOptions | null = null
   private ready = false
@@ -340,7 +200,7 @@ export class RealtimeVoiceClient {
       if (options.playLocally !== false) {
         await this.playback.start(options.outputDeviceId)
       }
-      await this.capture.start(16000, options.inputDeviceId, pcm => {
+      await this.capture.startDevice(16000, options.inputDeviceId, pcm => {
         const socket = this.socket
         const canSend = options.mode !== 'manual' || this.pushToTalk
         if (!this.ready || !canSend || socket?.readyState !== WebSocket.OPEN) return

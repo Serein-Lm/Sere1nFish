@@ -15,6 +15,7 @@ from core.observability import obs_log
 
 MEDIA_PACKET_VIDEO = 1
 MEDIA_PACKET_AUDIO = 2
+MEDIA_PACKET_AUDIO_16K = 3
 MAX_VIDEO_PACKET_BYTES = 8 * 1024 * 1024
 MAX_AUDIO_PACKET_BYTES = 512 * 1024
 
@@ -215,10 +216,23 @@ class MediaOutputService:
             raise MediaOutputError("远端 OBS 视频帧大小无效")
         await self._publish(session_id, owner, MEDIA_PACKET_VIDEO, data)
 
-    async def publish_audio(self, session_id: str, owner: str, data: bytes) -> None:
+    async def publish_audio(
+        self,
+        session_id: str,
+        owner: str,
+        data: bytes,
+        *,
+        sample_rate: int = 24000,
+    ) -> None:
         if not data or len(data) > MAX_AUDIO_PACKET_BYTES or len(data) % 2:
             raise MediaOutputError("远端 OBS PCM 音频分片大小无效")
-        await self._publish(session_id, owner, MEDIA_PACKET_AUDIO, data)
+        packet_type = {
+            16000: MEDIA_PACKET_AUDIO_16K,
+            24000: MEDIA_PACKET_AUDIO,
+        }.get(sample_rate)
+        if packet_type is None:
+            raise MediaOutputError("远端 OBS PCM 音频采样率不受支持")
+        await self._publish(session_id, owner, packet_type, data)
 
     async def _publish(
         self,

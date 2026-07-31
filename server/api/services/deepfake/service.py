@@ -140,8 +140,6 @@ class DeepfakeService:
         self.validate_sources(sources)
         normalized_transport = self.normalize_transport(transport)
         if voice_options is not None:
-            if normalized_transport != "obs_whip":
-                raise ValueError("voice conversion is only supported by OBS direct sessions")
             if voice_options.provider != "meanvc":
                 raise ValueError("voice conversion provider is invalid")
             if voice_options.steps not in {1, 2}:
@@ -165,6 +163,11 @@ class DeepfakeService:
         payload.pop("ticket", None)
         if payload.get("transport") == "frame_ws":
             payload["stream_path"] = f"/api/v1/deepfake/sessions/{session_id}/stream"
+            if payload.get("voice_conversion"):
+                payload["voice_stream_path"] = (
+                    f"/api/v1/deepfake/sessions/{session_id}/voice"
+                )
+        payload.pop("voice_websocket_path", None)
         return payload
 
     async def _require_owner(self, session_id: str, username: str) -> None:
@@ -191,6 +194,14 @@ class DeepfakeService:
     ) -> AbstractAsyncContextManager[DeepfakeStream]:
         await self._require_owner(session_id, username)
         return self.provider.open_stream(session_id)
+
+    async def open_voice_stream(
+        self,
+        session_id: str,
+        username: str,
+    ) -> AbstractAsyncContextManager[DeepfakeStream]:
+        await self._require_owner(session_id, username)
+        return self.provider.open_voice_stream(session_id)
 
 
 async def get_deepfake_service() -> DeepfakeService:

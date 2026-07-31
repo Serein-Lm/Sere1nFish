@@ -203,3 +203,24 @@ class FaceFusionGatewayProvider:
             raise
         except Exception as exc:
             raise DeepfakeProviderError(f"GPU realtime stream failed: {exc}") from exc
+
+    @asynccontextmanager
+    async def open_voice_stream(self, session_id: str) -> AsyncIterator[DeepfakeStream]:
+        try:
+            async with websockets.connect(
+                self._websocket_url(f"/v1/realtime/{session_id}/voice"),
+                additional_headers=self._headers,
+                subprotocols=["sere1nfish"],
+                ssl=self._ssl_context,
+                open_timeout=self.config.timeout_seconds,
+                close_timeout=5,
+                ping_interval=20,
+                ping_timeout=20,
+                max_size=4 * 1024 * 1024,
+                compression=None,
+            ) as websocket:
+                yield websocket
+        except DeepfakeProviderError:
+            raise
+        except Exception as exc:
+            raise DeepfakeProviderError(f"GPU voice conversion stream failed: {exc}") from exc

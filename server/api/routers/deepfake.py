@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Annotated
 
@@ -12,7 +13,12 @@ from starlette.websockets import WebSocketDisconnect
 from api.auth import User, get_current_active_user
 from api.services.deepfake import get_deepfake_service
 from api.services.deepfake.adapters import DeepfakeProviderError
-from api.services.deepfake.contracts import DeepfakeVoiceOptions, SourceAudio, SourceImage
+from api.services.deepfake.contracts import (
+    DeepfakeStream,
+    DeepfakeVoiceOptions,
+    SourceAudio,
+    SourceImage,
+)
 from api.services.deepfake.service import DeepfakeConfigurationError
 from api.services.media_output import MediaOutputError, get_media_output_service
 from api.services.websocket_auth import (
@@ -240,3 +246,114 @@ async def stream_session(
             await websocket.send_text(json.dumps({"type": "error", "message": "GPU stream disconnected"}))
         except Exception:
             pass
+
+
+@router.websocket("/sessions/{session_id}/voice")
+async def stream_voice_session(
+    websocket: WebSocket,
+    session_id: str,
+    output_session_id: str = "",
+) -> None:
+    username = await authenticated_websocket_username(websocket)
+    if not username or not output_session_id or len(output_session_id) > 96:
+        await websocket.close(code=4401)
+        return
+    try:
+        service = await get_deepfake_service()
+        stream_context = await service.open_voice_stream(session_id, username)
+        media_output = get_media_output_service()
+        await media_output.require_owner(output_session_id, username)
+    except Exception:
+        await websocket.close(code=4404)
+        return
+    await websocket.accept(subprotocol=PUBLIC_SUBPROTOCOL)
+
+    async def browser_to_remote(remote: DeepfakeStream) -> None:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+            payload: bytes | str | None = message.get("bytes")
+            if payload is None:
+                payload = message.get("text")
+            if payload is None:
+                continue
+            if isinstance(payload, bytes) and (
+                len(payload) > 128 * 1024 or len(payload) % 2
+            ):
+                raise ValueError("PCM audio chunk is invalid")
+            await remote.send(payload)
+
+    async def remote_to_output(remote: DeepfakeStream) -> None:
+        output_bytes = 0
+        output_chunks = 0
+        while True:
+            payload = await remote.recv()
+            if isinstance(payload, bytes):
+                await media_output.publish_audio(
+                    output_session_id,
+                    username,
+                    payload,
+                    sample_rate=16000,
+                )
+                output_bytes += len(payload)
+                output_chunks += 1
+                if output_chunks % 10 == 0:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "voice.progress",
+                                "output_bytes": output_bytes,
+                                "output_chunks": output_chunks,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                continue
+            try:
+                event = json.loads(payload)
+            except (TypeError, ValueError):
+                event = {
+                    "type": "error",
+                    "message": "GPU returned invalid voice stream metadata",
+                }
+            await websocket.send_text(json.dumps(event, separators=(",", ":")))
+
+    tasks: set[asyncio.Task[None]] = set()
+    try:
+        async with stream_context as remote:
+            tasks = {
+                asyncio.create_task(
+                    browser_to_remote(remote),
+                    name=f"deepfake-browser-voice-upload-{session_id}",
+                ),
+                asyncio.create_task(
+                    remote_to_output(remote),
+                    name=f"deepfake-browser-voice-download-{session_id}",
+                ),
+            }
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        try:
+            await websocket.send_text(
+                json.dumps(
+                    {"type": "error", "message": "MeanVC voice stream disconnected"}
+                )
+            )
+        except Exception:
+            pass
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

@@ -175,6 +175,7 @@ _OBS_VIEW_HTML = """<!doctype html>
   (() => {
     const VIDEO = 1;
     const AUDIO = 2;
+    const AUDIO_16K = 3;
     const token = location.hash.slice(1);
     const frame = document.getElementById('frame');
     const status = document.getElementById('status');
@@ -192,7 +193,7 @@ _OBS_VIEW_HTML = """<!doctype html>
       if (audioContext.state === 'suspended') await audioContext.resume().catch(() => {});
       return audioContext;
     };
-    const playPcm = async bytes => {
+    const playPcm = async (bytes, sampleRate) => {
       if (!bytes.byteLength || bytes.byteLength % 2) return;
       const context = await ensureAudio();
       if (context.state !== 'running') {
@@ -200,7 +201,7 @@ _OBS_VIEW_HTML = """<!doctype html>
         return;
       }
       const count = bytes.byteLength / 2;
-      const buffer = context.createBuffer(1, count, 24000);
+      const buffer = context.createBuffer(1, count, sampleRate);
       const channel = buffer.getChannelData(0);
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       for (let i = 0; i < count; i += 1) channel[i] = view.getInt16(i * 2, true) / 32768;
@@ -209,6 +210,15 @@ _OBS_VIEW_HTML = """<!doctype html>
       source.connect(context.destination);
       source.onended = () => audioSources.delete(source);
       audioSources.add(source);
+      if (nextAudioAt > context.currentTime + 0.6) {
+        audioSources.forEach(item => {
+          if (item !== source) {
+            try { item.stop(); } catch {}
+            audioSources.delete(item);
+          }
+        });
+        nextAudioAt = context.currentTime + 0.025;
+      }
       nextAudioAt = Math.max(nextAudioAt, context.currentTime + 0.025);
       source.start(nextAudioAt);
       nextAudioAt += buffer.duration;
@@ -246,7 +256,8 @@ _OBS_VIEW_HTML = """<!doctype html>
         if (packet.byteLength < 2) return;
         const payload = packet.subarray(1);
         if (packet[0] === VIDEO) showFrame(payload);
-        else if (packet[0] === AUDIO) void playPcm(payload);
+        else if (packet[0] === AUDIO) void playPcm(payload, 24000);
+        else if (packet[0] === AUDIO_16K) void playPcm(payload, 16000);
       };
       socket.onerror = () => socket && socket.close();
       socket.onclose = event => {

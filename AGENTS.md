@@ -103,7 +103,7 @@
 - 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。
 - 截图、Word 产物、语音上传和受保护下载文件统一通过 `api.storage.ObjectStorageService` 写入；业务集合只保存 `storage_object_id`，不得直接调用 OSS SDK 或拼接 Object Key。读取按对象元数据选择 Provider，允许迁移期本地与 OSS 对象并存。
 - 百炼全双工语音统一通过 `api.services.voice_realtime` 的 Provider/Factory/Service 接入：浏览器只连接鉴权代理并传输 16kHz PCM，后端返回 24kHz PCM 和白名单事件；API Key 不得下发前端。TTS 与全双工复刻音色按目标模型隔离，禁止跨模型混用。
-- 视频通话中的纯变声统一通过 Deepfake 会话的语音转换接口接入。OBS 麦克风由 GPU Gateway 解码为 16kHz PCM，当前 `meanvc` adapter 只做原话音色转换，不调用对话模型、不维护对话上下文；参考声音和原始 PCM 只属于短时会话，不落盘。后续替换模型必须扩展 Provider/Factory，不得在媒体 pipeline 增加模型特例。
+- 视频通话中的纯变声统一通过 Deepfake 会话的语音转换接口接入。默认浏览器采集路径通过共享 AudioWorklet 把麦克风重采样为 16kHz PCM，经鉴权 WebSocket、GPU Gateway 和 `meanvc` adapter 转换后写回统一 `media_output`，与换脸画面共同提供给 OBS 浏览器源；OBS WHIP 路径仍可直接解码其麦克风音轨。两条路径都只做原话音色转换，不调用对话模型、不维护对话上下文；参考声音和原始 PCM 只属于短时会话，不落盘。后续替换模型必须扩展 Provider/Factory，不得在媒体 pipeline 或页面增加模型特例。
 - 远端音视频合流统一通过 `api.services.media_output` 的短时会话接入。Deepfake 和全双工语音只按 `output_session_id` 发布领域媒体，不自行实现 OBS、观看端、票据或广播逻辑；观看凭据只允许通过 URL fragment 和 WebSocket subprotocol 传递，服务端仅保存摘要，不持久化原始音视频。
 - 对象存储 Bucket 必须为私有读写，服务端使用内网 Endpoint，浏览器下载使用短时签名 URL，图片通过鉴权 API 读取。AK/SK 只存 MongoDB 加密配置，不写入环境文件、日志、迁移报告或 Git。
 - 观测能力通过 `core/observability`、`Sere1nGraph` token tracker 或统一日志入口接入；新增长流程应记录开始、结束、失败和关键资源标识。
@@ -137,7 +137,7 @@
 - 页面元素应有稳定尺寸和响应式约束，避免按钮文字、表格列、卡片内容在桌面或移动视口互相遮挡。
 - 前端相关变更需要使用 Codex `chrome-devtools` 打开 `https://127.0.0.1/` 验证页面渲染、交互、控制台错误、网络请求和响应式表现。
 - 本机媒体接入由前端 service 管理设备权限、采集、重采样、播放和资源释放。远端 Deepfake 与全双工语音接入 OBS 使用统一的短时 HTTPS 浏览器源；前端只负责创建、复制和关闭输出会话，不向 OBS 暴露 GPU Gateway Token、百炼 API Key 或后端内部地址。
-- Deepfake 视频通话的目标声音通过会话表单上传，页面只展示 Provider、参考样本和质量档位；不得把对话模型、Prompt、历史轮次等语义混入纯变声界面。
+- Deepfake 视频通话的目标声音通过会话表单上传，页面只展示 Provider、参考样本和质量档位；不得把对话模型、Prompt、历史轮次等语义混入纯变声界面。浏览器采集是默认兼容路径，必须同时维护换脸视频和 MeanVC 音频到 OBS 浏览器源；WHIP 只能作为可选直连传输，不能成为脸声替换的唯一入口。
 - 不提交生成的 `dist` 输出、`node_modules` 或本地运行缓存。
 
 ## 测试与验证范式
