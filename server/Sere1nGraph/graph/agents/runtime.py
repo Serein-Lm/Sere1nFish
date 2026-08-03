@@ -38,6 +38,7 @@ logger = get_logger("agent_runtime")
 # 输出模式类型
 OutputMode = Literal["silent", "console", "sse"]
 ToolResultTransform = Callable[[str, Any], Any]
+ToolResultObserver = Callable[[str, Any], None]
 
 # 默认超时（秒）
 DEFAULT_AGENT_TIMEOUT = 500
@@ -202,6 +203,7 @@ def _wrap_tools_with_error_handling(
         [str, tuple[Any, ...], dict[str, Any]], str | None
     ] | None = None,
     result_transform: ToolResultTransform | None = None,
+    result_observer: ToolResultObserver | None = None,
 ) -> list:
     """
     给每个工具包一层 try/except，异常时返回错误字符串而不是抛异常。
@@ -254,6 +256,15 @@ def _wrap_tools_with_error_handling(
                     result = await _await_tool_call(call, float(tool_timeout))
                     _es["consecutive"] = 0  # 成功则重置
                     _es["container_error_consecutive"] = 0
+                    if result_observer is not None:
+                        try:
+                            result_observer(_name, result)
+                        except Exception:
+                            logger.warning(
+                                "MCP 工具结果观察器执行失败 | tool=%s",
+                                _name,
+                                exc_info=True,
+                            )
                     return (
                         result_transform(_name, result)
                         if result_transform is not None
@@ -308,6 +319,15 @@ def _wrap_tools_with_error_handling(
                     result = _orig(*args, **kwargs)
                     _es["consecutive"] = 0
                     _es["container_error_consecutive"] = 0
+                    if result_observer is not None:
+                        try:
+                            result_observer(_name, result)
+                        except Exception:
+                            logger.warning(
+                                "MCP 工具结果观察器执行失败 | tool=%s",
+                                _name,
+                                exc_info=True,
+                            )
                     return (
                         result_transform(_name, result)
                         if result_transform is not None
@@ -411,6 +431,7 @@ def create_agent_node(
     ] | None = None,
     mcp_tool_names: Sequence[str] | None = None,
     mcp_result_transform: ToolResultTransform | None = None,
+    mcp_result_observer: ToolResultObserver | None = None,
 ) -> Callable[[MessagesState], dict[str, Any] | AsyncGenerator[dict[str, Any], None]]:
     """
     创建 Agent 节点函数。
@@ -426,6 +447,7 @@ def create_agent_node(
     - timeout: Agent 执行超时秒数（默认从 config.runtime.agent_timeout 读取，fallback 500s，0 表示不限）
     - mcp_tool_names: 专用 Agent 可见的 MCP 工具白名单；None 表示保留全部工具
     - mcp_result_transform: MCP 工具结果进入模型上下文前的统一转换器
+    - mcp_result_observer: 在压缩前观察原始 MCP 工具结果，用于独立证据账本等运行时状态
     
     返回：
     - output_mode="silent" 或 "console": 返回异步函数，执行后返回 {"messages": [...]}
@@ -464,6 +486,7 @@ def create_agent_node(
                             max_calls=mcp_tool_limit,
                             call_guard=mcp_call_guard,
                             result_transform=mcp_result_transform,
+                            result_observer=mcp_result_observer,
                         )
                         all_tools.extend(mcp_tools)
                         agent = create_agent(
@@ -484,6 +507,7 @@ def create_agent_node(
                         max_calls=mcp_tool_limit,
                         call_guard=mcp_call_guard,
                         result_transform=mcp_result_transform,
+                        result_observer=mcp_result_observer,
                     )
                     all_tools.extend(mcp_tools)
 
@@ -548,6 +572,7 @@ def create_agent_node(
                                 max_calls=mcp_tool_limit,
                                 call_guard=mcp_call_guard,
                                 result_transform=mcp_result_transform,
+                                result_observer=mcp_result_observer,
                             )
                             all_tools.extend(mcp_tools)
                             return await _execute(all_tools)
@@ -559,6 +584,7 @@ def create_agent_node(
                             max_calls=mcp_tool_limit,
                             call_guard=mcp_call_guard,
                             result_transform=mcp_result_transform,
+                            result_observer=mcp_result_observer,
                         )
                         all_tools.extend(mcp_tools)
 

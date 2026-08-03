@@ -353,6 +353,7 @@ async def create_target_research_agent(
     app_config: AppConfig,
     server_name: str = "chrome-devtools",
     output_mode: OutputMode = "silent",
+    mcp_result_observer: Callable[[str, Any], None] | None = None,
 ) -> Callable:
     """创建机构 Target 深研 Agent；仅使用项目 Chrome，不另起浏览器。"""
     return create_agent_node(
@@ -384,6 +385,7 @@ async def create_target_research_agent(
         output_mode=output_mode,
         mcp_call_guard=_build_persona_research_guard(),
         mcp_result_transform=_compact_persona_research_result,
+        mcp_result_observer=mcp_result_observer,
     )
 
 

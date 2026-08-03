@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -50,56 +50,87 @@ def _clean_strings(values: list[Any] | None, *, limit: int) -> list[str]:
     )[:limit]
 
 
-def _extract_navigated_urls(raw: dict[str, Any]) -> set[str]:
-    urls: set[str] = set()
-    pending_selected_url = ""
-    for message in raw.get("messages") or []:
-        for tool_call in getattr(message, "tool_calls", None) or []:
-            if str(tool_call.get("name") or "") != "navigate_page":
-                continue
-            pending_selected_url = ""
-            args = tool_call.get("args") or {}
-            url = canonicalize_source_url(str(args.get("url") or ""))
-            if url.startswith(("http://", "https://")):
-                urls.add(url)
-        if not isinstance(message, ToolMessage):
-            continue
-        tool_name = str(getattr(message, "name", "") or "")
-        content = getattr(message, "content", "")
-        if isinstance(content, list):
-            text = "\n".join(
-                str(block.get("text") or "")
-                for block in content
-                if isinstance(block, dict) and block.get("text")
-            )
-        else:
-            text = str(content or "")
+def _browser_tool_text(value: Any) -> str:
+    if isinstance(value, tuple) and value:
+        value = value[0]
+    if isinstance(value, list):
+        return "\n".join(
+            text
+            for item in value
+            if (text := _browser_tool_text(item))
+        )
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("content") or "")
+    return str(value or "")
 
+
+def _canonical_browser_url(value: Any) -> str:
+    raw = str(value or "").strip().rstrip(".,;，。；")
+    url = canonicalize_source_url(raw)
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+def _selected_browser_urls(text: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            url
+            for value in re.findall(
+                r"\((https?://[^\s)]+)\)\s*\[selected\]",
+                text,
+            )
+            if (url := _canonical_browser_url(value))
+        )
+    )
+
+
+def _build_navigation_evidence_observer(
+    urls: set[str],
+) -> Callable[[str, Any], None]:
+    """Record browser evidence before Agent summarization can discard messages."""
+    pending_selected_url = ""
+
+    def observe(tool_name: str, result: Any) -> None:
+        nonlocal pending_selected_url
+        text = _browser_tool_text(result)
         if tool_name == "evaluate_script":
             if pending_selected_url and "Script ran on page and returned:" in text:
                 urls.add(pending_selected_url)
                 pending_selected_url = ""
-            continue
+            return
         if tool_name != "navigate_page":
-            continue
+            return
 
-        selected_urls = re.findall(
-            r"\((https?://[^\s)]+)\)\s*\[selected\]",
-            text,
-        )
+        selected_urls = _selected_browser_urls(text)
         if "Successfully navigated to " not in text:
-            pending_selected_url = ""
-            for selected_url in selected_urls:
-                candidate = canonicalize_source_url(selected_url)
-                if candidate.startswith(("http://", "https://")):
-                    pending_selected_url = candidate
-            continue
+            pending_selected_url = selected_urls[-1] if selected_urls else ""
+            return
 
         pending_selected_url = ""
-        for selected_url in selected_urls:
-            url = canonicalize_source_url(selected_url)
-            if url.startswith(("http://", "https://")):
+        for value in re.findall(
+            r"Successfully navigated to\s+(https?://[^\s]+)",
+            text,
+        ):
+            if url := _canonical_browser_url(value):
                 urls.add(url)
+        urls.update(selected_urls)
+
+    return observe
+
+
+def _extract_navigated_urls(raw: dict[str, Any]) -> set[str]:
+    urls: set[str] = set()
+    observe = _build_navigation_evidence_observer(urls)
+    for message in raw.get("messages") or []:
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            if str(tool_call.get("name") or "") != "navigate_page":
+                continue
+            args = tool_call.get("args") or {}
+            if url := _canonical_browser_url(args.get("url")):
+                urls.add(url)
+        if not isinstance(message, ToolMessage):
+            continue
+        tool_name = str(getattr(message, "name", "") or "")
+        observe(tool_name, getattr(message, "content", ""))
     return urls
 
 
@@ -124,7 +155,15 @@ def _normalize_payload(
     if navigated_urls is not None:
         verified = set(sources_by_url).intersection(navigated_urls)
         if len(verified) < 2 or verified != set(sources_by_url):
-            raise ValueError("机构深研来源必须全部来自本轮浏览器实际导航记录")
+            missing = sorted(set(sources_by_url).difference(navigated_urls))
+            logger.warning(
+                "机构深研来源证据不完整 | missing=%s navigated_count=%s",
+                missing,
+                len(navigated_urls),
+            )
+            raise ValueError(
+                f"机构深研来源必须全部来自本轮浏览器实际导航记录（未验证 {len(missing)} 个）"
+            )
     known_urls = set(sources_by_url)
 
     def normalize_urls(values: list[Any], *, field: str) -> list[str]:
@@ -477,7 +516,11 @@ async def run_target_research(
         raise RuntimeError("无法获取项目 Chrome 执行机构深研")
     try:
         worker_config = _build_worker_chrome_config(app_config, cdp_url)
-        agent = await create_target_research_agent(worker_config)
+        navigated_urls: set[str] = set()
+        agent = await create_target_research_agent(
+            worker_config,
+            mcp_result_observer=_build_navigation_evidence_observer(navigated_urls),
+        )
         query = (
             "请对以下公司/机构执行公开互联网深度研究，并严格输出 Prompt 规定的 JSON。\n"
             f"project_id: {project_id}\n"
@@ -508,9 +551,10 @@ async def run_target_research(
     if not parsed:
         raise ValueError("机构深研 Agent 未返回可解析的结构化结果")
 
+    navigated_urls.update(_extract_navigated_urls(raw))
     data = _normalize_payload(
         TargetResearchPayload.model_validate(parsed),
-        navigated_urls=_extract_navigated_urls(raw),
+        navigated_urls=navigated_urls,
     )
     await update_task_stage(
         db, task_id=task_id, stage="target_expand", message="正在校验证据并扩展 Target 关系..."

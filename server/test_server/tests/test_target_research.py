@@ -6,6 +6,7 @@ from api.models.target_research import TargetResearchPayload
 from langchain_core.messages import AIMessage, ToolMessage
 
 from api.services.target_research import (
+    _build_navigation_evidence_observer,
     _eligible_related_targets,
     _extract_navigated_urls,
     _normalize_payload,
@@ -177,6 +178,28 @@ def test_target_research_accepts_timed_out_navigation_after_dom_read() -> None:
     }
 
     assert _extract_navigated_urls(raw) == {"https://example.edu.cn/current"}
+
+
+def test_navigation_evidence_observer_survives_message_compaction() -> None:
+    urls: set[str] = set()
+    observe = _build_navigation_evidence_observer(urls)
+
+    observe(
+        "navigate_page",
+        ([{
+            "type": "text",
+            "text": (
+                "Successfully navigated to https://example.edu.cn/about.\n"
+                "## Pages\n"
+                "1: About (https://example.edu.cn/about/index.html) [selected]"
+            ),
+        }], {"raw": "artifact"}),
+    )
+
+    assert urls == {
+        "https://example.edu.cn/about",
+        "https://example.edu.cn/about/index.html",
+    }
 
 
 def test_auto_expansion_requires_first_party_evidence_and_control_relation() -> None:

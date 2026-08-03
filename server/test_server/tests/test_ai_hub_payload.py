@@ -871,17 +871,23 @@ async def test_agent_runtime_transforms_mcp_result_before_model_context() -> Non
             return ([{"type": "text", "text": "raw browser output"}], {"id": 1})
 
     tool = FakeTool()
+    observed: list[tuple[str, object]] = []
     wrapped = _wrap_tools_with_error_handling(
         [tool],
         result_transform=lambda name, value: (
             [{"type": "text", "text": f"compact:{name}"}],
             value[1],
         ),
+        result_observer=lambda name, value: observed.append((name, value)),
     )[0]
     content, artifact = await wrapped.coroutine()
 
     assert content == [{"type": "text", "text": "compact:evaluate_script"}]
     assert artifact == {"id": 1}
+    assert observed == [(
+        "evaluate_script",
+        ([{"type": "text", "text": "raw browser output"}], {"id": 1}),
+    )]
 
 
 @pytest.mark.asyncio
