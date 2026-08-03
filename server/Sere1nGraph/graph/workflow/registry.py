@@ -49,6 +49,7 @@ GRAPH_REGISTRY: dict[str, dict[str, Any]] = {
     "assistant": {
         "module": "workflow.hub",
         "builder": "build_hub_graph",
+        "capacity_priority": "interactive",
         "displayName": "🧠 AI 中枢",
         "icon": "robot",
         "description": "综合个人助手：分发到数据、人设、内容和载荷专家；载荷专家支持公网检索与 Word 交付",
@@ -194,6 +195,17 @@ def get_workflow_meta(name: str) -> dict | None:
         }
     
     return None
+
+
+def get_workflow_capacity_priority(name: str) -> str:
+    """Return the registered model-capacity class for one workflow."""
+    if name in AGENT_REGISTRY:
+        value = AGENT_REGISTRY[name].get("capacity_priority")
+    elif name in GRAPH_REGISTRY:
+        value = GRAPH_REGISTRY[name].get("capacity_priority")
+    else:
+        value = None
+    return "interactive" if value == "interactive" else "standard"
 
 
 def list_all_workflows() -> list[dict]:

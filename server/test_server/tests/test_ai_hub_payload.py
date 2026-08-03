@@ -2546,6 +2546,90 @@ async def test_dingtalk_stream_updates_card_only_for_synthesized_answer(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_dingtalk_stream_starts_ai_while_card_is_bootstrapping(monkeypatch) -> None:
+    from api.services import dingtalk_bridge
+    from api.services import dingtalk_stream as stream_module
+    from crawler_tools import dingtalk_bot
+
+    card_started = asyncio.Event()
+    release_card = asyncio.Event()
+    ai_started = asyncio.Event()
+
+    async def slow_card_session(*_args, **_kwargs):
+        card_started.set()
+        await release_card.wait()
+        return None
+
+    async def fast_query(*_args, **_kwargs):
+        ai_started.set()
+        await asyncio.sleep(0)
+        return "完成", []
+
+    async def fake_reply(*_args, **_kwargs):
+        return dingtalk_bot.SendResult(success=True, message="ok")
+
+    class FakeIncoming:
+        sender_staff_id = "user_1"
+        sender_id = "sender_1"
+        conversation_id = "conversation_1"
+        conversation_type = "2"
+        session_webhook = "https://example.test/session"
+
+    monkeypatch.setattr(stream_module, "create_ai_card_session", slow_card_session)
+    monkeypatch.setattr(stream_module, "_CARD_BOOTSTRAP_FINAL_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(dingtalk_bridge, "run_hub_query", fast_query)
+    monkeypatch.setattr(dingtalk_bot, "reply_to_session_webhook", fake_reply)
+
+    adapter = stream_module.DingTalkStreamAdapter(
+        "default",
+        {"ai_card_streaming": True},
+    )
+    task = asyncio.create_task(
+        adapter._process_message(object(), FakeIncoming(), "测试问题")
+    )
+    await asyncio.wait_for(ai_started.wait(), timeout=0.2)
+    assert not release_card.is_set()
+    await asyncio.wait_for(card_started.wait(), timeout=0.2)
+    release_card.set()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_stream_deduplicates_and_serializes_conversation_turns() -> None:
+    from api.services.dingtalk_stream import DingTalkStreamAdapter
+
+    adapter = DingTalkStreamAdapter("default", {})
+    assert adapter._claim_message_id("message-1") is True
+    assert adapter._claim_message_id("message-1") is False
+    assert adapter._claim_message_id("") is True
+
+    active = 0
+    peak = 0
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def worker(name: str) -> None:
+        nonlocal active, peak
+        async with adapter._conversation_turn("conversation-1"):
+            active += 1
+            peak = max(peak, active)
+            if name == "first":
+                first_started.set()
+                await release_first.wait()
+            active -= 1
+
+    first = asyncio.create_task(worker("first"))
+    await asyncio.wait_for(first_started.wait(), timeout=0.2)
+    second = asyncio.create_task(worker("second"))
+    await asyncio.sleep(0)
+    assert peak == 1
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert peak == 1
+    assert adapter._conversation_gates == {}
+
+
+@pytest.mark.asyncio
 async def test_dingtalk_stream_marks_card_failed_when_reload_cancels_turn(monkeypatch) -> None:
     from api.services import dingtalk_bridge
     from api.services import dingtalk_stream as stream_module

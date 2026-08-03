@@ -9,6 +9,8 @@ import asyncio
 import contextlib
 import json
 import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote_plus
@@ -26,6 +28,15 @@ logger = get_logger("api.services.dingtalk_stream")
 _MAX_CARD_CHARS = 12_000
 _STREAM_INTERVAL_SECONDS = 0.8
 _STREAM_MIN_DELTA = 48
+_CARD_BOOTSTRAP_FINAL_GRACE_SECONDS = 0.5
+_MESSAGE_DEDUPE_TTL_SECONDS = 10 * 60
+_MESSAGE_DEDUPE_MAX_ITEMS = 2_048
+
+
+@dataclass
+class _ConversationTurnGate:
+    lock: asyncio.Lock
+    users: int = 0
 
 
 def _now() -> str:
@@ -45,6 +56,8 @@ class DingTalkStreamAdapter:
         self._task: asyncio.Task[Any] | None = None
         self._client: Any = None
         self._websocket: Any = None
+        self._seen_message_ids: dict[str, float] = {}
+        self._conversation_gates: dict[str, _ConversationTurnGate] = {}
         self._status: dict[str, Any] = {
             "state": "stopped",
             "connected": False,
@@ -55,6 +68,69 @@ class DingTalkStreamAdapter:
 
     def status(self) -> dict[str, Any]:
         return {"bot_name": self.bot_name, **self._status}
+
+    def _claim_message_id(self, message_id: Any) -> bool:
+        """Accept one Stream delivery and reject SDK redelivery duplicates."""
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return True
+        now = time.monotonic()
+        cutoff = now - _MESSAGE_DEDUPE_TTL_SECONDS
+        previous = self._seen_message_ids.get(normalized)
+        if previous is not None and previous >= cutoff:
+            return False
+        if len(self._seen_message_ids) >= _MESSAGE_DEDUPE_MAX_ITEMS:
+            for key, seen_at in list(self._seen_message_ids.items()):
+                if seen_at < cutoff:
+                    self._seen_message_ids.pop(key, None)
+            while len(self._seen_message_ids) >= _MESSAGE_DEDUPE_MAX_ITEMS:
+                self._seen_message_ids.pop(next(iter(self._seen_message_ids)))
+        self._seen_message_ids[normalized] = now
+        return True
+
+    @asynccontextmanager
+    async def _conversation_turn(self, key: str):
+        """Serialize turns that share one persisted conversation context."""
+        gate = self._conversation_gates.get(key)
+        if gate is None:
+            gate = _ConversationTurnGate(lock=asyncio.Lock())
+            self._conversation_gates[key] = gate
+        gate.users += 1
+        try:
+            async with gate.lock:
+                yield
+        finally:
+            gate.users -= 1
+            if gate.users <= 0 and self._conversation_gates.get(key) is gate:
+                self._conversation_gates.pop(key, None)
+
+    @staticmethod
+    def _conversation_turn_key(incoming: Any) -> str:
+        conversation_id = str(
+            getattr(incoming, "conversation_id", "")
+            or getattr(incoming, "sender_id", "")
+            or "unknown"
+        )
+        conversation_type = str(
+            getattr(incoming, "conversation_type", "") or ""
+        ).strip().casefold()
+        if conversation_type in {"2", "group", "group_chat", "groupchat"}:
+            sender_id = str(
+                getattr(incoming, "sender_staff_id", "")
+                or getattr(incoming, "sender_id", "")
+                or "unknown"
+            )
+            return f"{conversation_id}:member:{sender_id}"
+        return conversation_id
+
+    async def _process_serialized_message(
+        self,
+        handler: Any,
+        incoming: Any,
+        query: str,
+    ) -> None:
+        async with self._conversation_turn(self._conversation_turn_key(incoming)):
+            await self._process_message(handler, incoming, query)
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -161,8 +237,10 @@ class DingTalkStreamAdapter:
                 query = _message_text(incoming)
                 if not query:
                     return dingtalk_stream.AckMessage.STATUS_OK, "ignored empty message"
+                if not adapter._claim_message_id(getattr(incoming, "message_id", "")):
+                    return dingtalk_stream.AckMessage.STATUS_OK, "ignored duplicate message"
                 spawn_background(
-                    adapter._process_message(self, incoming, query),
+                    adapter._process_serialized_message(self, incoming, query),
                     name=f"dingtalk_hub:{adapter.bot_name}",
                 )
                 return dingtalk_stream.AckMessage.STATUS_OK, "accepted"
@@ -224,24 +302,71 @@ class DingTalkStreamAdapter:
 
         renderer = DingTalkCardRenderer()
         card: BufferedDingTalkCardSession | None = None
+        card_bootstrap_task: asyncio.Task[Any] | None = None
         card_streaming = bool(self.config.get("ai_card_streaming", True))
         if card_streaming:
-            card_session = await create_ai_card_session(
-                handler,
-                incoming,
-                query=query,
-                template_id=str(self.config.get("ai_card_template_id") or ""),
+            # Card transport starts alongside the Agent. A slow DingTalk create
+            # request must not delay context loading, planning or model output.
+            card_bootstrap_task = asyncio.create_task(
+                create_ai_card_session(
+                    handler,
+                    incoming,
+                    query=query,
+                    template_id=str(self.config.get("ai_card_template_id") or ""),
+                ),
+                name=f"dingtalk_card_bootstrap:{self.bot_name}",
             )
-            if card_session is not None:
-                card = BufferedDingTalkCardSession(card_session)
 
         last_sent_content = ""
         last_sent_at = 0.0
         last_preparations = ""
 
+        async def _activate_card(
+            *,
+            wait_seconds: float = 0.0,
+        ) -> BufferedDingTalkCardSession | None:
+            nonlocal card, card_bootstrap_task
+            if card is not None or card_bootstrap_task is None:
+                return card
+            task = card_bootstrap_task
+            if not task.done() and wait_seconds <= 0:
+                return None
+            try:
+                if task.done():
+                    card_session = task.result()
+                else:
+                    card_session = await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=wait_seconds,
+                    )
+            except asyncio.TimeoutError:
+                return None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"初始化钉钉 AI Card 失败，回退 Markdown: {exc}")
+                card_bootstrap_task = None
+                return None
+            card_bootstrap_task = None
+            if card_session is not None:
+                card = BufferedDingTalkCardSession(card_session)
+            return card
+
+        async def _cancel_card_bootstrap() -> None:
+            nonlocal card_bootstrap_task
+            task = card_bootstrap_task
+            card_bootstrap_task = None
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
         async def _on_event(event: dict[str, Any]) -> None:
             nonlocal card, last_sent_content, last_sent_at, last_preparations
             renderer.consume(event)
+            await _activate_card()
             if card is None:
                 return
             if card.failed:
@@ -303,14 +428,20 @@ class DingTalkStreamAdapter:
                     card is None or not card.has_progress_panel
                 ),
             )
+            if card is None:
+                await _activate_card(
+                    wait_seconds=_CARD_BOOTSTRAP_FINAL_GRACE_SECONDS,
+                )
             if card is not None:
                 buttons = self._artifact_buttons(artifacts)
                 try:
                     await card.finish(final_markdown, buttons=buttons)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"结束钉钉 AI Card 失败，回退 Markdown: {exc}")
-                    with contextlib.suppress(Exception):
-                        await card.fail("卡片更新失败，最终结果已通过普通消息发送。")
+                    spawn_background(
+                        card.fail("卡片更新失败，最终结果已通过普通消息发送。"),
+                        name=f"dingtalk_card_final_fail:{self.bot_name}",
+                    )
                     await _send_markdown("AI 中枢回复", final_markdown)
             else:
                 await _send_markdown("AI 中枢回复", final_markdown)
@@ -329,6 +460,9 @@ class DingTalkStreamAdapter:
                 time.monotonic() - started_at,
             )
             interrupted = "服务正在重载，本次处理已中断，请稍后重新发送该问题。"
+            if card is None:
+                with contextlib.suppress(Exception):
+                    await _activate_card(wait_seconds=0.25)
             if card is not None:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
@@ -342,6 +476,9 @@ class DingTalkStreamAdapter:
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"钉钉 Stream AI 中枢处理失败: {exc}")
             error_text = f"处理问题时发生错误：{exc}"[:1000]
+            if card is None:
+                with contextlib.suppress(Exception):
+                    await _activate_card(wait_seconds=0.25)
             if card is not None:
                 try:
                     await card.fail(error_text)
@@ -351,6 +488,8 @@ class DingTalkStreamAdapter:
             else:
                 with contextlib.suppress(Exception):
                     await _send_markdown("AI 中枢", error_text)
+        finally:
+            await _cancel_card_bootstrap()
 
     def _artifact_buttons(self, artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return build_artifact_buttons(

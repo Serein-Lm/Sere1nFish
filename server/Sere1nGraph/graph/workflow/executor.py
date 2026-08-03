@@ -18,6 +18,7 @@ from .streaming import set_event_queue
 from .registry import (
     get_agent_factory,
     get_graph_builder,
+    get_workflow_capacity_priority,
     get_workflow_meta,
     list_all_workflows,
     workflow_exists as _workflow_exists,
@@ -215,7 +216,13 @@ async def _run_graph(
             state["synthesis_result"] = query
         
         # 启动 Graph 执行
-        task = asyncio.create_task(graph.ainvoke(state))
+        # The task copies this context at creation time. Interactive workflows
+        # can therefore use their reserved model capacity without coupling the
+        # HTTP or IM channel adapters to the limiter implementation.
+        from core.llm_capacity import llm_capacity_priority
+
+        with llm_capacity_priority(get_workflow_capacity_priority(name)):
+            task = asyncio.create_task(graph.ainvoke(state))
         
         # 收集并转换事件
         while not task.done():

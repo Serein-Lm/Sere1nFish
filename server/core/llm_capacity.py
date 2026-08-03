@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -93,10 +93,36 @@ def find_llm_capacity_error(
     return None
 
 
-@dataclass(frozen=True)
+LLM_CAPACITY_PRIORITY_STANDARD = "standard"
+LLM_CAPACITY_PRIORITY_INTERACTIVE = "interactive"
+
+
+_CAPACITY_PRIORITY: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "llm_capacity_priority",
+    default=LLM_CAPACITY_PRIORITY_STANDARD,
+)
+
+
+@contextmanager
+def llm_capacity_priority(priority: str):
+    """Propagate the model-work priority to child tasks created in this scope."""
+    normalized = str(priority or "").strip().casefold()
+    if normalized != LLM_CAPACITY_PRIORITY_INTERACTIVE:
+        normalized = LLM_CAPACITY_PRIORITY_STANDARD
+    token = _CAPACITY_PRIORITY.set(normalized)
+    try:
+        yield
+    finally:
+        _CAPACITY_PRIORITY.reset(token)
+
+
+@dataclass
 class _LeaseState:
     is_probe: bool
     incident_id: int
+    owner_task: asyncio.Task[Any] | None = None
+    standard_slot: bool = False
+    released: bool = False
 
 
 _ACTIVE_LEASE: contextvars.ContextVar[_LeaseState | None] = contextvars.ContextVar(
@@ -114,10 +140,15 @@ class LLMCapacityGuard:
         max_concurrency: int = 12,
         cooldown_seconds: int = 120,
         max_cooldown_seconds: int = 900,
+        interactive_reserve: int = 0,
         clock: Any = time.monotonic,
         sleep: Any = asyncio.sleep,
     ) -> None:
+        self._interactive_reserve = max(0, int(interactive_reserve))
         self._slots = ResizableLimiter(max_concurrency)
+        self._standard_slots = ResizableLimiter(
+            self._standard_concurrency(max_concurrency)
+        )
         self._cooldown_seconds = max(1, int(cooldown_seconds))
         self._max_cooldown_seconds = max(
             self._cooldown_seconds,
@@ -131,6 +162,11 @@ class LLMCapacityGuard:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._probe_lock: asyncio.Lock | None = None
 
+    def _standard_concurrency(self, max_concurrency: int) -> int:
+        total = max(1, int(max_concurrency))
+        reserve = min(self._interactive_reserve, max(0, total - 1))
+        return max(1, total - reserve)
+
     def configure(
         self,
         *,
@@ -138,7 +174,11 @@ class LLMCapacityGuard:
         cooldown_seconds: int,
         max_cooldown_seconds: int,
     ) -> None:
-        self._slots.resize(max(1, int(max_concurrency)))
+        normalized_concurrency = max(1, int(max_concurrency))
+        self._slots.resize(normalized_concurrency)
+        self._standard_slots.resize(
+            self._standard_concurrency(normalized_concurrency)
+        )
         self._cooldown_seconds = max(1, int(cooldown_seconds))
         self._max_cooldown_seconds = max(
             self._cooldown_seconds,
@@ -202,7 +242,12 @@ class LLMCapacityGuard:
     async def lease(self) -> AsyncIterator[dict[str, Any]]:
         """Acquire one model-work lease; nested model calls reuse the outer lease."""
         active = _ACTIVE_LEASE.get()
-        if active is not None:
+        current_task = asyncio.current_task()
+        if (
+            active is not None
+            and not active.released
+            and active.owner_task is current_task
+        ):
             try:
                 yield {
                     "nested": True,
@@ -219,38 +264,63 @@ class LLMCapacityGuard:
             return
 
         probe_lock: asyncio.Lock | None = None
-        state = _LeaseState(is_probe=False, incident_id=self._incident_id)
-        while True:
-            retry_after = self._open_until - self._clock()
-            if retry_after > 0:
-                await self._sleep(retry_after)
-                continue
-
-            if self._open_until > 0:
-                probe_lock = self._get_probe_lock()
-                await probe_lock.acquire()
-                if self._open_until == 0:
-                    probe_lock.release()
-                    probe_lock = None
-                    continue
+        state = _LeaseState(
+            is_probe=False,
+            incident_id=self._incident_id,
+            owner_task=current_task,
+        )
+        standard_slot_acquired = False
+        try:
+            while True:
                 retry_after = self._open_until - self._clock()
                 if retry_after > 0:
-                    probe_lock.release()
-                    probe_lock = None
                     await self._sleep(retry_after)
                     continue
-                state = _LeaseState(
-                    is_probe=True,
-                    incident_id=max(1, self._incident_id),
+
+                if self._open_until > 0:
+                    probe_lock = self._get_probe_lock()
+                    await probe_lock.acquire()
+                    if self._open_until == 0:
+                        probe_lock.release()
+                        probe_lock = None
+                        continue
+                    retry_after = self._open_until - self._clock()
+                    if retry_after > 0:
+                        probe_lock.release()
+                        probe_lock = None
+                        await self._sleep(retry_after)
+                        continue
+                    state.is_probe = True
+                    state.incident_id = max(1, self._incident_id)
+
+                is_interactive = (
+                    _CAPACITY_PRIORITY.get()
+                    == LLM_CAPACITY_PRIORITY_INTERACTIVE
                 )
+                if not is_interactive:
+                    await self._standard_slots.acquire()
+                    standard_slot_acquired = True
+                try:
+                    await self._slots.acquire()
+                except BaseException:
+                    if standard_slot_acquired:
+                        self._standard_slots.release()
+                        standard_slot_acquired = False
+                    raise
+                if not state.is_probe and self._open_until > self._clock():
+                    self._slots.release()
+                    if standard_slot_acquired:
+                        self._standard_slots.release()
+                        standard_slot_acquired = False
+                    continue
+                state.standard_slot = standard_slot_acquired
+                break
+        except BaseException:
+            if probe_lock is not None and probe_lock.locked():
+                probe_lock.release()
+            raise
 
-            await self._slots.acquire()
-            if not state.is_probe and self._open_until > self._clock():
-                self._slots.release()
-                continue
-            break
-
-        token = _ACTIVE_LEASE.set(state)
+        _ACTIVE_LEASE.set(state)
         try:
             yield {
                 "nested": False,
@@ -267,16 +337,34 @@ class LLMCapacityGuard:
         else:
             self._record_probe_success(state)
         finally:
-            _ACTIVE_LEASE.reset(token)
-            self._slots.release()
-            if probe_lock is not None and probe_lock.locked():
-                probe_lock.release()
+            # Async-generator finalizers may run in a different Context. A token
+            # reset would then raise before releasing the limiter and permanently
+            # consume one model slot. Marking the shared state released also makes
+            # stale copied contexts harmless.
+            state.released = True
+            if _ACTIVE_LEASE.get() is state:
+                _ACTIVE_LEASE.set(None)
+            try:
+                self._slots.release()
+            finally:
+                if state.standard_slot:
+                    self._standard_slots.release()
+                if probe_lock is not None and probe_lock.locked():
+                    probe_lock.release()
 
     def status(self) -> dict[str, Any]:
+        interactive_reserve = max(
+            0,
+            self._slots.limit - self._standard_slots.limit,
+        )
         return {
             "max_concurrency": self._slots.limit,
             "in_use": self._slots.in_use,
             "waiting": self._slots.waiting,
+            "interactive_reserve": interactive_reserve,
+            "standard_limit": self._standard_slots.limit,
+            "standard_in_use": self._standard_slots.in_use,
+            "standard_waiting": self._standard_slots.waiting,
             "circuit_open": self._open_until > self._clock(),
             "retry_after_seconds": (
                 round(self._retry_after(), 1)
@@ -288,7 +376,7 @@ class LLMCapacityGuard:
         }
 
 
-_GLOBAL_GUARD = LLMCapacityGuard()
+_GLOBAL_GUARD = LLMCapacityGuard(interactive_reserve=2)
 
 
 def get_global_llm_capacity_guard() -> LLMCapacityGuard:

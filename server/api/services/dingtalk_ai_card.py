@@ -20,8 +20,8 @@ _CARD_UPDATE_OPTIONS = {
     "updateCardDataByKey": True,
     "updatePrivateDataByKey": True,
 }
-_CARD_REQUEST_TIMEOUT_SECONDS = 10.0
-_CARD_BUFFER_CLOSE_TIMEOUT_SECONDS = 12.0
+_CARD_REQUEST_TIMEOUT_SECONDS = 5.0
+_CARD_BUFFER_CLOSE_TIMEOUT_SECONDS = 6.0
 
 
 async def _await_card_request(operation: str, awaitable: Any) -> Any:
@@ -34,6 +34,19 @@ async def _await_card_request(operation: str, awaitable: Any) -> Any:
         raise TimeoutError(
             f"{operation}超过 {_CARD_REQUEST_TIMEOUT_SECONDS:g} 秒"
         ) from exc
+
+
+async def _prime_access_token(client: Any) -> None:
+    """Keep the SDK's synchronous token refresh off the event loop."""
+    getter = getattr(client, "get_access_token", None)
+    if not callable(getter):
+        return
+    token = await _await_card_request(
+        "获取钉钉访问令牌",
+        asyncio.to_thread(getter),
+    )
+    if not token:
+        raise RuntimeError("获取钉钉访问令牌失败")
 
 
 class _SDKErrorCapture:
@@ -344,7 +357,9 @@ async def create_ai_card_session(
     normalized_template_id = str(template_id or "").strip()
     if normalized_template_id:
         try:
-            replier = sdk.AICardReplier(handler.dingtalk_client, incoming)
+            client = handler.dingtalk_client
+            await _prime_access_token(client)
+            replier = sdk.AICardReplier(client, incoming)
             sdk_errors = _SDKErrorCapture(getattr(replier, "logger", logger))
             replier.logger = sdk_errors
             card_data = stringify_card_data(

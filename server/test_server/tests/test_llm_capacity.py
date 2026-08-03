@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 
 import pytest
 
 from core.llm_capacity import (
     LLMCapacityGuard,
     LLMCapacityUnavailableError,
+    llm_capacity_priority,
 )
 
 
@@ -81,3 +83,66 @@ async def test_nested_llm_lease_reuses_outer_slot() -> None:
             assert outer["nested"] is False
             assert nested["nested"] is True
             assert guard.status()["in_use"] == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_capacity_release_survives_cross_context_finalization() -> None:
+    guard = LLMCapacityGuard(
+        max_concurrency=1,
+        cooldown_seconds=1,
+        max_cooldown_seconds=2,
+    )
+    lease = guard.lease()
+    await lease.__aenter__()
+
+    await asyncio.create_task(
+        lease.__aexit__(None, None, None),
+        context=contextvars.Context(),
+    )
+
+    assert guard.status()["in_use"] == 0
+    async with guard.lease() as next_lease:
+        assert next_lease["nested"] is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_capacity_remains_available_during_standard_load() -> None:
+    guard = LLMCapacityGuard(
+        max_concurrency=3,
+        interactive_reserve=1,
+        cooldown_seconds=1,
+        max_cooldown_seconds=2,
+    )
+    started: asyncio.Queue[str] = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def run(name: str, priority: str = "standard") -> None:
+        with llm_capacity_priority(priority):
+            async with guard.lease():
+                await started.put(name)
+                await release.wait()
+
+    standard_tasks = [
+        asyncio.create_task(run(f"standard-{index}"))
+        for index in range(3)
+    ]
+    first = await asyncio.wait_for(started.get(), timeout=1)
+    second = await asyncio.wait_for(started.get(), timeout=1)
+    assert {first, second}.issubset({f"standard-{index}" for index in range(3)})
+    assert guard.status()["standard_waiting"] == 1
+
+    interactive_task = asyncio.create_task(run("interactive", "interactive"))
+    assert await asyncio.wait_for(started.get(), timeout=1) == "interactive"
+    assert guard.status()["in_use"] == 3
+    assert guard.status()["interactive_reserve"] == 1
+
+    release.set()
+    await asyncio.gather(*standard_tasks, interactive_task)
+    assert guard.status()["in_use"] == 0
+
+
+def test_assistant_workflow_is_registered_as_interactive() -> None:
+    from Sere1nGraph.graph.workflow.registry import get_workflow_capacity_priority
+
+    assert get_workflow_capacity_priority("assistant") == "interactive"
+    assert get_workflow_capacity_priority("router") == "standard"
