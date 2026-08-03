@@ -52,18 +52,19 @@ def _clean_strings(values: list[Any] | None, *, limit: int) -> list[str]:
 
 def _extract_navigated_urls(raw: dict[str, Any]) -> set[str]:
     urls: set[str] = set()
+    pending_selected_url = ""
     for message in raw.get("messages") or []:
         for tool_call in getattr(message, "tool_calls", None) or []:
             if str(tool_call.get("name") or "") != "navigate_page":
                 continue
+            pending_selected_url = ""
             args = tool_call.get("args") or {}
             url = canonicalize_source_url(str(args.get("url") or ""))
             if url.startswith(("http://", "https://")):
                 urls.add(url)
         if not isinstance(message, ToolMessage):
             continue
-        if str(getattr(message, "name", "") or "") != "navigate_page":
-            continue
+        tool_name = str(getattr(message, "name", "") or "")
         content = getattr(message, "content", "")
         if isinstance(content, list):
             text = "\n".join(
@@ -73,12 +74,29 @@ def _extract_navigated_urls(raw: dict[str, Any]) -> set[str]:
             )
         else:
             text = str(content or "")
-        if "Successfully navigated to " not in text:
+
+        if tool_name == "evaluate_script":
+            if pending_selected_url and "Script ran on page and returned:" in text:
+                urls.add(pending_selected_url)
+                pending_selected_url = ""
             continue
-        for selected_url in re.findall(
+        if tool_name != "navigate_page":
+            continue
+
+        selected_urls = re.findall(
             r"\((https?://[^\s)]+)\)\s*\[selected\]",
             text,
-        ):
+        )
+        if "Successfully navigated to " not in text:
+            pending_selected_url = ""
+            for selected_url in selected_urls:
+                candidate = canonicalize_source_url(selected_url)
+                if candidate.startswith(("http://", "https://")):
+                    pending_selected_url = candidate
+            continue
+
+        pending_selected_url = ""
+        for selected_url in selected_urls:
             url = canonicalize_source_url(selected_url)
             if url.startswith(("http://", "https://")):
                 urls.add(url)

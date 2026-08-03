@@ -156,6 +156,29 @@ def test_target_research_rejects_selected_url_after_navigation_timeout() -> None
     assert _extract_navigated_urls(raw) == set()
 
 
+def test_target_research_accepts_timed_out_navigation_after_dom_read() -> None:
+    raw = {
+        "messages": [
+            ToolMessage(
+                name="navigate_page",
+                tool_call_id="call_1",
+                content=(
+                    "Unable to navigate in the selected page: Navigation timeout.\n"
+                    "## Pages\n"
+                    "1: Current (https://example.edu.cn/current) [selected]"
+                ),
+            ),
+            ToolMessage(
+                name="evaluate_script",
+                tool_call_id="call_2",
+                content="Script ran on page and returned:\n{\"title\": \"Current\"}",
+            ),
+        ]
+    }
+
+    assert _extract_navigated_urls(raw) == {"https://example.edu.cn/current"}
+
+
 def test_auto_expansion_requires_first_party_evidence_and_control_relation() -> None:
     normalized = _normalize_payload(TargetResearchPayload.model_validate(_payload()))
     assert [item["name"] for item in _eligible_related_targets(
