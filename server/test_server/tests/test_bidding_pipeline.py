@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,46 @@ from api.services.bidding_pipeline import (
     _html_text_and_links,
 )
 from crawler_tools.tianyancha_tools import BiddingRecord, BiddingSearchResult
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_provider_when_runtime_policy_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import tianyancha_runtime
+
+    async def _disabled_policy(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            enabled=False,
+            disabled_reason="quota_insufficient",
+            bidding_lookback_days=30,
+        )
+
+    async def _unexpected_client() -> Any:
+        raise AssertionError("停用后不应创建天眼查客户端")
+
+    monkeypatch.setattr(
+        tianyancha_runtime,
+        "get_tianyancha_runtime_policy",
+        _disabled_policy,
+    )
+    monkeypatch.setattr(
+        bidding_module.TianyanchaClient,
+        "from_runtime_config",
+        _unexpected_client,
+    )
+
+    result = await BiddingPipeline(object(), object()).run_pipeline(
+        task_id="task-disabled",
+        project_id="project-1",
+        target_id="target-1",
+        company_name="目标单位",
+    )
+
+    assert result["status"] == "disabled"
+    assert result["enabled"] is False
+    assert result["disabled_reason"] == "quota_insufficient"
+    assert result["lookback_days"] == 30
 
 
 def test_archive_merge_does_not_replace_ready_evidence_with_transient_errors() -> None:
@@ -181,7 +222,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
             assert company_name == "安徽广播电视台"
             assert kwargs["page_size"] == 20
             assert kwargs["max_records_per_type"] == 2000
-            assert kwargs["lookback_days"] == 60
+            assert kwargs["lookback_days"] == 30
             return BiddingSearchResult(
                 records=[record],
                 total_reported=1,
@@ -189,7 +230,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
                 raw_records_fetched=1,
                 bid_type="1,2,4",
                 bid_types=["1", "2", "4"],
-                publish_start="2026-01-18",
+                publish_start="2026-06-17",
                 publish_end="2026-07-17",
             )
 
@@ -270,9 +311,9 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert stored_record["raw_content_object_id"] == "obj_raw"
     assert stored_record["provider_payload_object_id"] == "obj_provider"
     assert persisted["query_meta"] == {
-        "publish_start": "2026-01-18",
+        "publish_start": "2026-06-17",
         "publish_end": "2026-07-17",
-        "lookback_days": 60,
+        "lookback_days": 30,
         "bid_types": ["1", "2", "4"],
     }
     assert scan_call["source"] == "bidding"
@@ -292,7 +333,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert result["raw_records_fetched"] == 1
     assert result["duplicates_discarded"] == 0
     assert result["truncated"] is False
-    assert result["lookback_days"] == 60
+    assert result["lookback_days"] == 30
     assert result["bid_types"] == ["1", "2", "4"]
 
 

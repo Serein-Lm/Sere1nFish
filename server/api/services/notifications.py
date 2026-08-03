@@ -550,7 +550,7 @@ def _enabled_batch_modules(items: list[dict[str, Any]]) -> list[str]:
         for params in params_list
     ):
         enabled.append("网站")
-    if any(params.get("enable_bidding", True) for params in params_list):
+    if any(params.get("enable_bidding", False) for params in params_list):
         enabled.append("招投标")
     if any(params.get("enable_wechat", False) for params in params_list):
         enabled.append("公众号")

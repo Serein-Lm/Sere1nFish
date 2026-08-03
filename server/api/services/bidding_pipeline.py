@@ -28,8 +28,11 @@ from api.storage import get_object_storage
 from core.logger import get_logger
 
 from crawler_tools.tianyancha_tools import (
+    BALANCE_INSUFFICIENT_CODE,
     BIDDING_TYPES,
     BiddingRecord,
+    PROVIDER_DISABLED_CODE,
+    TianyanchaApiError,
     TianyanchaClient,
 )
 
@@ -41,7 +44,7 @@ _MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 _MAX_TOTAL_ATTACHMENT_BYTES_PER_RECORD = 100 * 1024 * 1024
 _MAX_ATTACHMENTS_PER_RECORD = 20
 _MAX_ATTACHMENT_TEXT_CHARS = 60_000
-BIDDING_LOOKBACK_DAYS = 60
+BIDDING_LOOKBACK_DAYS = 30
 _ATTACHMENT_EXTENSIONS = {
     ".pdf",
     ".doc",
@@ -669,6 +672,39 @@ class BiddingPipeline:
         self.app_config = app_config
 
     @staticmethod
+    def _disabled_result(
+        *,
+        company_name: str,
+        lookback_days: int,
+        reason: str,
+        error_code: int | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "kind": "bidding",
+            "enabled": False,
+            "status": "disabled",
+            "disabled_reason": reason or "runtime_disabled",
+            "query_name": company_name,
+            "bid_types": list(BIDDING_TYPES),
+            "lookback_days": lookback_days,
+            "total_reported": 0,
+            "records_fetched": 0,
+            "pages_fetched": 0,
+            "findings_count": 0,
+            "copywritings_count": 0,
+            "visual_analysis": {
+                "enabled": False,
+                "status": "disabled",
+                "scanned_urls": 0,
+                "findings_count": 0,
+                "copywritings_count": 0,
+            },
+        }
+        if error_code is not None:
+            result["error_code"] = error_code
+        return result
+
+    @staticmethod
     def _scan_context(
         record: BiddingRecord,
         archive: dict[str, Any],
@@ -745,12 +781,40 @@ class BiddingPipeline:
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
     ) -> dict[str, Any]:
         from core.observability import obs_log
+        from api.services.tianyancha_runtime import get_tianyancha_runtime_policy
 
         if not project_id:
             raise ValueError("招投标采集必须关联项目")
         if not target_id:
             raise ValueError("招投标采集必须关联 Target")
-        safe_lookback_days = max(1, min(int(lookback_days), BIDDING_LOOKBACK_DAYS))
+        policy = await get_tianyancha_runtime_policy(self.db)
+        safe_lookback_days = max(
+            1,
+            min(
+                int(lookback_days),
+                BIDDING_LOOKBACK_DAYS,
+                policy.bidding_lookback_days,
+            ),
+        )
+        if not policy.enabled:
+            obs_log(
+                "招投标采集已跳过：天眼查供应商停用",
+                task_id=task_id,
+                project_id=project_id,
+                source="bidding_pipeline",
+                level="notice",
+                event="pipeline_skipped",
+                data={
+                    "company_name": company_name,
+                    "reason": policy.disabled_reason or "runtime_disabled",
+                    "lookback_days": safe_lookback_days,
+                },
+            )
+            return self._disabled_result(
+                company_name=company_name,
+                lookback_days=safe_lookback_days,
+                reason=policy.disabled_reason or "runtime_disabled",
+            )
 
         obs_log(
             "招投标采集流水线开始",
@@ -767,13 +831,27 @@ class BiddingPipeline:
                 "bid_types": list(BIDDING_TYPES),
             },
         )
-        client = await TianyanchaClient.from_runtime_config()
-        search = await client.search_all_bid_types(
-            company_name,
-            page_size=page_size,
-            max_records_per_type=max_records,
-            lookback_days=safe_lookback_days,
-        )
+        try:
+            client = await TianyanchaClient.from_runtime_config()
+            search = await client.search_all_bid_types(
+                company_name,
+                page_size=page_size,
+                max_records_per_type=max_records,
+                lookback_days=safe_lookback_days,
+            )
+        except TianyanchaApiError as exc:
+            if exc.code not in {BALANCE_INSUFFICIENT_CODE, PROVIDER_DISABLED_CODE}:
+                raise
+            return self._disabled_result(
+                company_name=company_name,
+                lookback_days=safe_lookback_days,
+                reason=(
+                    "quota_insufficient"
+                    if exc.code == BALANCE_INSUFFICIENT_CODE
+                    else exc.reason
+                ),
+                error_code=exc.code,
+            )
         archives = await BiddingArchiveService().archive_records(
             search.records,
             project_id=project_id,

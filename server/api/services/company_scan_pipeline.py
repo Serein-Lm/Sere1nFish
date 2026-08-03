@@ -188,7 +188,7 @@ class CompanyScanPipeline:
         enable_subsidiary_xhs: bool = False,
         xhs_target_selection_mode: str = "auto",
         xhs_manual_targets: list[str] | str | None = None,
-        enable_bidding: bool = True,
+        enable_bidding: bool = False,
         bidding_page_size: int = 20,
         bidding_max_records: int = 2000,
         enable_wechat: bool = False,
@@ -211,7 +211,7 @@ class CompanyScanPipeline:
         url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY,
-        enable_control_structure: bool = True,
+        enable_control_structure: bool = False,
         control_max_depth: int = 1,
         control_max_entities: int = 100,
         control_lookup_concurrency: int = 4,
@@ -2416,6 +2416,7 @@ class CompanyScanPipeline:
             elif kind == "bidding":
                 visual = outcome.get("visual_analysis") or {}
                 bidding_failed = outcome.get("status") == "error"
+                bidding_disabled = outcome.get("status") == "disabled"
                 bidding_partial = bool(
                     outcome.get("status") == "partial"
                     or visual.get("status") == "error"
@@ -2424,7 +2425,9 @@ class CompanyScanPipeline:
                 result["bidding"].update(
                     outcome,
                     status=(
-                        "error"
+                        "disabled"
+                        if bidding_disabled
+                        else "error"
                         if bidding_failed
                         else "partial"
                         if bidding_partial

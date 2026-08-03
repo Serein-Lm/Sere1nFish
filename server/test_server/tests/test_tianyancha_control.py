@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from crawler_tools.tianyancha_tools import (
+    BALANCE_INSUFFICIENT_CODE,
     BIDDING_PATH,
     BIDDING_TYPES,
     OUTBOUND_INVESTMENT_INTERFACE_ID,
@@ -18,6 +19,35 @@ from crawler_tools.tianyancha_tools import (
     parse_icp_records,
     parse_percent,
 )
+
+
+@pytest.mark.asyncio
+async def test_bidding_stops_other_types_after_balance_is_exhausted() -> None:
+    requested_types: list[str] = []
+
+    class _Client(TianyanchaClient):
+        def __init__(self) -> None:
+            super().__init__("test-key")
+
+        async def search_all_bids(
+            self,
+            _company_name: str,
+            *,
+            bid_type: str,
+            **_kwargs: Any,
+        ) -> Any:
+            requested_types.append(bid_type)
+            raise TianyanchaApiError(
+                code=BALANCE_INSUFFICIENT_CODE,
+                reason="余额不足",
+                endpoint=BIDDING_PATH,
+            )
+
+    with pytest.raises(TianyanchaApiError) as error:
+        await _Client().search_all_bid_types("目标单位")
+
+    assert error.value.code == BALANCE_INSUFFICIENT_CODE
+    assert requested_types == [BIDDING_TYPES[0]]
 
 
 def test_percent_parser_accepts_supplier_variants_but_keeps_exact_value() -> None:
@@ -342,7 +372,7 @@ async def test_recent_bidding_query_collects_forecast_notice_and_award_serially(
     assert result.coverage_expected == 4
     assert result.coverage_gap == 0
     assert result.coverage_complete is True
-    assert result.publish_start == "2026-01-18"
+    assert result.publish_start == "2026-06-17"
 
 
 def test_keyword_skill_ignores_standalone_company_placeholder(

@@ -34,10 +34,11 @@ def test_xhs_collection_is_disabled_by_default() -> None:
     assert parameter.default is False
 
 
-def test_bidding_collection_is_enabled_by_default() -> None:
+def test_tianyancha_collection_is_disabled_by_default() -> None:
     parameters = inspect.signature(CompanyScanPipeline.run_pipeline).parameters
 
-    assert parameters["enable_bidding"].default is True
+    assert parameters["enable_bidding"].default is False
+    assert parameters["enable_control_structure"].default is False
     assert parameters["bidding_page_size"].default == 20
     assert parameters["bidding_max_records"].default == 2000
 

@@ -3652,6 +3652,23 @@ export default function ProjectDetail() {
   )
 
   const targetDashboardRows = useMemo<TargetDashboardRow[]>(() => {
+    const compareRows = (left: TargetDashboardRow, right: TargetDashboardRow) => {
+      const highScoreDiff = Number(right.high_score_finding_count || 0)
+        - Number(left.high_score_finding_count || 0)
+      if (highScoreDiff) return highScoreDiff
+      const completionDiff = Number(Boolean(right.collection_complete))
+        - Number(Boolean(left.collection_complete))
+      if (completionDiff) return completionDiff
+      const findingDiff = Number(right.finding_count || 0) - Number(left.finding_count || 0)
+      if (findingDiff) return findingDiff
+      return left.target_name.localeCompare(right.target_name, 'zh-CN')
+    }
+    const sortTree = (items: TargetDashboardRow[]): TargetDashboardRow[] => items
+      .map((item) => ({
+        ...item,
+        ...(item.children?.length ? { children: sortTree(item.children) } : {}),
+      }))
+      .sort(compareRows)
     const rows = projectTargets.map<TargetDashboardRow>((target) => ({
       ...target,
       children: [],
@@ -3673,7 +3690,7 @@ export default function ProjectDetail() {
     rows.forEach((target) => {
       if (!target.children?.length) delete target.children
     })
-    return roots
+    return sortTree(roots)
   }, [projectTargets])
 
   const applyTargetScope = (targetId: string) => {
@@ -3765,6 +3782,8 @@ export default function ProjectDetail() {
         key: 'high_score_finding_count',
         width: 310,
         sorter: (a, b) => (a.high_score_finding_count || 0) - (b.high_score_finding_count || 0),
+        defaultSortOrder: 'descend',
+        sortDirections: ['descend', 'ascend'],
         render: (_, target) => {
           const total = Number(target.high_score_finding_count || 0)
           const breakdown = target.high_score_by_source || {}
@@ -4580,7 +4599,7 @@ export default function ProjectDetail() {
                         .map((name: string) => name.trim())
                         .filter(Boolean)
                     }
-                    params.enable_bidding = values.enable_bidding ?? true
+                    params.enable_bidding = values.enable_bidding ?? false
                     if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
                     if (values.bidding_max_records) params.bidding_max_records = values.bidding_max_records
                     params.enable_wechat = values.enable_wechat ?? false
@@ -4596,7 +4615,7 @@ export default function ProjectDetail() {
                       if (values.scholar_limit) params.scholar_limit = values.scholar_limit
                     }
                     params.enable_copywriting = values.enable_copywriting ?? true
-                    params.enable_control_structure = values.enable_control_structure ?? true
+                    params.enable_control_structure = values.enable_control_structure ?? false
                     if (values.enable_control_structure) {
                       params.control_max_depth = values.control_max_depth ?? 1
                     }
@@ -4698,7 +4717,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4768,7 +4787,7 @@ export default function ProjectDetail() {
                               <Checkbox>公司标准化 + FOFA/Hunter 资产发现与存活去重</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_control_structure" valuePropName="checked" noStyle>
-                              <Checkbox title="使用天眼查对外投资 ID 823，仅保留每一层直接持股比例恰好为 100% 的经营中企业">天眼查对外投资：全资关联单位 + ICP 域名</Checkbox>
+                              <Checkbox title="使用天眼查对外投资 ID 823，仅保留每一层直接持股比例恰好为 100% 的经营中企业；当前余额不足时请保持关闭">天眼查对外投资：全资关联单位 + ICP 域名（默认关闭）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_url_scan" valuePropName="checked" noStyle>
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
@@ -4777,7 +4796,7 @@ export default function ProjectDetail() {
                               <Checkbox>小红书采集（按目标选择策略执行）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_bidding" valuePropName="checked" noStyle>
-                              <Checkbox>招投标采集（近60天预告、公告和中标结果）</Checkbox>
+                              <Checkbox>招投标采集（近30天预告、公告和中标结果，默认关闭）</Checkbox>
                             </Form.Item>
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (

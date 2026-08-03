@@ -79,6 +79,28 @@ def _summarize_finding_counts(
     return summaries
 
 
+def _target_summary_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    """高分 Finding 优先，随后按完成度和数据量稳定排序。"""
+    module_total = sum(
+        int(item.get(field) or 0)
+        for field in (
+            "website_count",
+            "xhs_count",
+            "wechat_count",
+            "bidding_count",
+            "scholar_contact_count",
+        )
+    )
+    return (
+        -int(item.get("high_score_finding_count") or 0),
+        -int(bool(item.get("collection_complete"))),
+        -int(item.get("finding_count") or 0),
+        -module_total,
+        str(item.get("target_name") or "").casefold(),
+        str(item.get("target_id") or ""),
+    )
+
+
 async def resolve_target(
     db: AsyncIOMotorDatabase,
     *,
@@ -580,22 +602,5 @@ async def list_project_target_summaries(
         }
         for relation in relations
     ]
-    summaries.sort(
-        key=lambda item: (
-            bool(item.get("collection_complete")),
-            int(item.get("high_score_finding_count") or 0),
-            sum(
-                int(item.get(field) or 0)
-                for field in (
-                    "website_count",
-                    "xhs_count",
-                    "wechat_count",
-                    "bidding_count",
-                    "scholar_contact_count",
-                )
-            ),
-            str(item.get("target_name") or ""),
-        ),
-        reverse=True,
-    )
+    summaries.sort(key=_target_summary_sort_key)
     return summaries

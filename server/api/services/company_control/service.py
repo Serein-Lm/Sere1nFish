@@ -8,8 +8,10 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from crawler_tools.tianyancha_tools import (
+    BALANCE_INSUFFICIENT_CODE,
     OUTBOUND_INVESTMENT_INTERFACE_ID,
     PERMISSION_DENIED_CODE,
+    PROVIDER_DISABLED_CODE,
     TianyanchaApiError,
 )
 from core.logger import get_logger
@@ -69,18 +71,43 @@ class CompanyControlService:
             "cycles_skipped": 0,
             "permission_required": False,
         }
+        from api.services.tianyancha_runtime import get_tianyancha_runtime_policy
+
+        policy = await get_tianyancha_runtime_policy(self.db)
+        if not policy.enabled:
+            base_result.update(
+                {
+                    "enabled": False,
+                    "status": "disabled",
+                    "disabled_reason": policy.disabled_reason or "runtime_disabled",
+                }
+            )
+            return base_result
         try:
             provider = await CompanyControlProviderFactory.create("tianyancha")
         except TianyanchaApiError as exc:
+            provider_disabled = exc.code in {
+                BALANCE_INSUFFICIENT_CODE,
+                PROVIDER_DISABLED_CODE,
+            }
             base_result.update(
                 {
-                    "status": "unavailable",
+                    "enabled": not provider_disabled,
+                    "status": "disabled" if provider_disabled else "unavailable",
                     "error_code": exc.code,
                     "errors": [exc.reason],
+                    "disabled_reason": (
+                        "quota_insufficient"
+                        if exc.code == BALANCE_INSUFFICIENT_CODE
+                        else exc.reason
+                        if provider_disabled
+                        else ""
+                    ),
                     "permission_required": exc.code == PERMISSION_DENIED_CODE,
                 }
             )
-            logger.warning("全资关联单位发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
+            log = logger.info if provider_disabled else logger.warning
+            log("全资关联单位发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
             return base_result
         except Exception as exc:  # noqa: BLE001
             base_result.update({"status": "error", "errors": [str(exc)]})
@@ -285,11 +312,25 @@ class CompanyControlService:
                 if discovery_error is not None:
                     if depth == 1:
                         if isinstance(discovery_error, TianyanchaApiError):
+                            provider_disabled = discovery_error.code in {
+                                BALANCE_INSUFFICIENT_CODE,
+                                PROVIDER_DISABLED_CODE,
+                            }
                             base_result.update(
                                 {
-                                    "status": "unavailable",
+                                    "enabled": not provider_disabled,
+                                    "status": (
+                                        "disabled" if provider_disabled else "unavailable"
+                                    ),
                                     "error_code": discovery_error.code,
                                     "errors": [discovery_error.reason],
+                                    "disabled_reason": (
+                                        "quota_insufficient"
+                                        if discovery_error.code == BALANCE_INSUFFICIENT_CODE
+                                        else discovery_error.reason
+                                        if provider_disabled
+                                        else ""
+                                    ),
                                     "permission_required": (
                                         discovery_error.code == PERMISSION_DENIED_CODE
                                     ),

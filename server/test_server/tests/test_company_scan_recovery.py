@@ -128,7 +128,7 @@ def test_bidding_checkpoint_reuses_equal_or_wider_windows() -> None:
         {
             "bidding": {
                 "records_fetched": 30,
-                "lookback_days": 30,
+                "lookback_days": 15,
                 "bid_types": ["1", "2", "4"],
             }
         }
@@ -137,7 +137,7 @@ def test_bidding_checkpoint_reuses_equal_or_wider_windows() -> None:
         {
             "bidding": {
                 "records_fetched": 60,
-                "lookback_days": 60,
+                "lookback_days": 30,
                 "bid_types": ["1", "2", "4"],
             }
         }

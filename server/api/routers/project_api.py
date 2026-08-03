@@ -81,7 +81,7 @@ async def _normalize_xhs_target_params(
 
 def _validate_company_scan_params(params: dict[str, Any]) -> None:
     """Validate optional company-scan modules before creating task records."""
-    if params.get("enable_control_structure", True):
+    if params.get("enable_control_structure", False):
         try:
             control_max_depth = int(params.get("control_max_depth") or 1)
         except (TypeError, ValueError) as exc:
@@ -211,7 +211,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         enable_subsidiary_xhs=params.get("enable_subsidiary_xhs", False),
         xhs_target_selection_mode=params.get("xhs_target_selection_mode", "auto"),
         xhs_manual_targets=params.get("xhs_manual_targets", []),
-        enable_bidding=params.get("enable_bidding", True),
+        enable_bidding=params.get("enable_bidding", False),
         bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
         bidding_max_records=max(
             1,
@@ -239,7 +239,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         url_scan_concurrency=tuning.url_scan_concurrency,
         copywriting_concurrency=tuning.copywriting_concurrency,
         xhs_search_concurrency=tuning.xhs_search_concurrency,
-        enable_control_structure=params.get("enable_control_structure", True),
+        enable_control_structure=params.get("enable_control_structure", False),
         control_max_depth=max(1, min(int(params.get("control_max_depth") or 1), 2)),
         control_max_entities=max(1, min(int(params.get("control_max_entities") or 100), 500)),
         control_lookup_concurrency=max(1, min(int(params.get("control_lookup_concurrency") or 4), 12)),

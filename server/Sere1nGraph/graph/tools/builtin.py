@@ -118,7 +118,7 @@ def tianyancha_get_domain(company_name: str) -> str:
     "tianyancha_get_bids",
     description=(
         "根据公司名称调用天眼查开放平台招投标接口（/services/open/m/bids/2.0，GET）"
-        "查询该公司的招投标信息。默认查询最近 60 天的招标公告（type=2），返回详细的正文内容和链接。"
+        "查询该公司的招投标信息。默认查询最近 30 天的招标公告（type=2），返回详细的正文内容和链接。"
         "适用于：查询公司的招投标历史、招标公告等信息。"
     ),
 )

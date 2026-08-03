@@ -47,8 +47,11 @@ def _company_name_candidates(value: str) -> list[str]:
 async def _icp_lookup_records(company_names: list[str]) -> list[Any]:
     """Read and deduplicate all ICP candidates for plausible legal names."""
     try:
+        from api.services.tianyancha_runtime import get_tianyancha_runtime_policy
         from crawler_tools.tianyancha_tools import TianyanchaClient
 
+        if not (await get_tianyancha_runtime_policy()).enabled:
+            return []
         client = await TianyanchaClient.from_runtime_config()
         records: list[Any] = []
         seen: set[str] = set()

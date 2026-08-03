@@ -614,7 +614,7 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
         ProjectDatasetAdapter(
             "bidding_archive",
             "招投标完整档案",
-            "近60天预告、公告和中标结果的永久记录、采购项目聚合标识、联系方式候选与OSS证据引用",
+            "近30天预告、公告和中标结果的永久记录、采购项目聚合标识、联系方式候选与OSS证据引用",
             _bidding_archive,
             query_loader=_query_bidding_archive,
             filters=("target_id",),

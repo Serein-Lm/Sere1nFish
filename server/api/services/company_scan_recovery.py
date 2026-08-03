@@ -18,7 +18,7 @@ from api.db.collections import (
 )
 
 
-_CURRENT_BIDDING_LOOKBACK_DAYS = 60
+_CURRENT_BIDDING_LOOKBACK_DAYS = 30
 _CURRENT_BIDDING_TYPES = {"1", "2", "4"}
 
 

@@ -36,6 +36,8 @@ BIDDING_TYPE_LABELS = {
 SUCCESS_CODE = 0
 NO_RESULT_CODE = 300000
 PERMISSION_DENIED_CODE = 300005
+BALANCE_INSUFFICIENT_CODE = 300006
+PROVIDER_DISABLED_CODE = 390001
 INACTIVE_REGISTRATION_MARKERS = (
     "注销",
     "吊销",
@@ -480,6 +482,15 @@ class TianyanchaClient:
 
     @classmethod
     async def from_runtime_config(cls) -> "TianyanchaClient":
+        from api.services.tianyancha_runtime import get_tianyancha_runtime_policy
+
+        policy = await get_tianyancha_runtime_policy()
+        if not policy.enabled:
+            raise TianyanchaApiError(
+                code=PROVIDER_DISABLED_CODE,
+                reason=policy.disabled_reason or "供应商已在运行配置中停用",
+                endpoint="runtime",
+            )
         return cls(await get_configured_api_key())
 
     async def _request(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -517,6 +528,15 @@ class TianyanchaClient:
                         await asyncio.sleep(0.5 * (2**attempt))
                         continue
                     if code not in {SUCCESS_CODE, NO_RESULT_CODE}:
+                        if code == BALANCE_INSUFFICIENT_CODE:
+                            try:
+                                from api.services.tianyancha_runtime import (
+                                    disable_tianyancha_for_quota,
+                                )
+
+                                await disable_tianyancha_for_quota()
+                            except Exception as policy_error:  # noqa: BLE001
+                                logger.warning("天眼查自动熔断写入失败: %s", policy_error)
                         raise TianyanchaApiError(
                             code=code,
                             reason=str(data.get("reason") or data.get("message") or "请求失败"),
@@ -610,7 +630,7 @@ class TianyanchaClient:
         bid_type: str = "2",
         page_num: int = 1,
         page_size: int = 20,
-        lookback_days: int = 60,
+        lookback_days: int = 30,
         end_date: date | None = None,
     ) -> BiddingSearchResult:
         """按法定主体查询单页招投标公告。"""
@@ -658,7 +678,7 @@ class TianyanchaClient:
         page_size: int = 20,
         max_records: int = 2000,
         page_concurrency: int = 3,
-        lookback_days: int = 60,
+        lookback_days: int = 30,
         end_date: date | None = None,
     ) -> BiddingSearchResult:
         """分页读取招投标公告，并以稳定记录 ID 去重。"""
@@ -752,7 +772,7 @@ class TianyanchaClient:
         page_size: int = 20,
         max_records_per_type: int = 2000,
         page_concurrency: int = 3,
-        lookback_days: int = 60,
+        lookback_days: int = 30,
         end_date: date | None = None,
     ) -> BiddingSearchResult:
         """串行读取近期开标全阶段；单类失败不丢弃其他已取得数据。"""
@@ -791,6 +811,8 @@ class TianyanchaClient:
                         "reason": exc.reason,
                     }
                 )
+                if exc.code in {BALANCE_INSUFFICIENT_CODE, PROVIDER_DISABLED_CODE}:
+                    break
 
         if not results and first_error is not None:
             raise first_error
