@@ -17,7 +17,6 @@ import re
 from contextlib import asynccontextmanager
 from typing import Any, Callable, AsyncGenerator, Literal, Sequence
 
-import anyio
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -79,28 +78,59 @@ async def _bounded_mcp_session(
     *,
     close_timeout: float = 10,
 ):
-    """建立 MCP 会话，并阻止第三方 stdio 清理无限期卡住调用方。"""
-    context = client.session(server_name)
-    session = await context.__aenter__()
-    error: BaseException | None = None
+    """由专属 task 持有 MCP 上下文，保证 AnyIO 在同一 task 中进出。"""
+    loop = asyncio.get_running_loop()
+    session_ready: asyncio.Future[Any] = loop.create_future()
+    close_requested = asyncio.Event()
+
+    async def _session_owner() -> None:
+        try:
+            async with client.session(server_name) as session:
+                if not session_ready.done():
+                    session_ready.set_result(session)
+                await close_requested.wait()
+        except BaseException as exc:
+            if not session_ready.done():
+                session_ready.set_exception(exc)
+                return
+            raise
+
+    owner = asyncio.create_task(
+        _session_owner(),
+        name=f"mcp-session:{server_name}",
+    )
+    try:
+        session = await session_ready
+    except BaseException:
+        owner.cancel()
+        await asyncio.gather(owner, return_exceptions=True)
+        raise
+
+    body_error: BaseException | None = None
     try:
         yield session
     except BaseException as exc:
-        error = exc
+        body_error = exc
         raise
     finally:
-        exc_info = (
-            (type(error), error, error.__traceback__)
-            if error is not None
-            else (None, None, None)
-        )
-        with anyio.move_on_after(close_timeout) as cancel_scope:
-            await context.__aexit__(*exc_info)
-        if cancel_scope.cancel_called:
+        close_requested.set()
+        try:
+            await _await_tool_call(owner, close_timeout)
+        except asyncio.TimeoutError:
             logger.warning(
-                "MCP stdio 会话关闭超过 %.0fs，已中止清理等待 | server=%s",
+                "MCP stdio 会话关闭超过 %.0fs，已取消会话 owner | server=%s",
                 close_timeout,
                 server_name,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            if body_error is None:
+                raise
+            logger.warning(
+                "MCP stdio 会话清理失败，保留原始 Agent 异常 | server=%s",
+                server_name,
+                exc_info=True,
             )
 
 
