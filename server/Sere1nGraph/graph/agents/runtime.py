@@ -798,6 +798,7 @@ async def extract_with_retry(
     max_retries: int = 1,
     system_prompt: str = "",
     validator: Callable[[dict[str, Any]], Any] | None = None,
+    repair_context: str = "",
 ) -> dict | None:
     """
     提取结构化输出，解析失败时用 LLM 结合完整上下文和原始 system prompt 做修复。
@@ -807,6 +808,7 @@ async def extract_with_retry(
     - app_config: 用于创建修复 LLM
     - system_prompt: 原始 agent 的 system prompt（用于修复时保持一致的输出格式）
     - validator: 可选领域 Schema 校验器；JSON 可解析但结构不合法时同样触发修复
+    - repair_context: 由调用侧提供的可信运行时约束或证据账本，不替代原始工具事实
     """
     validation_error = ""
     parsed = extract_structured_output(result)
@@ -875,6 +877,7 @@ async def extract_with_retry(
                 "不得虚构来源，也不得省略必填字段。\n"
                 "只输出 JSON，不要输出任何其他内容。\n\n"
                 f"--- 校验错误 ---\n{validation_error[:4000] or 'JSON 解析失败'}\n\n"
+                f"--- 可信运行时上下文 ---\n{repair_context[:12000] or '无'}\n\n"
                 f"--- 对话记录 ---\n{context_text}\n\n"
                 f"--- 上一次输出 ---\n{raw_content}"
             )

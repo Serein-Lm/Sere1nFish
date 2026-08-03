@@ -915,10 +915,12 @@ async def test_extract_with_retry_repairs_schema_invalid_json(monkeypatch) -> No
         app_config=object(),
         max_retries=1,
         validator=validate,
+        repair_context="已核验 URL: https://example.edu.cn/about",
     )
 
     assert parsed == {"sources": ["official", "government"]}
     assert "sources 至少需要 2 项" in repair_prompts[0]
+    assert "https://example.edu.cn/about" in repair_prompts[0]
 
 
 @pytest.mark.asyncio

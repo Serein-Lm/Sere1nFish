@@ -5,6 +5,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -38,6 +39,13 @@ _TRUSTED_SOURCE_TYPES = {
     "first_party",
     "institution",
 }
+_SEARCH_RESULT_PATHS = {
+    "bing.com": ("/search",),
+    "baidu.com": ("/s",),
+    "google.com": ("/search",),
+    "sogou.com": ("/web",),
+    "so.com": ("/s",),
+}
 
 
 class TargetResearchTargetNotFoundError(LookupError):
@@ -68,6 +76,15 @@ def _canonical_browser_url(value: Any) -> str:
     raw = str(value or "").strip().rstrip(".,;，。；")
     url = canonicalize_source_url(raw)
     return url if url.startswith(("http://", "https://")) else ""
+
+
+def _is_search_result_url(url: str) -> bool:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower().removeprefix("www.").removeprefix("cn.")
+    return any(
+        parts.path.startswith(prefix)
+        for prefix in _SEARCH_RESULT_PATHS.get(host, ())
+    )
 
 
 def _selected_browser_urls(text: str) -> list[str]:
@@ -121,12 +138,6 @@ def _extract_navigated_urls(raw: dict[str, Any]) -> set[str]:
     urls: set[str] = set()
     observe = _build_navigation_evidence_observer(urls)
     for message in raw.get("messages") or []:
-        for tool_call in getattr(message, "tool_calls", None) or []:
-            if str(tool_call.get("name") or "") != "navigate_page":
-                continue
-            args = tool_call.get("args") or {}
-            if url := _canonical_browser_url(args.get("url")):
-                urls.add(url)
         if not isinstance(message, ToolMessage):
             continue
         tool_name = str(getattr(message, "name", "") or "")
@@ -145,6 +156,8 @@ def _normalize_payload(
         url = canonicalize_source_url(str(source.get("url") or ""))
         if not url.startswith(("http://", "https://")):
             raise ValueError("机构深研来源必须是 HTTP(S) URL")
+        if _is_search_result_url(url):
+            raise ValueError("机构深研 sources 不得使用搜索结果页，必须引用实际读取的正文页面")
         sources_by_url[url] = {
             **source,
             "url": url,
@@ -152,6 +165,11 @@ def _normalize_payload(
         }
     if len(sources_by_url) < 2:
         raise ValueError("机构深研至少需要两个实际访问的公开来源")
+    if not any(
+        str(source.get("source_type") or "").strip().lower() in _TRUSTED_SOURCE_TYPES
+        for source in sources_by_url.values()
+    ):
+        raise ValueError("机构深研至少需要一个官方、政府、监管或机构一手来源")
     if navigated_urls is not None:
         verified = set(sources_by_url).intersection(navigated_urls)
         if len(verified) < 2 or verified != set(sources_by_url):
@@ -540,19 +558,35 @@ async def run_target_research(
             task_type="target_research",
         ):
             raw = await agent({"messages": [HumanMessage(content=query)]})
+            navigated_urls.update(_extract_navigated_urls(raw))
+            content_urls = sorted(
+                url for url in navigated_urls if not _is_search_result_url(url)
+            )
+
+            def validate_research_payload(value: dict[str, Any]) -> None:
+                _normalize_payload(
+                    TargetResearchPayload.model_validate(value),
+                    navigated_urls=navigated_urls,
+                )
+
             parsed = await extract_with_retry(
                 raw,
                 worker_config,
                 max_retries=1,
                 system_prompt=load_prompt("target_research/target_research"),
-                validator=TargetResearchPayload.model_validate,
+                validator=validate_research_payload,
+                repair_context=(
+                    "以下 URL 由本轮浏览器实际打开并读取。sources、evidence、联系方式、"
+                    "关键人物和关联 Target 只能引用其中的正文 URL；Bing 等搜索结果页只用于"
+                    "发现候选，不得作为来源。至少选择两个正文来源：\n"
+                    + "\n".join(content_urls)
+                ),
             )
     finally:
         await provider.release_cdp_endpoint(browser_task_id)
     if not parsed:
         raise ValueError("机构深研 Agent 未返回可解析的结构化结果")
 
-    navigated_urls.update(_extract_navigated_urls(raw))
     data = _normalize_payload(
         TargetResearchPayload.model_validate(parsed),
         navigated_urls=navigated_urls,

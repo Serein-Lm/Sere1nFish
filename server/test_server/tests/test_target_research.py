@@ -88,7 +88,14 @@ def test_target_research_requires_sources_to_be_actually_navigated() -> None:
         )
 
 
-def test_target_research_extracts_navigated_urls_from_agent_messages() -> None:
+def test_target_research_rejects_search_result_as_source() -> None:
+    payload = _payload()
+    payload["sources"][0]["url"] = "https://cn.bing.com/search?q=education"
+    with pytest.raises(ValueError, match="搜索结果页"):
+        _normalize_payload(TargetResearchPayload.model_validate(payload))
+
+
+def test_target_research_rejects_unconfirmed_navigation_tool_call() -> None:
     raw = {
         "messages": [
             AIMessage(
@@ -102,7 +109,7 @@ def test_target_research_extracts_navigated_urls_from_agent_messages() -> None:
             )
         ]
     }
-    assert _extract_navigated_urls(raw) == {"https://example.edu.cn/about"}
+    assert _extract_navigated_urls(raw) == set()
 
 
 def test_target_research_accepts_successful_navigation_redirect_url() -> None:
