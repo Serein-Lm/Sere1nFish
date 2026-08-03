@@ -404,23 +404,20 @@ class UrlWebScanTool:
                 },
             )
 
-        from core.llm_capacity import get_global_llm_capacity_guard
-
-        async with get_global_llm_capacity_guard().lease():
-            return await self._scan_with_browser(
-                request,
-                url=url,
-                worker_id=worker_id,
-                attempt=attempt,
-                source_context=source_context,
-                target_context=target_context,
-                url_task_id=url_task_id,
-                provider=get_browser_provider(),
-                observation_context=observation_context,
-                human_message_type=HumanMessage,
-                create_web_tagging_agent=create_web_tagging_agent,
-                extract_with_retry=extract_with_retry,
-            )
+        return await self._scan_with_browser(
+            request,
+            url=url,
+            worker_id=worker_id,
+            attempt=attempt,
+            source_context=source_context,
+            target_context=target_context,
+            url_task_id=url_task_id,
+            provider=get_browser_provider(),
+            observation_context=observation_context,
+            human_message_type=HumanMessage,
+            create_web_tagging_agent=create_web_tagging_agent,
+            extract_with_retry=extract_with_retry,
+        )
 
     async def _scan_with_browser(
         self,

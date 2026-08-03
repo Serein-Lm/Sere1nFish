@@ -1,11 +1,12 @@
 """Target 机构公开情报深研与扩展扫描编排。"""
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import target_research as research_dao
@@ -57,6 +58,28 @@ def _extract_navigated_urls(raw: dict[str, Any]) -> set[str]:
                 continue
             args = tool_call.get("args") or {}
             url = canonicalize_source_url(str(args.get("url") or ""))
+            if url.startswith(("http://", "https://")):
+                urls.add(url)
+        if not isinstance(message, ToolMessage):
+            continue
+        if str(getattr(message, "name", "") or "") != "navigate_page":
+            continue
+        content = getattr(message, "content", "")
+        if isinstance(content, list):
+            text = "\n".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict) and block.get("text")
+            )
+        else:
+            text = str(content or "")
+        if "Successfully navigated to " not in text:
+            continue
+        for selected_url in re.findall(
+            r"\((https?://[^\s)]+)\)\s*\[selected\]",
+            text,
+        ):
+            url = canonicalize_source_url(selected_url)
             if url.startswith(("http://", "https://")):
                 urls.add(url)
     return urls

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from api.models.target_research import TargetResearchPayload
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from api.services.target_research import (
     _eligible_related_targets,
@@ -102,6 +102,58 @@ def test_target_research_extracts_navigated_urls_from_agent_messages() -> None:
         ]
     }
     assert _extract_navigated_urls(raw) == {"https://example.edu.cn/about"}
+
+
+def test_target_research_accepts_successful_navigation_redirect_url() -> None:
+    raw = {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "navigate_page",
+                    "args": {"url": "https://example.edu.cn/about"},
+                    "id": "call_1",
+                    "type": "tool_call",
+                }],
+            ),
+            ToolMessage(
+                name="navigate_page",
+                tool_call_id="call_1",
+                content=[{
+                    "type": "text",
+                    "text": (
+                        "Successfully navigated to https://example.edu.cn/about.\n"
+                        "## Pages\n"
+                        "1: About (https://example.edu.cn/about/index.html) [selected]\n"
+                        "2: Candidate (https://third-party.example/link)"
+                    ),
+                }],
+            ),
+        ]
+    }
+
+    assert _extract_navigated_urls(raw) == {
+        "https://example.edu.cn/about",
+        "https://example.edu.cn/about/index.html",
+    }
+
+
+def test_target_research_rejects_selected_url_after_navigation_timeout() -> None:
+    raw = {
+        "messages": [
+            ToolMessage(
+                name="navigate_page",
+                tool_call_id="call_1",
+                content=(
+                    "Unable to navigate in the selected page: Navigation timeout.\n"
+                    "## Pages\n"
+                    "1: Stale (https://example.edu.cn/stale) [selected]"
+                ),
+            )
+        ]
+    }
+
+    assert _extract_navigated_urls(raw) == set()
 
 
 def test_auto_expansion_requires_first_party_evidence_and_control_relation() -> None:

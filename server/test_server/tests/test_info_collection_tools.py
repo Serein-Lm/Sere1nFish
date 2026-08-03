@@ -816,6 +816,60 @@ def test_generic_http_error_page_bypasses_browser_agent():
     asyncio.run(_run())
 
 
+def test_url_web_scan_does_not_hold_llm_capacity_during_browser_work(
+    monkeypatch,
+):
+    async def _run():
+        from api.services.info_collection import ScanRequest, ScanResult
+        from api.services.info_collection.url_tools import UrlWebScanTool
+        from core import llm_capacity
+
+        class _UnexpectedGuard:
+            def lease(self):
+                raise AssertionError(
+                    "URL browser work must not hold a model-capacity lease"
+                )
+
+        async def fake_scan_with_browser(self, request, **_kwargs):
+            return ScanResult(
+                source=request.source,
+                target=request.target,
+                success=True,
+                data={"findings": []},
+            )
+
+        monkeypatch.setattr(
+            llm_capacity,
+            "get_global_llm_capacity_guard",
+            lambda: _UnexpectedGuard(),
+        )
+        monkeypatch.setattr(
+            UrlWebScanTool,
+            "_scan_with_browser",
+            fake_scan_with_browser,
+        )
+
+        result = await UrlWebScanTool(
+            app_config=object(),
+            db=_FakeDB(),
+        ).scan(
+            ScanRequest(
+                source="web_tagging",
+                target="https://example.com",
+                project_id="project-1",
+                task_id="task-1",
+                target_info={
+                    "url": "https://example.com",
+                    "probe": {"status_code": 200, "title": "Example"},
+                },
+            )
+        )
+
+        assert result.success is True
+
+    asyncio.run(_run())
+
+
 def test_url_scan_pipeline_streams_findings_to_copywriting(monkeypatch):
     async def _run():
         scan_requests = []
