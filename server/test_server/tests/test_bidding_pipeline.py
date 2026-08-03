@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import pytest
@@ -9,6 +10,8 @@ from api.services import bidding_pipeline as bidding_module
 from api.services.company_url import normalize_url
 from api.services.bidding_pipeline import (
     BiddingPipeline,
+    _extract_attachment_text,
+    _extract_contact_candidates,
     _filename_from_response,
     _html_text_and_links,
 )
@@ -102,6 +105,37 @@ def test_url_normalization_rejects_relative_or_hostless_values() -> None:
     assert normalize_url("example.com/bids/1") == "https://example.com/bids/1"
 
 
+def test_contact_candidates_keep_full_text_values_and_evidence_context() -> None:
+    candidates = _extract_contact_candidates(
+        "采购人联系人张老师，电话：0551-12345678；代理机构邮箱 bid@example.com。"
+    )
+
+    assert {(item["channel"], item["value"]) for item in candidates} == {
+        ("phone", "0551-12345678"),
+        ("email", "bid@example.com"),
+    }
+    assert all("采购人联系人" in item["context"] for item in candidates)
+
+
+def test_docx_attachment_text_is_available_to_contact_analysis() -> None:
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("采购联系人：李老师，电话 0551-87654321")
+    output = io.BytesIO()
+    document.save(output)
+
+    text, error, text_format = _extract_attachment_text(
+        output.getvalue(),
+        filename="采购文件.docx",
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    assert error == ""
+    assert text_format == "docx"
+    assert "0551-87654321" in text
+
+
 def test_scan_context_keeps_query_target_and_announcement_parties_distinct() -> None:
     record = BiddingRecord(
         record_id="bid_party_roles",
@@ -143,15 +177,18 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     )
 
     class _Client:
-        async def search_all_bids(self, company_name: str, **kwargs: Any) -> BiddingSearchResult:
+        async def search_all_bid_types(self, company_name: str, **kwargs: Any) -> BiddingSearchResult:
             assert company_name == "安徽广播电视台"
             assert kwargs["page_size"] == 20
-            assert kwargs["max_records"] == 2000
+            assert kwargs["max_records_per_type"] == 2000
+            assert kwargs["lookback_days"] == 180
             return BiddingSearchResult(
                 records=[record],
                 total_reported=1,
                 pages_fetched=1,
                 raw_records_fetched=1,
+                bid_type="1,2,4",
+                bid_types=["1", "2", "4"],
                 publish_start="2026-01-18",
                 publish_end="2026-07-17",
             )
@@ -232,6 +269,12 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert "content_text" not in stored_record
     assert stored_record["raw_content_object_id"] == "obj_raw"
     assert stored_record["provider_payload_object_id"] == "obj_provider"
+    assert persisted["query_meta"] == {
+        "publish_start": "2026-01-18",
+        "publish_end": "2026-07-17",
+        "lookback_days": 180,
+        "bid_types": ["1", "2", "4"],
+    }
     assert scan_call["source"] == "bidding"
     assert scan_call["parent_task_id"] == "company-task-1"
     assert scan_call["progress_source"] == "bidding_url_scan"
@@ -249,6 +292,8 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert result["raw_records_fetched"] == 1
     assert result["duplicates_discarded"] == 0
     assert result["truncated"] is False
+    assert result["lookback_days"] == 180
+    assert result["bid_types"] == ["1", "2", "4"]
 
 
 @pytest.mark.asyncio
@@ -264,7 +309,7 @@ async def test_pipeline_falls_back_from_relative_detail_to_provider_url(
     )
 
     class _Client:
-        async def search_all_bids(self, *_args: Any, **_kwargs: Any) -> BiddingSearchResult:
+        async def search_all_bid_types(self, *_args: Any, **_kwargs: Any) -> BiddingSearchResult:
             return BiddingSearchResult(
                 records=[record],
                 total_reported=1,

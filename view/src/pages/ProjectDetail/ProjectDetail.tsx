@@ -4581,7 +4581,7 @@ export default function ProjectDetail() {
                       params.wechat_device_id = values.wechat_device_id
                       params.wechat_target_selection_mode = values.wechat_target_selection_mode ?? 'auto'
                     }
-                    params.enable_scholar = values.enable_scholar ?? false
+                    params.enable_scholar = values.enable_scholar ?? true
                     if (values.enable_scholar) {
                       const scholarDirection = String(values.scholar_direction || '').trim()
                       if (scholarDirection) params.scholar_direction = scholarDirection
@@ -4691,7 +4691,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4770,7 +4770,7 @@ export default function ProjectDetail() {
                               <Checkbox>小红书采集（按目标选择策略执行）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_bidding" valuePropName="checked" noStyle>
-                              <Checkbox>招投标采集（法定主体，按总数自动分页）</Checkbox>
+                              <Checkbox>招投标采集（近180天预告、公告和中标结果）</Checkbox>
                             </Form.Item>
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (
@@ -4783,7 +4783,7 @@ export default function ProjectDetail() {
                               <Checkbox>微信公众号采集（默认关闭，可稍后基于已保存 Target 单独下发）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_scholar" valuePropName="checked" noStyle>
-                              <Checkbox>学者联系采集（默认关闭）</Checkbox>
+                              <Checkbox>学者联系采集（根单位及已选子、孙单位）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_copywriting" valuePropName="checked" noStyle>
                               <Checkbox>话术生成</Checkbox>
@@ -4988,7 +4988,7 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="bidding_max_records" label="招投标最大公告数" tooltip="按供应商返回总数自动分页，达到此安全上限后停止">
+                            <Form.Item name="bidding_max_records" label="招投标单类型上限" tooltip="预告、公告和中标结果分别自动分页并应用此安全上限">
                               <InputNumber min={20} max={2000} step={20} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>

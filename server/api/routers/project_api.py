@@ -101,7 +101,7 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
             )
         )
 
-    if params.get("enable_scholar", False):
+    if params.get("enable_scholar", True):
         direction = str(params.get("scholar_direction") or "").strip()
         if direction:
             params["scholar_direction"] = direction
@@ -222,7 +222,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         wechat_target_selection_mode=params.get(
             "wechat_target_selection_mode", "auto"
         ),
-        enable_scholar=params.get("enable_scholar", False),
+        enable_scholar=params.get("enable_scholar", True),
         scholar_direction=params.get("scholar_direction", ""),
         scholar_unit_en=params.get("scholar_unit_en", ""),
         scholar_limit=max(1, min(int(params.get("scholar_limit") or 10), 50)),

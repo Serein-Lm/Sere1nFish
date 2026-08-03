@@ -13,7 +13,10 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
 
-from api.db.collections import BIDDING_RECORDS_COLLECTION
+from api.db.collections import (
+    BIDDING_RECORD_LINKS_COLLECTION,
+    BIDDING_RECORDS_COLLECTION,
+)
 
 
 _PRESERVED_ARCHIVE_FIELDS = (
@@ -27,6 +30,8 @@ _PRESERVED_ARCHIVE_FIELDS = (
     "content_length",
     "content_preview",
     "detail_text_preview",
+    "contact_candidates",
+    "contact_candidate_count",
 )
 
 
@@ -37,12 +42,22 @@ def _now() -> datetime:
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     collection = db[BIDDING_RECORDS_COLLECTION]
     await collection.create_index("record_id", unique=True)
+    await collection.create_index([("procurement_id", 1), ("published_on", -1)])
+    await collection.create_index([("bid_type_codes", 1), ("published_on", -1)])
     await collection.create_index([("project_ids", 1), ("published_on", -1)])
     await collection.create_index([("target_ids", 1), ("published_on", -1)])
     await collection.create_index([("query_names", 1), ("published_on", -1)])
     await collection.create_index("task_ids")
     await collection.create_index("detail_url", sparse=True)
     await collection.create_index("updated_at")
+    links = db[BIDDING_RECORD_LINKS_COLLECTION]
+    await links.create_index("link_id", unique=True)
+    await links.create_index(
+        [("project_id", 1), ("target_id", 1), ("published_on", -1)]
+    )
+    await links.create_index([("record_id", 1), ("last_seen_at", -1)])
+    await links.create_index([("procurement_id", 1), ("last_seen_at", -1)])
+    await links.create_index("task_ids")
 
 
 def _content_hash(record: dict[str, Any]) -> str:
@@ -51,6 +66,9 @@ def _content_hash(record: dict[str, Any]) -> str:
         for key in (
             "provider_record_id",
             "provider_uuid",
+            "bid_type_codes",
+            "procurement_id",
+            "procurement_title",
             "title",
             "announcement_type",
             "stage",
@@ -73,6 +91,8 @@ def _content_hash(record: dict[str, Any]) -> str:
             "detail_html_object_id",
             "attachment_urls",
             "attachments",
+            "contact_candidates",
+            "contact_candidate_count",
         )
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -138,9 +158,16 @@ async def upsert_records_batch(
     target_id: str,
     task_id: str,
     query_name: str,
+    query_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not records:
-        return {"inserted": 0, "updated": 0, "unchanged": 0, "total": 0}
+        return {
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "total": 0,
+            "links_total": 0,
+        }
 
     now = _now()
     prepared: dict[str, dict[str, Any]] = {}
@@ -164,11 +191,21 @@ async def upsert_records_batch(
                 "updated_at": now,
             }
         )
+        fields.setdefault("attachment_urls", [])
+        fields.setdefault("attachments", [])
+        fields.setdefault("contact_candidates", [])
+        fields.setdefault("contact_candidate_count", 0)
         fields["content_hash"] = _content_hash(fields)
         prepared[record_id] = fields
 
     if not prepared:
-        return {"inserted": 0, "updated": 0, "unchanged": 0, "total": 0}
+        return {
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "total": 0,
+            "links_total": 0,
+        }
 
     ids = list(prepared)
     archive_projection = {
@@ -222,12 +259,95 @@ async def upsert_records_batch(
         )
 
     await db[BIDDING_RECORDS_COLLECTION].bulk_write(operations, ordered=False)
+    link_operations: list[UpdateOne] = []
+    if project_id and target_id:
+        query_window = {
+            key: value
+            for key, value in dict(query_meta or {}).items()
+            if key in {"publish_start", "publish_end", "lookback_days", "bid_types"}
+        }
+        for record_id, fields in prepared.items():
+            link_digest = hashlib.sha256(
+                f"{project_id}:{target_id}:{record_id}".encode("utf-8")
+            ).hexdigest()
+            link_id = "bidlink_" + link_digest[:24]
+            additions: dict[str, Any] = {}
+            if query_name:
+                additions["query_names"] = query_name
+            if task_id:
+                additions["task_ids"] = task_id
+            if query_window:
+                additions["query_windows"] = query_window
+            type_codes = [
+                str(item)
+                for item in fields.get("bid_type_codes") or []
+                if str(item)
+            ]
+            if type_codes:
+                additions["bid_type_codes"] = {"$each": type_codes}
+            link_operations.append(
+                UpdateOne(
+                    {"link_id": link_id},
+                    {
+                        "$set": {
+                            "link_id": link_id,
+                            "record_id": record_id,
+                            "project_id": project_id,
+                            "target_id": target_id,
+                            "latest_task_id": task_id,
+                            "latest_query_name": query_name,
+                            "latest_query_window": query_window,
+                            "procurement_id": str(fields.get("procurement_id") or ""),
+                            "published_on": str(fields.get("published_on") or ""),
+                            "last_seen_at": now,
+                            "updated_at": now,
+                        },
+                        "$setOnInsert": {"created_at": now, "first_seen_at": now},
+                        "$addToSet": additions,
+                    },
+                    upsert=True,
+                )
+            )
+    if link_operations:
+        await db[BIDDING_RECORD_LINKS_COLLECTION].bulk_write(
+            link_operations,
+            ordered=False,
+        )
     return {
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
         "total": len(prepared),
+        "links_total": len(link_operations),
     }
+
+
+async def query_record_links(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str = "",
+    target_id: str = "",
+    record_id: str = "",
+    limit: int = 100,
+    skip: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """读取精确的 Project/Target/公告关联，供后续聚合分析使用。"""
+    query: dict[str, Any] = {}
+    if project_id:
+        query["project_id"] = project_id
+    if target_id:
+        query["target_id"] = target_id
+    if record_id:
+        query["record_id"] = record_id
+    collection = db[BIDDING_RECORD_LINKS_COLLECTION]
+    total = await collection.count_documents(query)
+    cursor = (
+        collection.find(query, {"_id": 0})
+        .sort([("published_on", -1), ("updated_at", -1)])
+        .skip(max(0, skip))
+        .limit(max(1, limit))
+    )
+    return [doc async for doc in cursor], total
 
 
 async def query_records(
@@ -287,5 +407,8 @@ async def detach_project(db: AsyncIOMotorDatabase, project_id: str) -> int:
     result = await db[BIDDING_RECORDS_COLLECTION].update_many(
         {"project_ids": project_id},
         {"$pull": {"project_ids": project_id}},
+    )
+    await db[BIDDING_RECORD_LINKS_COLLECTION].delete_many(
+        {"project_id": project_id}
     )
     return int(result.modified_count)

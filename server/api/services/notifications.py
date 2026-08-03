@@ -554,7 +554,7 @@ def _enabled_batch_modules(items: list[dict[str, Any]]) -> list[str]:
         enabled.append("招投标")
     if any(params.get("enable_wechat", False) for params in params_list):
         enabled.append("公众号")
-    if any(params.get("enable_scholar", False) for params in params_list):
+    if any(params.get("enable_scholar", True) for params in params_list):
         enabled.append("学者")
     if any(params.get("enable_xhs", False) for params in params_list):
         enabled.append("小红书")

@@ -7,6 +7,7 @@ import pytest
 
 from crawler_tools.tianyancha_tools import (
     BIDDING_PATH,
+    BIDDING_TYPES,
     OUTBOUND_INVESTMENT_INTERFACE_ID,
     OUTBOUND_INVESTMENT_PATH,
     PERMISSION_DENIED_CODE,
@@ -148,8 +149,8 @@ def test_bidding_parser_maps_supplier_fields_and_builds_stable_id() -> None:
         "content": "<p>公告正文</p>",
     }
 
-    first = parse_bidding_records([payload])[0]
-    second = parse_bidding_records([dict(payload)])[0]
+    first = parse_bidding_records([payload], bid_type="4")[0]
+    second = parse_bidding_records([dict(payload)], bid_type="4")[0]
 
     assert first.record_id == second.record_id
     assert first.record_id.startswith("bid_")
@@ -159,6 +160,9 @@ def test_bidding_parser_maps_supplier_fields_and_builds_stable_id() -> None:
     assert first.published_on == "2026-07-15"
     assert first.content_html == "<p>公告正文</p>"
     assert first.raw_payload["bidList"] == [{"name": "供应商 A"}]
+    assert first.bid_type_codes == ["4"]
+    assert first.procurement_id.startswith("proc_")
+    assert first.procurement_title == "采购"
 
 
 def test_bidding_parser_normalizes_supplier_collection_fields() -> None:
@@ -249,10 +253,14 @@ async def test_bidding_query_reads_all_pages_with_bounded_concurrency() -> None:
     assert result.raw_records_fetched == 45
     assert result.duplicates_discarded == 0
     assert result.truncated is False
+    assert result.coverage_expected == 45
+    assert result.coverage_gap == 0
+    assert result.coverage_complete is True
+    assert result.retry_passes == 0
 
 
 @pytest.mark.asyncio
-async def test_bidding_query_reports_cross_page_duplicates_without_marking_truncated() -> None:
+async def test_bidding_query_retries_and_reports_persistent_cross_page_gap() -> None:
     class _Client(TianyanchaClient):
         def __init__(self) -> None:
             super().__init__("test-key")
@@ -281,11 +289,60 @@ async def test_bidding_query_reports_cross_page_duplicates_without_marking_trunc
         end_date=date(2026, 7, 17),
     )
 
-    assert result.pages_fetched == 3
-    assert result.raw_records_fetched == 42
+    assert result.pages_fetched == 9
+    assert result.raw_records_fetched == 126
     assert len(result.records) == 41
+    assert result.duplicates_discarded == 85
+    assert result.truncated is True
+    assert result.coverage_expected == 42
+    assert result.coverage_gap == 1
+    assert result.coverage_complete is False
+    assert result.retry_passes == 2
+
+
+@pytest.mark.asyncio
+async def test_recent_bidding_query_collects_forecast_notice_and_award_serially() -> None:
+    requested_types: list[str] = []
+
+    class _Client(TianyanchaClient):
+        def __init__(self) -> None:
+            super().__init__("test-key")
+
+        async def _request(self, _endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+            bid_type = str(params["type"])
+            requested_types.append(bid_type)
+            payloads = {
+                "1": [{"uuid": "forecast", "title": "设备采购意向", "purchaser": "目标单位"}],
+                "2": [{"uuid": "shared", "title": "设备采购公告", "purchaser": "目标单位"}],
+                "4": [
+                    {"uuid": "shared", "title": "设备采购公告", "purchaser": "目标单位"},
+                    {"uuid": "award", "title": "设备采购中标结果公告", "purchaser": "目标单位"},
+                ],
+            }
+            return {
+                "error_code": 0,
+                "result": {"total": len(payloads[bid_type]), "items": payloads[bid_type]},
+            }
+
+    result = await _Client().search_all_bid_types(
+        "目标单位",
+        end_date=date(2026, 7, 17),
+    )
+
+    assert requested_types == list(BIDDING_TYPES)
+    assert result.bid_types == ["1", "2", "4"]
+    assert result.total_reported == 4
+    assert result.raw_records_fetched == 4
+    assert len(result.records) == 3
     assert result.duplicates_discarded == 1
-    assert result.truncated is False
+    shared = next(item for item in result.records if item.provider_uuid == "shared")
+    assert shared.bid_type_codes == ["2", "4"]
+    assert result.type_stats["4"]["records_fetched"] == 2
+    assert result.type_stats["4"]["coverage_complete"] is True
+    assert result.coverage_expected == 4
+    assert result.coverage_gap == 0
+    assert result.coverage_complete is True
+    assert result.publish_start == "2026-01-18"
 
 
 def test_keyword_skill_ignores_standalone_company_placeholder(

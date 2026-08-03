@@ -72,10 +72,10 @@ def test_primary_source_jobs_are_gathered_concurrently() -> None:
     assert peak == 3
 
 
-def test_scholar_collection_is_opt_in_and_has_direction_parameters() -> None:
+def test_scholar_collection_is_enabled_by_default_and_has_direction_parameters() -> None:
     parameters = inspect.signature(CompanyScanPipeline.run_pipeline).parameters
 
-    assert parameters["enable_scholar"].default is False
+    assert parameters["enable_scholar"].default is True
     assert parameters["scholar_direction"].default == ""
 
 
@@ -117,6 +117,82 @@ async def test_scholar_collection_uses_shared_pipeline_adapter(
     assert captured["unit_en"] == "Anhui Broadcasting"
     assert captured["limit"] == 12
     assert captured["notify_completion"] is False
+
+
+@pytest.mark.asyncio
+async def test_related_entity_scholar_collection_is_serial_and_target_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import task_progress
+
+    pipeline = CompanyScanPipeline(object(), object())
+    active = 0
+    peak = 0
+    calls: list[dict[str, Any]] = []
+
+    async def collect(**kwargs: Any) -> dict[str, Any]:
+        nonlocal active, peak
+        calls.append(kwargs)
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {
+            "kind": "scholar",
+            "status": "completed",
+            "articles_total": 2,
+            "verified_articles_total": 1,
+            "unverified_articles_total": 1,
+            "contacts_total": 1,
+            "corresponding_count": 1,
+        }
+
+    async def progress(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(pipeline, "_run_scholar_collection", collect)
+    monkeypatch.setattr(task_progress, "update_source_progress", progress)
+
+    result = await pipeline._scan_scholar_entities(
+        task_id="task-1",
+        project_id="project-1",
+        entities=[
+            {
+                "name": "目标子公司",
+                "target_id": "target-child",
+                "relation_depth": 1,
+                "aliases": ["Child Company"],
+            },
+            {
+                "name": "目标孙公司",
+                "target_id": "target-grandchild",
+                "parent_target_id": "target-child",
+                "relation_depth": 2,
+            },
+        ],
+        manual_direction="人工智能",
+        limit=10,
+        entity_concurrency=1,
+    )
+
+    assert peak == 1
+    assert [call["target_id"] for call in calls] == [
+        "target-child",
+        "target-grandchild",
+    ]
+    assert calls[0]["unit_en"] == "Child Company"
+    assert all(call["direction"] == "人工智能" for call in calls)
+    assert result["status"] == "completed"
+    assert result["summary"] == {
+        "entities": 2,
+        "completed": 2,
+        "articles_total": 4,
+        "verified_articles_total": 2,
+        "unverified_articles_total": 2,
+        "contacts_total": 2,
+        "corresponding_count": 2,
+    }
+    assert [item["relation_depth"] for item in result["entities"]] == [1, 2]
 
 
 class _TargetCollection:
@@ -1037,3 +1113,63 @@ async def test_wholly_owned_entity_respects_target_selection_skip(
         "keywords_used": [],
     }
     assert result["errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_wholly_owned_bidding_collection_is_serial_and_target_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = CompanyScanPipeline(_PipelineDb(), object())  # type: ignore[arg-type]
+    active = 0
+    peak = 0
+    calls: list[tuple[str, str]] = []
+
+    async def run_bidding(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        calls.append((kwargs["company_name"], kwargs["target_id"]))
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {
+            "kind": "bidding",
+            "status": "completed",
+            "records_fetched": 3,
+            "attachments_archived": 1,
+            "visual_analysis": {"findings_count": 2},
+        }
+
+    monkeypatch.setattr(pipeline, "_run_bidding_collection", run_bidding)
+
+    result = await pipeline._scan_wholly_owned_entities(
+        task_id="task-1",
+        project_id="project-1",
+        entities=[
+            {"name": "子公司A", "target_id": "target-a"},
+            {"name": "子公司B", "target_id": "target-b"},
+        ],
+        enable_asset_discovery=False,
+        enable_url_scan=True,
+        enable_copywriting=False,
+        enable_xhs=False,
+        xhs_max_notes=20,
+        xhs_attention_threshold=60,
+        min_attention_score=40,
+        profile_copywriting_threshold=60,
+        fofa_size=200,
+        hunter_size=200,
+        asset_probe_concurrency=48,
+        incremental_scan=False,
+        url_probe_concurrency=64,
+        url_scan_concurrency=10,
+        copywriting_concurrency=6,
+        xhs_search_concurrency=1,
+        entity_concurrency=2,
+        enable_bidding=True,
+    )
+
+    assert peak == 1
+    assert set(calls) == {("子公司A", "target-a"), ("子公司B", "target-b")}
+    assert result["summary"]["bidding_records"] == 6
+    assert result["summary"]["bidding_findings"] == 4
+    assert result["summary"]["bidding_attachments"] == 2

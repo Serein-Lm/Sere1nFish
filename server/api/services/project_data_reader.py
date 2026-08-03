@@ -291,6 +291,18 @@ async def _scholar_articles(db, project_id, limit, _access):
 
 
 async def _bidding_records(db, project_id, limit, _access):
+    from api.services.bidding_records import list_project_bidding_records
+
+    items, total = await list_project_bidding_records(
+        db,
+        project_id=project_id,
+        limit=limit,
+        skip=0,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _bidding_archive(db, project_id, limit, _access):
     from api.dao import bidding
 
     items, total = await bidding.query_records(
@@ -476,6 +488,19 @@ async def _query_bidding_records(db, project_id, query, _access):
     return ProjectDatasetResult(items, total)
 
 
+async def _query_bidding_archive(db, project_id, query, _access):
+    from api.dao import bidding
+
+    items, total = await bidding.query_records(
+        db,
+        project_id=project_id,
+        target_id=query.target_id,
+        limit=query.limit,
+        skip=query.offset,
+    )
+    return ProjectDatasetResult(items, total)
+
+
 async def _query_findings(db, project_id, query, _access):
     from api.dao import findings
 
@@ -584,6 +609,14 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
             "仅含有效参与方联系方式、公告简介、原文和附件引用的招投标记录",
             _bidding_records,
             query_loader=_query_bidding_records,
+            filters=("target_id",),
+        ),
+        ProjectDatasetAdapter(
+            "bidding_archive",
+            "招投标完整档案",
+            "近180天预告、公告和中标结果的永久记录、采购项目聚合标识、联系方式候选与OSS证据引用",
+            _bidding_archive,
+            query_loader=_query_bidding_archive,
             filters=("target_id",),
         ),
         ProjectDatasetAdapter(

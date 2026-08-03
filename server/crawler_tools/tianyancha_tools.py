@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -26,6 +27,12 @@ OUTBOUND_INVESTMENT_PATH = "/services/open/ic/inverst/2.0"
 OUTBOUND_INVESTMENT_INTERFACE_ID = 823
 ICP_PATH = "/services/open/ipr/icp/3.0"
 BIDDING_PATH = "/services/open/m/bids/2.0"
+BIDDING_TYPES = ("1", "2", "4")
+BIDDING_TYPE_LABELS = {
+    "1": "招标预告",
+    "2": "招标公告",
+    "4": "中标结果",
+}
 SUCCESS_CODE = 0
 NO_RESULT_CODE = 300000
 PERMISSION_DENIED_CODE = 300005
@@ -109,6 +116,9 @@ class BiddingRecord:
     """不暴露供应商字段命名的招投标记录。"""
 
     record_id: str
+    bid_type_codes: list[str] = field(default_factory=list)
+    procurement_id: str = ""
+    procurement_title: str = ""
     provider_record_id: str = ""
     provider_uuid: str = ""
     title: str = ""
@@ -132,6 +142,9 @@ class BiddingRecord:
         result = {
             "record_id": self.record_id,
             "provider": "tianyancha",
+            "bid_type_codes": self.bid_type_codes,
+            "procurement_id": self.procurement_id,
+            "procurement_title": self.procurement_title,
             "provider_record_id": self.provider_record_id,
             "provider_uuid": self.provider_uuid,
             "title": self.title,
@@ -165,6 +178,13 @@ class BiddingSearchResult:
     duplicates_discarded: int = 0
     truncated: bool = False
     bid_type: str = "2"
+    bid_types: list[str] = field(default_factory=list)
+    type_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
+    type_errors: list[dict[str, Any]] = field(default_factory=list)
+    coverage_expected: int = 0
+    coverage_gap: int = 0
+    coverage_complete: bool = True
+    retry_passes: int = 0
     publish_start: str = ""
     publish_end: str = ""
 
@@ -366,7 +386,42 @@ def _bidding_record_id(item: dict[str, Any]) -> str:
     return "bid_" + digest[:24]
 
 
-def parse_bidding_records(items: Any) -> list[BiddingRecord]:
+_PROCUREMENT_NOTICE_SUFFIX_RE = re.compile(r"(?:公告|公示|通知|预告)$")
+_PROCUREMENT_STAGE_SUFFIX_RE = re.compile(
+    r"(?:意向公开|采购意向|中标结果|成交结果|中标|成交|结果|更正|变更|"
+    r"终止|废标|流标|竞争性磋商|竞争性谈判|单一来源|询比|询价)$"
+)
+_PROCUREMENT_ROUND_RE = re.compile(
+    r"[（(](?:第?[一二三四五六七八九十\d]+次|二次|三次|重新招标|重新采购)[）)]"
+)
+_PROCUREMENT_SPACE_RE = re.compile(r"[\s\u3000·•，,。；;：:—_-]+")
+
+
+def _procurement_identity(title: str, purchaser: str) -> tuple[str, str]:
+    """生成跨公告阶段聚合提示，不替代供应商记录 ID。"""
+    normalized_title = _PROCUREMENT_ROUND_RE.sub("", str(title or "").strip())
+    previous = ""
+    while normalized_title and normalized_title != previous:
+        previous = normalized_title
+        normalized_title = _PROCUREMENT_NOTICE_SUFFIX_RE.sub(
+            "", normalized_title
+        ).strip()
+        normalized_title = _PROCUREMENT_STAGE_SUFFIX_RE.sub("", normalized_title).strip()
+    normalized_title = _PROCUREMENT_SPACE_RE.sub("", normalized_title).casefold()
+    normalized_purchaser = _PROCUREMENT_SPACE_RE.sub(
+        "", str(purchaser or "").strip()
+    ).casefold()
+    if not normalized_title:
+        return "", ""
+    digest = hashlib.sha256(
+        f"tianyancha:procurement:{normalized_purchaser}:{normalized_title}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return "proc_" + digest[:24], normalized_title
+
+
+def parse_bidding_records(items: Any, *, bid_type: str = "") -> list[BiddingRecord]:
     """将天眼查招投标响应转换为稳定领域结构并按记录 ID 去重。"""
     if not isinstance(items, list):
         return []
@@ -375,16 +430,26 @@ def parse_bidding_records(items: Any) -> list[BiddingRecord]:
         if not isinstance(item, dict):
             continue
         record_id = _bidding_record_id(item)
+        title = _provider_text(item.get("title"))
+        purchaser = _provider_text(item.get("purchaser"))
+        type_code = str(bid_type or "").strip()
+        if not type_code:
+            provider_type = str(item.get("type") or "").strip()
+            type_code = provider_type if provider_type in BIDDING_TYPES else ""
+        procurement_id, procurement_title = _procurement_identity(title, purchaser)
         records[record_id] = BiddingRecord(
             record_id=record_id,
+            bid_type_codes=[type_code] if type_code else [],
+            procurement_id=procurement_id,
+            procurement_title=procurement_title,
             provider_record_id=_provider_text(item.get("id")),
             provider_uuid=_provider_text(item.get("uuid")),
-            title=_provider_text(item.get("title")),
+            title=title,
             announcement_type=_provider_text(item.get("type")),
             stage=_provider_text(item.get("stage")),
             published_on=_published_on(item.get("publishTime")),
             province=_provider_text(item.get("province")),
-            purchaser=_provider_text(item.get("purchaser")),
+            purchaser=purchaser,
             agency=_provider_text(item.get("proxy")),
             amount=_provider_text(item.get("bidAmount")),
             winner=_provider_text(item.get("bidWinner")),
@@ -570,13 +635,17 @@ class TianyanchaClient:
         )
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         return BiddingSearchResult(
-            records=parse_bidding_records(result.get("items") or []),
+            records=parse_bidding_records(
+                result.get("items") or [],
+                bid_type=str(bid_type or "2"),
+            ),
             total_reported=int(result.get("total") or 0),
             page_num=safe_page,
             page_size=safe_size,
             pages_fetched=1,
             raw_records_fetched=len(result.get("items") or []),
             bid_type=str(bid_type or "2"),
+            bid_types=[str(bid_type or "2")],
             publish_start=publish_start.isoformat(),
             publish_end=publish_end.isoformat(),
         )
@@ -607,37 +676,51 @@ class TianyanchaClient:
         pages_to_fetch = min(total_pages, max(1, math.ceil(safe_limit / safe_size)))
         resolved_end_date = end_date or date.fromisoformat(first.publish_end)
         records_by_id = {record.record_id: record for record in first.records}
-        raw_records_fetched = len(first.records)
+        raw_records_fetched = first.raw_records_fetched
         pages_fetched = 1
-        next_page = 2
         batch_size = max(1, min(int(page_concurrency), 6))
 
-        while next_page <= pages_to_fetch:
-            page_numbers = list(
-                range(next_page, min(pages_to_fetch + 1, next_page + batch_size))
-            )
-            pages = await asyncio.gather(
-                *[
-                    self.search_bids(
-                        company_name,
-                        bid_type=bid_type,
-                        page_num=page,
-                        page_size=safe_size,
-                        lookback_days=lookback_days,
-                        end_date=resolved_end_date,
-                    )
-                    for page in page_numbers
-                ]
-            )
-            pages_fetched += len(pages)
-            next_page += len(pages)
-            for page in pages:
-                raw_records_fetched += len(page.records)
-                for record in page.records:
-                    records_by_id.setdefault(record.record_id, record)
+        async def _fetch_and_merge(page_numbers: range) -> None:
+            nonlocal pages_fetched, raw_records_fetched
+            pending = list(page_numbers)
+            for offset in range(0, len(pending), batch_size):
+                batch = pending[offset : offset + batch_size]
+                pages = await asyncio.gather(
+                    *[
+                        self.search_bids(
+                            company_name,
+                            bid_type=bid_type,
+                            page_num=page,
+                            page_size=safe_size,
+                            lookback_days=lookback_days,
+                            end_date=resolved_end_date,
+                        )
+                        for page in batch
+                    ]
+                )
+                pages_fetched += len(pages)
+                for page in pages:
+                    raw_records_fetched += page.raw_records_fetched
+                    for record in page.records:
+                        records_by_id.setdefault(record.record_id, record)
+
+        await _fetch_and_merge(range(2, pages_to_fetch + 1))
+
+        coverage_expected = min(first.total_reported, safe_limit)
+        retry_passes = 0
+        # 供应商结果按相关性动态排序，分页间可能重复或短页。对同一日期窗口
+        # 重新读取全量页并取并集，避免把一次不稳定分页误判为完整。
+        while (
+            pages_to_fetch >= total_pages
+            and len(records_by_id) < coverage_expected
+            and retry_passes < 2
+        ):
+            retry_passes += 1
+            await _fetch_and_merge(range(1, pages_to_fetch + 1))
 
         unique_records = list(records_by_id.values())
         records = unique_records[:safe_limit]
+        coverage_gap = max(0, coverage_expected - len(records))
         return BiddingSearchResult(
             records=records,
             total_reported=first.total_reported,
@@ -646,10 +729,124 @@ class TianyanchaClient:
             pages_fetched=pages_fetched,
             raw_records_fetched=raw_records_fetched,
             duplicates_discarded=max(0, raw_records_fetched - len(unique_records)),
-            truncated=pages_to_fetch < total_pages or len(unique_records) > safe_limit,
+            truncated=(
+                pages_to_fetch < total_pages
+                or len(unique_records) > safe_limit
+                or coverage_gap > 0
+            ),
             bid_type=first.bid_type,
+            bid_types=[first.bid_type],
+            coverage_expected=coverage_expected,
+            coverage_gap=coverage_gap,
+            coverage_complete=coverage_gap == 0,
+            retry_passes=retry_passes,
             publish_start=first.publish_start,
             publish_end=first.publish_end,
+        )
+
+    async def search_all_bid_types(
+        self,
+        company_name: str,
+        *,
+        bid_types: tuple[str, ...] = BIDDING_TYPES,
+        page_size: int = 20,
+        max_records_per_type: int = 2000,
+        page_concurrency: int = 3,
+        lookback_days: int = 180,
+        end_date: date | None = None,
+    ) -> BiddingSearchResult:
+        """串行读取近期开标全阶段；单类失败不丢弃其他已取得数据。"""
+        requested_types = tuple(
+            dict.fromkeys(str(item or "").strip() for item in bid_types if str(item or "").strip())
+        )
+        unsupported = [item for item in requested_types if item not in BIDDING_TYPES]
+        if unsupported:
+            raise ValueError(f"不支持的招投标类型: {', '.join(unsupported)}")
+        if not requested_types:
+            raise ValueError("至少需要一个招投标类型")
+
+        results: list[BiddingSearchResult] = []
+        errors: list[dict[str, Any]] = []
+        first_error: TianyanchaApiError | None = None
+        for bid_type in requested_types:
+            try:
+                results.append(
+                    await self.search_all_bids(
+                        company_name,
+                        bid_type=bid_type,
+                        page_size=page_size,
+                        max_records=max_records_per_type,
+                        page_concurrency=page_concurrency,
+                        lookback_days=lookback_days,
+                        end_date=end_date,
+                    )
+                )
+            except TianyanchaApiError as exc:
+                first_error = first_error or exc
+                errors.append(
+                    {
+                        "bid_type": bid_type,
+                        "label": BIDDING_TYPE_LABELS[bid_type],
+                        "code": exc.code,
+                        "reason": exc.reason,
+                    }
+                )
+
+        if not results and first_error is not None:
+            raise first_error
+
+        records_by_id: dict[str, BiddingRecord] = {}
+        type_stats: dict[str, dict[str, Any]] = {}
+        for result in results:
+            type_code = result.bid_type
+            type_stats[type_code] = {
+                "label": BIDDING_TYPE_LABELS.get(type_code, type_code),
+                "total_reported": result.total_reported,
+                "records_fetched": len(result.records),
+                "raw_records_fetched": result.raw_records_fetched,
+                "pages_fetched": result.pages_fetched,
+                "duplicates_discarded": result.duplicates_discarded,
+                "truncated": result.truncated,
+                "coverage_expected": result.coverage_expected,
+                "coverage_gap": result.coverage_gap,
+                "coverage_complete": result.coverage_complete,
+                "retry_passes": result.retry_passes,
+            }
+            for record in result.records:
+                previous = records_by_id.get(record.record_id)
+                if previous is None:
+                    records_by_id[record.record_id] = record
+                    continue
+                previous.bid_type_codes = list(
+                    dict.fromkeys([*previous.bid_type_codes, *record.bid_type_codes])
+                )
+
+        records = sorted(
+            records_by_id.values(),
+            key=lambda item: (item.published_on, item.record_id),
+            reverse=True,
+        )
+        successful_types = [result.bid_type for result in results]
+        raw_records_fetched = sum(result.raw_records_fetched for result in results)
+        return BiddingSearchResult(
+            records=records,
+            total_reported=sum(result.total_reported for result in results),
+            page_num=1,
+            page_size=max(1, min(int(page_size), 20)),
+            pages_fetched=sum(result.pages_fetched for result in results),
+            raw_records_fetched=raw_records_fetched,
+            duplicates_discarded=max(0, raw_records_fetched - len(records)),
+            truncated=any(result.truncated for result in results),
+            bid_type=",".join(successful_types),
+            bid_types=successful_types,
+            type_stats=type_stats,
+            type_errors=errors,
+            coverage_expected=sum(result.coverage_expected for result in results),
+            coverage_gap=sum(result.coverage_gap for result in results),
+            coverage_complete=all(result.coverage_complete for result in results),
+            retry_passes=sum(result.retry_passes for result in results),
+            publish_start=results[0].publish_start if results else "",
+            publish_end=results[0].publish_end if results else "",
         )
 
 

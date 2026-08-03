@@ -194,7 +194,7 @@ class CompanyScanPipeline:
         enable_wechat: bool = False,
         wechat_device_id: str = "",
         wechat_target_selection_mode: str = "auto",
-        enable_scholar: bool = False,
+        enable_scholar: bool = True,
         scholar_direction: str = "",
         scholar_unit_en: str = "",
         scholar_limit: int = 10,
@@ -330,6 +330,12 @@ class CompanyScanPipeline:
                 "unverified_articles_total": 0,
                 "contacts_total": 0,
                 "corresponding_count": 0,
+                "descendant_entities_total": 0,
+                "descendant_entities_completed": 0,
+                "descendant_articles_total": 0,
+                "descendant_verified_articles_total": 0,
+                "descendant_contacts_total": 0,
+                "related_entities": [],
             },
             "profile_copywritings": {"count": 0},
             "sub_errors": [],
@@ -1056,7 +1062,7 @@ class CompanyScanPipeline:
                     ),
                 ))
             elif wholly_owned_entities and (
-                enable_asset_discovery or selected_child_xhs
+                enable_asset_discovery or selected_child_xhs or enable_bidding
             ):
                 followups.append((
                     "wholly_owned_entities",
@@ -1081,7 +1087,29 @@ class CompanyScanPipeline:
                         copywriting_concurrency=copywriting_concurrency,
                         xhs_search_concurrency=xhs_search_concurrency,
                         entity_concurrency=control_scan_concurrency,
+                        enable_bidding=enable_bidding,
+                        bidding_page_size=bidding_page_size,
+                        bidding_max_records=bidding_max_records,
                         xhs_decisions=child_xhs_decisions,
+                    ),
+                ))
+            if "scholar_entities" in checkpoint_results:
+                followups.append((
+                    "scholar_entities",
+                    self._completed_module_result(
+                        checkpoint_results["scholar_entities"]
+                    ),
+                ))
+            elif wholly_owned_entities and enable_scholar:
+                followups.append((
+                    "scholar_entities",
+                    self._scan_scholar_entities(
+                        task_id=task_id,
+                        project_id=project_id,
+                        entities=wholly_owned_entities,
+                        manual_direction=scholar_direction,
+                        limit=scholar_limit,
+                        entity_concurrency=control_scan_concurrency,
                     ),
                 ))
             if followups:
@@ -1112,6 +1140,45 @@ class CompanyScanPipeline:
                             result["control_structure"]["errors"].extend(outcome["errors"])
                             result["profile_copywritings"]["count"] = int(
                                 outcome["summary"].get("profile_copywritings") or 0
+                            )
+                        elif kind == "scholar_entities":
+                            summary = dict(outcome.get("summary") or {})
+                            result["scholar"].update(
+                                descendant_status=outcome.get("status") or "completed",
+                                descendant_entities_total=int(
+                                    summary.get("entities") or 0
+                                ),
+                                descendant_entities_completed=int(
+                                    summary.get("completed") or 0
+                                ),
+                                descendant_articles_total=int(
+                                    summary.get("articles_total") or 0
+                                ),
+                                descendant_verified_articles_total=int(
+                                    summary.get("verified_articles_total") or 0
+                                ),
+                                descendant_contacts_total=int(
+                                    summary.get("contacts_total") or 0
+                                ),
+                                related_entities=list(outcome.get("entities") or []),
+                            )
+                            result["scholar"]["articles_total"] = int(
+                                result["scholar"].get("articles_total") or 0
+                            ) + int(summary.get("articles_total") or 0)
+                            result["scholar"]["verified_articles_total"] = int(
+                                result["scholar"].get("verified_articles_total") or 0
+                            ) + int(summary.get("verified_articles_total") or 0)
+                            result["scholar"]["unverified_articles_total"] = int(
+                                result["scholar"].get("unverified_articles_total") or 0
+                            ) + int(summary.get("unverified_articles_total") or 0)
+                            result["scholar"]["contacts_total"] = int(
+                                result["scholar"].get("contacts_total") or 0
+                            ) + int(summary.get("contacts_total") or 0)
+                            result["scholar"]["corresponding_count"] = int(
+                                result["scholar"].get("corresponding_count") or 0
+                            ) + int(summary.get("corresponding_count") or 0)
+                            result["sub_errors"].extend(
+                                str(error) for error in outcome.get("errors") or []
                             )
                 finally:
                     core_lease.release()
@@ -1539,13 +1606,17 @@ class CompanyScanPipeline:
         copywriting_concurrency: int,
         xhs_search_concurrency: int,
         entity_concurrency: int,
+        enable_bidding: bool = False,
+        bidding_page_size: int = 20,
+        bidding_max_records: int = 2000,
         xhs_decisions: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """按全资关联单位限流并发，单位内部继续并行资产与社媒流水线。"""
+        """关联单位限流采集；招投标固定单通道，资产和社媒沿用资源池。"""
         from api.services.search_terms import build_channel_terms
         from api.services.task_progress import update_source_progress
 
         semaphore = asyncio.Semaphore(max(1, entity_concurrency))
+        bidding_semaphore = asyncio.Semaphore(1)
         progress_lock = asyncio.Lock()
         processed_entities = 0
         total_entities = len(entities)
@@ -1609,6 +1680,24 @@ class CompanyScanPipeline:
                             progress_source=f"wholly_owned_{index}_url_scan",
                         )
                     )
+                if enable_bidding and target_id:
+                    async def _run_bidding_serially() -> dict[str, Any]:
+                        async with bidding_semaphore:
+                            return await self._run_bidding_collection(
+                                task_id=f"{task_id}_wholly_owned_{index}",
+                                project_id=project_id,
+                                company_name=name,
+                                target_id=target_id,
+                                page_size=bidding_page_size,
+                                max_records=bidding_max_records,
+                                enable_visual_analysis=enable_url_scan,
+                                enable_copywriting=enable_copywriting,
+                                min_attention_score=min_attention_score,
+                                scan_concurrency=url_scan_concurrency,
+                                copywriting_concurrency=copywriting_concurrency,
+                            )
+
+                    subtasks.append(_run_bidding_serially())
                 xhs_keywords: list[str] = []
                 if entity_xhs_enabled:
                     xhs_keywords = build_channel_terms(
@@ -1632,6 +1721,10 @@ class CompanyScanPipeline:
                     "assets": {},
                     "url_scan": {},
                     "xhs": {"enabled": entity_xhs_enabled, "keywords_used": xhs_keywords},
+                    "bidding": {
+                        "enabled": enable_bidding,
+                        "status": "pending" if enable_bidding else "disabled",
+                    },
                     "profile_copywritings": {"count": 0},
                     "errors": [],
                 }
@@ -1644,6 +1737,12 @@ class CompanyScanPipeline:
                     elif sub.get("kind") == "asset_url":
                         scan_result["assets"] = sub.get("assets") or {}
                         scan_result["url_scan"] = sub.get("url_scan") or {}
+                    elif sub.get("kind") == "bidding":
+                        scan_result["bidding"].update(sub)
+                        if sub.get("status") == "error":
+                            scan_result["errors"].append(
+                                f"招投标采集失败: {sub.get('error') or '未知错误'}"
+                            )
                     elif "notes_count" in sub:
                         scan_result["xhs"].update(sub)
                         xhs_succeeded = True
@@ -1708,6 +1807,9 @@ class CompanyScanPipeline:
             "xhs_notes": 0,
             "xhs_profiles": 0,
             "profile_copywritings": 0,
+            "bidding_records": 0,
+            "bidding_findings": 0,
+            "bidding_attachments": 0,
         }
         for index, item in enumerate(scanned):
             if isinstance(item, Exception):
@@ -1723,6 +1825,7 @@ class CompanyScanPipeline:
             url_scan = scan.get("url_scan") or {}
             xhs = scan.get("xhs") or {}
             profile_copywritings = scan.get("profile_copywritings") or {}
+            bidding = scan.get("bidding") or {}
             summary["completed"] += int(not scan.get("errors"))
             summary["assets_discovered"] += int(assets.get("discovered") or 0)
             summary["assets_alive"] += int(assets.get("alive") or 0)
@@ -1730,6 +1833,9 @@ class CompanyScanPipeline:
             summary["xhs_notes"] += int(xhs.get("notes_count") or 0)
             summary["xhs_profiles"] += int(xhs.get("profiles_count") or 0)
             summary["profile_copywritings"] += int(profile_copywritings.get("count") or 0)
+            summary["bidding_records"] += int(bidding.get("records_fetched") or 0)
+            summary["bidding_findings"] += int(bidding.get("visual_analysis", {}).get("findings_count") or 0)
+            summary["bidding_attachments"] += int(bidding.get("attachments_archived") or 0)
             errors.extend(
                 f"{item.get('name')}: {message}" for message in scan.get("errors") or []
             )
@@ -1745,6 +1851,133 @@ class CompanyScanPipeline:
             message=f"全资关联单位采集完成 {summary['completed']}/{total_entities}",
         )
         return {"entities": output_entities, "summary": summary, "errors": errors}
+
+    async def _scan_scholar_entities(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        entities: list[dict[str, Any]],
+        manual_direction: str = "",
+        limit: int = 10,
+        entity_concurrency: int = 1,
+    ) -> dict[str, Any]:
+        """按已持久化控制关系采集子、孙单位学者联系。"""
+        from Sere1nGraph.graph.company_router.router import CompanyRouterResult
+        from api.services.scholar_direction import resolve_scholar_direction
+        from api.services.task_progress import update_source_progress
+
+        semaphore = asyncio.Semaphore(max(1, min(int(entity_concurrency), 3)))
+        progress_lock = asyncio.Lock()
+        processed = 0
+        total = len(entities)
+        await update_source_progress(
+            self.db,
+            task_id=task_id,
+            source="scholar_entities",
+            total=total,
+            processed=0,
+            status="running",
+            message=f"开始采集 {total} 家子、孙单位的学者联系",
+        )
+
+        async def _collect(entity: dict[str, Any]) -> dict[str, Any]:
+            nonlocal processed
+            name = str(entity.get("name") or "").strip()
+            target_id = str(entity.get("target_id") or "").strip()
+            aliases = self._dedupe_text(
+                [name, *[str(item) for item in entity.get("aliases") or []]]
+            )[:20]
+            if not name or not target_id:
+                raise ValueError("关联单位缺少名称或 target_id")
+            resolution = resolve_scholar_direction(
+                manual_direction,
+                CompanyRouterResult(success=False),
+                names=aliases,
+            )
+            try:
+                async with semaphore:
+                    scholar = await self._run_scholar_collection(
+                        task_id=f"{task_id}_scholar_{target_id}",
+                        project_id=project_id,
+                        target_id=target_id,
+                        unit=name,
+                        direction=resolution.direction,
+                        direction_source=resolution.source,
+                        unit_en=self._derive_scholar_unit_en(aliases),
+                        limit=limit,
+                    )
+                return {
+                    "target_id": target_id,
+                    "name": name,
+                    "relation_depth": int(entity.get("relation_depth") or 1),
+                    "parent_target_id": str(entity.get("parent_target_id") or ""),
+                    "scholar": scholar,
+                }
+            finally:
+                async with progress_lock:
+                    processed += 1
+                    await update_source_progress(
+                        self.db,
+                        task_id=task_id,
+                        source="scholar_entities",
+                        total=total,
+                        processed=processed,
+                        status="completed" if processed >= total else "running",
+                        message=f"子、孙单位学者联系已处理 {processed}/{total}",
+                    )
+
+        outcomes = await asyncio.gather(
+            *(_collect(entity) for entity in entities),
+            return_exceptions=True,
+        )
+        collected: list[dict[str, Any]] = []
+        errors: list[str] = []
+        summary = {
+            "entities": total,
+            "completed": 0,
+            "articles_total": 0,
+            "verified_articles_total": 0,
+            "unverified_articles_total": 0,
+            "contacts_total": 0,
+            "corresponding_count": 0,
+        }
+        for index, outcome in enumerate(outcomes):
+            if isinstance(outcome, BaseException):
+                entity_name = str(entities[index].get("name") or index)
+                errors.append(f"{entity_name}: {outcome}")
+                continue
+            collected.append(outcome)
+            scholar = dict(outcome.get("scholar") or {})
+            summary["completed"] += int(scholar.get("status") == "completed")
+            for field in (
+                "articles_total",
+                "verified_articles_total",
+                "unverified_articles_total",
+                "contacts_total",
+                "corresponding_count",
+            ):
+                summary[field] += int(scholar.get(field) or 0)
+
+        status = "completed" if not errors else "partial"
+        await update_source_progress(
+            self.db,
+            task_id=task_id,
+            source="scholar_entities",
+            total=total,
+            processed=total,
+            succeeded=summary["completed"],
+            failed=max(0, total - summary["completed"]),
+            status=status,
+            message=f"子、孙单位学者联系采集完成 {summary['completed']}/{total}",
+        )
+        return {
+            "kind": "scholar_entities",
+            "status": status,
+            "entities": collected,
+            "summary": summary,
+            "errors": errors,
+        }
 
     # ══════════════════════════════════════
     # 阶段 2a: URL 扫描
@@ -2169,7 +2402,8 @@ class CompanyScanPipeline:
                 visual = outcome.get("visual_analysis") or {}
                 bidding_failed = outcome.get("status") == "error"
                 bidding_partial = bool(
-                    visual.get("status") == "error"
+                    outcome.get("status") == "partial"
+                    or visual.get("status") == "error"
                     or outcome.get("archive_error_count")
                 )
                 result["bidding"].update(

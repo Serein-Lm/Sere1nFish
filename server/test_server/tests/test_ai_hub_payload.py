@@ -1063,6 +1063,7 @@ def test_project_dataset_registry_covers_project_detail_data_surfaces() -> None:
         "company_meta",
         "company_scans",
         "bidding_records",
+        "bidding_archive",
         "xhs_search_tasks",
         "xhs_notes",
         "xhs_note_details",

@@ -4,7 +4,7 @@ export interface BiddingAttachment {
   index: number
   source_url: string
   label?: string
-  status: 'ready' | 'error'
+  status: 'ready' | 'error' | 'skipped'
   filename?: string
   storage_object_id?: string
   url?: string
@@ -18,6 +18,9 @@ export interface BiddingAttachment {
 export interface BiddingRecord {
   record_id: string
   provider: string
+  bid_type_codes?: string[]
+  procurement_id?: string
+  procurement_title?: string
   title: string
   announcement_type?: string
   stage?: string
@@ -31,6 +34,7 @@ export interface BiddingRecord {
   detail_url?: string
   provider_url?: string
   content_length?: number
+  contact_candidate_count?: number
   content_preview?: string
   detail_text_preview?: string
   provider_payload_object_id?: string
@@ -51,6 +55,8 @@ export interface BiddingRecord {
     label?: string
     party_name?: string
     party_role?: string
+    target_relation?: 'confirmed' | 'related' | 'not_target' | 'uncertain'
+    target_relation_reason?: string
     role?: string
     context?: string
     evidence?: string
