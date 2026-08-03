@@ -545,6 +545,7 @@ async def run_target_research(
                 worker_config,
                 max_retries=1,
                 system_prompt=load_prompt("target_research/target_research"),
+                validator=TargetResearchPayload.model_validate,
             )
     finally:
         await provider.release_cdp_endpoint(browser_task_id)

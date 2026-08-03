@@ -891,6 +891,37 @@ async def test_agent_runtime_transforms_mcp_result_before_model_context() -> Non
 
 
 @pytest.mark.asyncio
+async def test_extract_with_retry_repairs_schema_invalid_json(monkeypatch) -> None:
+    from langchain_core.messages import AIMessage
+
+    from Sere1nGraph.graph.agents import runtime
+
+    repair_prompts: list[str] = []
+
+    class FakeRepairLLM:
+        async def ainvoke(self, messages):
+            repair_prompts.append(str(messages[-1].content))
+            return AIMessage(content='{"sources":["official","government"]}')
+
+    def validate(value: dict) -> None:
+        if len(value.get("sources") or []) < 2:
+            raise ValueError("sources 至少需要 2 项")
+
+    monkeypatch.setattr(runtime, "create_llm", lambda *_args, **_kwargs: FakeRepairLLM())
+    result = {"messages": [AIMessage(content='{"sources":[]}')]}
+
+    parsed = await runtime.extract_with_retry(
+        result,
+        app_config=object(),
+        max_retries=1,
+        validator=validate,
+    )
+
+    assert parsed == {"sources": ["official", "government"]}
+    assert "sources 至少需要 2 项" in repair_prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_persona_research_is_wrapped_in_token_observation(monkeypatch) -> None:
     from contextlib import contextmanager
 

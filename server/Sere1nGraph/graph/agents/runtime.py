@@ -797,6 +797,7 @@ async def extract_with_retry(
     app_config: AppConfig | None = None,
     max_retries: int = 1,
     system_prompt: str = "",
+    validator: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict | None:
     """
     提取结构化输出，解析失败时用 LLM 结合完整上下文和原始 system prompt 做修复。
@@ -805,11 +806,18 @@ async def extract_with_retry(
     - result: agent 执行结果 {"messages": [...]}
     - app_config: 用于创建修复 LLM
     - system_prompt: 原始 agent 的 system prompt（用于修复时保持一致的输出格式）
+    - validator: 可选领域 Schema 校验器；JSON 可解析但结构不合法时同样触发修复
     """
-    # 先尝试直接解析
+    validation_error = ""
     parsed = extract_structured_output(result)
     if parsed:
-        return parsed
+        if validator is None:
+            return parsed
+        try:
+            validator(parsed)
+            return parsed
+        except Exception as exc:
+            validation_error = str(exc)
 
     if not app_config or max_retries <= 0:
         return None
@@ -847,37 +855,56 @@ async def extract_with_retry(
     if not raw_content:
         return None
 
-    logger.warning(f"[runtime] 结构化输出解析失败，尝试 LLM 修复 (内容前200字: {raw_content[:200]})")
+    logger.warning(
+        "[runtime] 结构化输出无效，尝试 LLM 修复 "
+        f"(校验错误: {validation_error[:300] or 'JSON 解析失败'}; "
+        f"内容前200字: {raw_content[:200]})"
+    )
 
     try:
         repair_llm = create_llm(app_config, streaming=False)
-
-        # 用原始 system prompt 作为格式要求，附加上下文让 LLM 修复
         repair_system = system_prompt if system_prompt else ""
-        repair_user = (
-            "以上是你的任务要求。以下是你之前执行任务时的对话记录和工具调用结果。\n"
-            "你已经完成了分析，但最终输出的格式不正确。\n"
-            "请根据对话记录中的信息，严格按照任务要求的 JSON 格式重新输出结果。\n"
-            "只输出 JSON，不要输出任何其他内容。\n\n"
-            f"--- 对话记录 ---\n{context_text}\n\n"
-            f"--- 你之前的输出（格式有误）---\n{raw_content}"
-        )
-
         from langchain_core.messages import SystemMessage
-        repair_messages = []
-        if repair_system:
-            repair_messages.append(SystemMessage(content=repair_system))
-        repair_messages.append(HumanMessage(content=repair_user))
-
         from core.observability import observation_context
-        with observation_context(phase="structured_repair", agent="structured_repair"):
-            repair_result = await repair_llm.ainvoke(repair_messages)
-        repaired = getattr(repair_result, "content", "")
-        if repaired:
-            parsed = _extract_json(repaired.strip())
-            if parsed:
-                logger.info("[runtime] LLM 修复成功")
-                return parsed
+
+        for attempt in range(1, min(max_retries, 5) + 1):
+            repair_user = (
+                "以上是你的任务要求。以下是你之前执行任务时的对话记录和工具调用结果。\n"
+                "你已经完成了分析，但最终输出未通过 JSON 或领域 Schema 校验。\n"
+                "请只使用对话记录中已有的事实与来源，严格按照任务要求重新输出完整 JSON；"
+                "不得虚构来源，也不得省略必填字段。\n"
+                "只输出 JSON，不要输出任何其他内容。\n\n"
+                f"--- 校验错误 ---\n{validation_error[:4000] or 'JSON 解析失败'}\n\n"
+                f"--- 对话记录 ---\n{context_text}\n\n"
+                f"--- 上一次输出 ---\n{raw_content}"
+            )
+            repair_messages = []
+            if repair_system:
+                repair_messages.append(SystemMessage(content=repair_system))
+            repair_messages.append(HumanMessage(content=repair_user))
+
+            with observation_context(phase="structured_repair", agent="structured_repair"):
+                repair_result = await repair_llm.ainvoke(repair_messages)
+            repaired = str(getattr(repair_result, "content", "") or "").strip()
+            if not repaired:
+                validation_error = "修复模型返回空内容"
+                continue
+            raw_content = repaired
+            try:
+                parsed = _extract_json(repaired)
+                if validator is not None:
+                    validator(parsed)
+            except Exception as exc:
+                validation_error = str(exc)
+                logger.warning(
+                    "[runtime] 第 %s/%s 次结构化修复仍未通过校验: %s",
+                    attempt,
+                    min(max_retries, 5),
+                    validation_error[:500],
+                )
+                continue
+            logger.info("[runtime] LLM 结构化修复成功")
+            return parsed
     except Exception as e:
         from core.llm_capacity import LLMCapacityUnavailableError
 
