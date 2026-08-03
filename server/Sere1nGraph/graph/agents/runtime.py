@@ -160,9 +160,37 @@ class GuardedChatOpenAI(ChatOpenAI):
             return await super()._agenerate(*args, **kwargs)
 
     async def _astream(self, *args: Any, **kwargs: Any):
-        async with get_global_llm_capacity_guard().lease():
-            async for chunk in super()._astream(*args, **kwargs):
-                yield chunk
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+        async def _produce() -> None:
+            try:
+                async with get_global_llm_capacity_guard().lease():
+                    async for chunk in super(GuardedChatOpenAI, self)._astream(
+                        *args,
+                        **kwargs,
+                    ):
+                        queue.put_nowait(("chunk", chunk))
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                queue.put_nowait(("error", exc))
+            finally:
+                queue.put_nowait(("done", None))
+
+        producer = asyncio.create_task(_produce(), name="llm-stream-producer")
+        try:
+            while True:
+                event, payload = await queue.get()
+                if event == "chunk":
+                    yield payload
+                elif event == "error":
+                    raise payload
+                else:
+                    break
+        finally:
+            if not producer.done():
+                producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
 
 
 def _wrap_tools_with_error_handling(

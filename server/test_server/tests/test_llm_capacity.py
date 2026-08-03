@@ -106,6 +106,34 @@ async def test_llm_capacity_release_survives_cross_context_finalization() -> Non
 
 
 @pytest.mark.asyncio
+async def test_streaming_model_releases_capacity_when_consumer_stops_early(
+    monkeypatch,
+) -> None:
+    from langchain_openai import ChatOpenAI
+    from Sere1nGraph.graph.agents import runtime
+
+    guard = LLMCapacityGuard(
+        max_concurrency=1,
+        cooldown_seconds=1,
+        max_cooldown_seconds=2,
+    )
+
+    async def fake_stream(_self, *_args, **_kwargs):
+        yield "first"
+        yield "second"
+
+    monkeypatch.setattr(runtime, "get_global_llm_capacity_guard", lambda: guard)
+    monkeypatch.setattr(ChatOpenAI, "_astream", fake_stream)
+    model = runtime.GuardedChatOpenAI(model="test", api_key="test")
+    stream = model._astream([])
+
+    assert await anext(stream) == "first"
+    await asyncio.sleep(0)
+    assert guard.status()["in_use"] == 0
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_interactive_capacity_remains_available_during_standard_load() -> None:
     guard = LLMCapacityGuard(
         max_concurrency=3,
