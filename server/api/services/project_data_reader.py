@@ -516,6 +516,28 @@ async def _query_findings(db, project_id, query, _access):
     return ProjectDatasetResult(items, total)
 
 
+async def _target_research(db, project_id, limit, _access):
+    from api.dao import target_research
+
+    items, total = await target_research.list_project_research(
+        db, project_id, limit=limit
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_target_research(db, project_id, query, _access):
+    from api.dao import target_research
+
+    items, total = await target_research.list_project_research(
+        db,
+        project_id,
+        target_id=query.target_id,
+        skip=query.offset,
+        limit=query.limit,
+    )
+    return ProjectDatasetResult(items, total)
+
+
 def _record_adapter(key: str, label: str, description: str) -> ProjectDatasetAdapter:
     return ProjectDatasetAdapter(key, label, description, _project_record_loader(key))
 
@@ -546,6 +568,14 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
             filters=("target_id",),
         ),
         _record_adapter("company_meta", "公司元信息", "规范化公司名、别名和根域名"),
+        ProjectDatasetAdapter(
+            "target_research",
+            "机构深研",
+            "机构公开资料、证据、关联 Target 与扩展扫描链路",
+            _target_research,
+            query_loader=_query_target_research,
+            filters=("target_id",),
+        ),
         _record_adapter("company_scans", "综合公司扫描", "公司全流程扫描的阶段结果"),
         ProjectDatasetAdapter(
             "xhs_search_tasks",

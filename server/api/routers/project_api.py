@@ -301,6 +301,25 @@ async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict):
 
     return await _run(task_id, project_id, params)
 
+
+async def _dispatch_target_research(task_id: str, project_id: str, params: dict):
+    from api.services.runtime_config import get_runtime_app_config
+    from api.services.target_research import run_target_research
+
+    return await run_target_research(
+        get_db(),
+        await get_runtime_app_config(),
+        task_id=task_id,
+        project_id=project_id,
+        target_id=str(params.get("target_id") or ""),
+        max_related_targets=int(params.get("max_related_targets") or 8),
+        scan_discovered_targets=bool(params.get("scan_discovered_targets", True)),
+        rescan_root=bool(params.get("rescan_root", False)),
+        force_refresh=bool(params.get("force_refresh", True)),
+        scan_params=dict(params.get("scan_params") or {}),
+        requested_by=str(params.get("_requested_by") or ""),
+    )
+
 TASK_DISPATCHERS: dict[str, Any] = {
     "url_scan": _dispatch_url_scan,
     "xhs_search": _dispatch_xhs_search,
@@ -310,6 +329,7 @@ TASK_DISPATCHERS: dict[str, Any] = {
     "fofa_collect": _dispatch_fofa_collect,
     "scholar_contact": _dispatch_scholar_contact,
     "mobile_collect": _dispatch_mobile_collect,
+    "target_research": _dispatch_target_research,
 }
 register_task_dispatchers(TASK_DISPATCHERS)
 

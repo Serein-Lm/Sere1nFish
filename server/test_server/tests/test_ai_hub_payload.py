@@ -1090,8 +1090,9 @@ def test_project_dataset_registry_covers_project_detail_data_surfaces() -> None:
         "url_scan_findings",
         "url_scan_copywritings",
         "assets",
-        "company_meta",
-        "company_scans",
+            "company_meta",
+            "target_research",
+            "company_scans",
         "bidding_records",
         "bidding_archive",
         "xhs_search_tasks",
@@ -1486,6 +1487,7 @@ def test_target_intelligence_tool_returns_findings_and_existing_copywriting(
     monkeypatch,
 ) -> None:
     from api.dao import findings as findings_dao
+    from api.dao import target_research as target_research_dao
     from api.dao import targets as targets_dao
     from api.db import mongodb
     from Sere1nGraph.graph.tools.analysis_tools import query_target_intelligence
@@ -1505,12 +1507,20 @@ def test_target_intelligence_tool_returns_findings_and_existing_copywriting(
             "copywriting": {"scripts": ["已有沟通话术"]},
         }], 1)
 
+    async def fake_research(_db, **_kwargs):
+        return None
+
     monkeypatch.setattr(mongodb, "get_db", lambda: object())
     monkeypatch.setattr(targets_dao, "get_target", fake_target)
     monkeypatch.setattr(
         findings_dao,
         "query_target_findings_with_copywriting",
         fake_query,
+    )
+    monkeypatch.setattr(
+        target_research_dao,
+        "get_latest_research",
+        fake_research,
     )
 
     result = query_target_intelligence.invoke({
@@ -1526,6 +1536,7 @@ def test_target_intelligence_tool_returns_findings_and_existing_copywriting(
 
 def test_target_intelligence_tool_resolves_natural_target_name(monkeypatch) -> None:
     from api.dao import findings as findings_dao
+    from api.dao import target_research as target_research_dao
     from api.dao import targets as targets_dao
     from api.db import mongodb
     from Sere1nGraph.graph.tools.analysis_tools import query_target_intelligence
@@ -1542,6 +1553,9 @@ def test_target_intelligence_tool_resolves_natural_target_name(monkeypatch) -> N
         assert target_id == "tgt_resolved"
         return ([{"finding_id": "finding_1", "label": "高分发现"}], 1)
 
+    async def fake_research(_db, **_kwargs):
+        return None
+
     monkeypatch.setattr(mongodb, "get_db", lambda: object())
     monkeypatch.setattr(targets_dao, "get_target", fake_get_target)
     monkeypatch.setattr(targets_dao, "find_target", fake_find_target)
@@ -1549,6 +1563,11 @@ def test_target_intelligence_tool_resolves_natural_target_name(monkeypatch) -> N
         findings_dao,
         "query_target_findings_with_copywriting",
         fake_query,
+    )
+    monkeypatch.setattr(
+        target_research_dao,
+        "get_latest_research",
+        fake_research,
     )
 
     # Existing Agent calls may still put a natural name in target_id. Identity

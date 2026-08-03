@@ -14,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import asynccontextmanager
 from typing import Any, Callable, AsyncGenerator, Literal, Sequence
 
+import anyio
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -42,6 +44,64 @@ ToolResultTransform = Callable[[str, Any], Any]
 DEFAULT_AGENT_TIMEOUT = 500
 DEFAULT_TOOL_TIMEOUT = 60
 REQUIRE_EVIDENCE_TOOL_MARKER = "【工具调用要求】本子任务必须先调用至少一个事实查询工具。"
+
+
+def _consume_task_result(task: asyncio.Future[Any]) -> None:
+    """取走分离任务的最终异常，避免超时后的未检索异常告警。"""
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _await_tool_call(call: Any, timeout: float) -> Any:
+    """限制第三方工具调用时长，不等待不响应取消的底层协程。"""
+    if timeout <= 0:
+        return await call
+    task = asyncio.ensure_future(call)
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        task.cancel()
+        task.add_done_callback(_consume_task_result)
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    task.add_done_callback(_consume_task_result)
+    raise asyncio.TimeoutError
+
+
+@asynccontextmanager
+async def _bounded_mcp_session(
+    client: MultiServerMCPClient,
+    server_name: str,
+    *,
+    close_timeout: float = 10,
+):
+    """建立 MCP 会话，并阻止第三方 stdio 清理无限期卡住调用方。"""
+    context = client.session(server_name)
+    session = await context.__aenter__()
+    error: BaseException | None = None
+    try:
+        yield session
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        exc_info = (
+            (type(error), error, error.__traceback__)
+            if error is not None
+            else (None, None, None)
+        )
+        with anyio.move_on_after(close_timeout) as cancel_scope:
+            await context.__aexit__(*exc_info)
+        if cancel_scope.cancel_called:
+            logger.warning(
+                "MCP stdio 会话关闭超过 %.0fs，已中止清理等待 | server=%s",
+                close_timeout,
+                server_name,
+            )
 
 
 def _requires_initial_evidence_tool(messages: list[Any]) -> bool:
@@ -133,11 +193,7 @@ def _wrap_tools_with_error_handling(
                         return (blocked, "") if _art else blocked
                 try:
                     call = _orig(*args, **kwargs)
-                    result = (
-                        await asyncio.wait_for(call, timeout=tool_timeout)
-                        if tool_timeout > 0
-                        else await call
-                    )
+                    result = await _await_tool_call(call, float(tool_timeout))
                     _es["consecutive"] = 0  # 成功则重置
                     _es["container_error_consecutive"] = 0
                     return (
@@ -342,7 +398,7 @@ def create_agent_node(
                 transport = mcp_connections[mcp_server_name].get("transport", "stdio")
 
                 if transport == "stdio":
-                    async with client.session(mcp_server_name) as session:
+                    async with _bounded_mcp_session(client, mcp_server_name) as session:
                         mcp_tools = await load_mcp_tools(session)
                         mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
                         mcp_tools = _wrap_tools_with_error_handling(
@@ -426,7 +482,7 @@ def create_agent_node(
                     transport = mcp_connections[mcp_server_name].get("transport", "stdio")
 
                     if transport == "stdio":
-                        async with client.session(mcp_server_name) as session:
+                        async with _bounded_mcp_session(client, mcp_server_name) as session:
                             mcp_tools = await load_mcp_tools(session)
                             mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
                             mcp_tools = _wrap_tools_with_error_handling(

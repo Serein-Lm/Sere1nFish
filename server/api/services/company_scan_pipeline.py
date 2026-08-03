@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1068,20 +1069,20 @@ class CompanyScanPipeline:
                     item.should_collect_xhs for item in child_selection.decisions
                 )
 
-            followups: list[tuple[str, Any]] = []
+            followup_factories: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
             if "wholly_owned_entities" in checkpoint_results:
-                followups.append((
+                followup_factories.append((
                     "wholly_owned_entities",
-                    self._completed_module_result(
+                    lambda: self._completed_module_result(
                         checkpoint_results["wholly_owned_entities"]
                     ),
                 ))
             elif wholly_owned_entities and (
                 enable_asset_discovery or selected_child_xhs or enable_bidding
             ):
-                followups.append((
+                followup_factories.append((
                     "wholly_owned_entities",
-                    self._scan_wholly_owned_entities(
+                    lambda: self._scan_wholly_owned_entities(
                         task_id=task_id,
                         project_id=project_id,
                         entities=wholly_owned_entities,
@@ -1109,16 +1110,16 @@ class CompanyScanPipeline:
                     ),
                 ))
             if "scholar_entities" in checkpoint_results:
-                followups.append((
+                followup_factories.append((
                     "scholar_entities",
-                    self._completed_module_result(
+                    lambda: self._completed_module_result(
                         checkpoint_results["scholar_entities"]
                     ),
                 ))
             elif wholly_owned_entities and enable_scholar:
-                followups.append((
+                followup_factories.append((
                     "scholar_entities",
-                    self._scan_scholar_entities(
+                    lambda: self._scan_scholar_entities(
                         task_id=task_id,
                         project_id=project_id,
                         entities=wholly_owned_entities,
@@ -1127,7 +1128,7 @@ class CompanyScanPipeline:
                         entity_concurrency=control_scan_concurrency,
                     ),
                 ))
-            if followups:
+            if followup_factories:
                 await self._update_progress(
                     task_id,
                     "waiting_core",
@@ -1140,6 +1141,9 @@ class CompanyScanPipeline:
                         "followup_collection",
                         "采集全资关联单位...",
                     )
+                    followups = [
+                        (kind, factory()) for kind, factory in followup_factories
+                    ]
                     followup_results = await self._gather_named_jobs(
                         followups,
                         on_completed=_checkpoint_module,

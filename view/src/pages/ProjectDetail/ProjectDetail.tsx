@@ -64,6 +64,7 @@ import AuthenticatedImage from '../../components/AuthenticatedImage'
 import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
 import {
   listProjectTargets,
+  createTargetResearch,
   openAuthenticatedArtifact,
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
@@ -665,6 +666,7 @@ export default function ProjectDetail() {
   const [wechatLoading, setWechatLoading] = useState(false)
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
   const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
+  const [targetResearchActionId, setTargetResearchActionId] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
   const [websiteTargetId, setWebsiteTargetId] = useState('')
   const [wechatTargetId, setWechatTargetId] = useState('')
@@ -3750,6 +3752,25 @@ export default function ProjectDetail() {
     openTargetModule(target.target_id, defaultModule.tab)
   }
 
+  const runTargetResearch = async (target: ProjectTargetSummary) => {
+    if (!projectId || targetResearchActionId) return
+    setTargetResearchActionId(target.target_id)
+    try {
+      const result = await createTargetResearch(projectId, target.target_id, {
+        scan_discovered_targets: true,
+        rescan_root: true,
+        max_related_targets: 8,
+        force_refresh: true,
+      })
+      message.success(result.deduplicated ? '该机构已在深研队列中' : '机构深研已启动，可信关联 Target 将自动进入扫描')
+      void fetchTasks(projectId)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '机构深研启动失败')
+    } finally {
+      setTargetResearchActionId('')
+    }
+  }
+
   const renderTargetDashboard = () => {
     const columns: ColumnsType<TargetDashboardRow> = [
       {
@@ -3845,6 +3866,27 @@ export default function ProjectDetail() {
           return item ? <Tag color={item.color}>{item.text}</Tag> : <Text type="secondary">-</Text>
         },
       },
+      {
+        title: '操作',
+        key: 'actions',
+        width: 120,
+        fixed: 'right',
+        render: (_, target) => (
+          <Tooltip title="联网核验机构资料，扩展可信 Target 后自动扫描">
+            <Button
+              size="small"
+              icon={<SearchOutlined />}
+              loading={targetResearchActionId === target.target_id}
+              onClick={(event) => {
+                event.stopPropagation()
+                void runTargetResearch(target)
+              }}
+            >
+              机构深研
+            </Button>
+          </Tooltip>
+        ),
+      },
     ]
     return (
       <div>
@@ -3862,7 +3904,7 @@ export default function ProjectDetail() {
           locale={{ emptyText: <Empty description="项目尚未关联 Target" /> }}
           expandable={{ defaultExpandAllRows: true, indentSize: 20 }}
           pagination={{ pageSize: 20, showTotal: () => `共 ${projectTargets.length} 个 Target` }}
-          scroll={{ x: 1240 }}
+          scroll={{ x: 1380 }}
           onRow={(target) => ({
             onClick: () => openTargetDetails(target),
             style: { cursor: 'pointer' },
@@ -4035,6 +4077,7 @@ export default function ProjectDetail() {
               width: 120,
               render: (val: string) => <Tag>{
                 val === 'company_scan' ? '综合扫描' :
+                val === 'target_research' ? '机构深研' :
                 val === 'url_scan' ? 'URL 扫描' :
                 val === 'xhs_search' ? '小红书搜索' :
                 val === 'douyin_search' ? '抖音搜索' :

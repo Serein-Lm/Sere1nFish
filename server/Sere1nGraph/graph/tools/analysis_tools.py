@@ -300,6 +300,7 @@ def query_target_intelligence(
         str,
         list[dict[str, Any]],
         int,
+        dict[str, Any] | None,
     ]:
         from api.dao import findings as findings_dao
         from api.dao import targets as targets_dao
@@ -321,7 +322,7 @@ def query_target_intelligence(
             # whose entity document has not yet been backfilled.
             resolved_id = requested_id
         if not resolved_id:
-            return target, "", [], 0
+            return target, "", [], 0, None
 
         items, total = await findings_dao.query_target_findings_with_copywriting(
             db,
@@ -331,10 +332,17 @@ def query_target_intelligence(
             limit=max(1, min(int(limit or 10), 30)),
             skip=max(0, min(int(offset or 0), 10_000)),
         )
-        return target, resolved_id, items, total
+        from api.dao import target_research as target_research_dao
+
+        research = await target_research_dao.get_latest_research(
+            db,
+            target_id=resolved_id,
+            project_id=str(project_id or "").strip(),
+        )
+        return target, resolved_id, items, total, research
 
     try:
-        target, resolved_id, items, total = _run_coro_sync(_load())
+        target, resolved_id, items, total, research = _run_coro_sync(_load())
     except Exception as exc:  # noqa: BLE001
         return f"查询 Target 情报失败：{exc}"
 
@@ -349,14 +357,25 @@ def query_target_intelligence(
         or requested_name
         or resolved_id
     )
-    if not items:
+    if not items and not research:
         return f"Target {display_name}（{resolved_id}）暂无符合条件的 Finding。"
 
     bounded_offset = max(0, min(int(offset or 0), 10_000))
     lines = [
         f"Target：{display_name}（target_id={resolved_id}）",
-        f"命中 {total} 条，返回第 {bounded_offset + 1}-{bounded_offset + len(items)} 条：",
     ]
+    if research:
+        lines.extend([
+            f"机构深研：{str(research.get('summary') or '')[:1200]}",
+            f"行业/类型：{research.get('industry') or '-'} / {research.get('organization_type') or '-'}",
+            f"深研来源 {len(research.get('sources') or [])} 个，扩展 Target {int(research.get('expanded_target_count') or 0)} 个。",
+        ])
+    if not items:
+        lines.append("当前暂无符合条件的 Finding。")
+        return "\n".join(lines)
+    lines.append(
+        f"命中 {total} 条 Finding，返回第 {bounded_offset + 1}-{bounded_offset + len(items)} 条："
+    )
     for index, finding in enumerate(items, start=1):
         finding_id = str(finding.get("finding_id") or "")
         label = str(finding.get("label") or finding.get("value") or finding_id or "未命名 Finding")

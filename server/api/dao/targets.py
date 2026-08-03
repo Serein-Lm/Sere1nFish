@@ -225,6 +225,97 @@ async def upsert_target(
     return await get_target(db, target_id) or set_fields
 
 
+async def enrich_target_from_research(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    summary: str,
+    industry: str = "",
+    organization_type: str = "",
+    responsibilities: list[str] | None = None,
+    services: list[str] | None = None,
+    business_keywords: list[str] | None = None,
+    key_people: list[dict[str, Any]] | None = None,
+    research_id: str = "",
+) -> dict[str, Any] | None:
+    """把最新机构深研摘要挂到 Target，完整证据仍保存在研究版本表。"""
+    now = _now()
+    fields: dict[str, Any] = {
+        "research_summary": str(summary or "").strip()[:12000],
+        "industry": str(industry or "").strip()[:300],
+        "organization_type": str(organization_type or "").strip()[:300],
+        "responsibilities": [str(value).strip() for value in responsibilities or [] if str(value).strip()][:80],
+        "services": [str(value).strip() for value in services or [] if str(value).strip()][:80],
+        "business_keywords": [str(value).strip() for value in business_keywords or [] if str(value).strip()][:100],
+        "key_people": list(key_people or [])[:50],
+        "last_researched_at": now,
+        "updated_at": now,
+    }
+    if research_id:
+        fields["latest_research_id"] = research_id
+    return await db[TARGETS_COLLECTION].find_one_and_update(
+        {"target_id": target_id},
+        {"$set": fields},
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def merge_target_research_identity(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    aliases: list[str] | None = None,
+    root_domains: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """补齐研究得到的身份元数据，同时严格保留现有 Target 身份。"""
+    current = await get_target(db, target_id)
+    if not current:
+        return None
+    alias_values = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in aliases or []
+            if str(value).strip()
+        )
+    )[:50]
+    alias_keys = list(
+        dict.fromkeys(normalize_target_name(value) for value in alias_values)
+    )
+    domain_values = list(
+        dict.fromkeys(
+            str(value).strip().lower()
+            for value in [
+                current.get("root_domain") or "",
+                *(current.get("root_domains") or []),
+                *(root_domains or []),
+            ]
+            if str(value).strip()
+        )
+    )[:12]
+    now = _now()
+    fields: dict[str, Any] = {
+        "root_domains": domain_values,
+        "latest_source": "target_research",
+        "last_seen_at": now,
+        "updated_at": now,
+    }
+    if not current.get("root_domain") and domain_values:
+        fields["root_domain"] = domain_values[0]
+    update: dict[str, Any] = {"$set": fields}
+    if alias_values:
+        update["$addToSet"] = {
+            "aliases": {"$each": alias_values},
+            "aliases_normalized": {"$each": alias_keys},
+        }
+    return await db[TARGETS_COLLECTION].find_one_and_update(
+        {"target_id": target_id},
+        update,
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
 async def link_project_target(
     db: AsyncIOMotorDatabase,
     *,

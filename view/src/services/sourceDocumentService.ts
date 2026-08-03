@@ -138,6 +138,27 @@ export interface ProjectTargetSummary {
   last_document_at?: string
 }
 
+export interface TargetResearchTaskResponse {
+  task_id: string
+  target_id: string
+  task_type?: 'target_research'
+  status: string
+  deduplicated?: boolean
+}
+
+export interface TargetResearchResult {
+  research_id: string
+  target_id: string
+  project_id: string
+  canonical_name: string
+  summary: string
+  industry?: string
+  organization_type?: string
+  expanded_target_count: number
+  expanded_targets?: Array<Record<string, unknown>>
+  researched_at?: string
+}
+
 export function getSourceDocument(documentId: string, projectId?: string, versionId?: string) {
   const query = new URLSearchParams()
   if (projectId) query.set('project_id', projectId)
@@ -151,6 +172,37 @@ export function getSourceDocument(documentId: string, projectId?: string, versio
 export function listProjectTargets(projectId: string) {
   return apiFetch<{ items: ProjectTargetSummary[]; total: number }>(
     `/v1/targets?project_id=${encodeURIComponent(projectId)}&compact=true`,
+  )
+}
+
+export function createTargetResearch(
+  projectId: string,
+  targetId: string,
+  options?: {
+    scan_discovered_targets?: boolean
+    rescan_root?: boolean
+    max_related_targets?: number
+    force_refresh?: boolean
+  },
+) {
+  return apiFetch<TargetResearchTaskResponse>(
+    `/v1/targets/${encodeURIComponent(targetId)}/research`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        scan_discovered_targets: options?.scan_discovered_targets ?? true,
+        rescan_root: options?.rescan_root ?? true,
+        max_related_targets: options?.max_related_targets ?? 8,
+        force_refresh: options?.force_refresh ?? true,
+      }),
+    },
+  )
+}
+
+export function getTargetResearch(projectId: string, targetId: string) {
+  return apiFetch<{ item: TargetResearchResult | null }>(
+    `/v1/targets/${encodeURIComponent(targetId)}/research?project_id=${encodeURIComponent(projectId)}`,
   )
 }
 

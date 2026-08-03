@@ -5,7 +5,7 @@ import type { PaginatedResponse } from './projectService'
 // 任务
 // ============================================
 
-export type TaskType = 'url_scan' | 'xhs_search' | 'douyin_search' | 'web_tagging' | 'company_scan' | 'fofa_collect' | 'scholar_contact'
+export type TaskType = 'url_scan' | 'xhs_search' | 'douyin_search' | 'web_tagging' | 'company_scan' | 'fofa_collect' | 'scholar_contact' | 'target_research'
 export type TaskStatus = 'pending' | 'running' | 'pausing' | 'completed' | 'error' | 'failed' | 'paused' | 'cancelled'
 
 export interface TaskProgress {

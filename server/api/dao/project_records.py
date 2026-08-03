@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.db.collections import (
     COMPANY_META_COLLECTION,
     COMPANY_SCAN_COLLECTION,
+    TARGET_RESEARCH_COLLECTION,
     COPYWRITINGS_COLLECTION,
     PROFILE_COPYWRITINGS_COLLECTION,
     PROFILES_COLLECTION,
@@ -29,6 +30,7 @@ class ProjectRecordSource:
 PROJECT_RECORD_SOURCES: dict[str, ProjectRecordSource] = {
     "company_meta": ProjectRecordSource(COMPANY_META_COLLECTION, "updated_at"),
     "company_scans": ProjectRecordSource(COMPANY_SCAN_COLLECTION, "updated_at"),
+    "target_research": ProjectRecordSource(TARGET_RESEARCH_COLLECTION, "researched_at"),
     "copywritings": ProjectRecordSource(COPYWRITINGS_COLLECTION, "created_at"),
     "profiles": ProjectRecordSource(PROFILES_COLLECTION, "updated_at"),
     "profile_copywritings": ProjectRecordSource(PROFILE_COPYWRITINGS_COLLECTION, "_id"),

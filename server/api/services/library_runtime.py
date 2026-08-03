@@ -49,6 +49,7 @@ CORE_PROMPT_SLUGS = {
     "browser_chat/browser_chat",
     "copywriting/copywriting",
     "company_normalize/company_normalize",
+    "target_research/target_research",
     "company_router/company_router",
     "douyin_profile/douyin_profile",
     "douyin_profile/douyin_tagging",

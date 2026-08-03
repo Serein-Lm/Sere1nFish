@@ -76,6 +76,9 @@ COMPANY_META_COLLECTION = "company_meta"
 TARGETS_COLLECTION = "targets"
 PROJECT_TARGETS_COLLECTION = "project_targets"
 
+# Target 机构公开情报深研。每次研究保留独立版本，Target 仅保存最新摘要引用。
+TARGET_RESEARCH_COLLECTION = "target_research"
+
 # 永久来源文档。文档按规范 URL 去重，版本按稳定内容哈希不可变保存；
 # link 记录文档被哪个项目/Target/任务/关键词发现。
 SOURCE_DOCUMENTS_COLLECTION = "source_documents"

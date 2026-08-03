@@ -47,6 +47,31 @@ async def get_task(
     )
 
 
+async def find_latest_matching_task(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    task_type: str,
+    param_filters: dict[str, Any] | None = None,
+    statuses: list[str] | None = None,
+    projection: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """按稳定任务语义查询最近记录，调用侧不拼接 Mongo 字段路径。"""
+    query: dict[str, Any] = {
+        "project_id": project_id,
+        "task_type": task_type,
+    }
+    for key, value in (param_filters or {}).items():
+        query[f"params.{key}"] = value
+    if statuses is not None:
+        query["status"] = {"$in": list(statuses)}
+    return await db[TASKS_COLLECTION].find_one(
+        query,
+        projection or {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+
+
 async def prepare_interrupted_tasks(
     db: AsyncIOMotorDatabase,
 ) -> tuple[list[dict[str, Any]], int]:

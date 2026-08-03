@@ -143,6 +143,8 @@ def _build_persona_research_guard(
             unsafe_markers = (
                 "fetch(",
                 "xmlhttprequest",
+                "newpromise",
+                "setinterval(",
                 ".click(",
                 ".submit(",
                 "document.cookie",
@@ -344,6 +346,44 @@ async def create_company_normalize_agent(
         ],
         mcp_server_name=server_name,
         output_mode=output_mode,
+    )
+
+
+async def create_target_research_agent(
+    app_config: AppConfig,
+    server_name: str = "chrome-devtools",
+    output_mode: OutputMode = "silent",
+) -> Callable:
+    """创建机构 Target 深研 Agent；仅使用项目 Chrome，不另起浏览器。"""
+    return create_agent_node(
+        app_config=app_config,
+        system_prompt=(
+            f"{load_prompt('target_research/target_research')}\n\n"
+            f"{PERSONA_RESEARCH_RUNTIME_POLICY}"
+        ),
+        builtin_tools=[],
+        middleware=[
+            RequireEvidenceToolMiddleware(),
+            ModelCallLimitMiddleware(
+                run_limit=24,
+                exit_behavior="end",
+            ),
+            SummarizationMiddleware(
+                model=create_llm(app_config),
+                trigger=("tokens", 10000),
+                keep=("messages", 2),
+                summary_prompt=PERSONA_RESEARCH_SUMMARY_PROMPT,
+                trim_tokens_to_summarize=7000,
+            ),
+        ],
+        mcp_server_name=server_name,
+        mcp_tool_names=("navigate_page", "evaluate_script"),
+        mcp_tool_limit=20,
+        timeout=900,
+        max_attempts=2,
+        output_mode=output_mode,
+        mcp_call_guard=_build_persona_research_guard(),
+        mcp_result_transform=_compact_persona_research_result,
     )
 
 

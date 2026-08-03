@@ -4,7 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.auth import get_current_active_user
+from api.auth import User, get_current_active_user
+from api.dao import target_research as target_research_dao
 from api.dao import source_documents as source_dao
 from api.dao import targets as targets_dao
 from api.db.mongodb import get_db
@@ -28,6 +29,15 @@ class ProjectTargetLinkRequest(BaseModel):
     search_terms: list[str] = Field(default_factory=list)
     objectives: list[str] = Field(default_factory=list)
     task_def_id: str = ""
+
+
+class TargetResearchRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    scan_discovered_targets: bool = True
+    rescan_root: bool = True
+    max_related_targets: int = Field(default=8, ge=1, le=12)
+    force_refresh: bool = True
+    scan_params: dict = Field(default_factory=dict)
 
 
 @router.get("/targets")
@@ -72,6 +82,43 @@ async def get_target(target_id: str):
         raise HTTPException(404, "Target 不存在")
     projects = await targets_dao.list_target_projects(get_db(), target_id)
     return {**target, "projects": projects}
+
+
+@router.get("/targets/{target_id}/research")
+async def get_target_research(target_id: str, project_id: str = ""):
+    if not await targets_dao.get_target(get_db(), target_id):
+        raise HTTPException(404, "Target 不存在")
+    item = await target_research_dao.get_latest_research(
+        get_db(), target_id=target_id, project_id=project_id
+    )
+    return {"item": item}
+
+
+@router.post("/targets/{target_id}/research")
+async def create_target_research(
+    target_id: str,
+    payload: TargetResearchRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    from api.services.target_research import (
+        TargetResearchTargetNotFoundError,
+        enqueue_target_research,
+    )
+
+    try:
+        return await enqueue_target_research(
+            get_db(),
+            project_id=payload.project_id,
+            target_id=target_id,
+            requested_by=current_user.username,
+            scan_discovered_targets=payload.scan_discovered_targets,
+            rescan_root=payload.rescan_root,
+            max_related_targets=payload.max_related_targets,
+            force_refresh=payload.force_refresh,
+            scan_params=payload.scan_params,
+        )
+    except TargetResearchTargetNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/targets/{target_id}/projects")
