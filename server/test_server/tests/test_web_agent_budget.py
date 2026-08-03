@@ -19,12 +19,12 @@ def test_web_agent_budget_defaults_to_six_and_is_bounded() -> None:
 
 
 def test_web_agent_timeout_reserves_structured_extraction_budget() -> None:
-    assert _web_agent_timeout_budget({}) == (300, 270)
+    assert _web_agent_timeout_budget({}) == (900, 870)
     assert _web_agent_timeout_budget({"agent_timeout_seconds": 20}) == (60, 30)
-    assert _web_agent_timeout_budget({"agent_timeout_seconds": 9999}) == (600, 570)
+    assert _web_agent_timeout_budget({"agent_timeout_seconds": 9999}) == (1500, 1470)
     assert _web_agent_timeout_budget({"agent_timeout_seconds": "invalid"}) == (
-        300,
-        270,
+        900,
+        870,
     )
 
 

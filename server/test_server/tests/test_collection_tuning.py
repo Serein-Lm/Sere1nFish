@@ -11,7 +11,7 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "xhs_search_concurrency": 1,
         "company_scan_concurrency": 6,
         "llm_concurrency": 12,
-        "url_scan_agent_timeout_seconds": 300,
+        "url_scan_agent_timeout_seconds": 900,
         "llm_quota_cooldown_seconds": 120,
         "llm_quota_max_cooldown_seconds": 900,
     }
@@ -38,7 +38,7 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "xhs_search_concurrency": 1,
         "company_scan_concurrency": 12,
         "llm_concurrency": 32,
-        "url_scan_agent_timeout_seconds": 600,
+        "url_scan_agent_timeout_seconds": 1500,
         "llm_quota_cooldown_seconds": 1800,
         "llm_quota_max_cooldown_seconds": 1800,
     }
