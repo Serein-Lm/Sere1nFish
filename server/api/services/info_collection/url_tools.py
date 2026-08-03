@@ -45,6 +45,22 @@ _GENERIC_PAGE_TITLES = (
 )
 
 
+def _web_agent_timeout_budget(options: dict[str, Any]) -> tuple[int, int]:
+    """Reserve time for structured extraction after browser navigation ends."""
+    from api.services.info_collection.tuning import (
+        DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS,
+        MAX_URL_SCAN_AGENT_TIMEOUT_SECONDS,
+    )
+
+    requested = options.get("agent_timeout_seconds")
+    try:
+        total_timeout = int(requested or DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS)
+    except (TypeError, ValueError):
+        total_timeout = DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS
+    total_timeout = max(60, min(total_timeout, MAX_URL_SCAN_AGENT_TIMEOUT_SECONDS))
+    return total_timeout, max(30, total_timeout - 30)
+
+
 def classify_terminal_probe(target_info: dict[str, Any]) -> tuple[str, str] | None:
     """Identify deterministic error/default pages that do not need an Agent."""
     probe = target_info.get("probe") or {}
@@ -435,16 +451,15 @@ class UrlWebScanTool:
             )
             started = time.time()
             worker_config = _build_worker_chrome_config(self._app_config, cdp_url)
-            agent_timeout = max(
-                30,
-                min(int(request.options.get("agent_timeout_seconds") or 100), 180),
+            agent_timeout, execution_timeout = _web_agent_timeout_budget(
+                request.options
             )
             tool_limit = _web_agent_tool_limit(request.options)
             agent = await create_web_tagging_agent(
                 worker_config,
                 streaming=False,
                 allowed_navigation_url=url,
-                timeout=min(agent_timeout, 90),
+                timeout=execution_timeout,
                 mcp_tool_limit=tool_limit,
                 max_attempts=1,
             )

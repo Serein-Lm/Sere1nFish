@@ -361,6 +361,7 @@ def test_url_scan_stage_uses_scan_tool_and_preserves_streaming_emit():
         assert req.options["pipeline_id"] == "pipe-1"
         assert req.options["item_id"] == "item-1"
         assert req.options["attempt"] == 1
+        assert req.options["agent_timeout_seconds"] == 300
 
         assert len(ctx.state["scan_results"]) == 1
         assert ctx.state["scan_results"][0]["data"]["findings"][0]["label"] == "HR 邮箱"

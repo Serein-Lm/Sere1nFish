@@ -18,6 +18,7 @@ DEFAULT_COPYWRITING_CONCURRENCY = 6
 DEFAULT_XHS_SEARCH_CONCURRENCY = 1
 DEFAULT_COMPANY_SCAN_CONCURRENCY = 6
 DEFAULT_LLM_CONCURRENCY = 12
+DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS = 300
 DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS = 120
 DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS = 900
 
@@ -28,6 +29,7 @@ MAX_COPYWRITING_CONCURRENCY = 12
 MAX_XHS_SEARCH_CONCURRENCY = 8
 MAX_COMPANY_SCAN_CONCURRENCY = 12
 MAX_LLM_CONCURRENCY = 32
+MAX_URL_SCAN_AGENT_TIMEOUT_SECONDS = 600
 MAX_LLM_QUOTA_COOLDOWN_SECONDS = 1800
 
 
@@ -37,6 +39,20 @@ def _bounded(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(1, min(parsed, maximum))
+
+
+def _bounded_timeout(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 @dataclass(frozen=True)
@@ -50,6 +66,7 @@ class CollectionRuntimeTuning:
     xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY
     company_scan_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY
     llm_concurrency: int = DEFAULT_LLM_CONCURRENCY
+    url_scan_agent_timeout_seconds: int = DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS
     llm_quota_cooldown_seconds: int = DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS
     llm_quota_max_cooldown_seconds: int = DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS
 
@@ -92,6 +109,12 @@ class CollectionRuntimeTuning:
                 default=DEFAULT_LLM_CONCURRENCY,
                 maximum=MAX_LLM_CONCURRENCY,
             ),
+            url_scan_agent_timeout_seconds=_bounded_timeout(
+                data.get("url_scan_agent_timeout_seconds"),
+                default=DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS,
+                minimum=60,
+                maximum=MAX_URL_SCAN_AGENT_TIMEOUT_SECONDS,
+            ),
             llm_quota_cooldown_seconds=_bounded(
                 data.get("llm_quota_cooldown_seconds"),
                 default=DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS,
@@ -116,12 +139,18 @@ class CollectionRuntimeTuning:
         return type(self).from_config(data)
 
 
-async def get_collection_runtime_tuning() -> CollectionRuntimeTuning:
+async def get_collection_runtime_tuning(db: Any | None = None) -> CollectionRuntimeTuning:
     """从 MongoDB 配置中心读取采集预算，缺失时使用适配当前服务器的默认值。"""
-    from api.services.runtime_config import get_runtime_config_section
-
     try:
-        config = await get_runtime_config_section("collection_runtime")
+        if db is None:
+            from api.services.runtime_config import get_runtime_config_section
+
+            config = await get_runtime_config_section("collection_runtime")
+        else:
+            from api.dao import config as config_dao
+
+            document = await config_dao.get_config(db, "collection_runtime")
+            config = document.get("config", {}) if document else {}
     except Exception as exc:
         logger.warning("读取采集并发配置失败，使用内置安全默认值: %s", exc)
         config = {}

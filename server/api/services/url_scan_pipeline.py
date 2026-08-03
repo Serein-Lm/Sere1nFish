@@ -31,6 +31,7 @@ from api.services.company_url import normalize_url
 from api.db.collections import COPYWRITINGS_COLLECTION, FINDINGS_COLLECTION
 from api.services.info_collection.tuning import (
     DEFAULT_COPYWRITING_CONCURRENCY,
+    DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS,
     DEFAULT_URL_PROBE_CONCURRENCY,
     DEFAULT_URL_SCAN_CONCURRENCY,
     MAX_COPYWRITING_CONCURRENCY,
@@ -178,12 +179,14 @@ class _UrlScanStage(Stage):
         on_result: Any = None,
         emit_to: str | None = None,
         source: str = "web_tagging",
+        agent_timeout_seconds: int = DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS,
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
         self.on_result = on_result
         self.emit_to = emit_to
         self.source = source
+        self.agent_timeout_seconds = agent_timeout_seconds
         super().__init__(concurrency=concurrency)
 
     async def on_setup(self, state: dict[str, Any]) -> None:
@@ -214,6 +217,7 @@ class _UrlScanStage(Stage):
                         "item_id": item.item_id,
                         "attempt": item.attempt,
                         "persist_legacy_result": False,
+                        "agent_timeout_seconds": self.agent_timeout_seconds,
                     },
                 )
             )
@@ -416,6 +420,7 @@ class UrlScanPipeline:
         num_workers: int = 3,
         on_result: Any = None,
         source: str = "web_tagging",
+        agent_timeout_seconds: int = DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS,
     ) -> list[dict[str, Any]]:
         """
         多 Worker 并发扫描存活 URL.
@@ -444,6 +449,7 @@ class UrlScanPipeline:
             task_id=task_id,
             on_result=on_result,
             source=source,
+            agent_timeout_seconds=agent_timeout_seconds,
         )
         t_start = _time.time()
         await run_stream_pipeline(
@@ -760,6 +766,7 @@ class UrlScanPipeline:
         source_context_by_url: dict[str, str] | None = None,
         source_metadata_by_url: dict[str, dict[str, Any]] | None = None,
         target_context: dict[str, Any] | None = None,
+        agent_timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         """
         完整流水线：url.txt → 探活 → 扫描 → 提取 → 话术生成 → 存储。
@@ -767,6 +774,14 @@ class UrlScanPipeline:
         known_alive_urls 来自上游资产发现，用于跳过同一任务内的重复探活。
         """
         from core.observability import obs_log
+        from api.services.info_collection.tuning import get_collection_runtime_tuning
+
+        runtime_tuning = (
+            await get_collection_runtime_tuning(self.db)
+        ).with_overrides(
+            url_scan_agent_timeout_seconds=agent_timeout_seconds,
+        )
+        effective_agent_timeout = runtime_tuning.url_scan_agent_timeout_seconds
 
         task_result = {
             "task_id": task_id,
@@ -786,6 +801,7 @@ class UrlScanPipeline:
             "total_findings": 0,
             "total_copywritings": 0,
             "copywriting_enabled": enable_copywriting,
+            "agent_timeout_seconds": effective_agent_timeout,
             "copywriting_errors": [],
             "error": None,
         }
@@ -1113,6 +1129,7 @@ class UrlScanPipeline:
                 task_id=task_id,
                 on_result=_on_scan_result,
                 source=source,
+                agent_timeout_seconds=effective_agent_timeout,
             )
             cw_stage = _CopywritingStage(
                 concurrency=max(
