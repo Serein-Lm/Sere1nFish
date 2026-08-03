@@ -1,4 +1,4 @@
-"""公司全资子公司 Provider 工厂。"""
+"""公司全资关联单位 Provider 工厂。"""
 from __future__ import annotations
 
 from .adapters import TianyanchaInvestmentProvider
@@ -11,4 +11,4 @@ class CompanyControlProviderFactory:
         normalized = str(provider or "").strip().lower()
         if normalized == "tianyancha":
             return await TianyanchaInvestmentProvider.create()
-        raise ValueError(f"不支持的公司全资子公司 Provider: {provider}")
+        raise ValueError(f"不支持的公司全资关联单位 Provider: {provider}")

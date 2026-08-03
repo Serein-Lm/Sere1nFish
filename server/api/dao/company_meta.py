@@ -33,6 +33,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await coll.create_index("root_domain")
     await coll.create_index("target_id", sparse=True)
     await coll.create_index([("project_id", 1), ("relation.parent_target_id", 1)])
+    await coll.create_index(
+        [("project_id", 1), ("relation.root_target_id", 1), ("relation.relation_depth", 1)]
+    )
 
 
 async def upsert_company_meta(

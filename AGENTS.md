@@ -70,6 +70,7 @@
 - `Project` 是一次工作的组织边界，承载任务、搜索目标和项目内展示；它不是公司实体，也不能作为跨项目公司的唯一标识。
 - `Target` 是跨项目复用的全局目标实体，当前主要表示公司或机构，持久化在 `targets`。公司规范化结果通过 `target_id` 归入同一实体，名称别名和根域名只用于解析，调用侧使用稳定 `target_id`。
 - `ProjectTarget` 是项目关注某个 Target 的关系，持久化在 `project_targets`，保存搜索词、目标、采集任务和最近增量采集时间。一个 Project 可关联多个 Target，一个 Target 也可被多个 Project 复用。
+- 全资单位关系归属于 ProjectTarget 的项目场景：根单位、直接上级、`relation_depth` 和完整 `lineage_target_ids/lineage_target_names` 必须同时保存。扫描支持直属子单位或继续钻取一层孙单位；每一条边都必须是直接 100% 持股，禁止把根单位到孙单位的间接持股伪装为直接关系。项目详情按这些稳定字段构建层级树，不能依赖名称前缀临时推断。
 - `SourceDocument` 是按规范 URL 全局去重的来源文档，持久化在 `source_documents`；同一文章在不同项目或 Target 中只保存一份来源身份。
 - `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
 - `SourceDocumentLink` 是 Project、Target、任务、关键词发现某个文档的关系，持久化在 `source_document_links`。任务字段、主体对应度和相关性评分属于该场景关联，不得写成全局来源事实；相同场景可按分析指纹复用，不同 Target 必须独立分析。
@@ -120,6 +121,7 @@
 - 信息采集并发预算统一由 MongoDB `collection_runtime` 配置段和 `api.services.info_collection.tuning` 加载、校验与限幅；任务参数只做单次覆盖。浏览器 worker 数必须小于 Chrome 池上限，为公司规范化、公众号和其他并行任务保留容量；小红书搜索并发必须同时受任务上限、关键词数和当前可用账号数约束。
 - 新增 MongoDB collection（如 `fofa_assets`、`company_meta`）先在 `api/db/collections.py` 声明常量，再在 `api.main` 生命周期或 DAO `ensure_indexes` 中幂等建索引。
 - 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`；记录累积 `target_ids/project_ids` 供公司与项目双向检索，重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。
+- 控股结构通过 `api.services.company_control` 分层发现并持久化。层级上限、单位总量、投资查询、ICP 查询和后续扫描并发必须分别限幅；默认只查直属子单位，用户显式选择后最多继续一层孙单位。恢复任务、渠道词解析和项目 Target 汇总必须复用已保存 lineage，不能重新按名称猜测关系。
 
 ## 前端关键设计规则
 

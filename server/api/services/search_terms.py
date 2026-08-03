@@ -187,9 +187,10 @@ async def resolve_project_target_terms(
     channel: str,
     explicit_keywords: list[str] | None = None,
     include_direct_children: bool = True,
+    max_relation_depth: int = 2,
     max_keywords: int = 60,
 ) -> ResolvedSearchTerms:
-    """解析根 Target 及其第一层全资子公司的渠道词，供手机/浏览器任务复用。"""
+    """解析根 Target 及其全资关联单位渠道词，供手机/浏览器任务复用。"""
     from api.dao import targets as targets_dao
 
     channel = str(channel or "").strip().lower()
@@ -216,11 +217,11 @@ async def resolve_project_target_terms(
     documents = [root] if root else []
     if include_direct_children and target_id:
         documents.extend(
-            await targets_dao.list_project_target_children(
+            await targets_dao.list_project_target_descendants(
                 db,
                 project_id=project_id,
-                parent_target_id=target_id,
-                relation_depth=1,
+                root_target_id=target_id,
+                max_depth=max_relation_depth,
             )
         )
 
@@ -250,8 +251,13 @@ async def resolve_project_target_terms(
         )
         if doc_target_id:
             target_ids.append(doc_target_id)
+        relation_depth = int(doc.get("relation_depth") or 0)
         sources.append(
-            "project_target_child" if doc.get("parent_target_id") else "project_target"
+            "project_target_grandchild"
+            if relation_depth >= 2
+            else "project_target_child"
+            if doc.get("parent_target_id")
+            else "project_target"
         )
 
     if not documents and target_name:
@@ -278,7 +284,7 @@ async def resolve_project_target_terms(
     for term in explicit:
         _append(term, root_target)
 
-    # 在根公司和所有子单位之间轮询取词，避免根公司词库先占满上限。
+    # 在根公司和所有关联单位之间轮询取词，避免根公司词库先占满上限。
     max_group_size = max((len(group) for group, _target in term_groups), default=0)
     for term_index in range(max_group_size):
         for group, term_target in term_groups:

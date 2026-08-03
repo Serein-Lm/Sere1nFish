@@ -1,7 +1,8 @@
-"""公司第一层全资子公司发现、ICP 补全和项目 Target 持久化。"""
+"""公司全资关联单位分层发现、ICP 补全和项目 Target 持久化。"""
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -19,6 +20,14 @@ from .factory import CompanyControlProviderFactory
 logger = get_logger("company_control")
 
 
+@dataclass(slots=True)
+class _ControlParent:
+    target_id: str
+    name: str
+    lineage_target_ids: list[str]
+    lineage_target_names: list[str]
+
+
 class CompanyControlService:
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self.db = db
@@ -30,23 +39,30 @@ class CompanyControlService:
         task_id: str,
         parent_target: dict[str, Any],
         company_name: str,
+        max_depth: int = 1,
         max_entities: int = 100,
         page_concurrency: int = 4,
         icp_concurrency: int = 6,
     ) -> dict[str, Any]:
         parent_target_id = str(parent_target.get("target_id") or "")
         parent_target_name = str(parent_target.get("canonical_name") or company_name).strip()
+        safe_max_depth = max(1, min(int(max_depth or 1), 2))
+        safe_max_entities = max(1, int(max_entities or 100))
+        safe_lookup_concurrency = max(1, int(page_concurrency or 4))
         base_result: dict[str, Any] = {
             "enabled": True,
             "status": "running",
             "provider": "tianyancha_outbound_investment",
             "relation_type": "wholly_owned_direct_investment",
-            "relation_depth": 1,
+            "max_depth": safe_max_depth,
+            "relation_depth": 0,
             "ownership_percent": 100.0,
             "total_reported": 0,
             "matched": 0,
             "persisted": 0,
             "pages_fetched": 0,
+            "parents_queried": 0,
+            "depth_counts": {},
             "truncated": False,
             "entities": [],
             "errors": [],
@@ -54,11 +70,6 @@ class CompanyControlService:
         }
         try:
             provider = await CompanyControlProviderFactory.create("tianyancha")
-            discovery = await provider.discover(
-                company_name,
-                max_entities=max(1, max_entities),
-                page_concurrency=max(1, page_concurrency),
-            )
         except TianyanchaApiError as exc:
             base_result.update(
                 {
@@ -68,59 +79,81 @@ class CompanyControlService:
                     "permission_required": exc.code == PERMISSION_DENIED_CODE,
                 }
             )
-            logger.warning("全资子公司发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
+            logger.warning("全资关联单位发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
             return base_result
         except Exception as exc:  # noqa: BLE001
             base_result.update({"status": "error", "errors": [str(exc)]})
-            logger.exception("全资子公司发现异常 company=%s", company_name)
+            logger.exception("全资关联单位发现异常 company=%s", company_name)
             return base_result
-
-        base_result.update(
-            {
-                "provider": discovery.provider,
-                "total_reported": discovery.total_reported,
-                "matched": len(discovery.entities),
-                "pages_fetched": discovery.pages_fetched,
-                "truncated": discovery.truncated,
-            }
+        provider_name = str(
+            getattr(provider, "name", "") or "tianyancha_outbound_investment"
         )
-        semaphore = asyncio.Semaphore(max(1, icp_concurrency))
 
-        async def _enrich(entity: ControlledEntity) -> tuple[ControlledEntity, str]:
-            async with semaphore:
-                try:
-                    return await provider.lookup_icp(entity), ""
-                except TianyanchaApiError as exc:
-                    logger.warning("全资子公司 ICP 查询失败 company=%s code=%s", entity.name, exc.code)
-                    return entity, f"{entity.name}: ICP 查询失败({exc.code}) {exc.reason}"
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("全资子公司 ICP 查询异常 company=%s: %s", entity.name, exc)
-                    return entity, f"{entity.name}: ICP 查询异常 {exc}"
-
-        enriched = await asyncio.gather(*[_enrich(entity) for entity in discovery.entities])
         from api.dao import company_meta as company_meta_dao
         from api.dao import targets as targets_dao
         from api.services.search_terms import build_target_channel_terms
 
-        async def _persist(entity: ControlledEntity, icp_error: str) -> dict[str, Any]:
+        icp_semaphore = asyncio.Semaphore(max(1, int(icp_concurrency or 6)))
+
+        async def _enrich(
+            parent: _ControlParent,
+            entity: ControlledEntity,
+        ) -> tuple[_ControlParent, ControlledEntity, str]:
+            async with icp_semaphore:
+                try:
+                    return parent, await provider.lookup_icp(entity), ""
+                except TianyanchaApiError as exc:
+                    logger.warning(
+                        "全资关联单位 ICP 查询失败 company=%s code=%s",
+                        entity.name,
+                        exc.code,
+                    )
+                    return parent, entity, f"{entity.name}: ICP 查询失败({exc.code}) {exc.reason}"
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("全资关联单位 ICP 查询异常 company=%s: %s", entity.name, exc)
+                    return parent, entity, f"{entity.name}: ICP 查询异常 {exc}"
+
+        async def _persist(
+            parent: _ControlParent,
+            entity: ControlledEntity,
+            icp_error: str,
+            depth: int,
+        ) -> tuple[dict[str, Any], _ControlParent]:
             aliases = list(dict.fromkeys([entity.name, *entity.aliases]))
             target = await targets_dao.upsert_target(
                 self.db,
                 name=entity.name,
                 root_domain=entity.root_domain,
                 aliases=aliases,
-                source=discovery.provider,
+                source=provider_name,
             )
+            target_id = str(target.get("target_id") or "")
+            lineage_target_ids = [*parent.lineage_target_ids, target_id]
+            lineage_target_names = [*parent.lineage_target_names, entity.name]
             relation = {
-                "parent_target_id": parent_target_id,
-                "parent_target_name": parent_target_name,
+                "root_target_id": parent_target_id,
+                "root_target_name": parent_target_name,
+                "parent_target_id": parent.target_id,
+                "parent_target_name": parent.name,
                 "relation_type": "wholly_owned_direct_investment",
-                "relation_depth": 1,
+                "relation_depth": depth,
                 "ownership_percent": 100.0,
-                "relation_source": discovery.provider,
+                "relation_source": provider_name,
                 "provider_company_id": entity.provider_id,
                 "registration_status": entity.registration_status,
                 "relation_paths": entity.relation_paths,
+                "lineage_target_ids": lineage_target_ids,
+                "lineage_target_names": lineage_target_names,
+                "lineage": [
+                    {
+                        "target_id": lineage_id,
+                        "target_name": lineage_name,
+                        "relation_depth": lineage_depth,
+                    }
+                    for lineage_depth, (lineage_id, lineage_name) in enumerate(
+                        zip(lineage_target_ids, lineage_target_names)
+                    )
+                ],
             }
             channel_terms = build_target_channel_terms(names=aliases)
             project_target = await targets_dao.link_project_target(
@@ -140,20 +173,20 @@ class CompanyControlService:
                 root_domain=entity.root_domain,
                 aliases=aliases,
                 confidence=1.0,
-                source=f"{discovery.provider}_icp",
+                source=f"{provider_name}_icp",
                 task_id=task_id,
-                target_id=str(target.get("target_id") or ""),
+                target_id=target_id,
                 icp_domains=entity.icp_domains,
                 relation=relation,
                 provenance={
-                    "investment_provider": discovery.provider,
+                    "investment_provider": provider_name,
                     "investment_interface_id": OUTBOUND_INVESTMENT_INTERFACE_ID,
                     "domain_provider": "tianyancha_icp",
                     "domain_interface_id": 1038,
                 },
             )
-            return {
-                "target_id": target.get("target_id") or "",
+            output = {
+                "target_id": target_id,
                 "project_target_id": project_target.get("project_target_id") or "",
                 "name": entity.name,
                 "aliases": aliases,
@@ -161,21 +194,145 @@ class CompanyControlService:
                 "icp_domains": entity.icp_domains,
                 "icp_records": entity.icp_records,
                 "ownership_percent": 100.0,
-                "relation_depth": 1,
+                "root_target_id": parent_target_id,
+                "root_target_name": parent_target_name,
+                "parent_target_id": parent.target_id,
+                "parent_target_name": parent.name,
+                "relation_depth": depth,
+                "lineage_target_ids": lineage_target_ids,
+                "lineage_target_names": lineage_target_names,
                 "registration_status": entity.registration_status,
                 "provider_company_id": entity.provider_id,
                 "icp_error": icp_error or None,
             }
+            return output, _ControlParent(
+                target_id=target_id,
+                name=entity.name,
+                lineage_target_ids=lineage_target_ids,
+                lineage_target_names=lineage_target_names,
+            )
 
-        persisted = await asyncio.gather(
-            *[_persist(entity, icp_error) for entity, icp_error in enriched],
-            return_exceptions=True,
-        )
-        for item in persisted:
-            if isinstance(item, Exception):
-                base_result["errors"].append(str(item))
-            else:
-                base_result["entities"].append(item)
+        frontier = [
+            _ControlParent(
+                target_id=parent_target_id,
+                name=parent_target_name,
+                lineage_target_ids=[parent_target_id] if parent_target_id else [],
+                lineage_target_names=[parent_target_name] if parent_target_name else [],
+            )
+        ]
+        seen_entities = {
+            f"id:{parent_target_id}" if parent_target_id else f"name:{parent_target_name.casefold()}"
+        }
+        deepest_persisted = 0
+
+        for depth in range(1, safe_max_depth + 1):
+            remaining = safe_max_entities - len(base_result["entities"])
+            if not frontier or remaining <= 0:
+                if frontier:
+                    base_result["truncated"] = True
+                break
+
+            lookup_semaphore = asyncio.Semaphore(safe_lookup_concurrency)
+            nested_page_concurrency = safe_lookup_concurrency if depth == 1 else 1
+
+            async def _discover_parent(
+                parent: _ControlParent,
+            ) -> tuple[_ControlParent, Any, Exception | None]:
+                async with lookup_semaphore:
+                    try:
+                        found = await provider.discover(
+                            parent.name,
+                            max_entities=remaining,
+                            page_concurrency=nested_page_concurrency,
+                        )
+                        return parent, found, None
+                    except Exception as exc:  # noqa: BLE001
+                        return parent, None, exc
+
+            discoveries = await asyncio.gather(
+                *[_discover_parent(parent) for parent in frontier]
+            )
+            edges: list[tuple[_ControlParent, ControlledEntity]] = []
+            for parent, discovery, discovery_error in discoveries:
+                base_result["parents_queried"] += 1
+                if discovery_error is not None:
+                    if depth == 1:
+                        if isinstance(discovery_error, TianyanchaApiError):
+                            base_result.update(
+                                {
+                                    "status": "unavailable",
+                                    "error_code": discovery_error.code,
+                                    "errors": [discovery_error.reason],
+                                    "permission_required": (
+                                        discovery_error.code == PERMISSION_DENIED_CODE
+                                    ),
+                                }
+                            )
+                        else:
+                            base_result.update(
+                                {"status": "error", "errors": [str(discovery_error)]}
+                            )
+                        return base_result
+                    base_result["errors"].append(
+                        f"{parent.name}: 下级单位查询失败 {discovery_error}"
+                    )
+                    continue
+                base_result["provider"] = discovery.provider
+                base_result["total_reported"] += int(discovery.total_reported or 0)
+                base_result["pages_fetched"] += int(discovery.pages_fetched or 0)
+                base_result["truncated"] = bool(
+                    base_result["truncated"] or discovery.truncated
+                )
+                for entity in discovery.entities:
+                    entity_key = (
+                        f"id:{entity.provider_id}"
+                        if entity.provider_id
+                        else f"name:{entity.name.casefold()}"
+                    )
+                    if (
+                        not entity.name
+                        or entity_key in seen_entities
+                        or entity.name in parent.lineage_target_names
+                    ):
+                        continue
+                    if len(edges) >= remaining:
+                        base_result["truncated"] = True
+                        break
+                    seen_entities.add(entity_key)
+                    edges.append((parent, entity))
+
+            base_result["matched"] += len(edges)
+            if not edges:
+                frontier = []
+                continue
+            enriched = await asyncio.gather(
+                *[_enrich(parent, entity) for parent, entity in edges]
+            )
+            persisted = await asyncio.gather(
+                *[
+                    _persist(parent, entity, icp_error, depth)
+                    for parent, entity, icp_error in enriched
+                ],
+                return_exceptions=True,
+            )
+            next_frontier: list[_ControlParent] = []
+            depth_persisted = 0
+            for item in persisted:
+                if isinstance(item, Exception):
+                    base_result["errors"].append(str(item))
+                    continue
+                output, child_parent = item
+                base_result["entities"].append(output)
+                next_frontier.append(child_parent)
+                depth_persisted += 1
+            if depth_persisted:
+                deepest_persisted = depth
+                base_result["depth_counts"][str(depth)] = depth_persisted
+            frontier = next_frontier
+
         base_result["persisted"] = len(base_result["entities"])
-        base_result["status"] = "completed" if not base_result["errors"] else "partial"
+        base_result["relation_depth"] = deepest_persisted
+        base_result["status"] = (
+            "completed" if not base_result["errors"] else "partial"
+        )
         return base_result

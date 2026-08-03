@@ -130,6 +130,10 @@ type TargetDataTabKey = 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scho
 type TargetCountKey = 'website_count' | 'xhs_count' | 'wechat_count' | 'bidding_count' | 'scholar_contact_count'
 type TargetHighScoreKey = 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars' | 'other'
 
+interface TargetDashboardRow extends ProjectTargetSummary {
+  children?: TargetDashboardRow[]
+}
+
 interface TargetModuleDefinition {
   tab: TargetDataTabKey
   label: string
@@ -3118,7 +3122,7 @@ export default function ProjectDetail() {
               style={{ width: 360, maxWidth: '100%' }}
               options={projectTargets.map((target) => ({
                 value: target.target_id,
-                label: `${['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(target.relation_type || '') ? '[全资子公司] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
+                label: `${(target.relation_depth ?? 0) >= 2 ? '[孙单位] ' : (target.relation_depth ?? 0) === 1 ? '[子单位] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
               }))}
               onChange={(value) => {
                 openTargetModule(value, 'wechat')
@@ -3602,6 +3606,31 @@ export default function ProjectDetail() {
     [projectTargets, selectedTargetId],
   )
 
+  const targetDashboardRows = useMemo<TargetDashboardRow[]>(() => {
+    const rows = projectTargets.map<TargetDashboardRow>((target) => ({
+      ...target,
+      children: [],
+    }))
+    const byTargetId = new Map(rows.map((target) => [target.target_id, target]))
+    const roots: TargetDashboardRow[] = []
+    rows.forEach((target) => {
+      const depth = Number(target.relation_depth || 0)
+      const parent = target.parent_target_id
+        ? byTargetId.get(target.parent_target_id)
+        : undefined
+      const parentDepth = Number(parent?.relation_depth || 0)
+      if (parent && parent.target_id !== target.target_id && parentDepth < depth) {
+        parent.children?.push(target)
+      } else {
+        roots.push(target)
+      }
+    })
+    rows.forEach((target) => {
+      if (!target.children?.length) delete target.children
+    })
+    return roots
+  }, [projectTargets])
+
   const applyTargetScope = (targetId: string) => {
     if (targetId !== selectedTargetId) {
       TARGET_DATA_TAB_KEYS.forEach((tab) => loadedTabsRef.current.delete(tab))
@@ -3660,7 +3689,7 @@ export default function ProjectDetail() {
   }
 
   const renderTargetDashboard = () => {
-    const columns: ColumnsType<ProjectTargetSummary> = [
+    const columns: ColumnsType<TargetDashboardRow> = [
       {
         title: '公司 / 机构',
         key: 'target',
@@ -3670,11 +3699,19 @@ export default function ProjectDetail() {
             <Space size={6} wrap>
               <Text strong>{target.target_name}</Text>
               {target.collection_complete ? <Tag color="success">采集完成</Tag> : <Tag>待完成</Tag>}
-              {target.parent_target_id || (target.relation_depth ?? 0) > 0
-                ? <Tag color="cyan">关联单位</Tag>
-                : null}
+              {(target.relation_depth ?? 0) >= 2
+                ? <Tag color="gold">孙单位</Tag>
+                : (target.relation_depth ?? 0) === 1
+                ? <Tag color="cyan">子单位</Tag>
+                : <Tag color="blue">主目标</Tag>}
             </Space>
             {target.root_domain ? <Text type="secondary">{target.root_domain}</Text> : null}
+            {target.parent_target_name ? (
+              <Text type="secondary">
+                上级：{target.parent_target_name}
+                {target.ownership_percent != null ? ` · 持股 ${target.ownership_percent}%` : ''}
+              </Text>
+            ) : null}
           </div>
         ),
       },
@@ -3748,18 +3785,19 @@ export default function ProjectDetail() {
     return (
       <div>
         <div className="project-data-toolbar">
-          <Text type="secondary">按 Target 汇总项目数据；点击整行进入默认模块，或点击模块数量直接钻取。</Text>
+          <Text type="secondary">按 Target 汇总项目数据并展示单位层级；展开子单位或孙单位后，可点击模块数量直接钻取。</Text>
           <Button size="small" icon={<SyncOutlined />} onClick={() => { if (projectId) void fetchProjectTargets(projectId) }}>
             刷新
           </Button>
         </div>
-        <Table<ProjectTargetSummary>
+        <Table<TargetDashboardRow>
           rowKey="project_target_id"
           size="small"
           columns={columns}
-          dataSource={projectTargets}
+          dataSource={targetDashboardRows}
           locale={{ emptyText: <Empty description="项目尚未关联 Target" /> }}
-          pagination={{ pageSize: 20, showTotal: (total) => `共 ${total} 个 Target` }}
+          expandable={{ defaultExpandAllRows: true, indentSize: 20 }}
+          pagination={{ pageSize: 20, showTotal: () => `共 ${projectTargets.length} 个 Target` }}
           scroll={{ x: 1240 }}
           onRow={(target) => ({
             onClick: () => openTargetDetails(target),
@@ -4250,9 +4288,11 @@ export default function ProjectDetail() {
                     <Text type="secondary">当前 Target</Text>
                     <Text strong>{selectedTarget.target_name}</Text>
                     {selectedTarget.relation_type === 'primary' && <Tag color="blue">主目标</Tag>}
-                    {['wholly_owned_direct_investment', 'wholly_owned_controlled_entity'].includes(selectedTarget.relation_type || '') && (
-                      <Tag color="cyan">全资子公司</Tag>
-                    )}
+                    {(selectedTarget.relation_depth ?? 0) >= 2
+                      ? <Tag color="gold">孙单位</Tag>
+                      : (selectedTarget.relation_depth ?? 0) === 1
+                      ? <Tag color="cyan">子单位</Tag>
+                      : null}
                   </Space>
                   {selectedTarget.root_domain && (
                     <Text type="secondary" className="target-scope-domain">{selectedTarget.root_domain}</Text>
@@ -4472,6 +4512,9 @@ export default function ProjectDetail() {
                     }
                     params.enable_copywriting = values.enable_copywriting ?? true
                     params.enable_control_structure = values.enable_control_structure ?? true
+                    if (values.enable_control_structure) {
+                      params.control_max_depth = values.control_max_depth ?? 1
+                    }
                     params.incremental_scan = values.asset_scan_mode === 'incremental'
                     if (values.xhs_max_notes) params.xhs_max_notes = values.xhs_max_notes
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
@@ -4570,7 +4613,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: true, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: false, scholar_limit: 10, enable_copywriting: true, enable_control_structure: true, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -4640,7 +4683,7 @@ export default function ProjectDetail() {
                               <Checkbox>公司标准化 + FOFA/Hunter 资产发现与存活去重</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_control_structure" valuePropName="checked" noStyle>
-                              <Checkbox title="使用天眼查对外投资 ID 823，仅保留直接持股比例恰好为 100% 的企业">天眼查对外投资：第一层全资子公司 + ICP 域名</Checkbox>
+                              <Checkbox title="使用天眼查对外投资 ID 823，仅保留每一层直接持股比例恰好为 100% 的经营中企业">天眼查对外投资：全资关联单位 + ICP 域名</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_url_scan" valuePropName="checked" noStyle>
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
@@ -4654,12 +4697,12 @@ export default function ProjectDetail() {
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (
                                 <Form.Item name="enable_subsidiary_xhs" valuePropName="checked" noStyle>
-                                  <Checkbox disabled={!getFieldValue('enable_xhs')}>将第一层全资子公司纳入小红书目标选择</Checkbox>
+                                  <Checkbox disabled={!getFieldValue('enable_xhs')}>将已发现的全资关联单位纳入小红书目标选择</Checkbox>
                                 </Form.Item>
                               )}
                             </Form.Item>
                             <Form.Item name="enable_wechat" valuePropName="checked" noStyle>
-                              <Checkbox>微信公众号采集（机构优先，互联网低优先级）</Checkbox>
+                              <Checkbox>微信公众号采集（默认关闭，可稍后基于已保存 Target 单独下发）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_scholar" valuePropName="checked" noStyle>
                               <Checkbox>学者联系采集（默认关闭）</Checkbox>
@@ -4668,6 +4711,20 @@ export default function ProjectDetail() {
                               <Checkbox>话术生成</Checkbox>
                             </Form.Item>
                           </Space>
+                        </Form.Item>
+                        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_control_structure !== cur.enable_control_structure}>
+                          {({ getFieldValue }) => getFieldValue('enable_control_structure') ? (
+                            <Form.Item
+                              name="control_max_depth"
+                              label="全资单位层级"
+                              extra="孙单位必须由根单位到子单位、再到孙单位连续两层均为直接 100% 持股。"
+                            >
+                              <Segmented block options={[
+                                { label: '仅直属子单位', value: 1 },
+                                { label: '包含孙单位', value: 2 },
+                              ]} />
+                            </Form.Item>
+                          ) : null}
                         </Form.Item>
                         <Form.Item noStyle shouldUpdate={(prev, cur) => (
                           prev.enable_xhs !== cur.enable_xhs
@@ -4686,7 +4743,7 @@ export default function ProjectDetail() {
                                   name="xhs_manual_targets"
                                   label="需要采集的公司名单"
                                   rules={[{ required: true, whitespace: true, message: '请输入至少一个公司名称' }]}
-                                  extra="每行一个名称，也支持逗号分隔；按法定名和已有别名匹配根目标及第一层全资子公司。"
+                                  extra="每行一个名称，也支持逗号分隔；按法定名和已有别名匹配根目标及本次发现的全资关联单位。"
                                 >
                                   <Input.TextArea rows={4} placeholder={'如：\n中国平安保险（集团）股份有限公司\n平安科技'} />
                                 </Form.Item>
@@ -4770,7 +4827,7 @@ export default function ProjectDetail() {
                         </Form.Item>
                         <Row gutter={16}>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="control_max_entities" label="全资子公司上限">
+                            <Form.Item name="control_max_entities" label="关联单位总上限" tooltip="子单位和孙单位共用此上限，优先保留层级更近的单位">
                               <InputNumber min={1} max={500} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
@@ -4787,8 +4844,8 @@ export default function ProjectDetail() {
                           <Col xs={24} sm={6}>
                             <Form.Item
                               name="control_scan_concurrency"
-                              label="子公司采集并发"
-                              tooltip="默认逐个处理子公司的资产发现与深扫；显式开启子公司小红书后同样受此限流"
+                              label="关联单位采集并发"
+                              tooltip="默认逐个处理关联单位的资产发现与深扫；显式开启关联单位小红书后同样受此限流"
                             >
                               <InputNumber min={1} max={12} style={{ width: '100%' }} />
                             </Form.Item>

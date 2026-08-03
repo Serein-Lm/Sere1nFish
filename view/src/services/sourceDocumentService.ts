@@ -104,12 +104,16 @@ export interface ProjectTargetSummary {
   root_domain?: string
   search_terms?: string[]
   search_terms_by_channel?: Record<string, string[]>
+  root_target_id?: string
+  root_target_name?: string
   parent_target_id?: string
   parent_target_name?: string
   relation_type?: string
   relation_depth?: number
   ownership_percent?: number
   relation_source?: string
+  lineage_target_ids?: string[]
+  lineage_target_names?: string[]
   relation?: Record<string, unknown>
   task_def_ids?: string[]
   document_count: number

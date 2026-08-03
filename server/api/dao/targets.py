@@ -55,6 +55,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await links.create_index(
         [("project_id", 1), ("parent_target_id", 1), ("relation_depth", 1)]
     )
+    await links.create_index(
+        [("project_id", 1), ("root_target_id", 1), ("relation_depth", 1)]
+    )
 
 
 async def get_target(
@@ -263,12 +266,16 @@ async def link_project_target(
         }
         update["$set"]["relation"] = relation_doc
         for key in (
+            "root_target_id",
+            "root_target_name",
             "parent_target_id",
             "parent_target_name",
             "relation_type",
             "relation_depth",
             "ownership_percent",
             "relation_source",
+            "lineage_target_ids",
+            "lineage_target_names",
         ):
             if key in relation_doc:
                 update["$set"][key] = relation_doc[key]
@@ -319,6 +326,35 @@ async def list_project_target_children(
     return [doc async for doc in cursor]
 
 
+async def list_project_target_descendants(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    root_target_id: str,
+    max_depth: int = 2,
+) -> list[dict[str, Any]]:
+    """读取项目中根 Target 下的全资关联单位，兼容旧的第一层记录。"""
+    if not project_id or not root_target_id:
+        return []
+    safe_depth = max(1, min(int(max_depth or 1), 2))
+    cursor = db[PROJECT_TARGETS_COLLECTION].find(
+        {
+            "project_id": project_id,
+            "active": {"$ne": False},
+            "relation_depth": {"$gte": 1, "$lte": safe_depth},
+            "$or": [
+                {"root_target_id": root_target_id},
+                {
+                    "root_target_id": {"$exists": False},
+                    "parent_target_id": root_target_id,
+                },
+            ],
+        },
+        {"_id": 0},
+    ).sort([("relation_depth", 1), ("target_name", 1)])
+    return [doc async for doc in cursor]
+
+
 async def list_project_targets(
     db: AsyncIOMotorDatabase,
     project_id: str,
@@ -336,12 +372,16 @@ async def list_project_targets(
                 "target_name": 1,
                 "root_domain": 1,
                 "root_domains": 1,
+                "root_target_id": 1,
+                "root_target_name": 1,
                 "parent_target_id": 1,
                 "parent_target_name": 1,
                 "relation_type": 1,
                 "relation_depth": 1,
                 "ownership_percent": 1,
                 "relation_source": 1,
+                "lineage_target_ids": 1,
+                "lineage_target_names": 1,
                 "run_task_ids": 1,
                 "task_def_ids": 1,
                 "last_collected_at": 1,

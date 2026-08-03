@@ -4,9 +4,17 @@
 提供 Chrome Docker 容器池的状态查询和管理接口。
 """
 
-from fastapi import APIRouter
+from typing import Annotated
 
-router = APIRouter(prefix="/browser", tags=["浏览器管理"])
+from fastapi import APIRouter, Depends
+
+from api.auth import User, get_current_active_user, require_admin
+
+router = APIRouter(
+    prefix="/browser",
+    tags=["浏览器管理"],
+    dependencies=[Depends(get_current_active_user)],
+)
 
 
 @router.get("/pool/status")
@@ -79,7 +87,9 @@ async def pool_config():
 
 
 @router.post("/pool/shutdown")
-async def pool_shutdown():
+async def pool_shutdown(
+    _admin: Annotated[User, Depends(require_admin)],
+):
     """关闭所有 Chrome 容器"""
     try:
         from browser_manager import get_browser_provider

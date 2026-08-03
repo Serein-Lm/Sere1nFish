@@ -81,6 +81,15 @@ async def _normalize_xhs_target_params(
 
 def _validate_company_scan_params(params: dict[str, Any]) -> None:
     """Validate optional company-scan modules before creating task records."""
+    if params.get("enable_control_structure", True):
+        try:
+            control_max_depth = int(params.get("control_max_depth") or 1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("全资单位层级必须为 1 或 2") from exc
+        if control_max_depth not in {1, 2}:
+            raise ValueError("全资单位层级必须为 1 或 2")
+        params["control_max_depth"] = control_max_depth
+
     if params.get("enable_wechat", False):
         from api.services.wechat_target_selection import (
             normalize_wechat_selection_mode,
@@ -231,6 +240,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         copywriting_concurrency=tuning.copywriting_concurrency,
         xhs_search_concurrency=tuning.xhs_search_concurrency,
         enable_control_structure=params.get("enable_control_structure", True),
+        control_max_depth=max(1, min(int(params.get("control_max_depth") or 1), 2)),
         control_max_entities=max(1, min(int(params.get("control_max_entities") or 100), 500)),
         control_lookup_concurrency=max(1, min(int(params.get("control_lookup_concurrency") or 4), 12)),
         control_icp_concurrency=max(1, min(int(params.get("control_icp_concurrency") or 6), 20)),

@@ -208,3 +208,16 @@ def test_company_scan_validates_wechat_target_selection_mode() -> None:
                 "wechat_target_selection_mode": "manual",
             }
         )
+
+
+def test_company_scan_validates_control_relation_depth() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    params = {"enable_control_structure": True, "control_max_depth": "2"}
+    _validate_company_scan_params(params)
+    assert params["control_max_depth"] == 2
+
+    with pytest.raises(ValueError, match="必须为 1 或 2"):
+        _validate_company_scan_params(
+            {"enable_control_structure": True, "control_max_depth": 3}
+        )

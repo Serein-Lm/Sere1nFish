@@ -5,7 +5,7 @@
 1. URL 扫描 → findings → 话术生成
 2. 小红书搜索（多关键词）→ 打标 → 画像
 3. 画像 → 话术生成（每个高分画像生成多套话术）
-4. 第一层全资子公司发现 → ICP 补全 → 资产与社媒采集
+4. 全资关联单位分层发现 → ICP 补全 → 资产与社媒采集
 5. 微信公众号手机发现 → 原文链接 → Chrome 全文与图片归档
 
 前端只需传 company_name + 勾选项，后端自动编排。
@@ -212,6 +212,7 @@ class CompanyScanPipeline:
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY,
         enable_control_structure: bool = True,
+        control_max_depth: int = 1,
         control_max_entities: int = 100,
         control_lookup_concurrency: int = 4,
         control_icp_concurrency: int = 6,
@@ -224,8 +225,8 @@ class CompanyScanPipeline:
 
         阶段:
         1. CompanyRouter 分析公司 → 生成搜索策略
-        2. 并行执行: URL扫描 + 招投标 + XHS搜索 + 公众号 + 学者联系 + 全资子公司查询
-        3. 逐个采集全资子公司（子公司 XHS 默认关闭）
+        2. 并行执行: URL扫描 + 招投标 + XHS搜索 + 公众号 + 学者联系 + 全资关联单位查询
+        3. 逐个采集全资关联单位（关联单位 XHS 默认关闭）
         4. 根 Target 的 XHS画像 → 话术生成
         """
         from core.observability import obs_log
@@ -244,7 +245,8 @@ class CompanyScanPipeline:
                 "enabled": enable_control_structure,
                 "status": "pending" if enable_control_structure else "disabled",
                 "relation_type": "wholly_owned_direct_investment",
-                "relation_depth": 1,
+                "max_depth": max(1, min(int(control_max_depth or 1), 2)),
+                "relation_depth": 0,
                 "ownership_percent": 100.0,
                 "entities": [],
                 "errors": [],
@@ -741,6 +743,7 @@ class CompanyScanPipeline:
                             self.db,
                             project_id=project_id,
                             parent_target_id=target_id,
+                            max_depth=control_max_depth,
                         ),
                     ))
                 if enable_asset_discovery or enable_url_scan:
@@ -790,6 +793,7 @@ class CompanyScanPipeline:
                         project_id=project_id,
                         parent_target=target,
                         company_name=normalized_name,
+                        max_depth=control_max_depth,
                         max_entities=control_max_entities,
                         page_concurrency=control_lookup_concurrency,
                         icp_concurrency=control_icp_concurrency,
@@ -1013,7 +1017,10 @@ class CompanyScanPipeline:
                                 ),
                                 "icp_domains": list(entity.get("icp_domains") or []),
                                 "relation_type": "wholly_owned_direct_investment",
-                                "parent_target_name": normalized_name,
+                                "relation_depth": int(entity.get("relation_depth") or 1),
+                                "parent_target_name": str(
+                                    entity.get("parent_target_name") or normalized_name
+                                ),
                             },
                         )
                         for entity in wholly_owned_entities
@@ -1081,14 +1088,14 @@ class CompanyScanPipeline:
                 await self._update_progress(
                     task_id,
                     "waiting_core",
-                    "等待资源采集全资子公司...",
+                    "等待资源采集全资关联单位...",
                 )
                 await core_lease.acquire()
                 try:
                     await self._update_progress(
                         task_id,
                         "followup_collection",
-                        "采集全资子公司...",
+                        "采集全资关联单位...",
                     )
                     followup_results = await self._gather_named_jobs(
                         followups,
@@ -1367,6 +1374,7 @@ class CompanyScanPipeline:
         project_id: str,
         parent_target: dict[str, Any],
         company_name: str,
+        max_depth: int,
         max_entities: int,
         page_concurrency: int,
         icp_concurrency: int,
@@ -1378,6 +1386,7 @@ class CompanyScanPipeline:
             task_id=task_id,
             parent_target=parent_target,
             company_name=company_name,
+            max_depth=max_depth,
             max_entities=max_entities,
             page_concurrency=page_concurrency,
             icp_concurrency=icp_concurrency,
@@ -1532,7 +1541,7 @@ class CompanyScanPipeline:
         entity_concurrency: int,
         xhs_decisions: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """按全资子公司限流并发，单位内部继续并行资产与社媒流水线。"""
+        """按全资关联单位限流并发，单位内部继续并行资产与社媒流水线。"""
         from api.services.search_terms import build_channel_terms
         from api.services.task_progress import update_source_progress
 
@@ -1547,7 +1556,7 @@ class CompanyScanPipeline:
             total=total_entities,
             processed=0,
             status="running",
-            message=f"开始采集 {total_entities} 家全资子公司",
+            message=f"开始采集 {total_entities} 家全资关联单位",
         )
 
         async def _scan(index: int, entity: dict[str, Any]) -> dict[str, Any]:
@@ -1678,7 +1687,7 @@ class CompanyScanPipeline:
                             if current >= total_entities
                             else "running"
                         ),
-                        message=f"全资子公司已处理 {current}/{total_entities}",
+                        message=f"全资关联单位已处理 {current}/{total_entities}",
                     )
 
         scanned = await asyncio.gather(
@@ -1733,7 +1742,7 @@ class CompanyScanPipeline:
             succeeded=summary["completed"],
             failed=max(0, total_entities - summary["completed"]),
             status="completed",
-            message=f"全资子公司采集完成 {summary['completed']}/{total_entities}",
+            message=f"全资关联单位采集完成 {summary['completed']}/{total_entities}",
         )
         return {"entities": output_entities, "summary": summary, "errors": errors}
 

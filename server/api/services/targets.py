@@ -488,9 +488,16 @@ async def list_project_target_summaries(
                 "target_type",
                 "target_name",
                 "root_domain",
+                "root_target_id",
+                "root_target_name",
                 "parent_target_id",
+                "parent_target_name",
                 "relation_type",
                 "relation_depth",
+                "ownership_percent",
+                "relation_source",
+                "lineage_target_ids",
+                "lineage_target_names",
             )
             if key in relation
         }

@@ -1,4 +1,4 @@
-"""公司全资子公司供应商适配。"""
+"""公司全资关联单位供应商适配。"""
 from __future__ import annotations
 
 from crawler_tools.tianyancha_tools import TianyanchaClient

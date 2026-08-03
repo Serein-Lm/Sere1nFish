@@ -459,6 +459,98 @@ async def test_subsidiary_service_persists_outbound_investment_provenance(
 
 
 @pytest.mark.asyncio
+async def test_subsidiary_service_persists_child_and_grandchild_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import company_meta as company_meta_dao
+    from api.dao import targets as targets_dao
+    from api.services.company_control.contracts import ControlDiscovery, ControlledEntity
+    from api.services.company_control.factory import CompanyControlProviderFactory
+    from api.services.company_control.service import CompanyControlService
+
+    class _Provider:
+        name = "tianyancha_outbound_investment"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        async def discover(
+            self,
+            company_name: str,
+            *,
+            max_entities: int,
+            page_concurrency: int,
+        ) -> ControlDiscovery:
+            self.calls.append((company_name, page_concurrency))
+            names = {
+                "根公司": [("直属子单位", "provider-child")],
+                "直属子单位": [("孙单位", "provider-grandchild")],
+            }.get(company_name, [])
+            return ControlDiscovery(
+                provider=self.name,
+                entities=[
+                    ControlledEntity(name=name, provider_id=provider_id)
+                    for name, provider_id in names[:max_entities]
+                ],
+                total_reported=len(names),
+                pages_fetched=1,
+            )
+
+        async def lookup_icp(self, entity: ControlledEntity) -> ControlledEntity:
+            return entity
+
+    provider = _Provider()
+
+    async def _create(_provider: str = "tianyancha") -> _Provider:
+        return provider
+
+    target_ids = {"直属子单位": "child", "孙单位": "grandchild"}
+    relations: dict[str, dict[str, Any]] = {}
+
+    async def _upsert_target(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        name = str(kwargs["name"])
+        return {"target_id": target_ids[name], "canonical_name": name}
+
+    async def _link_target(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        target_id = str(kwargs["target"]["target_id"])
+        relations[target_id] = dict(kwargs["relation"])
+        return {"project_target_id": f"project-{target_id}"}
+
+    async def _upsert_meta(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(CompanyControlProviderFactory, "create", _create)
+    monkeypatch.setattr(targets_dao, "upsert_target", _upsert_target)
+    monkeypatch.setattr(targets_dao, "link_project_target", _link_target)
+    monkeypatch.setattr(company_meta_dao, "upsert_company_meta", _upsert_meta)
+
+    result = await CompanyControlService(object()).discover_and_persist(
+        project_id="project-1",
+        task_id="task-1",
+        parent_target={"target_id": "root", "canonical_name": "根公司"},
+        company_name="根公司",
+        max_depth=2,
+        page_concurrency=4,
+    )
+
+    assert result["status"] == "completed"
+    assert result["persisted"] == 2
+    assert result["relation_depth"] == 2
+    assert result["depth_counts"] == {"1": 1, "2": 1}
+    assert provider.calls == [("根公司", 4), ("直属子单位", 1)]
+    assert relations["child"]["parent_target_id"] == "root"
+    assert relations["child"]["lineage_target_ids"] == ["root", "child"]
+    assert relations["grandchild"]["root_target_id"] == "root"
+    assert relations["grandchild"]["parent_target_id"] == "child"
+    assert relations["grandchild"]["relation_depth"] == 2
+    assert relations["grandchild"]["lineage_target_ids"] == [
+        "root",
+        "child",
+        "grandchild",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_project_terms_merge_root_and_direct_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -483,7 +575,7 @@ async def test_project_terms_merge_root_and_direct_children(
         ]
 
     monkeypatch.setattr(targets_dao, "get_project_target", _root)
-    monkeypatch.setattr(targets_dao, "list_project_target_children", _children)
+    monkeypatch.setattr(targets_dao, "list_project_target_descendants", _children)
     result = await resolve_project_target_terms(
         object(),
         project_id="project-1",
@@ -500,6 +592,65 @@ async def test_project_terms_merge_root_and_direct_children(
         "根公司 公告": {"target_id": "root", "target_name": "根公司"},
         "根公司 招标": {"target_id": "root", "target_name": "根公司"},
         "全资子公司 采购": {"target_id": "child", "target_name": "全资子公司"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_project_terms_include_grandchild_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+    from api.services.search_terms import resolve_project_target_terms
+
+    async def _root(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "target_id": "root",
+            "target_name": "根公司",
+            "search_terms_by_channel": {"weixin": ["根公司 公告"]},
+        }
+
+    async def _descendants(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "target_id": "child",
+                "target_name": "直属子单位",
+                "parent_target_id": "root",
+                "relation_depth": 1,
+                "search_terms_by_channel": {"weixin": ["直属子单位 采购"]},
+            },
+            {
+                "target_id": "grandchild",
+                "target_name": "孙单位",
+                "parent_target_id": "child",
+                "relation_depth": 2,
+                "search_terms_by_channel": {"weixin": ["孙单位 招标"]},
+            },
+        ]
+
+    monkeypatch.setattr(targets_dao, "get_project_target", _root)
+    monkeypatch.setattr(
+        targets_dao,
+        "list_project_target_descendants",
+        _descendants,
+    )
+    result = await resolve_project_target_terms(
+        object(),
+        project_id="project-1",
+        target_id="root",
+        target_name="根公司",
+        channel="weixin",
+    )
+
+    assert result.target_ids == ["root", "child", "grandchild"]
+    assert result.keywords == ["根公司 公告", "直属子单位 采购", "孙单位 招标"]
+    assert result.sources == [
+        "project_target",
+        "project_target_child",
+        "project_target_grandchild",
+    ]
+    assert result.keyword_targets["孙单位 招标"] == {
+        "target_id": "grandchild",
+        "target_name": "孙单位",
     }
 
 
@@ -534,7 +685,7 @@ async def test_project_terms_round_robin_children_before_limit(
         ]
 
     monkeypatch.setattr(targets_dao, "get_project_target", _root)
-    monkeypatch.setattr(targets_dao, "list_project_target_children", _children)
+    monkeypatch.setattr(targets_dao, "list_project_target_descendants", _children)
     result = await resolve_project_target_terms(
         object(),
         project_id="project-1",

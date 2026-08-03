@@ -230,14 +230,25 @@ async def restore_control_structure(
     *,
     project_id: str,
     parent_target_id: str,
+    max_depth: int = 2,
 ) -> dict[str, Any]:
+    safe_depth = max(1, min(int(max_depth or 1), 2))
     entities = await db[COMPANY_META_COLLECTION].find(
         {
             "project_id": project_id,
-            "relation.parent_target_id": parent_target_id,
             "relation.relation_type": "wholly_owned_direct_investment",
+            "relation.relation_depth": {"$lte": safe_depth},
+            "$or": [
+                {"relation.root_target_id": parent_target_id},
+                {
+                    "relation.root_target_id": {"$exists": False},
+                    "relation.parent_target_id": parent_target_id,
+                },
+            ],
         },
         {"_id": 0},
+    ).sort(
+        [("relation.relation_depth", 1), ("normalized_name", 1)]
     ).to_list(None)
     normalized = [
         {
@@ -246,6 +257,14 @@ async def restore_control_structure(
             "root_domain": str(item.get("root_domain") or ""),
             "aliases": list(item.get("aliases") or []),
             "icp_domains": list(item.get("icp_domains") or []),
+            "root_target_id": str((item.get("relation") or {}).get("root_target_id") or parent_target_id),
+            "root_target_name": str((item.get("relation") or {}).get("root_target_name") or ""),
+            "parent_target_id": str((item.get("relation") or {}).get("parent_target_id") or ""),
+            "parent_target_name": str((item.get("relation") or {}).get("parent_target_name") or ""),
+            "relation_depth": int((item.get("relation") or {}).get("relation_depth") or 1),
+            "ownership_percent": float((item.get("relation") or {}).get("ownership_percent") or 100),
+            "lineage_target_ids": list((item.get("relation") or {}).get("lineage_target_ids") or []),
+            "lineage_target_names": list((item.get("relation") or {}).get("lineage_target_names") or []),
             "relation": dict(item.get("relation") or {}),
         }
         for item in entities
@@ -256,7 +275,11 @@ async def restore_control_structure(
             "enabled": True,
             "status": "completed",
             "relation_type": "wholly_owned_direct_investment",
-            "relation_depth": 1,
+            "max_depth": safe_depth,
+            "relation_depth": max(
+                (int(item.get("relation_depth") or 0) for item in normalized),
+                default=0,
+            ),
             "ownership_percent": 100.0,
             "entities": normalized,
             "errors": [],
