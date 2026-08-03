@@ -472,6 +472,8 @@ async def create_hub_specialist_agent(
     output_mode: OutputMode = "sse",
     summary_trigger_tokens: int = 3000,
     summary_keep_messages: int = 6,
+    summary_prompt: str | None = None,
+    summary_trim_tokens: int | None = 4000,
     timeout: int = 500,
     mcp_tool_limit: int = 0,
 ) -> Callable:
@@ -494,6 +496,8 @@ async def create_hub_specialist_agent(
                 model=create_llm(app_config),
                 trigger=("tokens", summary_trigger_tokens),
                 keep=("messages", summary_keep_messages),
+                trim_tokens_to_summarize=summary_trim_tokens,
+                **({"summary_prompt": summary_prompt} if summary_prompt else {}),
             ),
         ],
         mcp_server_name=mcp_server_name,

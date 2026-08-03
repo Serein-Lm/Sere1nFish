@@ -181,7 +181,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
             assert company_name == "安徽广播电视台"
             assert kwargs["page_size"] == 20
             assert kwargs["max_records_per_type"] == 2000
-            assert kwargs["lookback_days"] == 180
+            assert kwargs["lookback_days"] == 60
             return BiddingSearchResult(
                 records=[record],
                 total_reported=1,
@@ -272,7 +272,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert persisted["query_meta"] == {
         "publish_start": "2026-01-18",
         "publish_end": "2026-07-17",
-        "lookback_days": 180,
+        "lookback_days": 60,
         "bid_types": ["1", "2", "4"],
     }
     assert scan_call["source"] == "bidding"
@@ -292,7 +292,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert result["raw_records_fetched"] == 1
     assert result["duplicates_discarded"] == 0
     assert result["truncated"] is False
-    assert result["lookback_days"] == 180
+    assert result["lookback_days"] == 60
     assert result["bid_types"] == ["1", "2", "4"]
 
 

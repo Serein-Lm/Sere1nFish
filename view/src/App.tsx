@@ -16,6 +16,7 @@ const WebsitePhishing = lazy(() => import('./pages/WebsitePhishing/WebsitePhishi
 const Observability = lazy(() => import('./pages/Observability/Observability'))
 const PhoneControl = lazy(() => import('./pages/PhoneControl/PhoneControl'))
 const PersonaLibrary = lazy(() => import('./pages/PersonaLibrary/PersonaLibrary'))
+const PersonIntelligence = lazy(() => import('./pages/PersonIntelligence/PersonIntelligence'))
 const MobileCollect = lazy(() => import('./pages/MobileCollect/MobileCollect'))
 const ProjectManagement = lazy(() => import('./pages/ProjectManagement/ProjectManagement'))
 const ProjectDetail = lazy(() => import('./pages/ProjectDetail/ProjectDetail'))
@@ -85,6 +86,7 @@ function AppContent() {
               <Route path="website-phishing" element={<WebsitePhishing />} />
               <Route path="phone-control" element={<PhoneControl />} />
               <Route path="persona-library" element={<PersonaLibrary />} />
+              <Route path="person-intelligence" element={<PersonIntelligence />} />
               <Route path="mobile-collect" element={<MobileCollect />} />
               <Route path="mobile-profiles" element={<Navigate to="/phone-control?tab=profiles" replace />} />
               <Route path="mobile-auto-chat" element={<Navigate to="/phone-control?tab=auto-chat" replace />} />

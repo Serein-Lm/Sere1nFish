@@ -47,6 +47,8 @@ def _format_person(p: dict[str, Any], *, brief: bool = True) -> str:
         parts.append(
             f"资料版本：v{p['profile_version']}（研究 {p.get('research_rounds') or 0} 轮）"
         )
+    if p.get("last_researched_at"):
+        parts.append(f"最近主动研究：{p['last_researched_at']}")
     if not brief:
         if p.get("aliases"):
             parts.append(f"别名：{', '.join(p['aliases'])}")
@@ -97,6 +99,8 @@ def _format_person(p: dict[str, Any], *, brief: bool = True) -> str:
             parts.append(f"风险点：{', '.join(p['risk_signals'])}")
         if p.get("generation_brief"):
             parts.append(f"生成背景：{p['generation_brief']}")
+        if p.get("generation_key"):
+            parts.append(f"人设指纹：{p['generation_key']}")
         if p.get("source_urls"):
             parts.append("背景参考来源：" + "、".join(str(x) for x in p["source_urls"][:12]))
         if p.get("evidence"):
@@ -168,6 +172,7 @@ def search_personas(
             tags=tag_list,
             limit=max(1, min(limit, 20)),
             summary_only=True,
+            is_fictional=True,
         )
 
     try:
@@ -207,6 +212,8 @@ def get_persona(person_id: str) -> str:
 
     if not doc:
         return f"未找到 person_id={person_id} 的人设。"
+    if doc.get("is_fictional") is not True:
+        return f"person_id={person_id} 不是虚构人设，请改用人物情报工具。"
     return _format_person(doc, brief=False)
 
 

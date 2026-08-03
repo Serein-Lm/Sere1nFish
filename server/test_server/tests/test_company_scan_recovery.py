@@ -118,12 +118,30 @@ async def test_retryable_child_scans_invalidate_only_their_parent_modules(
     assert modules == {"asset_url"}
 
 
-def test_legacy_bidding_checkpoint_is_reopened_for_current_window() -> None:
+def test_bidding_checkpoint_reuses_equal_or_wider_windows() -> None:
     from api.services.company_scan_recovery import find_incompatible_core_modules
 
     assert find_incompatible_core_modules(
         {"bidding": {"records_fetched": 57}}
+    ) == set()
+    assert find_incompatible_core_modules(
+        {
+            "bidding": {
+                "records_fetched": 30,
+                "lookback_days": 30,
+                "bid_types": ["1", "2", "4"],
+            }
+        }
     ) == {"bidding"}
+    assert find_incompatible_core_modules(
+        {
+            "bidding": {
+                "records_fetched": 60,
+                "lookback_days": 60,
+                "bid_types": ["1", "2", "4"],
+            }
+        }
+    ) == set()
     assert find_incompatible_core_modules(
         {
             "bidding": {

@@ -30,6 +30,7 @@ AGENT_DISPLAY_NAMES = {
     "persona": "🎭 人设与联系人",
     "content": "✍️ 话术与产物",
     "payload": "📦 载荷研究与交付",
+    "osint": "公开信息研究",
 }
 
 TOOL_DISPLAY_NAMES = {

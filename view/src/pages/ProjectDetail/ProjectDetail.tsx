@@ -4777,7 +4777,7 @@ export default function ProjectDetail() {
                               <Checkbox>小红书采集（按目标选择策略执行）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_bidding" valuePropName="checked" noStyle>
-                              <Checkbox>招投标采集（近180天预告、公告和中标结果）</Checkbox>
+                              <Checkbox>招投标采集（近60天预告、公告和中标结果）</Checkbox>
                             </Form.Item>
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (

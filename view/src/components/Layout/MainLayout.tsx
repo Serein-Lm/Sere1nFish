@@ -23,6 +23,7 @@ import {
   HighlightOutlined,
   DatabaseOutlined,
   TeamOutlined,
+  GlobalOutlined,
 } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -123,6 +124,11 @@ export default function MainLayout() {
         key: '/persona-library',
         icon: <TeamOutlined />,
         label: '人设库',
+      },
+      {
+        key: '/person-intelligence',
+        icon: <GlobalOutlined />,
+        label: '人物情报',
       },
       {
         key: '/ai-tools',

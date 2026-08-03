@@ -608,7 +608,7 @@ export const getHubToolCatalog = () => apiFetch<HubToolCatalog>('/v1/agent/tools
 // 可跳转引用解析（AI 输出内嵌 [[ref:type:id|label]]）
 // ============================================
 
-export type EntityRefType = 'person' | 'finding' | 'company' | 'project'
+export type EntityRefType = 'person' | 'person_intel' | 'finding' | 'company' | 'project'
 
 export interface EntityRef {
   type: EntityRefType
@@ -616,7 +616,7 @@ export interface EntityRef {
   label: string
 }
 
-const REF_PATTERN = /\[\[ref:(person|finding|company|project):([^|\]]+)\|([^\]]*)\]\]/g
+const REF_PATTERN = /\[\[ref:(person|person_intel|finding|company|project):([^|\]]+)\|([^\]]*)\]\]/g
 
 /** 从 AI 输出文本中提取可跳转引用，按 type+id 去重保序。 */
 export function parseEntityRefs(text: string): EntityRef[] {

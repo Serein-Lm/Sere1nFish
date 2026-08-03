@@ -456,13 +456,16 @@ export default function PhishingPlatform() {
   // 从其它页面跳转并预引用（如人设库"带需求跳转中台"）
   useEffect(() => {
     const personId = searchParams.get('ref_person')
+    const personIntelId = searchParams.get('ref_person_intel')
     const projectId = searchParams.get('ref_project')
     const findingId = searchParams.get('ref_finding')
     const label = searchParams.get('label') || ''
     const desc = searchParams.get('desc') || undefined
-    if (!personId && !projectId && !findingId) return
+    if (!personId && !personIntelId && !projectId && !findingId) return
     const ref: DataReference | null = personId
       ? { type: 'person', id: personId, label: label || personId, desc }
+      : personIntelId
+      ? { type: 'person_intel', id: personIntelId, label: label || personIntelId, desc }
       : projectId
       ? { type: 'project', id: projectId, label: label || projectId, desc }
       : findingId
@@ -483,6 +486,7 @@ export default function PhishingPlatform() {
     // 清理 URL 参数，避免刷新重复引用
     const next = new URLSearchParams(searchParams)
     next.delete('ref_person')
+    next.delete('ref_person_intel')
     next.delete('ref_project')
     next.delete('ref_finding')
     next.delete('label')
@@ -681,6 +685,8 @@ export default function PhishingPlatform() {
     const q = encodeURIComponent(ref.id)
     if (ref.type === 'person') {
       navigate(`/persona-library?person_id=${q}`)
+    } else if (ref.type === 'person_intel') {
+      navigate(`/person-intelligence?intel_id=${q}`)
     } else if (ref.type === 'company') {
       navigate(`/persona-library?company=${q}`)
     } else if (ref.type === 'finding') {
@@ -1092,9 +1098,9 @@ export default function PhishingPlatform() {
                   {entityRefs.map(ref => (
                     <Tag
                       key={`${ref.type}:${ref.id}`}
-                      color={ref.type === 'person' ? 'blue' : ref.type === 'company' ? 'green' : ref.type === 'project' ? 'purple' : 'gold'}
+                      color={ref.type === 'person' ? 'blue' : ref.type === 'person_intel' ? 'cyan' : ref.type === 'company' ? 'green' : ref.type === 'project' ? 'purple' : 'gold'}
                       style={{ cursor: 'pointer', marginInlineEnd: 0 }}
-                      icon={ref.type === 'person' ? <UserOutlined /> : ref.type === 'company' ? <GlobalOutlined /> : ref.type === 'project' ? <ProjectOutlined /> : <ProfileOutlined />}
+                      icon={ref.type === 'person' ? <UserOutlined /> : ref.type === 'person_intel' ? <GlobalOutlined /> : ref.type === 'company' ? <GlobalOutlined /> : ref.type === 'project' ? <ProjectOutlined /> : <ProfileOutlined />}
                       onClick={() => handleRefJump(ref)}
                     >
                       {ref.label}
@@ -1367,8 +1373,8 @@ export default function PhishingPlatform() {
               {dataRefs.map(ref => (
                 <Tag
                   key={`${ref.type}:${ref.id}`}
-                  color={ref.type === 'person' ? 'blue' : ref.type === 'finding' ? 'gold' : 'purple'}
-                  icon={ref.type === 'person' ? <UserOutlined /> : <ProfileOutlined />}
+                  color={ref.type === 'person' ? 'blue' : ref.type === 'person_intel' ? 'cyan' : ref.type === 'finding' ? 'gold' : 'purple'}
+                  icon={ref.type === 'person' ? <UserOutlined /> : ref.type === 'person_intel' ? <GlobalOutlined /> : <ProfileOutlined />}
                   closable
                   onClose={() => handleRemoveReference(ref.type, ref.id)}
                   style={{ marginInlineEnd: 0 }}

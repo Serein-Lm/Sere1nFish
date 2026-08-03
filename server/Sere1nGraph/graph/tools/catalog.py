@@ -30,6 +30,8 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
     from .analysis_tools import ANALYSIS_TOOLS
     from .artifact_tools import ARTIFACT_QUERY_TOOLS
     from .context_tools import CONTEXT_TOOLS
+    from .osint_tools import OSINT_READ_TOOLS, OSINT_TOOLS
+    from .persona_collection_tools import PERSONA_COLLECTION_TOOLS
     from .persona_tools import PERSONA_TOOLS
     from .project_data_tools import PROJECT_DATA_TOOLS
     from .read_tools import READ_TOOLS
@@ -42,11 +44,14 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
         list(PROJECT_DATA_TOOLS),
         list(ARTIFACT_QUERY_TOOLS),
         list(SKILL_TOOLS),
+        list(OSINT_READ_TOOLS),
     )
     persona = _unique_tools(
         list(PERSONA_TOOLS),
+        list(PERSONA_COLLECTION_TOOLS),
         list(CONTEXT_TOOLS),
         list(SKILL_TOOLS),
+        list(OSINT_READ_TOOLS),
         [
             tool
             for tool in READ_TOOLS
@@ -75,6 +80,7 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
         list(WORD_TOOLS),
         list(PERSONA_TOOLS),
         list(ARTIFACT_QUERY_TOOLS),
+        list(OSINT_READ_TOOLS),
         [
             tool
             for tool in (
@@ -93,8 +99,40 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
         list(SKILL_TOOLS),
         list(WORD_TOOLS),
         list(PAYLOAD_WORD_TOOLS),
+        list(OSINT_TOOLS),
+        list(PERSONA_COLLECTION_TOOLS),
     )
-    return {"data": data, "persona": persona, "content": content, "payload": payload}
+    osint_context_names = {
+        "get_finding_copywriting",
+        "get_finding_detail",
+        "get_finding_profile",
+        "get_project",
+        "get_project_data_catalog",
+        "query_target_intelligence",
+        "read_project_dataset",
+    }
+    osint = _unique_tools(
+        list(OSINT_TOOLS),
+        list(PERSONA_COLLECTION_TOOLS),
+        list(PERSONA_TOOLS),
+        list(SKILL_TOOLS),
+        list(WORD_TOOLS),
+        list(ARTIFACT_QUERY_TOOLS),
+        [
+            tool
+            for tool in (
+                list(READ_TOOLS) + list(ANALYSIS_TOOLS) + list(PROJECT_DATA_TOOLS)
+            )
+            if _name(tool) in osint_context_names
+        ],
+    )
+    return {
+        "data": data,
+        "persona": persona,
+        "content": content,
+        "payload": payload,
+        "osint": osint,
+    }
 
 
 def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
@@ -124,6 +162,7 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
     from .analysis_tools import ANALYSIS_TOOLS
     from .artifact_tools import ARTIFACT_QUERY_TOOLS
     from .context_tools import CONTEXT_TOOLS
+    from .osint_tools import OSINT_READ_TOOLS
     from .persona_tools import PERSONA_TOOLS
     from .project_data_tools import PROJECT_DATA_TOOLS
     from .read_tools import READ_TOOLS
@@ -137,6 +176,7 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
             + list(CONTEXT_TOOLS)
             + list(PROJECT_DATA_TOOLS)
             + list(ARTIFACT_QUERY_TOOLS)
+            + list(OSINT_READ_TOOLS)
         )
     }
     exposed_names = {name for names in assignments.values() for name in names}
@@ -153,6 +193,7 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
                 "name": "persona",
                 "prompt": "hub/persona",
                 "tools": assignments["persona"],
+                "mcp_servers": ["chrome-devtools"],
             },
             {
                 "name": "content",
@@ -165,15 +206,21 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
                 "tools": assignments["payload"],
                 "mcp_servers": ["chrome-devtools"],
             },
+            {
+                "name": "osint",
+                "prompt": "hub/osint",
+                "tools": assignments["osint"],
+                "mcp_servers": ["chrome-devtools"],
+            },
         ],
         "tools": sorted(all_tools.values(), key=lambda item: item["name"]),
         "project_datasets": project_datasets,
         "mcp": [
             {
                 "name": "chrome-devtools",
-                "purpose": "公网检索与来源核验",
+                "purpose": "人物/内容公网检索、来源核验与虚构人设背景主动研究",
                 "configured": chrome_configured,
-                "agents": ["payload"],
+                "agents": ["persona", "payload", "osint"],
             }
         ],
         "audit": {

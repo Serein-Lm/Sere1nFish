@@ -98,6 +98,10 @@ BIDDING_RECORD_LINKS_COLLECTION = "bidding_record_links"
 PERSONS_COLLECTION = "persons"
 PERSONA_RESEARCH_TASKS_COLLECTION = "persona_research_tasks"
 
+# 人物 OSINT 情报 — 真实自然人的公开资料、证据、画像和沟通方案。
+# 与虚构人设 persons 分离，按姓名+机构稳定归并并跨项目复用。
+PERSON_INTELLIGENCE_COLLECTION = "person_intelligence"
+
 # AI 中枢对话留存（会话 + 消息）
 AI_HUB_CONVERSATIONS_COLLECTION = "ai_hub_conversations"
 AI_HUB_MESSAGES_COLLECTION = "ai_hub_messages"

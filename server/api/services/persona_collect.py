@@ -410,6 +410,14 @@ def _merge_existing_profile(
     return merged
 
 
+def merge_existing_persona_profile(
+    existing: dict[str, Any] | None,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """统一归并主动研究结果，供批量研究和 Agent 写入复用。"""
+    return _merge_existing_profile(existing, candidate)
+
+
 def _enforce_fictional_profile(
     parsed: dict[str, Any],
     *,

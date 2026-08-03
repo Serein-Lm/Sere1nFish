@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Modal, Tabs, Input, List, Tag, Empty, Spin, message, Button, Breadcrumb } from 'antd'
-import { TeamOutlined, ProjectOutlined, SearchOutlined, AimOutlined, ArrowLeftOutlined } from '@ant-design/icons'
+import { TeamOutlined, ProjectOutlined, SearchOutlined, AimOutlined, ArrowLeftOutlined, GlobalOutlined } from '@ant-design/icons'
 import { listPersons, type Person } from '../../services/personaService'
+import { listPersonIntelligence, type PersonIntelligence } from '../../services/personIntelligenceService'
 import { listProjects, type Project } from '../../services/projectService'
 import { listProjectFindings, type UnifiedFinding } from '../../services/taskService'
 
 // 可引用给 AI 中枢的数据实体：携带稳定 id，供后端 agent 自主用工具读取
 export interface DataReference {
-  type: 'person' | 'project' | 'finding'
+  type: 'person' | 'person_intel' | 'project' | 'finding'
   id: string
   label: string
   desc?: string
@@ -21,11 +22,14 @@ interface DataReferencePickerProps {
 }
 
 export default function DataReferencePicker({ open, onClose, onPick, selectedIds = [] }: DataReferencePickerProps) {
-  const [activeTab, setActiveTab] = useState<'person' | 'project'>('person')
+  const [activeTab, setActiveTab] = useState<'person' | 'person_intel' | 'project'>('person_intel')
 
   const [personKeyword, setPersonKeyword] = useState('')
   const [persons, setPersons] = useState<Person[]>([])
   const [personLoading, setPersonLoading] = useState(false)
+  const [intelligenceKeyword, setIntelligenceKeyword] = useState('')
+  const [intelligence, setIntelligence] = useState<PersonIntelligence[]>([])
+  const [intelligenceLoading, setIntelligenceLoading] = useState(false)
 
   const [projects, setProjects] = useState<Project[]>([])
   const [projectKeyword, setProjectKeyword] = useState('')
@@ -60,6 +64,22 @@ export default function DataReferencePicker({ open, onClose, onPick, selectedIds
     }
   }
 
+  const loadIntelligence = async (keyword: string) => {
+    setIntelligenceLoading(true)
+    try {
+      const result = await listPersonIntelligence({
+        keyword: keyword.trim(),
+        limit: 20,
+        summary_only: true,
+      })
+      setIntelligence(result.items)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '加载人物情报失败')
+    } finally {
+      setIntelligenceLoading(false)
+    }
+  }
+
   const openProjectFindings = async (project: Project) => {
     setDrillProject(project)
     setFindingsLoading(true)
@@ -77,6 +97,7 @@ export default function DataReferencePicker({ open, onClose, onPick, selectedIds
   useEffect(() => {
     if (!open) return
     if (activeTab === 'person') loadPersons(personKeyword)
+    else if (activeTab === 'person_intel') loadIntelligence(intelligenceKeyword)
     else loadProjects()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, activeTab])
@@ -255,13 +276,70 @@ export default function DataReferencePicker({ open, onClose, onPick, selectedIds
     >
       <Tabs
         activeKey={activeTab}
-        onChange={k => setActiveTab(k as 'person' | 'project')}
+        onChange={k => setActiveTab(k as 'person' | 'person_intel' | 'project')}
         items={[
+          {
+            key: 'person_intel',
+            label: (
+              <span>
+                <GlobalOutlined /> 人物情报
+              </span>
+            ),
+            children: (
+              <>
+                <Input
+                  allowClear
+                  prefix={<SearchOutlined />}
+                  placeholder="按姓名 / 机构 / 职位搜索"
+                  value={intelligenceKeyword}
+                  onChange={event => setIntelligenceKeyword(event.target.value)}
+                  onPressEnter={() => loadIntelligence(intelligenceKeyword)}
+                  style={{ marginBottom: 12 }}
+                />
+                {intelligenceLoading ? (
+                  <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div>
+                ) : intelligence.length === 0 ? (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无人物情报" />
+                ) : (
+                  <List
+                    dataSource={intelligence}
+                    style={{ maxHeight: 380, overflow: 'auto' }}
+                    renderItem={item => {
+                      const selected = isSelected(item.intel_id)
+                      return (
+                        <List.Item
+                          actions={[
+                            <a
+                              key="pick"
+                              onClick={() => !selected && onPick({
+                                type: 'person_intel',
+                                id: item.intel_id,
+                                label: item.name,
+                                desc: [item.organization, item.position].filter(Boolean).join(' · '),
+                              })}
+                              style={selected ? { color: '#999', cursor: 'default' } : undefined}
+                            >
+                              {selected ? '已引用' : '引用'}
+                            </a>,
+                          ]}
+                        >
+                          <List.Item.Meta
+                            title={<span>{item.name}<Tag color="blue" style={{ marginLeft: 8 }}>v{item.profile_version || 1}</Tag></span>}
+                            description={[item.organization, item.position, item.summary].filter(Boolean).join(' · ') || '—'}
+                          />
+                        </List.Item>
+                      )
+                    }}
+                  />
+                )}
+              </>
+            ),
+          },
           {
             key: 'person',
             label: (
               <span>
-                <TeamOutlined /> 人物画像
+                <TeamOutlined /> 虚构人设
               </span>
             ),
             children: (

@@ -12,6 +12,7 @@ _SUPPORTED_TYPES = {
     "contact_profile",
     "finding",
     "person",
+    "person_intel",
     "project",
     "source_document",
     "target",
@@ -85,6 +86,10 @@ def compose_reference_query(query: str, references: Any) -> str:
     if types & {"person", "company", "contact_profile", "target"}:
         lines.append(
             "- 实体引用：按类型调用 get_entity_context、get_persona 或 get_contact_profile。"
+        )
+    if "person_intel" in types:
+        lines.append(
+            "- 人物情报引用：调用 get_person_intelligence 读取核验来源、画像、沟通方案和话术。"
         )
     if "artifact" in types:
         lines.append("- 产物引用：调用 get_artifact_content 读取正文、来源和历史引用。")

@@ -366,12 +366,15 @@ async def search_persons(
     limit: int = 20,
     skip: int = 0,
     summary_only: bool = False,
+    is_fictional: bool | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """面向人设的检索：全局库按公司/行业/职位/标签/关键词/置信度筛选，分页返回。
 
     project_id 可选：传入时按 project_ids 溯源筛选，不传则全库检索。
     """
     query: dict[str, Any] = {}
+    if is_fictional is not None:
+        query["is_fictional"] = is_fictional
     if project_id:
         query["project_ids"] = project_id
     if company:

@@ -32,6 +32,7 @@ from api.routers import (
     aigc,
     mobile_collect,
     persons,
+    person_intelligence,
     artifacts,
     context,
     scholar_contact,
@@ -279,6 +280,8 @@ async def lifespan(app: FastAPI):
         if backfilled_persona_versions:
             logger.info("已初始化人设版本元数据: %s", backfilled_persona_versions)
         await persona_research_tasks_dao.ensure_indexes(db)
+        from api.dao import person_intelligence as person_intelligence_dao
+        await person_intelligence_dao.ensure_indexes(db)
         interrupted_persona_tasks = await persona_research_tasks_dao.mark_interrupted(db)
         if interrupted_persona_tasks:
             logger.warning("已关闭中断的人设研究任务: %s", interrupted_persona_tasks)
@@ -541,6 +544,11 @@ app.include_router(mobile.router, prefix="/api/v1/mobile", tags=["手机"])
 app.include_router(mobile_transfers.router, prefix="/api/v1/mobile", tags=["手机文件传递"])
 app.include_router(mobile_collect.router, prefix="/api/v1/mobile-collect", tags=["手机采集任务"])
 app.include_router(persons.router, prefix="/api/v1/persons", tags=["人设库"])
+app.include_router(
+    person_intelligence.router,
+    prefix="/api/v1/person-intelligence",
+    tags=["人物 OSINT 情报"],
+)
 app.include_router(artifacts.router, prefix="/api/v1/artifacts", tags=["产物"])
 app.include_router(storage.router, prefix="/api/v1/storage", tags=["对象存储"])
 app.include_router(context.router, prefix="/api/v1/context", tags=["上下文聚合"])

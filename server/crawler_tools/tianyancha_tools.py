@@ -610,7 +610,7 @@ class TianyanchaClient:
         bid_type: str = "2",
         page_num: int = 1,
         page_size: int = 20,
-        lookback_days: int = 180,
+        lookback_days: int = 60,
         end_date: date | None = None,
     ) -> BiddingSearchResult:
         """按法定主体查询单页招投标公告。"""
@@ -658,7 +658,7 @@ class TianyanchaClient:
         page_size: int = 20,
         max_records: int = 2000,
         page_concurrency: int = 3,
-        lookback_days: int = 180,
+        lookback_days: int = 60,
         end_date: date | None = None,
     ) -> BiddingSearchResult:
         """分页读取招投标公告，并以稳定记录 ID 去重。"""
@@ -752,7 +752,7 @@ class TianyanchaClient:
         page_size: int = 20,
         max_records_per_type: int = 2000,
         page_concurrency: int = 3,
-        lookback_days: int = 180,
+        lookback_days: int = 60,
         end_date: date | None = None,
     ) -> BiddingSearchResult:
         """串行读取近期开标全阶段；单类失败不丢弃其他已取得数据。"""

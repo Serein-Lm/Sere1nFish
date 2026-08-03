@@ -319,6 +319,7 @@ async def list_persons(
         limit=limit,
         skip=skip,
         summary_only=summary_only,
+        is_fictional=True,
     )
     return {"items": items, "total": total, "limit": limit, "skip": skip}
 
@@ -328,7 +329,7 @@ async def get_person(person_id: str):
     """查看单个人设。"""
     db = get_db()
     doc = await persons_dao.get_person(db, person_id)
-    if not doc:
+    if not doc or doc.get("is_fictional") is not True:
         raise HTTPException(status_code=404, detail="人设不存在")
     return doc
 

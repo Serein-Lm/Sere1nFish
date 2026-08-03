@@ -18,7 +18,7 @@ from api.db.collections import (
 )
 
 
-_CURRENT_BIDDING_LOOKBACK_DAYS = 180
+_CURRENT_BIDDING_LOOKBACK_DAYS = 60
 _CURRENT_BIDDING_TYPES = {"1", "2", "4"}
 
 
@@ -38,10 +38,16 @@ def find_incompatible_core_modules(
             for item in bidding.get("bid_types") or []
             if str(item).strip()
         }
-        if (
-            lookback_days != _CURRENT_BIDDING_LOOKBACK_DAYS
-            or bid_types != _CURRENT_BIDDING_TYPES
-        ):
+        # A wider successful window already covers the current contract. Old
+        # summaries rebuilt from durable records may not carry query metadata;
+        # keep those checkpoints instead of forcing an unbounded retry loop.
+        window_incomplete = bool(lookback_days) and (
+            lookback_days < _CURRENT_BIDDING_LOOKBACK_DAYS
+        )
+        types_incomplete = bool(bid_types) and (
+            not _CURRENT_BIDDING_TYPES.issubset(bid_types)
+        )
+        if window_incomplete or types_incomplete:
             incompatible.add("bidding")
     return incompatible
 

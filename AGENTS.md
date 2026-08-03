@@ -99,6 +99,8 @@
 - 通知类能力必须走统一通知 Hook/Service，例如 `api.services.notifications.notify_event` 或 `notify_event_background`。业务流程只表达事件、级别、标题和上下文，不直接 import 钉钉、邮件、Webhook 等具体通道。
 - 配置读取和敏感字段处理应通过 `api.services.runtime_config`、`api.dao.config`、配置加密工具或既有配置入口接入，不在业务模块散落解析逻辑。
 - AI 技能、提示词、模型客户端和 AIGC 能力应通过技能/提示词库、runtime service 或模型适配层接入；业务模块不要直接绑定单一模型供应商。
+- 人物 OSINT 是 AI 中枢的一等核心能力：真实人物的公网检索、身份消歧、来源核验、事实/推断分层、画像、公开职业联系方式、沟通方案和话术统一通过独立 OSINT Agent 与 `person_intelligence` 领域层处理。真实人物情报不得写入虚构人设 `persons`；虚构人设只能用于渐进式匹配沟通风格，不能作为真实事实。任何基于真实人物生成的话术都必须保留可追溯公开来源，AI 中枢与钉钉入口复用同一工具、Prompt、Chrome Provider 和持久化服务。
+- 人物方案链路统一为“身份消歧 -> 按新鲜度复用或刷新 OSINT -> 当前时间与热点信号 -> 主动采集/匹配虚构人设 -> 沟通场景 -> 话术 -> 可选产物”。不是每次请求都重新检索：身份一致、信息完整且 30 天内的新鲜记录可直接复用；缺少匹配人设时由 Agent 主动研究公开的行业/岗位通用背景，并按严格 Schema 生成、校验、入库完全虚构且自洽的人设，代码不得硬编码人物样本。事实来源链和生成决策链分别保存，由 service 自动生成稳定 node/edge，前端只消费统一 lineage，不自行推断关联。
 - 手机相关能力通过 `core/mobile/*`、设备池、预约 DAO、mobile router/service 统一接入；不要在业务流程里直接写 ADB、EasyTier 或设备协议细节。
 - 手机附件、图片和音频传递统一通过 `api.services.mobile_transfer` 接入：先写私有对象存储留档，再按媒体类型推送到 Android 公共媒体目录并触发媒体扫描；上传临时文件必须在成功、失败和取消分支释放，页面不得直接执行 ADB。
 - 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。
@@ -120,7 +122,7 @@
 - 外部资产情报（FOFA/Hunter 等）经 `api.services.asset_intelligence` 统一协议、工厂和 Provider 接入，底层查询复用 `crawler_tools/*_tools.py`；API Key 走 `api.dao.config` 的 tools 分类加密存储。候选 URL 必须先跨来源规范化去重和并发存活探测，再按稳定 `asset_id` 增量 upsert 到 `fofa_assets`。普通任务默认深扫本轮发现的全部存活资产；只有用户显式选择增量扫描时，才仅深扫新增或发生实质变化且存活的资产。已在资产发现阶段完成探活的 URL 必须复用结果，不得在深扫入口重复探活。工具 Key 有效性探测统一走 `api.services.tool_key_test` 分派，各工具校验收敛在其 `validate_key`。
 - 信息采集并发预算统一由 MongoDB `collection_runtime` 配置段和 `api.services.info_collection.tuning` 加载、校验与限幅；任务参数只做单次覆盖。浏览器 worker 数必须小于 Chrome 池上限，为公司规范化、公众号和其他并行任务保留容量；小红书搜索并发必须同时受任务上限、关键词数和当前可用账号数约束。
 - 新增 MongoDB collection（如 `fofa_assets`、`company_meta`）先在 `api/db/collections.py` 声明常量，再在 `api.main` 生命周期或 DAO `ensure_indexes` 中幂等建索引。
-- 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，默认固定采集近 180 天的招标预告、招标公告和中标结果；由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`。精确的 Project、Target、任务和查询窗口关系写入 `bidding_record_links`，记录上的 `target_ids/project_ids` 仅保留向后兼容；重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。
+- 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，默认固定采集近 60 天的招标预告、招标公告和中标结果；由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`。精确的 Project、Target、任务和查询窗口关系写入 `bidding_record_links`，记录上的 `target_ids/project_ids` 仅保留向后兼容；重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。
 - 控股结构通过 `api.services.company_control` 分层发现并持久化。层级上限、单位总量、投资查询、ICP 查询和后续扫描并发必须分别限幅；默认只查直属子单位，用户显式选择后最多继续一层孙单位。综合扫描启用学者联系时，根 Target 与已选子、孙单位均需按 `target_id` 持久化，关联单位使用独立 `scholar_entities` 检查点，恢复时不得因网站阶段已完成而跳过。恢复任务、渠道词解析和项目 Target 汇总必须复用已保存 lineage，不能重新按名称猜测关系。
 
 ## 前端关键设计规则

@@ -20,6 +20,16 @@ from typing import Any, Callable
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 
+def _is_internal_summary(metadata: Any) -> bool:
+    """识别 SummarizationMiddleware 的内部模型流，避免混入用户正文。"""
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("lc_source") == "summarization":
+        return True
+    nested = metadata.get("metadata")
+    return isinstance(nested, dict) and nested.get("lc_source") == "summarization"
+
+
 async def process_agent_stream(
     agent: Any,
     messages: list[Any],
@@ -60,6 +70,8 @@ async def process_agent_stream(
         if mode == "messages":
             # messages 模式返回 (message_chunk, metadata) 元组
             msg_chunk, metadata = chunk
+            if _is_internal_summary(metadata):
+                continue
             
             # 处理 AIMessageChunk（token 级别的流式输出）
             if isinstance(msg_chunk, AIMessageChunk):
@@ -286,6 +298,8 @@ async def process_agent_stream_sse(
         ):
             if mode == "messages":
                 msg_chunk, metadata = chunk
+                if _is_internal_summary(metadata):
+                    continue
                 
                 if isinstance(msg_chunk, AIMessageChunk):
                     # 内容流

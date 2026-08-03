@@ -7,13 +7,14 @@
     [[ref:finding:{finding_id}|{label}]]
     [[ref:company:{root_domain}|{label}]]
     [[ref:project:{project_id}|{label}]]
+    [[ref:person_intel:{intel_id}|{label}]]
 
 设计原则：标记只承载"跳转到哪个实体"的语义，不含平台协议或页面路由细节；
 路由映射收敛在前端。工具侧只调用本 helper 生成稳定标记。
 """
 from __future__ import annotations
 
-_ALLOWED_TYPES = {"person", "finding", "company", "project"}
+_ALLOWED_TYPES = {"person", "person_intel", "finding", "company", "project"}
 
 
 def ref_tag(entity_type: str, entity_id: str, label: str = "") -> str:
@@ -28,6 +29,10 @@ def ref_tag(entity_type: str, entity_id: str, label: str = "") -> str:
 
 def person_ref(person_id: str, label: str = "") -> str:
     return ref_tag("person", person_id, label)
+
+
+def person_intelligence_ref(intel_id: str, label: str = "") -> str:
+    return ref_tag("person_intel", intel_id, label)
 
 
 def finding_ref(finding_id: str, label: str = "") -> str:
