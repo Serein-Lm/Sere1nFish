@@ -9,7 +9,8 @@ import {
   ArrowLeftOutlined, ReloadOutlined, EyeOutlined, DeleteOutlined,
   ClockCircleOutlined, CheckCircleOutlined, SyncOutlined,
   ExclamationCircleOutlined, BarChartOutlined,
-  DollarOutlined, FilterOutlined, FileTextOutlined,
+  DollarOutlined, FilterOutlined, FileTextOutlined, PauseCircleOutlined,
+  PlayCircleOutlined,
 } from '@ant-design/icons'
 import CopywritingRenderer, {
   FINDING_TYPE_ICONS, CHANNEL_TYPE_LABELS,
@@ -17,6 +18,7 @@ import CopywritingRenderer, {
 import { renderFindingValue } from '../../utils/findingValueRenderer'
 import {
   getTask, getTaskStats, deleteTask, listProjectFindings, getFindingCopywriting,
+  pauseTask, resumeTask,
 } from '../../services/taskService'
 import type {
   Task, FindingCopywriting, TaskStatsResponse, TaskProgress, UnifiedFinding,
@@ -35,6 +37,7 @@ const STATUS_MAP: Record<string, { color: string; icon: React.ReactNode; label: 
   scanning: { color: 'processing', icon: <SyncOutlined spin />, label: '扫描中' },
   generating: { color: 'processing', icon: <SyncOutlined spin />, label: '生成中' },
   running: { color: 'processing', icon: <SyncOutlined spin />, label: '执行中' },
+  pausing: { color: 'warning', icon: <SyncOutlined spin />, label: '暂停中' },
   completed: { color: 'success', icon: <CheckCircleOutlined />, label: '已完成' },
   error: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
   failed: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
@@ -115,6 +118,7 @@ export default function TaskDetail() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [currentCopywriting, setCurrentCopywriting] = useState<FindingCopywriting | null>(null)
   const [copywritingLoading, setCopywritingLoading] = useState(false)
+  const [taskAction, setTaskAction] = useState<'pause' | 'resume' | ''>('')
 
   // projectId 优先从路由取，否则从 task 数据取
   const projectId = routeProjectId || task?.project_id
@@ -168,6 +172,42 @@ export default function TaskDetail() {
         catch (e) { message.error(e instanceof Error ? e.message : '删除失败') }
       },
     })
+  }
+
+  const handlePause = async () => {
+    if (!taskId || !projectId || taskAction) return
+    setTaskAction('pause')
+    try {
+      const result = await pauseTask(projectId, taskId)
+      setTask((current) => current ? {
+        ...current,
+        status: result.status,
+        progress: result.progress,
+      } : current)
+      message.success(result.status === 'paused' ? '任务已暂停' : '正在暂停任务')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '暂停任务失败')
+    } finally {
+      setTaskAction('')
+    }
+  }
+
+  const handleResume = async () => {
+    if (!taskId || !projectId || taskAction) return
+    setTaskAction('resume')
+    try {
+      const result = await resumeTask(projectId, taskId)
+      setTask((current) => current ? {
+        ...current,
+        status: result.status,
+        progress: result.progress,
+      } : current)
+      message.success('任务已从检查点继续执行')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '继续任务失败')
+    } finally {
+      setTaskAction('')
+    }
   }
 
   const progress = task?.progress || {} as TaskProgress
@@ -420,10 +460,37 @@ export default function TaskDetail() {
           <Title level={2} className="page-title">任务详情</Title>
           <Paragraph className="page-description">查看任务执行结果、信息节点和话术内容</Paragraph>
         </div>
-        <Space>
+        <Space wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(-1)} className="hover-float">返回</Button>
           <Button icon={<ReloadOutlined />} onClick={fetchData} className="hover-float">刷新</Button>
-          <Button danger icon={<DeleteOutlined />} className="hover-float" onClick={handleDelete}>删除任务</Button>
+          {task?.status === 'paused' ? (
+            <Button
+              icon={<PlayCircleOutlined />}
+              loading={taskAction === 'resume'}
+              onClick={() => void handleResume()}
+            >
+              继续
+            </Button>
+          ) : task?.status === 'pausing' ? (
+            <Button icon={<SyncOutlined spin />} disabled>暂停中</Button>
+          ) : task && ['pending', 'running'].includes(task.status) ? (
+            <Button
+              icon={<PauseCircleOutlined />}
+              loading={taskAction === 'pause'}
+              onClick={() => void handlePause()}
+            >
+              暂停
+            </Button>
+          ) : null}
+          <Button
+            danger
+            icon={<DeleteOutlined />}
+            className="hover-float"
+            onClick={handleDelete}
+            disabled={Boolean(task && ['pending', 'running', 'pausing'].includes(task.status))}
+          >
+            删除任务
+          </Button>
         </Space>
       </div>
 
@@ -527,7 +594,7 @@ export default function TaskDetail() {
 
       <Drawer
         title={currentCopywriting ? <Space><span>{FINDING_TYPE_ICONS[currentCopywriting.finding_type] || '📌'}</span><span>{currentCopywriting.finding_label}</span><Tag color="blue">{CHANNEL_TYPE_LABELS[currentCopywriting.finding_channel] || currentCopywriting.finding_channel}</Tag></Space> : '话术详情'}
-        open={drawerOpen} onClose={() => { setDrawerOpen(false); setCurrentCopywriting(null) }} width={720} destroyOnClose
+        open={drawerOpen} onClose={() => { setDrawerOpen(false); setCurrentCopywriting(null) }} size={720} destroyOnHidden
       >
         {copywritingLoading ? <Skeleton active /> : currentCopywriting ? <CopywritingRenderer data={currentCopywriting} /> : <Empty description="暂无话术数据" />}
       </Drawer>

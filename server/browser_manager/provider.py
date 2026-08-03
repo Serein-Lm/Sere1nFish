@@ -104,7 +104,8 @@ class ChromeDockerConfig:
     generic_busy_lease_timeout: int = 1800  # 其他浏览器租约异常告警/恢复上限
     # 预热池
     warm_pool_size: int = 1  # 预热池大小（启动时预创建的空闲容器数）
-    reserved_non_bulk_containers: int = 2  # 为公众号/学者等非批量任务保留容量
+    # 软保留：无非批量需求时可由批量扫描借用，有需求时自动归还。
+    reserved_non_bulk_containers: int = 2
     container_create_concurrency: int = 4  # Docker API 创建并发，避免启动风暴
     container_health_concurrency: int = 12  # stats/CDP 健康检查并发
     docker_api_timeout_seconds: int = 90
@@ -293,7 +294,8 @@ class DockerProvider(BrowserProvider):
         self._http_client: httpx.AsyncClient | None = None
         self._port_counter = 0
         self._pending_creates = 0
-        self._bulk_slot_limit = config.bulk_container_limit
+        self._bulk_base_limit = config.bulk_container_limit
+        self._bulk_slot_limit = config.max_containers
         self._bulk_slots = ResizableLimiter(self._bulk_slot_limit)
         self._create_slots = ResizableLimiter(
             config.container_create_concurrency
@@ -302,6 +304,7 @@ class DockerProvider(BrowserProvider):
             config.container_health_concurrency
         )
         self._bulk_slot_owners: set[str] = set()
+        self._non_bulk_slot_owners: set[str] = set()
         self._recent_cdp_failures: deque[float] = deque()
         self._last_resource_guard: dict[str, Any] = {
             "restricted": False,
@@ -313,11 +316,12 @@ class DockerProvider(BrowserProvider):
         self._container_create_tasks: set[asyncio.Task[Any]] = set()
 
         logger.info(
-            "[DockerProvider] 工作负载配额 | max=%s bulk=%s "
-            "reserved_non_bulk=%s create=%s health=%s",
+            "[DockerProvider] 工作负载配额 | max=%s bulk_base=%s "
+            "bulk_dynamic=%s reserved_non_bulk=%s create=%s health=%s",
             config.max_containers,
+            self._bulk_base_limit,
             self._bulk_slot_limit,
-            int(config.max_containers) - self._bulk_slot_limit,
+            config.normalized_reserved_non_bulk_containers,
             config.container_create_concurrency,
             config.container_health_concurrency,
         )
@@ -331,9 +335,38 @@ class DockerProvider(BrowserProvider):
             and not info.recovery_in_progress
         )
 
+    def _desired_bulk_slot_limit(self) -> int:
+        """Return the soft bulk limit after accounting for live priority demand."""
+        priority_demand = min(
+            len(self._non_bulk_slot_owners),
+            self.config.normalized_reserved_non_bulk_containers,
+        )
+        return max(1, int(self.config.max_containers) - priority_demand)
+
+    def _refresh_bulk_slot_limit(self) -> None:
+        next_limit = self._desired_bulk_slot_limit()
+        if next_limit == self._bulk_slot_limit:
+            return
+        previous = self._bulk_slot_limit
+        self._bulk_slot_limit = next_limit
+        self._bulk_slots.resize(next_limit)
+        logger.info(
+            "[DockerProvider] 动态批量配额更新 | bulk=%s->%s "
+            "non_bulk_demand=%s reserve=%s",
+            previous,
+            next_limit,
+            len(self._non_bulk_slot_owners),
+            self.config.normalized_reserved_non_bulk_containers,
+        )
+
     async def _acquire_workload_slot(self, task_id: str, purpose: str) -> None:
-        """限制批量网站 worker 的全局占用，避免挤压公众号等并行链路。"""
-        if purpose not in _BULK_BROWSER_PURPOSES or task_id in self._bulk_slot_owners:
+        """Let bulk work borrow idle reserved slots and yield them on priority demand."""
+        if purpose not in _BULK_BROWSER_PURPOSES:
+            if task_id not in self._non_bulk_slot_owners:
+                self._non_bulk_slot_owners.add(task_id)
+                self._refresh_bulk_slot_limit()
+            return
+        if task_id in self._bulk_slot_owners:
             return
         if self._bulk_slots.locked():
             logger.info(
@@ -349,10 +382,14 @@ class DockerProvider(BrowserProvider):
         self._bulk_slot_owners.add(task_id)
 
     def _release_workload_slot(self, task_id: str | None) -> None:
-        if not task_id or task_id not in self._bulk_slot_owners:
+        if not task_id:
             return
-        self._bulk_slot_owners.remove(task_id)
-        self._bulk_slots.release()
+        if task_id in self._bulk_slot_owners:
+            self._bulk_slot_owners.remove(task_id)
+            self._bulk_slots.release()
+        if task_id in self._non_bulk_slot_owners:
+            self._non_bulk_slot_owners.remove(task_id)
+            self._refresh_bulk_slot_limit()
 
     def _get_docker_client(self):
         """延迟初始化 docker client"""
@@ -398,19 +435,21 @@ class DockerProvider(BrowserProvider):
         """Apply capacity and guard settings without replacing active leases."""
         previous = self.config
         self.config = config
-        self._bulk_slot_limit = config.bulk_container_limit
-        self._bulk_slots.resize(self._bulk_slot_limit)
+        self._bulk_base_limit = config.bulk_container_limit
+        self._refresh_bulk_slot_limit()
         self._create_slots.resize(config.container_create_concurrency)
         self._health_slots.resize(config.container_health_concurrency)
         self._warm_pool_ready.clear()
         self._ensure_background_tasks()
         logger.notice(
-            "[DockerProvider] 运行时配置已更新 | max=%s->%s bulk=%s->%s "
+            "[DockerProvider] 运行时配置已更新 | max=%s->%s bulk_base=%s->%s "
+            "bulk_dynamic=%s "
             "reserve=%s warm=%s create=%s health=%s",
             previous.max_containers,
             config.max_containers,
             previous.bulk_container_limit,
             config.bulk_container_limit,
+            self._bulk_slot_limit,
             config.normalized_reserved_non_bulk_containers,
             config.warm_pool_size,
             config.container_create_concurrency,
@@ -488,8 +527,13 @@ class DockerProvider(BrowserProvider):
             "configured_max_containers": self.config.max_containers,
             "effective_max_containers": effective,
             "bulk_limit": self._bulk_slot_limit,
+            "bulk_base_limit": self._bulk_base_limit,
+            "bulk_borrowed_slots": max(
+                0, self._bulk_slot_limit - self._bulk_base_limit
+            ),
             "bulk_in_use": self._bulk_slots.in_use,
             "bulk_waiting": self._bulk_slots.waiting,
+            "non_bulk_demand": len(self._non_bulk_slot_owners),
             "reserved_non_bulk_containers": (
                 self.config.normalized_reserved_non_bulk_containers
             ),

@@ -432,6 +432,8 @@ chrome-browser/
 }
 ```
 
+`reserved_non_bulk_containers` 是软保留容量：没有公众号、学者等非批量租约需求时，批量扫描可借用至 `max_containers`；需求出现后，后续释放的批量槽位会优先归还非批量链路。
+
 `enabled: false` 时走原有本地逻辑，`enabled: true` 时走 Docker。开发环境和生产环境通过这一个开关切换。
 
 ---

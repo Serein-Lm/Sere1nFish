@@ -449,6 +449,7 @@ async def test_pending_tasks_do_not_consume_recovery_budget() -> None:
             "progress": {"stage": "waiting_core"},
         },
         {"task_id": "exhausted", "status": "running", "recovery_count": 3},
+        {"task_id": "pausing", "status": "pausing", "recovery_count": 1},
     ]
     recovered, exhausted = await tasks_dao.prepare_interrupted_tasks(_Db(documents))
 
@@ -465,6 +466,7 @@ async def test_pending_tasks_do_not_consume_recovery_budget() -> None:
     assert documents[2]["status"] == "pending"
     assert documents[2]["recovery_count"] == 3
     assert documents[3]["status"] == "error"
+    assert documents[4]["status"] == "paused"
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, FilterOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, FilterOutlined, PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import {
   getProject,
   createWebTagging,
@@ -38,7 +38,7 @@ import { stringToColor } from '../../utils/colorUtils'
 import { mapWebTaggingEnum } from '../../utils/webTaggingMap'
 import { renderFindingValue } from '../../utils/findingValueRenderer'
 import ProfileDrawer from '../../components/ProfileDrawer'
-import { listTasks, createTask, createCompanyScanBatch, getProjectStats, deleteTask, batchDeleteTasks, getFindingCopywriting, getFindingProfile } from '../../services/taskService'
+import { listTasks, createTask, createCompanyScanBatch, getProjectStats, deleteTask, batchDeleteTasks, getFindingCopywriting, getFindingProfile, pauseTask, resumeTask } from '../../services/taskService'
 import type { Task, TaskType, TaskStatus, FindingCopywriting, ProjectStatsResponse, FindingProfile } from '../../services/taskService'
 import {
   fetchMobileScreenshotBlob,
@@ -635,6 +635,7 @@ export default function ProjectDetail() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [tasksTotal, setTasksTotal] = useState(0)
   const [tasksLoading, setTasksLoading] = useState(false)
+  const [taskActionId, setTaskActionId] = useState('')
   const [projectStats, setProjectStats] = useState<ProjectStatsResponse | null>(null)
   const [projectStatsLoading, setProjectStatsLoading] = useState(false)
 
@@ -809,6 +810,34 @@ export default function ProjectDetail() {
       console.error('加载任务列表失败:', e)
     } finally {
       setTasksLoading(false)
+    }
+  }
+
+  const handlePauseTask = async (task: Task) => {
+    if (!projectId || taskActionId) return
+    setTaskActionId(task.task_id)
+    try {
+      const result = await pauseTask(projectId, task.task_id)
+      message.success(result.status === 'paused' ? '任务已暂停' : '正在暂停任务')
+      await fetchTasks(projectId)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '暂停任务失败')
+    } finally {
+      setTaskActionId('')
+    }
+  }
+
+  const handleResumeTask = async (task: Task) => {
+    if (!projectId || taskActionId) return
+    setTaskActionId(task.task_id)
+    try {
+      await resumeTask(projectId, task.task_id)
+      message.success('任务已从检查点继续执行')
+      await fetchTasks(projectId)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '继续任务失败')
+    } finally {
+      setTaskActionId('')
     }
   }
 
@@ -3944,6 +3973,7 @@ export default function ProjectDetail() {
             rowKey="task_id"
             size="small"
             loading={tasksLoading}
+            scroll={{ x: 1240 }}
             pagination={{
               total: tasksTotal,
               pageSize: 10,
@@ -3989,6 +4019,7 @@ export default function ProjectDetail() {
                   scanning: { color: 'processing', icon: <SyncOutlined spin />, label: '扫描中' },
                   generating: { color: 'processing', icon: <SyncOutlined spin />, label: '生成中' },
                   running: { color: 'processing', icon: <SyncOutlined spin />, label: '执行中' },
+                  pausing: { color: 'warning', icon: <SyncOutlined spin />, label: '暂停中' },
                   completed: { color: 'success', icon: <CheckCircleOutlined />, label: '已完成' },
                   error: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
                   failed: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
@@ -4053,40 +4084,78 @@ export default function ProjectDetail() {
             {
               title: '操作',
               key: 'action',
-              width: 140,
-              render: (_: unknown, rec: Task) => (
-                <Space size={4}>
-                  <Button type="link" size="small" icon={<EyeOutlined />} onClick={(e) => { e.stopPropagation(); navigate(`/projects/${projectId}/tasks/${rec.task_id}`) }}>
-                    详情
-                  </Button>
-                  <Button
-                    type="text"
-                    danger
-                    size="small"
-                    icon={<DeleteOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      Modal.confirm({
-                        title: '确认删除任务',
-                        content: '删除后将同时清除关联的信息节点和话术数据。',
-                        okText: '删除',
-                        okType: 'danger',
-                        cancelText: '取消',
-                        onOk: async () => {
-                          if (!projectId) return
-                          try {
-                            await deleteTask(projectId, rec.task_id)
-                            message.success('任务已删除')
-                            if (projectId) fetchTasks(projectId)
-                          } catch (err) {
-                            message.error(err instanceof Error ? err.message : '删除失败')
-                          }
-                        },
-                      })
-                    }}
-                  />
-                </Space>
-              ),
+              width: 180,
+              render: (_: unknown, rec: Task) => {
+                const isActing = taskActionId === rec.task_id
+                const isExecuting = ['pending', 'running', 'pausing'].includes(rec.status)
+                return (
+                  <Space size={2}>
+                    <Button type="link" size="small" icon={<EyeOutlined />} onClick={(e) => { e.stopPropagation(); navigate(`/projects/${projectId}/tasks/${rec.task_id}`) }}>
+                      详情
+                    </Button>
+                    {rec.status === 'paused' ? (
+                      <Tooltip title="从检查点继续">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<PlayCircleOutlined />}
+                          loading={isActing}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void handleResumeTask(rec)
+                          }}
+                        />
+                      </Tooltip>
+                    ) : rec.status === 'pausing' ? (
+                      <Tooltip title="正在保存检查点并释放资源">
+                        <Button type="text" size="small" icon={<SyncOutlined spin />} disabled />
+                      </Tooltip>
+                    ) : ['pending', 'running'].includes(rec.status) ? (
+                      <Tooltip title="暂停任务">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<PauseCircleOutlined />}
+                          loading={isActing}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void handlePauseTask(rec)
+                          }}
+                        />
+                      </Tooltip>
+                    ) : null}
+                    <Tooltip title={isExecuting ? '请先暂停任务再删除' : '删除任务'}>
+                      <Button
+                        type="text"
+                        danger
+                        size="small"
+                        icon={<DeleteOutlined />}
+                        disabled={isExecuting}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          Modal.confirm({
+                            title: '确认删除任务',
+                            content: '删除后将同时清除关联的信息节点和话术数据。',
+                            okText: '删除',
+                            okType: 'danger',
+                            cancelText: '取消',
+                            onOk: async () => {
+                              if (!projectId) return
+                              try {
+                                await deleteTask(projectId, rec.task_id)
+                                message.success('任务已删除')
+                                if (projectId) fetchTasks(projectId)
+                              } catch (err) {
+                                message.error(err instanceof Error ? err.message : '删除失败')
+                              }
+                            },
+                          })
+                        }}
+                      />
+                    </Tooltip>
+                  </Space>
+                )
+              },
             },
           ]}
         />

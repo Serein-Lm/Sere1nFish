@@ -105,7 +105,7 @@ async def test_container_startup_does_not_block_release(
 
 
 @pytest.mark.asyncio
-async def test_url_scan_capacity_leaves_room_for_wechat(
+async def test_url_scan_borrows_idle_reserve_and_yields_to_wechat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = DockerProvider(
@@ -135,25 +135,36 @@ async def test_url_scan_capacity_leaves_room_for_wechat(
 
     assert await provider.get_cdp_endpoint("url-1", purpose="url_scan")
     assert await provider.get_cdp_endpoint("url-2", purpose="url_scan")
+    assert await provider.get_cdp_endpoint("url-3", purpose="url_scan")
+    assert provider.capacity_status()["bulk_limit"] == 3
+    assert provider.capacity_status()["bulk_borrowed_slots"] == 1
 
     waiting_url = asyncio.create_task(
-        provider.get_cdp_endpoint("url-3", purpose="url_scan")
+        provider.get_cdp_endpoint("url-4", purpose="url_scan")
     )
     await asyncio.sleep(0.05)
     assert not waiting_url.done()
 
-    assert await asyncio.wait_for(
+    waiting_wechat = asyncio.create_task(
         provider.get_cdp_endpoint("wechat-1", purpose="wechat_article"),
-        timeout=0.2,
     )
+    await asyncio.sleep(0.05)
+    status = provider.capacity_status()
+    assert status["bulk_limit"] == 2
+    assert status["non_bulk_demand"] == 1
+    assert not waiting_wechat.done()
+
+    await provider.release_cdp_endpoint("url-1")
+    assert await asyncio.wait_for(waiting_wechat, timeout=2.0)
+    assert not waiting_url.done()
 
     await provider.release_cdp_endpoint("wechat-1")
-    assert not waiting_url.done()
-    await provider.release_cdp_endpoint("url-1")
-    assert await asyncio.wait_for(waiting_url, timeout=0.2)
+    assert await asyncio.wait_for(waiting_url, timeout=0.5)
+    assert provider.capacity_status()["bulk_limit"] == 3
 
     await provider.release_cdp_endpoint("url-2")
     await provider.release_cdp_endpoint("url-3")
+    await provider.release_cdp_endpoint("url-4")
 
 
 @pytest.mark.asyncio
@@ -286,10 +297,17 @@ async def test_pool_capacity_reconfigures_without_replacing_active_leases() -> N
     )
 
     assert provider.config.max_containers == 6
-    assert provider._bulk_slots.limit == 4
+    assert provider._bulk_slots.limit == 6
     assert provider._bulk_slots.in_use == 1
     assert status["configured_max_containers"] == 6
-    assert status["bulk_limit"] == 4
+    assert status["bulk_base_limit"] == 4
+    assert status["bulk_limit"] == 6
+    assert status["bulk_borrowed_slots"] == 2
+
+    await provider._acquire_workload_slot("wechat-1", "wechat_article")
+    assert provider._bulk_slots.limit == 5
+    assert provider.capacity_status()["non_bulk_demand"] == 1
+    provider._release_workload_slot("wechat-1")
     provider._release_workload_slot("url-1")
 
 
@@ -336,6 +354,9 @@ def test_pool_config_hard_caps_chrome_and_applies_resource_guard(
     status = provider.capacity_status()
 
     assert status["effective_max_containers"] == 1
+    assert status["bulk_base_limit"] == 88
+    assert status["bulk_limit"] == 96
+    assert status["bulk_borrowed_slots"] == 8
     assert status["resource_guard"]["restricted"] is True
     assert "available_memory_below_floor" in status["resource_guard"]["reason"]
 

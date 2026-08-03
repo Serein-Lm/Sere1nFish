@@ -116,6 +116,18 @@ async def _notify_company_batch_completion(
         logger.exception("批次完成通知异常，已释放重试锁 | batch=%s", batch_id)
 
 
+async def notify_project_batch_if_complete(
+    *,
+    batch_id: str,
+    project_id: str,
+) -> None:
+    """Retry the idempotent aggregate notification after a resumed task ends."""
+    await _notify_company_batch_completion(
+        batch_id=batch_id,
+        project_id=project_id,
+    )
+
+
 async def run_project_task_batch(
     *,
     batch_id: str,

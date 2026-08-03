@@ -100,6 +100,8 @@ Project (项目)
 | POST | `/projects/{id}/tasks/upload` | 带文件下发 |
 | POST | `/projects/{id}/tasks/list` | 列出任务（分页） |
 | GET | `/projects/{id}/tasks/{tid}` | 任务状态（轮询 3s） |
+| POST | `/projects/{id}/tasks/{tid}/pause` | 暂停等待中或执行中的任务 |
+| POST | `/projects/{id}/tasks/{tid}/resume` | 从持久化检查点继续已暂停任务 |
 | DELETE | `/projects/{id}/tasks/{tid}` | 删除任务 |
 | DELETE | `/projects/{id}/tasks?status=error` | 批量删除 |
 
@@ -124,6 +126,18 @@ Project (项目)
 
 ```json
 { "project_id": "660a...", "page": 1, "page_size": 10, "task_type": "" }
+```
+
+### POST /projects/{id}/tasks/{tid}/pause 与 /resume
+
+暂停请求先持久化为 `pausing`，运行时释放浏览器、手机和并发租约后进入 `paused`；等待中的任务会直接进入 `paused`。继续执行复用原 `task_id` 和已保存检查点，不清空模块进度。
+
+```json
+{
+  "task_id": "e5d03076fcbf",
+  "status": "paused",
+  "progress": { "stage": "paused", "message": "任务已暂停，可继续执行" }
+}
 ```
 
 ---

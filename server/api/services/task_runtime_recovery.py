@@ -9,6 +9,7 @@ from typing import Any
 from api.dao import device_reservations, mobile_collect, tasks
 from api.services.project_task_batch import ProjectTaskJob, run_project_task_batch
 from api.services.project_task_runtime import (
+    build_task_runtime_params,
     execute_project_task,
     supported_task_types,
 )
@@ -82,15 +83,7 @@ def build_stalled_task_notification(
 
 
 def _runtime_params(task: dict[str, Any]) -> dict[str, Any]:
-    params = {
-        **dict(task.get("params") or {}),
-        "_requested_by": str(task.get("requested_by") or ""),
-    }
-    batch_id = str(task.get("batch_id") or "")
-    batch_total = max(0, int(task.get("batch_total") or 0))
-    if batch_id and batch_total > 1:
-        params.update({"_batch_id": batch_id, "_batch_total": batch_total})
-    return params
+    return build_task_runtime_params(task)
 
 
 async def _schedule_recovered_tasks(recovered: list[dict[str, Any]]) -> int:

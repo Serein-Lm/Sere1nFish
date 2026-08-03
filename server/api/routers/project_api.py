@@ -679,6 +679,58 @@ async def get_task(project_id: str, task_id: str):
     return task
 
 
+@router.post("/projects/{project_id}/tasks/{task_id}/pause")
+async def pause_task(project_id: str, task_id: str):
+    """Pause one pending or running task while preserving recovery checkpoints."""
+    from api.services.project_task_control import (
+        ProjectTaskNotFoundError,
+        ProjectTaskStateError,
+        pause_project_task,
+    )
+
+    try:
+        task = await pause_project_task(
+            get_db(),
+            project_id=project_id,
+            task_id=task_id,
+        )
+    except ProjectTaskNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ProjectTaskStateError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "task_id": task_id,
+        "status": str(task.get("status") or "paused"),
+        "progress": dict(task.get("progress") or {}),
+    }
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/resume")
+async def resume_task(project_id: str, task_id: str):
+    """Requeue one manually paused task with the same persistent task ID."""
+    from api.services.project_task_control import (
+        ProjectTaskNotFoundError,
+        ProjectTaskStateError,
+        resume_project_task,
+    )
+
+    try:
+        task = await resume_project_task(
+            get_db(),
+            project_id=project_id,
+            task_id=task_id,
+        )
+    except ProjectTaskNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ProjectTaskStateError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "task_id": task_id,
+        "status": str(task.get("status") or "pending"),
+        "progress": dict(task.get("progress") or {}),
+    }
+
+
 @router.delete("/projects/{project_id}/tasks/{task_id}")
 async def delete_task(project_id: str, task_id: str):
     """删除任务及关联数据"""

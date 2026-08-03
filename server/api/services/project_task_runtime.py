@@ -18,6 +18,7 @@ TaskDispatcher = Callable[[str, str, dict[str, Any]], Awaitable[Any]]
 logger = get_logger("project_task_runtime")
 _RUNTIME_ID = uuid.uuid4().hex
 _TASK_DISPATCHERS: dict[str, TaskDispatcher] = {}
+_RUNNING_TASKS: dict[str, asyncio.Task[Any]] = {}
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
 _NOTIFIED_LLM_CAPACITY_INCIDENTS: set[int] = set()
 
@@ -29,6 +30,38 @@ def register_task_dispatchers(dispatchers: Mapping[str, TaskDispatcher]) -> None
 
 def supported_task_types() -> frozenset[str]:
     return frozenset(_TASK_DISPATCHERS)
+
+
+def build_task_runtime_params(task: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild internal execution metadata from one persistent task document."""
+    params = {
+        **dict(task.get("params") or {}),
+        "_requested_by": str(task.get("requested_by") or ""),
+    }
+    batch_id = str(task.get("batch_id") or "")
+    batch_total = max(0, int(task.get("batch_total") or 0))
+    if batch_id and batch_total > 1:
+        params.update({"_batch_id": batch_id, "_batch_total": batch_total})
+    return params
+
+
+async def cancel_running_project_task(
+    task_id: str,
+    *,
+    wait_timeout: float = 1.5,
+) -> bool:
+    """Cancel one execution child without cancelling its batch worker."""
+    running = _RUNNING_TASKS.get(task_id)
+    if running is None or running.done():
+        return False
+    running.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(running), timeout=wait_timeout)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    except Exception:
+        logger.exception("暂停任务时执行协程清理异常 | task=%s", task_id)
+    return True
 
 
 async def _heartbeat(task_id: str) -> None:
@@ -45,6 +78,42 @@ async def _heartbeat(task_id: str) -> None:
 
 
 async def execute_project_task(
+    task_id: str,
+    project_id: str,
+    task_type: str,
+    params: dict[str, Any],
+) -> Any:
+    """Run each persistent task in an independently cancellable child task."""
+    existing = _RUNNING_TASKS.get(task_id)
+    if existing is not None and not existing.done():
+        logger.info("任务执行已存在，复用当前实例 | task=%s", task_id)
+        try:
+            return await asyncio.shield(existing)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() == 0:
+                return None
+            raise
+
+    running = asyncio.create_task(
+        _execute_project_task(task_id, project_id, task_type, params),
+        name=f"project-task:{task_id}",
+    )
+    _RUNNING_TASKS[task_id] = running
+    try:
+        try:
+            return await running
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() == 0:
+                return None
+            raise
+    finally:
+        if _RUNNING_TASKS.get(task_id) is running:
+            _RUNNING_TASKS.pop(task_id, None)
+
+
+async def _execute_project_task(
     task_id: str,
     project_id: str,
     task_type: str,
@@ -153,13 +222,25 @@ async def execute_project_task(
                     exc.incident_id
                 )
         elapsed_ms = round((time.monotonic() - started) * 1000)
-        await tasks_dao.complete_task(
+        completed = await tasks_dao.complete_task(
             db,
             task_id=task_id,
             runtime_id=_RUNTIME_ID,
             elapsed_ms=elapsed_ms,
             result=result,
         )
+        if not completed and await tasks_dao.is_pause_requested(
+            db,
+            task_id=task_id,
+            runtime_id=_RUNTIME_ID,
+        ):
+            await tasks_dao.mark_task_paused(
+                db,
+                task_id=task_id,
+                runtime_id=_RUNTIME_ID,
+            )
+            logger.info("任务在完成提交前收到暂停请求 | task=%s", task_id)
+            return None
         obs_log(
             f"任务完成 ({elapsed_ms / 1000:.1f}s)",
             task_id=task_id,
@@ -172,6 +253,27 @@ async def execute_project_task(
         logger.notice("任务完成 | task=%s (%.1fs)", task_id, elapsed_ms / 1000)
         return result
     except asyncio.CancelledError:
+        if await tasks_dao.is_pause_requested(
+            db,
+            task_id=task_id,
+            runtime_id=_RUNTIME_ID,
+        ):
+            await tasks_dao.mark_task_paused(
+                db,
+                task_id=task_id,
+                runtime_id=_RUNTIME_ID,
+            )
+            obs_log(
+                "任务已暂停",
+                task_id=task_id,
+                project_id=project_id,
+                source="task_runner",
+                level="notice",
+                event="task_paused",
+                data={"task_type": task_type},
+            )
+            logger.notice("任务已按用户请求暂停 | task=%s", task_id)
+            return None
         await tasks_dao.release_interrupted_task(
             db,
             task_id=task_id,
@@ -181,6 +283,18 @@ async def execute_project_task(
         logger.warning("任务执行被进程关闭中断，已退回待恢复 | task=%s", task_id)
         raise
     except Exception as exc:
+        if await tasks_dao.is_pause_requested(
+            db,
+            task_id=task_id,
+            runtime_id=_RUNTIME_ID,
+        ):
+            await tasks_dao.mark_task_paused(
+                db,
+                task_id=task_id,
+                runtime_id=_RUNTIME_ID,
+            )
+            logger.info("任务异常清理期间完成暂停 | task=%s", task_id)
+            return None
         elapsed_ms = round((time.monotonic() - started) * 1000)
         await tasks_dao.fail_task(
             db,

@@ -6,7 +6,7 @@ import type { PaginatedResponse } from './projectService'
 // ============================================
 
 export type TaskType = 'url_scan' | 'xhs_search' | 'douyin_search' | 'web_tagging' | 'company_scan' | 'fofa_collect' | 'scholar_contact'
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'error' | 'failed' | 'paused' | 'cancelled'
+export type TaskStatus = 'pending' | 'running' | 'pausing' | 'completed' | 'error' | 'failed' | 'paused' | 'cancelled'
 
 export interface TaskProgress {
   stage?: string
@@ -376,6 +376,20 @@ export async function listTasks(projectId: string, params?: {
 
 export async function getTask(projectId: string, taskId: string): Promise<Task> {
   return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`, { method: 'GET' })
+}
+
+export interface TaskControlResponse {
+  task_id: string
+  status: TaskStatus
+  progress: TaskProgress
+}
+
+export async function pauseTask(projectId: string, taskId: string): Promise<TaskControlResponse> {
+  return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/pause`, { method: 'POST' })
+}
+
+export async function resumeTask(projectId: string, taskId: string): Promise<TaskControlResponse> {
+  return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/resume`, { method: 'POST' })
 }
 
 export async function deleteTask(projectId: string, taskId: string): Promise<{

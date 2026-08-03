@@ -13,6 +13,12 @@ class _TaskCollection:
             self.doc.pop(key, None)
         return dict(self.doc)
 
+    async def find_one(self, query, _projection=None):
+        for key in ("status", "runtime_id"):
+            if key in query and self.doc.get(key) != query[key]:
+                return None
+        return dict(self.doc)
+
     async def update_one(self, _query, update):
         self.doc.update(update.get("$set", {}))
         for key in update.get("$unset", {}):
@@ -69,6 +75,8 @@ def test_execute_task_persists_dispatch_result_and_completion_time(monkeypatch):
     )
 
     assert db.tasks.doc["status"] == "completed"
+    assert db.tasks.doc["progress.stage"] == "completed"
+    assert db.tasks.doc["progress.message"] == "任务已完成"
     assert db.tasks.doc["result"] == {"total": 6, "documents": 1}
     assert db.tasks.doc["completed_at"] == db.tasks.doc["updated_at"]
     assert tracker.depth == 0
@@ -100,6 +108,8 @@ def test_execute_task_marks_error_completion_time(monkeypatch):
     )
 
     assert db.tasks.doc["status"] == "error"
+    assert db.tasks.doc["progress.stage"] == "error"
+    assert db.tasks.doc["progress.message"] == "boom"
     assert db.tasks.doc["error"] == "boom"
     assert db.tasks.doc["completed_at"] == db.tasks.doc["updated_at"]
     assert tracker.depth == 0
@@ -159,4 +169,139 @@ def test_execute_task_waits_for_llm_capacity_without_marking_failure(monkeypatch
     assert db.tasks.doc["status"] == "completed"
     assert db.tasks.doc["result"] == {"resumed": True}
     assert "error" not in db.tasks.doc
+    assert tracker.depth == 0
+
+
+def test_execute_task_pause_cancels_only_registered_execution(monkeypatch):
+    from api.services import project_task_runtime
+    from Sere1nGraph.graph import observability as graph_observability
+
+    db = _Db()
+    tracker = _Tracker()
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+
+        async def dispatcher(_task_id, _project_id, _params):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def pause_requested(*_args, **_kwargs):
+            return True
+
+        async def mark_paused(*_args, **_kwargs):
+            db.tasks.doc["status"] = "paused"
+            return True
+
+        monkeypatch.setattr(
+            project_task_runtime,
+            "_TASK_DISPATCHERS",
+            {"company_scan": dispatcher},
+        )
+        monkeypatch.setattr(
+            project_task_runtime.tasks_dao,
+            "is_pause_requested",
+            pause_requested,
+        )
+        monkeypatch.setattr(
+            project_task_runtime.tasks_dao,
+            "mark_task_paused",
+            mark_paused,
+        )
+        execution = asyncio.create_task(
+            project_task_runtime.execute_project_task(
+                "task-pause",
+                "project-1",
+                "company_scan",
+                {"company_name": "测试公司"},
+            )
+        )
+        await started.wait()
+        assert await project_task_runtime.cancel_running_project_task(
+            "task-pause",
+            wait_timeout=0.2,
+        )
+        await execution
+
+    monkeypatch.setattr(project_task_runtime, "get_db", lambda: db)
+    monkeypatch.setattr(graph_observability, "get_global_tracker", lambda: tracker)
+    monkeypatch.setattr(project_task_runtime, "obs_log", lambda *args, **kwargs: None)
+
+    asyncio.run(scenario())
+
+    assert db.tasks.doc["status"] == "paused"
+    assert "task-pause" not in project_task_runtime._RUNNING_TASKS
+    assert tracker.depth == 0
+
+
+def test_duplicate_execution_observer_does_not_propagate_manual_pause(monkeypatch):
+    from api.services import project_task_runtime
+    from Sere1nGraph.graph import observability as graph_observability
+
+    db = _Db()
+    tracker = _Tracker()
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+
+        async def dispatcher(_task_id, _project_id, _params):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def pause_requested(*_args, **_kwargs):
+            return True
+
+        async def mark_paused(*_args, **_kwargs):
+            db.tasks.doc["status"] = "paused"
+            return True
+
+        monkeypatch.setattr(
+            project_task_runtime,
+            "_TASK_DISPATCHERS",
+            {"company_scan": dispatcher},
+        )
+        monkeypatch.setattr(
+            project_task_runtime.tasks_dao,
+            "is_pause_requested",
+            pause_requested,
+        )
+        monkeypatch.setattr(
+            project_task_runtime.tasks_dao,
+            "mark_task_paused",
+            mark_paused,
+        )
+        primary = asyncio.create_task(
+            project_task_runtime.execute_project_task(
+                "task-shared",
+                "project-1",
+                "company_scan",
+                {"company_name": "测试公司"},
+            )
+        )
+        await started.wait()
+        observer = asyncio.create_task(
+            project_task_runtime.execute_project_task(
+                "task-shared",
+                "project-1",
+                "company_scan",
+                {"company_name": "测试公司"},
+            )
+        )
+        await asyncio.sleep(0)
+        assert await project_task_runtime.cancel_running_project_task(
+            "task-shared",
+            wait_timeout=0.2,
+        )
+
+        assert await observer is None
+        assert await primary is None
+
+    monkeypatch.setattr(project_task_runtime, "get_db", lambda: db)
+    monkeypatch.setattr(graph_observability, "get_global_tracker", lambda: tracker)
+    monkeypatch.setattr(project_task_runtime, "obs_log", lambda *args, **kwargs: None)
+
+    asyncio.run(scenario())
+
+    assert db.tasks.doc["status"] == "paused"
+    assert "task-shared" not in project_task_runtime._RUNNING_TASKS
     assert tracker.depth == 0

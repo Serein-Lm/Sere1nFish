@@ -141,7 +141,15 @@ class AssetTriageService:
                     )
             items = getattr(result, "items", []) or []
             valid_indexes = {index for index, _candidate in batch}
-            return [item for item in items if item.index in valid_indexes]
+            filtered = [item for item in items if item.index in valid_indexes]
+            returned_indexes = {item.index for item in filtered}
+            if (
+                returned_indexes != valid_indexes
+                or len(filtered) != len(valid_indexes)
+            ):
+                missing = sorted(valid_indexes - returned_indexes)
+                raise ValueError(f"资产分诊结果不完整，缺少索引: {missing}")
+            return filtered
 
         initial_results = await asyncio.gather(
             *(

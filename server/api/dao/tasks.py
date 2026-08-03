@@ -33,15 +33,50 @@ async def insert_tasks(
     return len(result.inserted_ids)
 
 
+async def get_task(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    if not project_id or not task_id:
+        return None
+    return await db[TASKS_COLLECTION].find_one(
+        {"project_id": project_id, "task_id": task_id},
+        {"_id": 0},
+    )
+
+
 async def prepare_interrupted_tasks(
     db: AsyncIOMotorDatabase,
 ) -> tuple[list[dict[str, Any]], int]:
     """Return unfinished tasks to the persistent queue after a process restart."""
     now = datetime.now(timezone.utc)
     unfinished = await db[TASKS_COLLECTION].find(
-        {"status": {"$in": ["pending", "running"]}},
+        {"status": {"$in": ["pending", "running", "pausing"]}},
         {"_id": 0},
     ).to_list(None)
+    pausing = [
+        item
+        for item in unfinished
+        if str(item.get("status") or "") == "pausing"
+    ]
+    pausing_ids = [str(item.get("task_id") or "") for item in pausing]
+    if pausing_ids:
+        await db[TASKS_COLLECTION].update_many(
+            {"task_id": {"$in": pausing_ids}, "status": "pausing"},
+            {
+                "$set": {
+                    "status": "paused",
+                    "progress.stage": "paused",
+                    "progress.message": "任务已按用户请求暂停，可继续执行",
+                    "progress.last_activity_at": now,
+                    "paused_at": now,
+                    "updated_at": now,
+                },
+                "$unset": {"runtime_id": "", "heartbeat_at": ""},
+            },
+        )
     pending = [
         item
         for item in unfinished
@@ -257,6 +292,128 @@ async def mark_task_waiting_resource(
     return bool(updated.modified_count)
 
 
+async def request_task_pause(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    """Persist pause intent before the runtime receives cancellation."""
+    now = datetime.now(timezone.utc)
+    paused = await db[TASKS_COLLECTION].find_one_and_update(
+        {"project_id": project_id, "task_id": task_id, "status": "pending"},
+        {
+            "$set": {
+                "status": "paused",
+                "progress.stage": "paused",
+                "progress.message": "任务已暂停，可继续执行",
+                "progress.last_activity_at": now,
+                "pause_requested_at": now,
+                "paused_at": now,
+                "updated_at": now,
+            },
+            "$unset": {"runtime_id": "", "heartbeat_at": ""},
+        },
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    if paused:
+        return paused
+
+    pausing = await db[TASKS_COLLECTION].find_one_and_update(
+        {"project_id": project_id, "task_id": task_id, "status": "running"},
+        {
+            "$set": {
+                "status": "pausing",
+                "progress.stage": "pausing",
+                "progress.message": "正在保存检查点并释放任务资源...",
+                "progress.last_activity_at": now,
+                "pause_requested_at": now,
+                "updated_at": now,
+            }
+        },
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    if pausing:
+        return pausing
+    return await get_task(db, project_id=project_id, task_id=task_id)
+
+
+async def is_pause_requested(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+    runtime_id: str,
+) -> bool:
+    document = await db[TASKS_COLLECTION].find_one(
+        {"task_id": task_id, "status": "pausing", "runtime_id": runtime_id},
+        {"task_id": 1},
+    )
+    return document is not None
+
+
+async def mark_task_paused(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+    runtime_id: str = "",
+) -> bool:
+    now = datetime.now(timezone.utc)
+    query: dict[str, Any] = {"task_id": task_id, "status": "pausing"}
+    if runtime_id:
+        query["runtime_id"] = runtime_id
+    updated = await db[TASKS_COLLECTION].update_one(
+        query,
+        {
+            "$set": {
+                "status": "paused",
+                "progress.stage": "paused",
+                "progress.message": "任务已暂停，可继续执行",
+                "progress.last_activity_at": now,
+                "paused_at": now,
+                "updated_at": now,
+            },
+            "$unset": {"runtime_id": "", "heartbeat_at": ""},
+        },
+    )
+    return bool(updated.modified_count)
+
+
+async def resume_task(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    """Atomically requeue a manually paused task without clearing checkpoints."""
+    now = datetime.now(timezone.utc)
+    return await db[TASKS_COLLECTION].find_one_and_update(
+        {"project_id": project_id, "task_id": task_id, "status": "paused"},
+        {
+            "$set": {
+                "status": "pending",
+                "progress.stage": "recovering",
+                "progress.message": "任务已继续，正在从检查点恢复...",
+                "progress.last_activity_at": now,
+                "resume_requested_at": now,
+                "updated_at": now,
+            },
+            "$inc": {"manual_resume_count": 1},
+            "$unset": {
+                "runtime_id": "",
+                "heartbeat_at": "",
+                "pause_requested_at": "",
+                "paused_at": "",
+                "completed_at": "",
+                "error": "",
+            },
+        },
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
 async def complete_task(
     db: AsyncIOMotorDatabase,
     *,
@@ -268,6 +425,9 @@ async def complete_task(
     now = datetime.now(timezone.utc)
     fields: dict[str, Any] = {
         "status": "completed",
+        "progress.stage": "completed",
+        "progress.message": "任务已完成",
+        "progress.last_activity_at": now,
         "elapsed_ms": elapsed_ms,
         "updated_at": now,
         "completed_at": now,
@@ -296,6 +456,9 @@ async def fail_task(
         {
             "$set": {
                 "status": "error",
+                "progress.stage": "error",
+                "progress.message": str(error or "任务执行失败")[:500],
+                "progress.last_activity_at": now,
                 "error": error,
                 "elapsed_ms": elapsed_ms,
                 "updated_at": now,

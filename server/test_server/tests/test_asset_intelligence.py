@@ -76,6 +76,9 @@ class _EmptyCursor:
     def limit(self, *_args: Any) -> "_EmptyCursor":
         return self
 
+    def skip(self, *_args: Any) -> "_EmptyCursor":
+        return self
+
     def __aiter__(self) -> "_EmptyCursor":
         return self
 
@@ -632,4 +635,59 @@ async def test_llm_triage_splits_and_corrects_malformed_batch(
         "https://asset-0.example.com",
         "https://asset-2.example.com",
         "https://asset-3.example.com",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_triage_retries_when_structured_result_omits_an_asset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from Sere1nGraph.graph.agents import runtime as agent_runtime
+    from Sere1nGraph.graph.prompts import loader as prompt_loader
+
+    call_sizes: list[int] = []
+
+    class _Structured:
+        async def ainvoke(self, messages: Any) -> AssetTriageBatch:
+            payload = json.loads(messages[-1].content.splitlines()[-1])
+            assets = payload["assets"]
+            call_sizes.append(len(assets))
+            selected = assets[:1] if len(assets) > 1 else assets
+            return AssetTriageBatch(
+                items=[
+                    AssetTriageDecision(
+                        index=item["index"],
+                        category=(
+                            "third_party_system"
+                            if item["index"] == 1
+                            else "business_system"
+                        ),
+                        relevance_score=90,
+                    )
+                    for item in selected
+                ]
+            )
+
+    class _Llm:
+        def with_structured_output(self, _schema: Any) -> _Structured:
+            return _Structured()
+
+    monkeypatch.setattr(agent_runtime, "create_llm", lambda *_args, **_kwargs: _Llm())
+    monkeypatch.setattr(prompt_loader, "load_prompt", lambda _name: "asset triage")
+    candidates = [
+        AssetCandidate(link="https://business.example.com"),
+        AssetCandidate(link="https://third-party.example.net"),
+    ]
+
+    result = await AssetTriageService(object()).prioritize(
+        candidates,
+        identity=AssetIdentity("示例", "示例公司", "example.com"),
+        project_id="project-1",
+        task_id="task-1",
+        batch_size=2,
+    )
+
+    assert call_sizes == [2, 1, 1]
+    assert [item.canonical_url for item in result] == [
+        "https://business.example.com"
     ]

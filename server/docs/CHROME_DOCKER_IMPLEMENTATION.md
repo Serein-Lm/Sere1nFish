@@ -238,7 +238,7 @@ MongoDB `chrome_docker` 配置段：
 | `enabled` | 是否启用 Docker 模式 | `true` |
 | `image` | Docker 镜像名 | `chrome-browser:latest` |
 | `max_containers` | 最大容器数 | `5` |
-| `reserved_non_bulk_containers` | 为公众号归档、学者采集等非批量链路保留的容器数 | `2` |
+| `reserved_non_bulk_containers` | 公众号归档、学者采集等非批量链路的软保留数；无相关需求时批量扫描可借用 | `2` |
 | `idle_timeout` | 空闲超时（秒） | `300` |
 | `shm_size` | 共享内存大小 | `2g` |
 | `screen_width/height` | 虚拟屏幕分辨率 | `1920x1080` |
