@@ -17,6 +17,7 @@ import { CodeOutlined, DatabaseOutlined, EyeOutlined, FileTextOutlined, PictureO
 
 import { type CollectRecord } from '../../services/mobileCollectService'
 import AuthenticatedImage from '../AuthenticatedImage'
+import { CopyableLink } from '../CopyLinkButton'
 import {
   getSourceDocument,
   openAuthenticatedArtifact,
@@ -229,7 +230,7 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
           ))}
           {record.source_url && (
             <Descriptions.Item label="原文链接" span="filled">
-              <a href={record.source_url} target="_blank" rel="noopener noreferrer">{record.source_url}</a>
+              <CopyableLink href={record.source_url} style={{ wordBreak: 'break-all' }} />
             </Descriptions.Item>
           )}
         </Descriptions>

@@ -1,6 +1,6 @@
 import React from 'react'
 import { Tag, Tooltip, Image } from 'antd'
-import { CopyOutlined } from '@ant-design/icons'
+import CopyLinkButton from '../components/CopyLinkButton'
 
 /**
  * Finding value 智能渲染
@@ -39,13 +39,19 @@ export function renderFindingValue(
 
   // 网页链接
   if (URL_PATTERN.test(value)) {
-    return (
+    const link = (
       <Tooltip title={value}>
         <a href={value} target="_blank" rel="noopener noreferrer" style={{ ...style, wordBreak: 'break-all' }}>
           {value.length > 40 ? value.slice(0, 40) + '…' : value}
         </a>
       </Tooltip>
     )
+    return options?.copyable ? (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, maxWidth: '100%' }}>
+        {link}
+        <CopyLinkButton value={value} />
+      </span>
+    ) : link
   }
 
   // 邮箱
@@ -83,13 +89,7 @@ function renderCopyable(
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
       {node}
-      <CopyOutlined
-        style={{ color: '#999', cursor: 'pointer', fontSize: 12 }}
-        onClick={(e) => {
-          e.stopPropagation()
-          navigator.clipboard.writeText(text)
-        }}
-      />
+      <CopyLinkButton value={text} label="内容" />
     </span>
   )
 }

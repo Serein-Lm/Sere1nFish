@@ -61,6 +61,7 @@ import {
 } from '../../services/mobileCollectService'
 import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
 import AuthenticatedImage from '../../components/AuthenticatedImage'
+import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
 import {
   listProjectTargets,
   openAuthenticatedArtifact,
@@ -317,9 +318,7 @@ const taggingColumns: ColumnsType<WebTaggingRecord> = [
     render: (url: string) => (
       <div className="url-cell">
         <GlobalOutlined className="url-icon" />
-        <Tooltip title={url}>
-          <span className="url-text">{url}</span>
-        </Tooltip>
+        <CopyableLink href={url} className="url-text" title={url}>{url}</CopyableLink>
       </div>
     ),
   },
@@ -437,12 +436,17 @@ const findingsColumns = (onViewCopywriting?: (finding: WebTaggingFinding) => voi
     title: '来源',
     dataIndex: 'source_url',
     key: 'source_url',
-    width: 60,
+    width: 76,
     align: 'center',
     render: (url: string) => (
-      <a href={url} target="_blank" rel="noreferrer" className="source-link">
-        <LinkOutlined />
-      </a>
+      <Space size={0}>
+        <Tooltip title="打开来源链接">
+          <a href={url} target="_blank" rel="noreferrer" className="source-link">
+            <LinkOutlined />
+          </a>
+        </Tooltip>
+        <CopyLinkButton value={url} />
+      </Space>
     ),
   },
   ...(onViewCopywriting ? [{
@@ -466,8 +470,8 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
     <div className="expanded-record-content">
       <div className="expanded-intro">
         <Descriptions size="small" column={{ xxl: 3, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }} bordered className="intro-descriptions">
-          <Descriptions.Item label="输入 URL">{record.data?.intro?.url || '-'}</Descriptions.Item>
-          <Descriptions.Item label="最终 URL">{record.data?.intro?.final_url || '-'}</Descriptions.Item>
+          <Descriptions.Item label="输入 URL">{record.data?.intro?.url ? renderFindingValue(record.data.intro.url, { copyable: true, maxWidth: 420 }) : '-'}</Descriptions.Item>
+          <Descriptions.Item label="最终 URL">{record.data?.intro?.final_url ? renderFindingValue(record.data.intro.final_url, { copyable: true, maxWidth: 420 }) : '-'}</Descriptions.Item>
           <Descriptions.Item label="域名">{record.data?.intro?.domain || '-'}</Descriptions.Item>
           <Descriptions.Item label="站点名称">{record.data?.intro?.site_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="主体名称">{record.data?.intro?.entity_name || '-'}</Descriptions.Item>
@@ -1606,6 +1610,7 @@ export default function ProjectDetail() {
               <LinkOutlined />
             </a>
           </Tooltip>
+          <CopyLinkButton value={buildNoteUrl(rec)} />
           <Tooltip title="查看详情">
             <a className="xhs-detail-btn" onClick={() => handleViewNoteDetail(rec)}>
               <EyeOutlined />
@@ -3271,9 +3276,9 @@ export default function ProjectDetail() {
           const label = r.article_title || r.article_id
           if (url) {
             return (
-              <a href={url} target="_blank" rel="noreferrer" title={r.article_title || r.article_id} style={{ wordBreak: 'break-all' }}>
+              <CopyableLink href={url} title={r.article_title || r.article_id} style={{ wordBreak: 'break-all' }}>
                 {label}
-              </a>
+              </CopyableLink>
             )
           }
           return <span title={r.article_id} style={{ wordBreak: 'break-all' }}>{label}</span>
@@ -3287,9 +3292,9 @@ export default function ProjectDetail() {
           const q = encodeURIComponent(r.author_name || r.email)
           return (
             <Space size={4}>
-              <a href={`https://scholar.google.com/scholar?q=${q}`} target="_blank" rel="noreferrer">Scholar</a>
-              <a href={`https://orcid.org/orcid-search/search?searchQuery=${q}`} target="_blank" rel="noreferrer">ORCID</a>
-              <a href={`https://openalex.org/works?search=${q}`} target="_blank" rel="noreferrer">OpenAlex</a>
+              <CopyableLink href={`https://scholar.google.com/scholar?q=${q}`}>Scholar</CopyableLink>
+              <CopyableLink href={`https://orcid.org/orcid-search/search?searchQuery=${q}`}>ORCID</CopyableLink>
+              <CopyableLink href={`https://openalex.org/works?search=${q}`}>OpenAlex</CopyableLink>
             </Space>
           )
         },
@@ -3377,7 +3382,7 @@ export default function ProjectDetail() {
         width: 260,
         ellipsis: true,
         render: (title: string, record) => record.original_url ? (
-          <a href={record.original_url} target="_blank" rel="noreferrer" title={title}>{title || '未命名公告'}</a>
+          <CopyableLink href={record.original_url} title={title}>{title || '未命名公告'}</CopyableLink>
         ) : (title || '未命名公告'),
       },
       {
@@ -3449,6 +3454,7 @@ export default function ProjectDetail() {
             <Tooltip title="打开公告原文">
               <Button type="text" size="small" icon={<LinkOutlined />} disabled={!record.original_url} href={record.original_url} target="_blank" />
             </Tooltip>
+            <CopyLinkButton value={record.original_url} />
             <Tooltip title="查看供应商原始记录">
               <Button type="text" size="small" icon={<FileSearchOutlined />} disabled={!record.provider_payload_url} onClick={() => openArtifact(record.provider_payload_url)} />
             </Tooltip>
@@ -3459,9 +3465,12 @@ export default function ProjectDetail() {
               <Button type="text" size="small" icon={<GlobalOutlined />} disabled={!record.detail_html_url} onClick={() => openArtifact(record.detail_html_url)} />
             </Tooltip>
             {record.provider_url && (
-              <Tooltip title="查看天眼查记录">
-                <Button type="text" size="small" icon={<LinkOutlined />} href={record.provider_url} target="_blank" />
-              </Tooltip>
+              <>
+                <Tooltip title="查看天眼查记录">
+                  <Button type="text" size="small" icon={<LinkOutlined />} href={record.provider_url} target="_blank" />
+                </Tooltip>
+                <CopyLinkButton value={record.provider_url} />
+              </>
             )}
           </Space>
         ),
@@ -3535,10 +3544,10 @@ export default function ProjectDetail() {
                     </div>
                   </Descriptions.Item>
                   <Descriptions.Item label="公告原文">
-                    {record.original_url ? <a href={record.original_url} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{record.original_url}</a> : '-'}
+                    {record.original_url ? <CopyableLink href={record.original_url} style={{ wordBreak: 'break-all' }} /> : '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="天眼查来源">
-                    {record.provider_url ? <a href={record.provider_url} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{record.provider_url}</a> : '-'}
+                    {record.provider_url ? <CopyableLink href={record.provider_url} style={{ wordBreak: 'break-all' }} /> : '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="归档证据">
                     <Space wrap>

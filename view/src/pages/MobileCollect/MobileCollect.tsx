@@ -56,6 +56,7 @@ import {
 } from '../../services/mobileCollectService'
 import { getDevices, type SimpleDevice } from '../../services/mobileService'
 import CollectRecordsView from '../../components/CollectRecordsView/CollectRecordsView'
+import { CopyableLink } from '../../components/CopyLinkButton'
 import './MobileCollect.css'
 
 const NOTIFY_OPTIONS = [
@@ -467,9 +468,7 @@ export default function MobileCollect() {
           <div style={{ marginTop: 4 }}>
             {r.contacts_count ? <Tag color="magenta">联系方式 {r.contacts_count}</Tag> : null}
             {r.source_url ? (
-              <a href={r.source_url} target="_blank" rel="noreferrer">
-                原文链接
-              </a>
+              <CopyableLink href={r.source_url}>原文链接</CopyableLink>
             ) : null}
           </div>
         </div>
