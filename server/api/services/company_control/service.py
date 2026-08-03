@@ -66,6 +66,7 @@ class CompanyControlService:
             "truncated": False,
             "entities": [],
             "errors": [],
+            "cycles_skipped": 0,
             "permission_required": False,
         }
         try:
@@ -118,16 +119,42 @@ class CompanyControlService:
             entity: ControlledEntity,
             icp_error: str,
             depth: int,
-        ) -> tuple[dict[str, Any], _ControlParent]:
+        ) -> tuple[dict[str, Any], _ControlParent] | None:
             aliases = list(dict.fromkeys([entity.name, *entity.aliases]))
+            entity_name_key = targets_dao.normalize_target_name(entity.name)
+            lineage_name_keys = {
+                targets_dao.normalize_target_name(name)
+                for name in parent.lineage_target_names
+                if str(name or "").strip()
+            }
+            if entity_name_key and entity_name_key in lineage_name_keys:
+                logger.warning(
+                    "跳过全资关系名称循环 root=%s parent=%s entity=%s",
+                    parent_target_id,
+                    parent.target_id,
+                    entity.name,
+                )
+                return None
             target = await targets_dao.upsert_target(
                 self.db,
                 name=entity.name,
                 root_domain=entity.root_domain,
                 aliases=aliases,
                 source=provider_name,
+                # Legal entities may share short brand aliases. Control-tree
+                # identity must use the legal name/domain, not those aliases.
+                match_aliases=False,
             )
             target_id = str(target.get("target_id") or "")
+            if not target_id or target_id in parent.lineage_target_ids:
+                logger.warning(
+                    "跳过全资关系循环 root=%s parent=%s entity=%s target=%s",
+                    parent_target_id,
+                    parent.target_id,
+                    entity.name,
+                    target_id,
+                )
+                return None
             lineage_target_ids = [*parent.lineage_target_ids, target_id]
             lineage_target_names = [*parent.lineage_target_names, entity.name]
             relation = {
@@ -292,7 +319,6 @@ class CompanyControlService:
                     if (
                         not entity.name
                         or entity_key in seen_entities
-                        or entity.name in parent.lineage_target_names
                     ):
                         continue
                     if len(edges) >= remaining:
@@ -320,6 +346,9 @@ class CompanyControlService:
             for item in persisted:
                 if isinstance(item, Exception):
                     base_result["errors"].append(str(item))
+                    continue
+                if item is None:
+                    base_result["cycles_skipped"] += 1
                     continue
                 output, child_parent = item
                 base_result["entities"].append(output)

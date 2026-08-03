@@ -361,12 +361,19 @@ class CompanyScanPipeline:
             and entry.get("status") == "completed"
             and isinstance(entry.get("result"), dict)
         }
-        from api.services.company_scan_recovery import find_retryable_core_modules
+        from api.services.company_scan_recovery import (
+            find_incompatible_core_modules,
+            find_retryable_core_modules,
+        )
 
         retryable_core_modules = await find_retryable_core_modules(
             self.db,
             task_id=task_id,
         )
+        incompatible_core_modules = find_incompatible_core_modules(
+            checkpoint_results
+        )
+        retryable_core_modules.update(incompatible_core_modules)
         for module in retryable_core_modules:
             checkpoint_results.pop(module, None)
         restore_core_context = bool(resume_flags.get("core_completed"))
@@ -375,7 +382,7 @@ class CompanyScanPipeline:
         )
         if retryable_core_modules:
             logger.warning(
-                "[company_scan] task=%s 检查点包含可重试 URL，重开模块: %s",
+                "[company_scan] task=%s 检查点需要重跑，重开模块: %s",
                 task_id,
                 ", ".join(sorted(retryable_core_modules)),
             )
@@ -719,6 +726,7 @@ class CompanyScanPipeline:
 
             # ── 阶段 2: 各根 Target 数据源并发执行 ──
             primary_jobs: list[tuple[str, Any]] = []
+            restored_primary_modules: set[str] = set()
             xhs_succeeded = False
             if not resume_core_completed:
                 enabled_checkpoint_modules = {
@@ -735,6 +743,7 @@ class CompanyScanPipeline:
                             self._completed_module_result(checkpoint_results[module]),
                         ))
             if resume_core_completed:
+                restored_primary_modules.update(checkpoint_results)
                 from api.services.company_scan_recovery import (
                     restore_asset_url,
                     restore_bidding,
@@ -743,6 +752,7 @@ class CompanyScanPipeline:
                 )
 
                 if enable_control_structure:
+                    restored_primary_modules.add("control_structure")
                     primary_jobs.append((
                         "control_structure",
                         restore_control_structure(
@@ -753,6 +763,7 @@ class CompanyScanPipeline:
                         ),
                     ))
                 if enable_asset_discovery or enable_url_scan:
+                    restored_primary_modules.add("asset_url")
                     primary_jobs.append((
                         "asset_url",
                         restore_asset_url(
@@ -764,6 +775,7 @@ class CompanyScanPipeline:
                         ),
                     ))
                 if enable_bidding:
+                    restored_primary_modules.add("bidding")
                     primary_jobs.append((
                         "bidding",
                         restore_bidding(
@@ -773,6 +785,7 @@ class CompanyScanPipeline:
                         ),
                     ))
                 if enable_scholar:
+                    restored_primary_modules.add("scholar")
                     primary_jobs.append((
                         "scholar",
                         restore_scholar(
@@ -923,6 +936,8 @@ class CompanyScanPipeline:
                 ))
 
             async def _checkpoint_module(kind: str, outcome: Any) -> None:
+                if kind in restored_primary_modules:
+                    return
                 if not isinstance(outcome, dict) or outcome.get("status") == "error":
                     return
                 from api.services.task_progress import save_module_checkpoint

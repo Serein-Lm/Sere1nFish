@@ -41,10 +41,12 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
         list(ANALYSIS_TOOLS),
         list(PROJECT_DATA_TOOLS),
         list(ARTIFACT_QUERY_TOOLS),
+        list(SKILL_TOOLS),
     )
     persona = _unique_tools(
         list(PERSONA_TOOLS),
         list(CONTEXT_TOOLS),
+        list(SKILL_TOOLS),
         [
             tool
             for tool in READ_TOOLS
@@ -89,6 +91,7 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
         list(PROJECT_DATA_TOOLS),
         list(ARTIFACT_QUERY_TOOLS),
         list(SKILL_TOOLS),
+        list(WORD_TOOLS),
         list(PAYLOAD_WORD_TOOLS),
     )
     return {"data": data, "persona": persona, "content": content, "payload": payload}

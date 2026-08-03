@@ -4,6 +4,7 @@ from api.models.web_tagging_schema import WebTaggingOutput
 from api.services.url_scan_pipeline import UrlScanPipeline
 from api.services.bidding_records import (
     _public_bidding_record,
+    _record_recency_key,
     _record_urls,
     is_actionable_bidding_contact,
 )
@@ -140,3 +141,15 @@ def test_bidding_read_model_excludes_heavy_archived_evidence() -> None:
     assert "detail_text_preview" not in public
     assert len(public["content_preview"]) <= 2_003
     assert "text_preview" not in public["attachments"][0]
+
+
+def test_bidding_project_order_prioritizes_publish_date_over_contact_score() -> None:
+    records = [
+        {"published_on": "2026-06-01", "updated_at": "2026-07-01", "max_contact_score": 99},
+        {"published_on": "2026-08-01", "updated_at": "2026-08-02", "max_contact_score": 40},
+    ]
+
+    assert sorted(records, key=_record_recency_key, reverse=True) == [
+        records[1],
+        records[0],
+    ]

@@ -18,6 +18,34 @@ from api.db.collections import (
 )
 
 
+_CURRENT_BIDDING_LOOKBACK_DAYS = 180
+_CURRENT_BIDDING_TYPES = {"1", "2", "4"}
+
+
+def find_incompatible_core_modules(
+    checkpoint_results: dict[str, dict[str, Any]],
+) -> set[str]:
+    """Return completed checkpoints whose persisted contract is now obsolete."""
+    incompatible: set[str] = set()
+    bidding = checkpoint_results.get("bidding")
+    if isinstance(bidding, dict):
+        try:
+            lookback_days = int(bidding.get("lookback_days") or 0)
+        except (TypeError, ValueError):
+            lookback_days = 0
+        bid_types = {
+            str(item).strip()
+            for item in bidding.get("bid_types") or []
+            if str(item).strip()
+        }
+        if (
+            lookback_days != _CURRENT_BIDDING_LOOKBACK_DAYS
+            or bid_types != _CURRENT_BIDDING_TYPES
+        ):
+            incompatible.add("bidding")
+    return incompatible
+
+
 async def load_recovery_state(
     db: AsyncIOMotorDatabase,
     *,

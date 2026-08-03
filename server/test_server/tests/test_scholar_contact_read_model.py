@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from api.dao import scholar_contact as scholar_dao
+from crawler_tools import scholar_tools
 
 
 def test_scholar_article_url_requires_a_public_source() -> None:
@@ -18,6 +19,94 @@ def test_scholar_article_url_requires_a_public_source() -> None:
         {"landing_page": "https://example.org/article/1"}
     ) == "https://example.org/article/1"
     assert scholar_dao.scholar_article_url({"article_id": "synthetic"}) == ""
+
+
+def test_pubmed_contacts_are_bound_to_article_and_author_evidence() -> None:
+    xml = """
+    <PubmedArticleSet>
+      <PubmedArticle>
+        <MedlineCitation>
+          <PMID>123456</PMID>
+          <Article>
+            <ArticleTitle>Digital media systems</ArticleTitle>
+            <Journal><JournalIssue><PubDate><Year>2026</Year></PubDate></JournalIssue></Journal>
+            <AuthorList><Author>
+              <ForeName>Li</ForeName><LastName>Ming</LastName>
+              <AffiliationInfo><Affiliation>
+                Anhui Broadcasting Corporation, Electronic address: li.ming@media-lab.org
+              </Affiliation></AffiliationInfo>
+            </Author></AuthorList>
+          </Article>
+        </MedlineCitation>
+        <PubmedData><ArticleIdList><ArticleId IdType="doi">10.1000/test</ArticleId></ArticleIdList></PubmedData>
+      </PubmedArticle>
+    </PubmedArticleSet>
+    """
+
+    articles = scholar_tools._parse_pubmed_articles(
+        xml,
+        unit="Anhui Broadcasting Corporation",
+    )
+    assert articles[0]["landing_page"] == "https://pubmed.ncbi.nlm.nih.gov/123456/"
+    assert articles[0]["unit_verified"] is True
+    assert articles[0]["contacts"] == [
+        {
+            "email": "li.ming@media-lab.org",
+            "author_name": "Li Ming",
+            "is_corresponding": True,
+            "unit_verified": True,
+            "evidence": "Anhui Broadcasting Corporation, Electronic address: li.ming@media-lab.org",
+            "email_kind": "institutional",
+        }
+    ]
+
+    _, normalized_articles, normalized_contacts = scholar_tools.normalize_to_docs(
+        {
+            "unit": "安徽广播电视台",
+            "unit_en": "Anhui Broadcasting Corporation",
+            "direction": "media technology",
+            "api_results": {},
+            "email_extraction": {"sources": {"pubmed": {"articles": articles}}},
+        }
+    )
+    assert normalized_articles[0].article_id == "10.1000/test"
+    assert normalized_articles[0].landing_page == "https://pubmed.ncbi.nlm.nih.gov/123456/"
+    assert normalized_contacts[0].article_id == normalized_articles[0].article_id
+    assert normalized_contacts[0].unit_verified is True
+
+
+def test_pubmed_acronym_does_not_match_only_an_email_domain() -> None:
+    xml = """
+    <PubmedArticleSet>
+      <PubmedArticle>
+        <MedlineCitation>
+          <PMID>789</PMID>
+          <Article>
+            <ArticleTitle>Carbohydrate research</ArticleTitle>
+            <AuthorList><Author>
+              <ForeName>Chris</ForeName><LastName>Heiss</LastName>
+              <AffiliationInfo><Affiliation>
+                Complex Carbohydrate Research Center, University of Georgia.
+                Electronic address: cheiss@ccrc.uga.edu.
+              </Affiliation></AffiliationInfo>
+            </Author></AuthorList>
+          </Article>
+        </MedlineCitation>
+      </PubmedArticle>
+    </PubmedArticleSet>
+    """
+
+    articles = scholar_tools._parse_pubmed_articles(xml, unit="CCRC")
+
+    assert articles[0]["unit_verified"] is False
+    assert articles[0]["contacts"][0]["unit_verified"] is False
+
+
+def test_pubmed_acronym_matches_a_standalone_affiliation_token() -> None:
+    assert scholar_tools._affiliation_matches_unit(
+        "China Information and Communication Technologies Group (CICT), Wuhan.",
+        "CICT",
+    ) is True
 
 
 class _Cursor:
@@ -85,6 +174,20 @@ async def test_query_contacts_hides_orphans_before_pagination() -> None:
         index for index, stage in enumerate(pipeline) if "$lookup" in stage
     )
     assert limit_index < lookup_index
+
+
+@pytest.mark.asyncio
+async def test_target_scholar_counts_include_only_verified_contacts() -> None:
+    db = _Db()
+
+    result = await scholar_dao.count_contacts_by_target(
+        db,  # type: ignore[arg-type]
+        project_id="project-1",
+        target_ids=["target-1"],
+    )
+
+    assert result == {"target-1": 0}
+    assert db.contacts.pipelines[0][0]["$match"]["unit_verified"] is True
 
 
 @pytest.mark.asyncio

@@ -419,6 +419,18 @@ class DingTalkStreamAdapter:
                 channel="dingtalk_stream",
                 on_event=_on_event,
             )
+            from api.db.mongodb import get_db
+            from api.services.artifact_access import attach_temporary_download_urls
+
+            try:
+                artifacts = await attach_temporary_download_urls(
+                    get_db(),
+                    artifacts,
+                    owner=f"dingtalk:{sender_id}",
+                    expires_seconds=3600,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("钉钉产物临时链接生成失败，回退登录下载: %s", exc)
             final_markdown = renderer.render_final(
                 final_text,
                 artifacts,

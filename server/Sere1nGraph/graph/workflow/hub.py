@@ -16,6 +16,7 @@ AI 中枢路由工作流（复用 router.py 的 LangGraph 路由架构）。
 from __future__ import annotations
 
 import operator
+import re
 import uuid
 from typing import Any, Annotated, Literal
 from typing_extensions import TypedDict
@@ -29,6 +30,10 @@ from ..agents.runtime import REQUIRE_EVIDENCE_TOOL_MARKER, create_llm
 from ..prompts.loader import load_prompt
 
 HubTarget = Literal["data", "persona", "content", "payload"]
+_PUBLIC_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_CURRENT_REQUEST_MARKER = "【本轮用户请求】"
+_DIRECT_URL_AGENT_TIMEOUT_SECONDS = 90
+_DIRECT_URL_MCP_TOOL_LIMIT = 4
 
 
 class AgentInput(TypedDict):
@@ -74,6 +79,21 @@ def _compose_specialist_query(
         "只回答聚焦任务；不要代替其他专家回答原始请求中的其他部分。"
         f"{tool_requirement}"
     )
+
+
+def _has_direct_public_url(query: str) -> bool:
+    """Detect a URL in the current turn, excluding URLs carried in chat history."""
+    text = str(query or "")
+    if _CURRENT_REQUEST_MARKER in text:
+        text = text.rpartition(_CURRENT_REQUEST_MARKER)[2]
+    return bool(_PUBLIC_URL_RE.search(text))
+
+
+def _direct_url_classifications(query: str) -> list[Classification] | None:
+    """Bypass one router-model call for the unambiguous exact-URL workflow."""
+    if not _has_direct_public_url(query):
+        return None
+    return [{"source": "payload", "query": query, "requires_tools": True}]
 
 
 def _build_synthesis_prompt(query: str, response_style: str) -> str:
@@ -131,18 +151,20 @@ async def build_hub_graph(app_config: Any):
         await emit_event({"type": "router_start", "timestamp": _ts()})
         await emit_event({"type": "classify_start", "timestamp": _ts()})
 
-        structured_llm = router_llm.with_structured_output(ClassificationResult)
-        with observation_context(phase="hub_classify", agent="hub_classify"):
-            result = await structured_llm.ainvoke(
-                [
-                    {"role": "system", "content": classify_prompt},
-                    {"role": "user", "content": state["query"]},
-                ]
-            )
+        classifications = _direct_url_classifications(state["query"])
+        if classifications is None:
+            structured_llm = router_llm.with_structured_output(ClassificationResult)
+            with observation_context(phase="hub_classify", agent="hub_classify"):
+                result = await structured_llm.ainvoke(
+                    [
+                        {"role": "system", "content": classify_prompt},
+                        {"role": "user", "content": state["query"]},
+                    ]
+                )
 
-        classifications = result.classifications or [
-            {"source": "data", "query": state["query"], "requires_tools": False}
-        ]
+            classifications = result.classifications or [
+                {"source": "data", "query": state["query"], "requires_tools": False}
+            ]
 
         await emit_event({
             "type": "classify_end",
@@ -196,6 +218,7 @@ async def build_hub_graph(app_config: Any):
             }
         try:
             worker_config = _build_worker_chrome_config(app_config, cdp_url)
+            direct_url_request = _has_direct_public_url(state["query"])
             payload_agent = await create_hub_specialist_agent(
                 worker_config,
                 system_prompt=load_prompt("hub/payload"),
@@ -204,8 +227,12 @@ async def build_hub_graph(app_config: Any):
                 output_mode="sse",
                 summary_trigger_tokens=16_000,
                 summary_keep_messages=12,
-                timeout=300,
-                mcp_tool_limit=12,
+                timeout=(
+                    _DIRECT_URL_AGENT_TIMEOUT_SECONDS if direct_url_request else 300
+                ),
+                mcp_tool_limit=(
+                    _DIRECT_URL_MCP_TOOL_LIMIT if direct_url_request else 12
+                ),
             )
             with observation_context(phase="hub_payload", agent="hub_payload"):
                 text = await run_agent_with_sse("payload", payload_agent, state["query"])

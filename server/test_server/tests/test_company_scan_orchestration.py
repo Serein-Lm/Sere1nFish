@@ -757,6 +757,38 @@ async def test_low_authority_alias_does_not_downgrade_canonical_target(
 
 
 @pytest.mark.asyncio
+async def test_control_entity_identity_does_not_reuse_a_shared_brand_alias() -> None:
+    from api.dao import targets as targets_dao
+
+    class _NoExactLegalTarget(_TargetCollection):
+        async def find_one(
+            self,
+            query: dict[str, Any],
+            *_args: Any,
+        ) -> dict[str, Any] | None:
+            if "$or" in query:
+                return dict(self.existing)
+            return None
+
+    collection = _NoExactLegalTarget()
+    target = await targets_dao.upsert_target(
+        _TargetDb(collection),
+        name="上海银清企业服务有限公司",
+        aliases=["银清企业"],
+        source="tianyancha_outbound_investment",
+        match_aliases=False,
+    )
+
+    assert collection.update_filter == {
+        "target_id": targets_dao.target_id_for_name(
+            "上海银清企业服务有限公司",
+            "company",
+        )
+    }
+    assert target["target_id"] != "tgt_brand"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("incremental_scan", "expected_urls", "expected_known_alive"),
     [

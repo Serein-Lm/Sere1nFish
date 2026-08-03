@@ -563,8 +563,10 @@ async def test_subsidiary_service_persists_child_and_grandchild_lineage(
 
     target_ids = {"直属子单位": "child", "孙单位": "grandchild"}
     relations: dict[str, dict[str, Any]] = {}
+    target_upserts: list[dict[str, Any]] = []
 
     async def _upsert_target(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        target_upserts.append(dict(kwargs))
         name = str(kwargs["name"])
         return {"target_id": target_ids[name], "canonical_name": name}
 
@@ -605,6 +607,59 @@ async def test_subsidiary_service_persists_child_and_grandchild_lineage(
         "child",
         "grandchild",
     ]
+    assert all(item.get("match_aliases") is False for item in target_upserts)
+
+
+@pytest.mark.asyncio
+async def test_subsidiary_service_skips_repeated_legal_name_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+    from api.services.company_control.contracts import ControlDiscovery, ControlledEntity
+    from api.services.company_control.factory import CompanyControlProviderFactory
+    from api.services.company_control.service import CompanyControlService
+
+    class _Provider:
+        name = "tianyancha_outbound_investment"
+
+        async def discover(self, *_args: Any, **_kwargs: Any) -> ControlDiscovery:
+            return ControlDiscovery(
+                provider=self.name,
+                entities=[
+                    ControlledEntity(
+                        name="根公司",
+                        provider_id="cycle-provider",
+                        root_domain="root.example",
+                    )
+                ],
+                total_reported=1,
+                pages_fetched=1,
+            )
+
+        async def lookup_icp(self, entity: ControlledEntity) -> ControlledEntity:
+            return entity
+
+    async def _create(_provider: str = "tianyancha") -> _Provider:
+        return _Provider()
+
+    async def _unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("循环 Target 不应继续写入")
+
+    monkeypatch.setattr(CompanyControlProviderFactory, "create", _create)
+    monkeypatch.setattr(targets_dao, "upsert_target", _unexpected)
+    monkeypatch.setattr(targets_dao, "link_project_target", _unexpected)
+
+    result = await CompanyControlService(object()).discover_and_persist(
+        project_id="project-1",
+        task_id="task-1",
+        parent_target={"target_id": "root", "canonical_name": "根公司"},
+        company_name="根公司",
+    )
+
+    assert result["status"] == "completed"
+    assert result["persisted"] == 0
+    assert result["cycles_skipped"] == 1
+    assert result["entities"] == []
 
 
 @pytest.mark.asyncio

@@ -126,6 +126,16 @@ def artifact_open_url(base_url: str, artifact_id: Any) -> str:
     return f"{base}/phishing?ref_artifact={quote(identifier, safe='')}"
 
 
+def artifact_download_url(artifact: dict[str, Any], *, base_url: str) -> str:
+    """Prefer a short-lived direct URL and fall back to the authenticated app."""
+    temporary = str(artifact.get("temporary_download_url") or "").strip()
+    if temporary:
+        parsed = urlsplit(temporary)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return temporary
+    return artifact_open_url(base_url, artifact.get("artifact_id"))
+
+
 def build_artifact_buttons(
     artifacts: list[dict[str, Any]],
     *,
@@ -137,8 +147,8 @@ def build_artifact_buttons(
     for artifact in artifacts:
         if len(buttons) >= max(0, limit):
             break
-        url = artifact_open_url(base_url, artifact.get("artifact_id"))
-        if not url or not artifact.get("download_url"):
+        url = artifact_download_url(artifact, base_url=base_url)
+        if not url:
             continue
         title = _clean_text(artifact.get("title") or artifact.get("filename") or "产物", limit=18)
         label = f"打开/下载 {artifact_format(artifact)} · {title}"
@@ -337,8 +347,10 @@ class DingTalkCardRenderer:
             size = _format_size(artifact.get("size"))
             if size:
                 details.append(size)
-            url = artifact_open_url(base_url, artifact.get("artifact_id"))
-            action = f"，[打开并下载]({url})" if url else ""
+            url = artifact_download_url(artifact, base_url=base_url)
+            temporary = bool(artifact.get("temporary_download_url"))
+            action_label = "临时下载（1 小时有效）" if temporary else "打开并下载"
+            action = f"，[{action_label}]({url})" if url else ""
             artifact_lines.append(
                 f"{index}. **{title}**（{' / '.join(details)}）{action}"
             )
@@ -355,7 +367,10 @@ class DingTalkCardRenderer:
             if footer:
                 footer.append("")
             footer.extend(["### 产物", *artifact_lines])
-            if not base_url:
+            if not any(
+                artifact_download_url(item, base_url=base_url)
+                for item in artifacts
+            ):
                 footer.extend(
                     ["", "> 已生成产物；管理员配置“公网访问地址”后，钉钉中会显示打开和下载入口。"]
                 )

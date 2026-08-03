@@ -30,6 +30,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
@@ -144,6 +145,9 @@ class Contact:
     author_name: Optional[str] = None
     is_corresponding: bool = False
     unit: Optional[str] = None
+    unit_verified: bool = False
+    evidence: str = ""
+    email_kind: str = ""
 
 
 # ════════════════════════════════════════════════════════════
@@ -204,6 +208,29 @@ def _organization_full_identity(value: str) -> str:
         "",
         str(value or "").casefold(),
     )
+
+
+def _text_matches_organization_alias(text: str, alias: str) -> bool:
+    """Match an organization name without treating an email domain as evidence."""
+    observed_text = EMAIL_RE.sub(" ", str(text or ""))
+    observed_text = re.sub(r"https?://\S+", " ", observed_text, flags=re.I)
+    expected_text = str(alias or "").strip().casefold()
+    if not expected_text:
+        return False
+
+    # Short ASCII identifiers are ambiguous. They must occur as a standalone
+    # affiliation token, e.g. ``(CICT)``, rather than inside ``ccrc.uga.edu``.
+    if re.fullmatch(r"[a-z0-9]{2,10}", expected_text, flags=re.I):
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(expected_text)}(?![a-z0-9])",
+                observed_text.casefold(),
+            )
+        )
+
+    expected = _organization_identity(expected_text)
+    observed = _organization_identity(observed_text)
+    return len(expected) >= 4 and expected in observed
 
 
 def _institution_matches(
@@ -328,6 +355,98 @@ def _openalex_articles(unit: str, direction: str, limit: int,
 # 邮箱抽取源: PubMed / EuropePMC / DOAJ / CrossRef / OpenAIRE
 # ════════════════════════════════════════════════════════════
 
+def _element_text(node: ET.Element | None) -> str:
+    return "" if node is None else re.sub(r"\s+", " ", "".join(node.itertext())).strip()
+
+
+def _affiliation_matches_unit(affiliation: str, unit: str) -> bool:
+    return _text_matches_organization_alias(affiliation, unit)
+
+
+def _parse_pubmed_articles(xml: str, *, unit: str) -> list[dict[str, Any]]:
+    """Bind each public email to its PubMed article and author evidence."""
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return []
+
+    output: list[dict[str, Any]] = []
+    for entry in root.findall(".//PubmedArticle"):
+        citation = entry.find("./MedlineCitation")
+        article = citation.find("./Article") if citation is not None else None
+        if citation is None or article is None:
+            continue
+        pmid = str(citation.findtext("./PMID") or "").strip()
+        title = _element_text(article.find("./ArticleTitle"))
+        doi = ""
+        for identifier in entry.findall("./PubmedData/ArticleIdList/ArticleId"):
+            if str(identifier.attrib.get("IdType") or "").casefold() == "doi":
+                doi = _element_text(identifier)
+                break
+        year = str(article.findtext("./Journal/JournalIssue/PubDate/Year") or "").strip()
+        if not year:
+            medline_date = str(
+                article.findtext("./Journal/JournalIssue/PubDate/MedlineDate") or ""
+            )
+            match = re.search(r"\b(?:19|20)\d{2}\b", medline_date)
+            year = match.group(0) if match else ""
+
+        contacts: dict[str, dict[str, Any]] = {}
+        article_verified = False
+        article_evidence = ""
+        for author in article.findall("./AuthorList/Author"):
+            author_name = " ".join(
+                value
+                for value in (
+                    str(author.findtext("./ForeName") or "").strip(),
+                    str(author.findtext("./LastName") or "").strip(),
+                )
+                if value
+            ) or str(author.findtext("./CollectiveName") or "").strip()
+            for affiliation_node in author.findall("./AffiliationInfo/Affiliation"):
+                affiliation = _element_text(affiliation_node)
+                verified = _affiliation_matches_unit(affiliation, unit)
+                if verified:
+                    article_verified = True
+                    article_evidence = article_evidence or affiliation[:240]
+                corresponding = "electronic address" in affiliation.casefold()
+                for raw_email in _clean_emails(affiliation):
+                    email = normalize_email(raw_email)
+                    if not email or is_noise_email(email):
+                        continue
+                    existing = contacts.get(email)
+                    candidate = {
+                        "email": email,
+                        "author_name": author_name or None,
+                        "is_corresponding": corresponding,
+                        "unit_verified": verified,
+                        "evidence": affiliation[:240],
+                        "email_kind": _email_kind(email),
+                    }
+                    if existing is None or (
+                        candidate["unit_verified"], candidate["is_corresponding"]
+                    ) > (
+                        existing["unit_verified"], existing["is_corresponding"]
+                    ):
+                        contacts[email] = candidate
+
+        output.append(
+            {
+                "pmid": pmid,
+                "title": title,
+                "doi": doi or None,
+                "year": year,
+                "landing_page": (
+                    f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
+                ),
+                "unit_verified": article_verified,
+                "match_evidence": article_evidence,
+                "contacts": list(contacts.values()),
+            }
+        )
+    return output
+
+
 def _pubmed(unit: str, direction: str, retmax: int = 8) -> dict:
     term = f"{unit}[AFFL] AND {direction}"
     u = ("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
@@ -337,14 +456,30 @@ def _pubmed(unit: str, direction: str, retmax: int = 8) -> dict:
     count = d["esearchresult"]["count"]
     emails: list[str] = []
     corresp: list[str] = []
+    articles: list[dict[str, Any]] = []
     if ids:
         u2 = ("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?"
               f"db=pubmed&id={','.join(ids)}&retmode=xml")
         xml = _get_text(u2)
-        emails = _clean_emails(xml)
-        corresp = re.findall(r"Electronic address:\s*([^\s<.]+@[^\s<]+)", xml)
+        articles = _parse_pubmed_articles(xml, unit=unit)
+        emails = sorted(
+            {
+                contact["email"]
+                for article in articles
+                for contact in article.get("contacts") or []
+            }
+        )
+        corresp = sorted(
+            {
+                contact["email"]
+                for article in articles
+                for contact in article.get("contacts") or []
+                if contact.get("is_corresponding")
+            }
+        )
     return {"source": "pubmed", "hit_count": count, "pmids": ids,
-            "emails": emails, "electronic_address": sorted(set(corresp))}
+            "emails": emails, "electronic_address": corresp,
+            "articles": articles}
 
 
 def _europepmc(unit: str, direction: str, page_size: int = 8) -> dict:
@@ -366,7 +501,11 @@ def _europepmc(unit: str, direction: str, page_size: int = 8) -> dict:
                 item["emails"] = _clean_emails(xml)
                 corr = re.findall(r"<corresp[^>]*>(.*?)</corresp>", xml, re.S)
                 item["corresp"] = [
-                    re.sub(r"<[^>]+>", " ", c).strip()[:200] for c in corr
+                    re.sub(r"<[^>]+>", " ", c).strip()[:400] for c in corr
+                ]
+                affs = re.findall(r"<aff[^>]*>(.*?)</aff>", xml, re.S)
+                item["affs"] = [
+                    re.sub(r"<[^>]+>", " ", a).strip()[:400] for a in affs
                 ]
             except Exception:  # noqa: BLE001
                 item["emails"] = []
@@ -637,25 +776,17 @@ def _verify_person_unit(
             hosting = c
             break
     if hosting:
-        hl = hosting.lower()
-        if any(k in hl for k in neg):
+        if any(_text_matches_organization_alias(hosting, key) for key in neg):
             return False, "NEG:" + hosting[:120]
-        for k in pos:
-            if k in hl:
-                idx = hl.find(k)
-                start = max(0, idx - 40); end = min(len(hosting), idx + len(k) + 60)
-                return True, hosting[start:end]
+        if any(_text_matches_organization_alias(hosting, key) for key in pos):
+            return True, hosting[:200]
         return False, hosting[:120]
     # 2) 无 corresp 段，回落 aff 拼接
     joined = " || ".join(aff_blocks or [])
-    jl = joined.lower()
-    if any(k in jl for k in neg):
+    if any(_text_matches_organization_alias(joined, key) for key in neg):
         return False, "NEG-AFF"
-    for k in pos:
-        if k in jl:
-            idx = jl.find(k)
-            start = max(0, idx - 40); end = min(len(joined), idx + len(k) + 60)
-            return True, joined[start:end]
+    if any(_text_matches_organization_alias(joined, key) for key in pos):
+        return True, joined[:200]
     return False, ""
 
 
@@ -877,10 +1008,11 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
         src=None,
         landing=None,
         *,
+        external_id="",
         unit_verified=False,
         match_evidence="",
     ) -> str:
-        aid = _article_id(doi, pmcid, title)
+        aid = str(external_id or "").strip() or _article_id(doi, pmcid, title)
         a = articles.get(aid)
         if not a:
             a = Article(article_id=aid, title=title or "", year=year,
@@ -900,7 +1032,17 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
             a.match_evidence = str(match_evidence or a.match_evidence)
         return aid
 
-    def add_contact(email, aid, src, name=None, corr=False) -> None:
+    def add_contact(
+        email,
+        aid,
+        src,
+        name=None,
+        corr=False,
+        *,
+        unit_verified=False,
+        evidence="",
+        email_kind="",
+    ) -> None:
         email = normalize_email(email)
         if not email or is_noise_email(email):
             return
@@ -909,12 +1051,17 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
         if not c:
             contacts[key] = Contact(email=email, article_id=aid, source_key=src,
                                     author_name=name, is_corresponding=corr,
-                                    unit=unit)
+                                    unit=unit, unit_verified=bool(unit_verified),
+                                    evidence=str(evidence or ""),
+                                    email_kind=str(email_kind or _email_kind(email)))
         else:
             if corr:
                 c.is_corresponding = True
             if name and not c.author_name:
                 c.author_name = name
+            if unit_verified:
+                c.unit_verified = True
+                c.evidence = str(evidence or c.evidence)
 
     # --- OpenAlex / ORCID ---
     api = discover_output.get("api_results", {}) or {}
@@ -931,24 +1078,82 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
     ee = (discover_output.get("email_extraction") or {}).get("sources", {})
 
     pm = ee.get("pubmed", {})
-    for em in pm.get("emails", []):
-        add_contact(em, f"pubmed:{unit}:{direction}", "pubmed", corr=False)
-    for em in pm.get("electronic_address", []):
-        add_contact(em, f"pubmed:{unit}:{direction}", "pubmed", corr=True)
+    for item in pm.get("articles", []):
+        doi = item.get("doi")
+        pmid = str(item.get("pmid") or "").strip()
+        aid = upsert_article(
+            doi,
+            None,
+            item.get("title"),
+            str(item.get("year") or ""),
+            src="pubmed",
+            landing=item.get("landing_page"),
+            external_id="" if doi else (f"pubmed:{pmid}" if pmid else ""),
+            unit_verified=item.get("unit_verified", False),
+            match_evidence=item.get("match_evidence", ""),
+        )
+        for contact in item.get("contacts", []):
+            add_contact(
+                contact.get("email"),
+                aid,
+                "pubmed",
+                contact.get("author_name"),
+                corr=contact.get("is_corresponding", False),
+                unit_verified=contact.get("unit_verified", False),
+                evidence=contact.get("evidence", ""),
+                email_kind=contact.get("email_kind", ""),
+            )
 
     ep = ee.get("europepmc", {})
     for a in ep.get("articles", []):
+        corresp_blocks = a.get("corresp", []) or []
+        aff_blocks = a.get("affs", []) or []
+        query_unit = discover_output.get("unit_en") or unit
+        verification = {
+            normalize_email(email): _verify_person_unit(
+                normalize_email(email), corresp_blocks, aff_blocks, query_unit
+            )
+            for email in a.get("emails", []) or []
+            if normalize_email(email)
+        }
+        article_verified = any(item[0] for item in verification.values())
         aid = upsert_article(a.get("doi"), a.get("pmcid"), a.get("title"),
                              str(a.get("year") or ""), src="europepmc",
-                             unit_verified=True,
-                             match_evidence=f"Europe PMC AFF={discover_output.get('unit_en') or unit}")
-        pairs = _parse_corresp(a.get("corresp", []))
+                             unit_verified=article_verified,
+                             match_evidence=next(
+                                 (evidence for verified, evidence in verification.values() if verified),
+                                 "",
+                             ))
+        pairs = _parse_corresp(corresp_blocks)
         bound = {normalize_email(e) for _, e in pairs}
         for name, em in pairs:
-            add_contact(em, aid, "europepmc", name, corr=True)
+            email = normalize_email(em)
+            verified, evidence = verification.get(
+                email,
+                _verify_person_unit(email, corresp_blocks, aff_blocks, query_unit),
+            )
+            add_contact(
+                email,
+                aid,
+                "europepmc",
+                name,
+                corr=True,
+                unit_verified=verified,
+                evidence=evidence,
+            )
         for em in a.get("emails", []):
-            if normalize_email(em) not in bound:
-                add_contact(em, aid, "europepmc", None, corr=False)
+            email = normalize_email(em)
+            if email not in bound:
+                verified, evidence = verification.get(email, (False, ""))
+                add_contact(
+                    email,
+                    aid,
+                    "europepmc",
+                    None,
+                    corr=False,
+                    unit_verified=verified,
+                    evidence=evidence,
+                )
 
     for a in ee.get("doaj", {}).get("articles", []):
         upsert_article(a.get("doi"), None, a.get("title"), src="doaj")
@@ -957,8 +1162,8 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
         upsert_article(a.get("doi"), None, a.get("title"),
                        str(a.get("year") or ""), src="crossref")
 
-    for em in ee.get("openaire", {}).get("emails", []):
-        add_contact(em, f"openaire:{unit}:{direction}", "openaire", corr=False)
+    # OpenAIRE only exposes response-wide emails here. Without an article URL,
+    # they remain discovery hints and are deliberately not persisted as contacts.
 
     return (list(_default_sources().values()),
             list(articles.values()),

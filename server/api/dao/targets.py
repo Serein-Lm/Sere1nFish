@@ -16,6 +16,21 @@ from pymongo import ReturnDocument
 from api.db.collections import PROJECT_TARGETS_COLLECTION, TARGETS_COLLECTION
 
 
+_PROJECT_TARGET_RELATION_FIELDS = (
+    "relation",
+    "root_target_id",
+    "root_target_name",
+    "parent_target_id",
+    "parent_target_name",
+    "relation_type",
+    "relation_depth",
+    "ownership_percent",
+    "relation_source",
+    "lineage_target_ids",
+    "lineage_target_names",
+)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -115,6 +130,7 @@ async def upsert_target(
     aliases: list[str] | None = None,
     source: str = "",
     normalization_version: int | None = None,
+    match_aliases: bool = True,
 ) -> dict[str, Any]:
     """按根域名/规范名称复用 Target；不存在时创建稳定实体。"""
     display_name = str(name or "").strip()
@@ -129,13 +145,24 @@ async def upsert_target(
     alias_keys = list(
         dict.fromkeys(normalize_target_name(value) for value in alias_values)
     )
-    existing = await find_target(
-        db,
-        name=display_name,
-        root_domain=root_domain,
-        target_type=target_type,
-    )
-    if existing is None and alias_keys:
+    if match_aliases:
+        existing = await find_target(
+            db,
+            name=display_name,
+            root_domain=root_domain,
+            target_type=target_type,
+        )
+    else:
+        # Legal entities in a control tree may share a brand alias or related
+        # domain. Only an exact normalized legal name may reuse an identity.
+        existing = await db[TARGETS_COLLECTION].find_one(
+            {
+                "target_type": target_type,
+                "normalized_name": normalize_target_name(display_name),
+            },
+            {"_id": 0},
+        )
+    if existing is None and alias_keys and match_aliases:
         existing = await db[TARGETS_COLLECTION].find_one(
             {
                 "target_type": target_type,
@@ -279,6 +306,12 @@ async def link_project_target(
         ):
             if key in relation_doc:
                 update["$set"][key] = relation_doc[key]
+    else:
+        # A directly selected project Target takes precedence over stale or
+        # circular hierarchy metadata previously written to the same relation.
+        update["$unset"] = {
+            field: "" for field in _PROJECT_TARGET_RELATION_FIELDS
+        }
     if additions:
         update["$addToSet"] = additions
     doc = await db[PROJECT_TARGETS_COLLECTION].find_one_and_update(
@@ -341,6 +374,7 @@ async def list_project_target_descendants(
         {
             "project_id": project_id,
             "active": {"$ne": False},
+            "target_id": {"$ne": root_target_id},
             "relation_depth": {"$gte": 1, "$lte": safe_depth},
             "$or": [
                 {"root_target_id": root_target_id},

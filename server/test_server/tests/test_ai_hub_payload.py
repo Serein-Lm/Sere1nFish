@@ -37,6 +37,7 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
     payload = next(item for item in catalog["agents"] if item["name"] == "payload")
     assert "chrome-devtools" in payload["mcp_servers"]
     assert "generate_payload_word" in payload["tools"]
+    assert "generate_document_artifact" in payload["tools"]
     assert "get_artifact_content" in payload["tools"]
     content = next(item for item in catalog["agents"] if item["name"] == "content")
     assert "generate_document_artifact" in content["tools"]
@@ -53,6 +54,9 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
     assert "get_persona" in persona["tools"]
     assert "list_mobile_devices" in persona["tools"]
     assert "get_mobile_device_status" in persona["tools"]
+    for agent in catalog["agents"]:
+        assert "list_available_skills" in agent["tools"]
+        assert "load_skill" in agent["tools"]
     assert catalog["audit"]["project_dataset_interfaces"] == len(
         catalog["project_datasets"]
     )
@@ -61,6 +65,32 @@ def test_hub_tool_catalog_registers_all_query_interfaces() -> None:
         item for item in catalog["project_datasets"] if item["source"] == "bidding_records"
     )
     assert bidding["filters"] == ["offset", "target_id"]
+
+
+def test_hub_direct_url_requests_use_the_bounded_research_path() -> None:
+    from Sere1nGraph.graph.workflow.hub import (
+        _DIRECT_URL_AGENT_TIMEOUT_SECONDS,
+        _DIRECT_URL_MCP_TOOL_LIMIT,
+        _direct_url_classifications,
+        _has_direct_public_url,
+    )
+
+    query = "读取 https://example.com/article 并生成 Word"
+    assert _has_direct_public_url(query)
+    assert _direct_url_classifications(query) == [
+        {"source": "payload", "query": query, "requires_tools": True}
+    ]
+    assert not _has_direct_public_url("检索最近的公开行业资料并总结")
+    assert not _has_direct_public_url(
+        "【同一会话最近上下文】\n用户：读取 https://old.example/article\n\n"
+        "【本轮用户请求】\n继续讨论项目数据"
+    )
+    assert _has_direct_public_url(
+        "【同一会话最近上下文】\n用户：继续讨论\n\n"
+        "【本轮用户请求】\n读取 https://new.example/article"
+    )
+    assert _DIRECT_URL_MCP_TOOL_LIMIT == 4
+    assert _DIRECT_URL_AGENT_TIMEOUT_SECONDS == 90
 
 
 def test_persona_profile_sources_are_kept_as_public_evidence() -> None:
@@ -1831,6 +1861,8 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
             "filename": "接入教程.docx",
             "size": 2048,
             "download_url": "/api/v1/artifacts/art_word/download",
+            "temporary_download_url": "https://private.example.com/report.docx?signature=test",
+            "temporary_download_expires_seconds": 3600,
         },
         {
             "artifact_id": "art_json",
@@ -1847,7 +1879,8 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
     )
     assert "### 产物" in final
     assert "Word" in final and "JSON" in final
-    assert "https://fish.example.com/phishing?ref_artifact=art_word" in final
+    assert "https://private.example.com/report.docx?signature=test" in final
+    assert "临时下载（1 小时有效）" in final
     assert "[[artifact:" not in final
     assert "下载链接：/api/" not in final
 
@@ -1867,7 +1900,13 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
         "打开/下载 Word",
         "打开/下载 JSON",
     ]
-    assert build_artifact_buttons(artifacts, base_url="javascript:alert(1)") == []
+    temporary_buttons = build_artifact_buttons(
+        artifacts,
+        base_url="javascript:alert(1)",
+    )
+    assert [button["url"] for button in temporary_buttons] == [
+        "https://private.example.com/report.docx?signature=test"
+    ]
 
     preparations = renderer.render_preparations()
     assert preparations == [{"name": "正在整理关键结果", "progress": 90}]
@@ -1875,6 +1914,55 @@ def test_dingtalk_card_renders_concise_progress_and_downloadable_artifacts() -> 
 
     completed = renderer.render_preparations(final=True)
     assert completed == []
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_artifact_access_uses_owned_short_lived_oss_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from api.dao import artifacts as artifacts_dao
+    from api.services.artifact_access import attach_temporary_download_urls
+    from api import storage as storage_module
+
+    async def get_artifact(_db, artifact_id: str):
+        owner = "dingtalk:user-1" if artifact_id == "owned" else "admin"
+        return {
+            "artifact_id": artifact_id,
+            "owner": owner,
+            "storage_object_id": f"object-{artifact_id}",
+            "filename": "report.docx",
+            "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+
+    class _Storage:
+        async def read_access(self, object_id: str, **kwargs):
+            assert object_id == "object-owned"
+            assert kwargs["expires_seconds"] == 3600
+            return SimpleNamespace(
+                mode="redirect",
+                url="https://private.example.com/report.docx?signature=temporary",
+            )
+
+    async def get_storage():
+        return _Storage()
+
+    monkeypatch.setattr(artifacts_dao, "get_artifact", get_artifact)
+    monkeypatch.setattr(storage_module, "get_object_storage", get_storage)
+
+    artifacts = await attach_temporary_download_urls(
+        object(),
+        [
+            {"artifact_id": "owned", "download_url": "/stable/owned"},
+            {"artifact_id": "other", "download_url": "/stable/other"},
+        ],
+        owner="dingtalk:user-1",
+    )
+
+    assert artifacts[0]["temporary_download_url"].endswith("signature=temporary")
+    assert artifacts[0]["temporary_download_expires_seconds"] == 3600
+    assert "temporary_download_url" not in artifacts[1]
 
 
 @pytest.mark.asyncio

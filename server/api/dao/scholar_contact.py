@@ -464,6 +464,7 @@ async def count_contacts_by_target(
             "project_id": project_id,
             "email": {"$nin": [None, ""]},
             "article_url": {"$regex": r"^https?://", "$options": "i"},
+            "unit_verified": True,
             "$or": [
                 {"target_ids": {"$in": selected}},
                 {"target_id": {"$in": selected}},
@@ -517,6 +518,7 @@ async def list_units(db: AsyncIOMotorDatabase, project_id: str) -> list[dict[str
             "project_id": project_id,
             "email": {"$nin": [None, ""]},
             "article_url": {"$regex": r"^https?://", "$options": "i"},
+            "unit_verified": True,
         }},
         {"$group": {
             "_id": "$unit",

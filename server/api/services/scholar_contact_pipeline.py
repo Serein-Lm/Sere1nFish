@@ -21,6 +21,7 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from core.logger import get_logger
+from api.services.scholar_contact_runtime import scholar_collection_slot
 
 logger = get_logger("scholar_contact")
 
@@ -99,6 +100,42 @@ async def run_scholar_contact_collect(
         采集摘要（matched_institution / articles_inserted / contacts_inserted /
         corresponding_count / status / error），dry_run 时不入库。
     """
+    async with scholar_collection_slot(db, task_id=task_id):
+        return await _run_scholar_contact_collect(
+            db,
+            app_config,
+            task_id=task_id,
+            project_id=project_id,
+            target_id=target_id,
+            unit=unit,
+            direction=direction,
+            unit_en=unit_en,
+            limit=limit,
+            enable_chrome_pmc=enable_chrome_pmc,
+            dry_run=dry_run,
+            bulk=bulk,
+            max_articles=max_articles,
+            notify_completion=notify_completion,
+        )
+
+
+async def _run_scholar_contact_collect(
+    db: AsyncIOMotorDatabase,
+    app_config: Any,
+    *,
+    task_id: str,
+    project_id: str,
+    target_id: str = "",
+    unit: str,
+    direction: str,
+    unit_en: str = "",
+    limit: int = 10,
+    enable_chrome_pmc: bool = False,
+    dry_run: bool = False,
+    bulk: bool = False,
+    max_articles: int = 2000,
+    notify_completion: bool = True,
+) -> dict[str, Any]:
     from core.observability import obs_log
 
     from api.dao import scholar_contact as scholar_dao

@@ -125,6 +125,15 @@ def _compact_text(value: Any, *, limit: int) -> str:
     return text[:limit].rstrip() + "..."
 
 
+def _record_recency_key(item: dict[str, Any]) -> tuple[str, str, int]:
+    """Keep project pages newest-first; contact score only breaks date ties."""
+    return (
+        str(item.get("published_on") or ""),
+        str(item.get("updated_at") or ""),
+        int(item.get("max_contact_score") or 0),
+    )
+
+
 def _public_bidding_record(
     record: dict[str, Any],
     *,
@@ -244,14 +253,7 @@ async def list_project_bidding_records(
         if not ordered_contacts:
             continue
         output.append(_public_bidding_record(record, contacts=ordered_contacts))
-    output.sort(
-        key=lambda item: (
-            int(item.get("max_contact_score") or 0),
-            str(item.get("published_on") or ""),
-            str(item.get("updated_at") or ""),
-        ),
-        reverse=True,
-    )
+    output.sort(key=_record_recency_key, reverse=True)
     bounded_skip = max(0, int(skip or 0))
     # HTTP API caps page_size at 100; the wider internal bound lets project
     # summaries reuse this exact read model instead of maintaining a second

@@ -673,7 +673,7 @@ export default function ProjectDetail() {
   const [scholarLoading, setScholarLoading] = useState(false)
   const [scholarTargetId, setScholarTargetId] = useState('')
   const [scholarOnlyCorresponding, setScholarOnlyCorresponding] = useState(false)
-  const [scholarOnlyVerified, setScholarOnlyVerified] = useState(false)
+  const [scholarOnlyVerified, setScholarOnlyVerified] = useState(true)
   const [biddingRecords, setBiddingRecords] = useState<BiddingRecord[]>([])
   const [biddingRecordsTotal, setBiddingRecordsTotal] = useState(0)
   const [biddingLoading, setBiddingLoading] = useState(false)
@@ -791,7 +791,12 @@ export default function ProjectDetail() {
         page_size: pageSize,
         target_id: targetId || undefined,
       })
-      setBiddingRecords(result.items)
+      const newestFirst = [...result.items].sort((a, b) => (
+        String(b.published_on || '').localeCompare(String(a.published_on || ''))
+        || String(b.updated_at || '').localeCompare(String(a.updated_at || ''))
+        || (Number(b.max_contact_score || 0) - Number(a.max_contact_score || 0))
+      ))
+      setBiddingRecords(newestFirst)
       setBiddingRecordsTotal(result.total)
       setBiddingPage(result.page)
       setBiddingPageSize(result.page_size)
@@ -3429,6 +3434,8 @@ export default function ProjectDetail() {
         dataIndex: 'published_on',
         key: 'published_on',
         width: 110,
+        defaultSortOrder: 'descend',
+        sorter: (a, b) => String(a.published_on || '').localeCompare(String(b.published_on || '')),
         render: (value: string) => value || '-',
       },
       {
