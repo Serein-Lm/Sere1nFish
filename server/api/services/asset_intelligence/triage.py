@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Literal
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -20,22 +20,26 @@ from .contracts import AssetCandidate, AssetIdentity
 logger = get_logger("asset_intelligence.triage")
 
 
-class AssetTriageDecision(BaseModel):
-    index: int = Field(ge=0)
-    category: Literal[
-        "business_system",
-        "official_public_system",
-        "infrastructure_or_unknown",
-        "third_party_system",
-        "generic_open_source_surface",
-        "unknown",
-    ] = "unknown"
-    relevance_score: int = Field(default=50, ge=0, le=100)
-    reason: str = ""
-
-
 class AssetTriageBatch(BaseModel):
-    items: list[AssetTriageDecision] = Field(default_factory=list)
+    """Compact partition returned by the model.
+
+    The previous per-asset category/score/reason payload regularly produced
+    more than one thousand output tokens for a 20-item batch. Only the three
+    partitions below are needed by the scan scheduler.
+    """
+
+    high_priority_indexes: list[int] = Field(
+        default_factory=list,
+        description="明确属于目标业务系统或官方公开系统的索引，按价值降序排列",
+    )
+    normal_priority_indexes: list[int] = Field(
+        default_factory=list,
+        description="基础设施、证据不足或未知系统的索引，按价值降序排列",
+    )
+    discard_indexes: list[int] = Field(
+        default_factory=list,
+        description="明确的第三方系统或通用开源表面的索引",
+    )
 
 
 class AssetTriageService:
@@ -54,16 +58,11 @@ class AssetTriageService:
         batch_size: int = 20,
         concurrency: int = 4,
         batch_timeout_seconds: float = 90.0,
+        task_type: str = "asset_discovery",
     ) -> list[AssetCandidate]:
         if not candidates:
             return []
 
-        from Sere1nGraph.graph.agents.runtime import create_llm
-        from Sere1nGraph.graph.prompts.loader import load_prompt
-
-        prompt = load_prompt("asset_triage/asset_triage")
-        llm = create_llm(self.app_config, streaming=False)
-        structured = llm.with_structured_output(AssetTriageBatch)
         indexed = [
             (index, candidate)
             for index, candidate in enumerate(candidates)
@@ -81,6 +80,21 @@ class AssetTriageService:
                 deterministic_discarded,
             )
             return []
+
+        from Sere1nGraph.graph.agents.runtime import create_llm
+        from Sere1nGraph.graph.prompts.loader import load_prompt
+
+        try:
+            prompt = load_prompt("asset_triage/asset_triage")
+            llm = create_llm(self.app_config, streaming=False)
+            structured = llm.with_structured_output(AssetTriageBatch)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "存活资产 LLM 分诊初始化失败，保留非通用开源资产: %s",
+                exc,
+            )
+            return [candidate for _index, candidate in indexed]
+
         batches = [
             indexed[offset : offset + max(1, batch_size)]
             for offset in range(0, len(indexed), max(1, batch_size))
@@ -91,7 +105,7 @@ class AssetTriageService:
             batch: list[tuple[int, AssetCandidate]],
             *,
             correction_retry: bool = False,
-        ) -> list[AssetTriageDecision]:
+        ) -> AssetTriageBatch:
             payload = {
                 "target": {
                     "input_name": identity.input_name,
@@ -117,7 +131,7 @@ class AssetTriageService:
                     task_id=task_id or None,
                     phase="asset_triage",
                     agent="asset_triage",
-                    task_type="asset_discovery",
+                    task_type=task_type,
                 ):
                     result = await asyncio.wait_for(
                         structured.ainvoke(
@@ -139,17 +153,23 @@ class AssetTriageService:
                         ),
                         timeout=max(15.0, min(batch_timeout_seconds, 180.0)),
                     )
-            items = getattr(result, "items", []) or []
             valid_indexes = {index for index, _candidate in batch}
-            filtered = [item for item in items if item.index in valid_indexes]
-            returned_indexes = {item.index for item in filtered}
+            high = list(getattr(result, "high_priority_indexes", []) or [])
+            normal = list(getattr(result, "normal_priority_indexes", []) or [])
+            discarded = list(getattr(result, "discard_indexes", []) or [])
+            returned = [*high, *normal, *discarded]
+            returned_indexes = set(returned)
             if (
                 returned_indexes != valid_indexes
-                or len(filtered) != len(valid_indexes)
+                or len(returned) != len(valid_indexes)
             ):
                 missing = sorted(valid_indexes - returned_indexes)
-                raise ValueError(f"资产分诊结果不完整，缺少索引: {missing}")
-            return filtered
+                invalid = sorted(returned_indexes - valid_indexes)
+                raise ValueError(
+                    "资产分诊结果不是完整互斥分区，"
+                    f"缺少索引: {missing}，非法索引: {invalid}"
+                )
+            return result
 
         initial_results = await asyncio.gather(
             *(
@@ -158,9 +178,21 @@ class AssetTriageService:
             ),
             return_exceptions=True,
         )
-        decisions: dict[int, AssetTriageDecision] = {}
+        priority_groups: dict[int, int] = {}
+        priority_orders: dict[int, int] = {}
+        discarded_indexes: set[int] = set()
         retry_batches: list[list[tuple[int, AssetCandidate]]] = []
         failed_batches = 0
+
+        def _merge_result(result: AssetTriageBatch) -> None:
+            for order, index in enumerate(result.high_priority_indexes):
+                priority_groups[index] = 0
+                priority_orders[index] = order
+            for order, index in enumerate(result.normal_priority_indexes):
+                priority_groups[index] = 1
+                priority_orders[index] = order
+            discarded_indexes.update(result.discard_indexes)
+
         for batch, result in zip(batches, initial_results, strict=True):
             if isinstance(result, Exception):
                 midpoint = max(1, len(batch) // 2)
@@ -173,8 +205,7 @@ class AssetTriageService:
                     result,
                 )
                 continue
-            for item in result:
-                decisions[item.index] = item
+            _merge_result(result)
 
         if retry_batches:
             retry_results = await asyncio.gather(
@@ -193,28 +224,22 @@ class AssetTriageService:
                         result,
                     )
                     continue
-                for item in result:
-                    decisions[item.index] = item
+                _merge_result(result)
 
-        ranked: list[tuple[int, int, AssetCandidate]] = []
-        discarded = 0
+        ranked: list[tuple[int, int, int, AssetCandidate]] = []
         for index, candidate in indexed:
-            decision = decisions.get(index)
-            if decision and decision.category in {
-                "third_party_system",
-                "generic_open_source_surface",
-            }:
-                discarded += 1
+            if index in discarded_indexes:
                 continue
-            score = decision.relevance_score if decision else 50
-            ranked.append((-score, index, candidate))
+            group = priority_groups.get(index, 1)
+            order = priority_orders.get(index, index)
+            ranked.append((group, order, index, candidate))
 
-        ranked.sort(key=lambda item: (item[0], item[1]))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
         logger.info(
             "存活资产瞬时分诊完成 total=%s kept=%s discarded_irrelevant=%s failed_batches=%s",
             len(candidates),
             len(ranked),
-            discarded + deterministic_discarded,
+            len(discarded_indexes) + deterministic_discarded,
             failed_batches,
         )
-        return [candidate for _score, _index, candidate in ranked]
+        return [candidate for _group, _order, _index, candidate in ranked]

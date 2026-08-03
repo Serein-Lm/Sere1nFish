@@ -47,11 +47,11 @@ import {
   ArrowDownOutlined,
   ArrowUpOutlined,
   DashboardOutlined,
+  FontSizeOutlined,
 } from '@ant-design/icons'
 import {
   relativeTime,
   getOverview,
-  getDevices,
   remoteDiscover,
   remoteAdd,
   remoteRemove,
@@ -67,6 +67,7 @@ import {
   startAdbQrPairing,
   completeAdbQrPairing,
   wakeUnlockDevice,
+  restoreSystemKeyboard,
   type PoolDevice,
   type Overview,
   type SimpleDevice,
@@ -165,7 +166,6 @@ export default function DevicePool({
   const [ip, setIp] = useState('')
   const [port, setPort] = useState('5555')
   const [overview, setOverview] = useState<Overview | null>(null)
-  const [localCount, setLocalCount] = useState(0)
   const [remoteOpen, setRemoteOpen] = useState(false)
   const [remoteBaseUrl, setRemoteBaseUrl] = useState('')
   const [discovered, setDiscovered] = useState<SimpleDevice[]>([])
@@ -183,6 +183,7 @@ export default function DevicePool({
   const [adbPairResult, setAdbPairResult] = useState('')
   const [adbQrSession, setAdbQrSession] = useState<AdbPairQrSession | null>(null)
   const [unlockDevice, setUnlockDevice] = useState<PoolDevice | null>(null)
+  const [keyboardBusyId, setKeyboardBusyId] = useState<string | null>(null)
   const [unlockPin, setUnlockPin] = useState('')
   const [unlocking, setUnlocking] = useState(false)
   const trafficSamples = useRef(new Map<string, TrafficSample>())
@@ -345,7 +346,6 @@ export default function DevicePool({
 
   useEffect(() => {
     getOverview().then(setOverview).catch(() => {})
-    getDevices().then((r) => setLocalCount(r.devices.length)).catch(() => {})
     loadGroups()
   }, [])
 
@@ -528,6 +528,7 @@ export default function DevicePool({
       openMetaEditor(d)
       return
     }
+    if (key === 'keyboard') setKeyboardBusyId(d.device_id)
     try {
       if (key === 'u2w') {
         await usbToWifi(d.device_id)
@@ -538,10 +539,15 @@ export default function DevicePool({
       } else if (key === 'rm') {
         await remoteRemove(d.device_id)
         message.success('已移除远程设备')
+      } else if (key === 'keyboard') {
+        const result = await restoreSystemKeyboard(d.device_id)
+        message.success(result.changed ? '已恢复系统输入法' : '当前已是系统输入法')
       }
       onRefresh()
     } catch (e) {
       message.error(e instanceof Error ? e.message : '操作失败')
+    } finally {
+      if (key === 'keyboard') setKeyboardBusyId(null)
     }
   }
 
@@ -566,6 +572,14 @@ export default function DevicePool({
     const items: MenuProps['items'] = [
       { key: 'meta', icon: <EditOutlined />, label: '编辑信息 / 分组' },
     ]
+    if (d.online && (!d.reserved || d.owner === me)) {
+      items.push({
+        key: 'keyboard',
+        icon: <FontSizeOutlined spin={keyboardBusyId === d.device_id} />,
+        label: '恢复系统输入法',
+        disabled: keyboardBusyId === d.device_id,
+      })
+    }
     const ct = (d.connection_type || '').toLowerCase()
     if (ct === 'usb') items.push({ key: 'u2w', icon: <SwapOutlined />, label: 'USB 转 WiFi' })
     if (ct === 'wifi' || ct === 'remote') items.push({ key: 'disc', icon: <DisconnectOutlined />, label: '断开连接' })
@@ -586,7 +600,7 @@ export default function DevicePool({
             <span className="pool-ov-label">在线 / 总数</span>
           </div>
           <div className="pool-ov-item">
-            <span className="pool-ov-num">{localCount}</span>
+            <span className="pool-ov-num">{overview?.devices?.total ?? '-'}</span>
             <span className="pool-ov-label">ADB 设备</span>
           </div>
           <div className="pool-ov-item wide">

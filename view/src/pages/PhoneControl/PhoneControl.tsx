@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { Typography, Button, message, Tabs } from 'antd'
+import { lazy, Suspense, useState, useEffect, useCallback, useRef } from 'react'
+import { Typography, Button, message, Spin, Tabs } from 'antd'
 import {
   ArrowLeftOutlined,
   MobileOutlined,
@@ -10,9 +10,6 @@ import {
 } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import DevicePool from './DevicePool'
-import DeviceConsole from './DeviceConsole'
-import MobileProfiles from '../MobileProfiles/MobileProfiles'
-import MobileAutoChat from '../MobileAutoChat/MobileAutoChat'
 import {
   getPool,
   autoConnect,
@@ -26,12 +23,25 @@ import {
 import { getCurrentUser } from '../../services/authService'
 import './PhoneControl.css'
 
+const DeviceConsole = lazy(() => import('./DeviceConsole'))
+const MobileProfiles = lazy(() => import('../MobileProfiles/MobileProfiles'))
+const MobileAutoChat = lazy(() => import('../MobileAutoChat/MobileAutoChat'))
+
 const { Title, Paragraph, Text } = Typography
 
 type View = 'pool' | 'console'
 type PhoneTab = 'control' | 'profiles' | 'auto-chat'
 
 const VIBE_KEY = 'mobile_console_vibe_mode'
+
+function DeferredPanel({ label }: { label: string }) {
+  return (
+    <div className="pool-loading">
+      <Spin size="large" />
+      <div className="pool-loading-text">正在加载{label}…</div>
+    </div>
+  )
+}
 
 const isPhoneTab = (value: string | null): value is PhoneTab =>
   value === 'control' || value === 'profiles' || value === 'auto-chat'
@@ -259,14 +269,16 @@ export default function PhoneControl() {
           onWake={handleWake}
         />
       ) : (
-        <DeviceConsole
-          device={selected}
-          vibeMode={vibeMode}
-          onVibeChange={setVibeMode}
-          onBackToPool={() => setView('pool')}
-          onRelease={() => handleRelease(selected)}
-          releasing={busyId === selected.device_id}
-        />
+        <Suspense fallback={<DeferredPanel label="手机操控" />}>
+          <DeviceConsole
+            device={selected}
+            vibeMode={vibeMode}
+            onVibeChange={setVibeMode}
+            onBackToPool={() => setView('pool')}
+            onRelease={() => handleRelease(selected)}
+            releasing={busyId === selected.device_id}
+          />
+        </Suspense>
       )}
     </div>
   )
@@ -335,7 +347,11 @@ export default function PhoneControl() {
                 <ProfileOutlined /> 人物画像
               </span>
             ),
-            children: <MobileProfiles embedded />,
+            children: (
+              <Suspense fallback={<DeferredPanel label="人物画像" />}>
+                <MobileProfiles embedded />
+              </Suspense>
+            ),
           },
           {
             key: 'auto-chat',
@@ -344,7 +360,11 @@ export default function PhoneControl() {
                 <CommentOutlined /> 自动聊天
               </span>
             ),
-            children: <MobileAutoChat embedded />,
+            children: (
+              <Suspense fallback={<DeferredPanel label="自动聊天" />}>
+                <MobileAutoChat embedded />
+              </Suspense>
+            ),
           },
         ]}
       />

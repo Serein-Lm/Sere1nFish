@@ -23,6 +23,7 @@ from api.auth import get_current_active_user, require_admin, User
 from api.services.runtime_config import get_runtime_app_config
 from core.mobile import MobileDeviceManager
 from core.mobile.coordinates import CoordSpace, resolve_swipe, resolve_tap
+from core.mobile.keyboard import ADB_KEYBOARD_IME, get_mobile_keyboard_service
 from core.observability import obs_log, observation_context
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
@@ -717,16 +718,28 @@ async def input_text(
 ) -> dict:
     """向当前聚焦输入框输入文本。"""
     await _ensure_device_access(device_id, current_user)
-    dev = _get_manager().get_device(device_id)
+    mgr = _get_manager()
+    dev = mgr.get_device(device_id)
+    adb_device_id = mgr.resolve_adb_device_id(device_id)
+    keyboard = get_mobile_keyboard_service()
 
     def _do() -> None:
         original_ime = dev.detect_and_set_adb_keyboard()
-        need_restore = "com.android.adbkeyboard/.AdbIME" not in original_ime
+        keyboard.remember_manual_ime(device_id, original_ime)
         try:
             dev.type_text(req.text)
         finally:
-            if need_restore and original_ime:
-                dev.restore_keyboard(original_ime)
+            try:
+                keyboard.restore_system_keyboard(
+                    adb_device_id,
+                    device_key=device_id,
+                    preferred_ime=(
+                        original_ime if ADB_KEYBOARD_IME not in original_ime else ""
+                    ),
+                )
+            except Exception:
+                if original_ime and ADB_KEYBOARD_IME not in original_ime:
+                    dev.restore_keyboard(original_ime)
 
     await _device_op(_do, op="输入")
     await _log_mobile_operation(
@@ -739,6 +752,41 @@ async def input_text(
         data={"text": req.text},
     )
     return {"ok": True}
+
+
+@router.post("/devices/{device_id}/keyboard/restore")
+async def restore_system_keyboard(
+    device_id: str,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    """切回设备上可供手动输入的系统输入法。"""
+    await _ensure_device_access(device_id, current_user)
+    mgr = _get_manager()
+    adb_device_id = mgr.resolve_ready_adb_device_id(device_id)
+    if not adb_device_id:
+        raise HTTPException(status_code=404, detail="设备当前未通过 ADB 在线")
+
+    def _restore():
+        return get_mobile_keyboard_service().restore_system_keyboard(
+            adb_device_id,
+            device_key=device_id,
+        )
+
+    result = await _device_op(
+        _restore,
+        op="恢复系统输入法",
+        timeout=15,
+    )
+    await _log_mobile_operation(
+        operation_type="keyboard",
+        device_id=device_id,
+        action="restore_system_keyboard",
+        data={
+            "changed": result.changed,
+            "restored_ime": result.restored_ime,
+        },
+    )
+    return {"ok": True, **result.as_dict()}
 
 
 @router.post("/devices/{device_id}/key")

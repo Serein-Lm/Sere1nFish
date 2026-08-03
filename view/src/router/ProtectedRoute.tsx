@@ -8,12 +8,26 @@ interface ProtectedRouteProps {
   children: React.ReactNode
 }
 
+function hasCachedActiveUser(token: string | null): boolean {
+  if (!token) return false
+  try {
+    const cached = JSON.parse(localStorage.getItem('userInfo') || '{}') as {
+      username?: string
+      disabled?: boolean
+    }
+    return Boolean(cached.username) && cached.disabled !== true
+  } catch {
+    return false
+  }
+}
+
 export default function ProtectedRoute({ children }: ProtectedRouteProps) {
   const token = localStorage.getItem('token')
   const location = useLocation()
+  const hasCachedUser = hasCachedActiveUser(token)
 
-  const [checking, setChecking] = useState(true)
-  const [authed, setAuthed] = useState(false)
+  const [checking, setChecking] = useState(!hasCachedUser)
+  const [authed, setAuthed] = useState(hasCachedUser)
 
   useEffect(() => {
     let cancelled = false

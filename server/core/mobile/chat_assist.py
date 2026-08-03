@@ -493,25 +493,20 @@ def _do_send_sequence(
         # 8) 恢复原输入法,让真人能继续打字。
         # 若原始 IME 为空或本身残留在 ADB Keyboard(上次异常中断),
         # 则回退到设备上第一个可用的非 ADB 输入法。
-        target_ime = ""
-        if original_ime and _ADB_KEYBOARD_IME not in original_ime:
-            target_ime = original_ime
-        else:
-            try:
-                lr = _sh(["ime", "list", "-s"])
-                for line in (lr.stdout + lr.stderr).splitlines():
-                    ime = line.strip()
-                    if ime and _ADB_KEYBOARD_IME not in ime:
-                        target_ime = ime
-                        break
-            except Exception:  # noqa: BLE001
-                target_ime = ""
-        if target_ime:
-            try:
-                _sh(["ime", "set", target_ime])
-                restored_ime = target_ime
-            except Exception:  # noqa: BLE001
-                restored_ime = ""
+        try:
+            from core.mobile.keyboard import get_mobile_keyboard_service
+
+            keyboard = get_mobile_keyboard_service()
+            keyboard.remember_manual_ime(adb_id, original_ime)
+            restored_ime = keyboard.restore_system_keyboard(
+                adb_id,
+                device_key=adb_id,
+                preferred_ime=(
+                    original_ime if _ADB_KEYBOARD_IME not in original_ime else ""
+                ),
+            ).restored_ime
+        except Exception:  # noqa: BLE001
+            restored_ime = ""
 
     return {
         "typed": typed,

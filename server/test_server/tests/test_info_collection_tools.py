@@ -541,6 +541,214 @@ def test_url_scan_restart_skips_same_task_terminal_urls(monkeypatch):
     asyncio.run(_run())
 
 
+def test_manual_url_scan_triages_before_browser_work(monkeypatch):
+    async def _run():
+        tool = _FakeScanTool()
+        triage_calls = []
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": tool,
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        class _Triage:
+            async def prioritize(self, candidates, **kwargs):
+                triage_calls.append({"candidates": candidates, **kwargs})
+                return [
+                    candidate
+                    for candidate in candidates
+                    if "official.example" in candidate.canonical_url
+                ]
+
+        async def fake_probe(urls, **_kwargs):
+            return [
+                {
+                    "url": url,
+                    "status_code": 200,
+                    "title": (
+                        "目标公司业务平台"
+                        if "official.example" in url
+                        else "通用第三方系统"
+                    ),
+                }
+                for url in urls
+            ]
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        monkeypatch.setattr(UrlScanPipeline, "probe_urls", staticmethod(fake_probe))
+        pipeline = UrlScanPipeline(_FakeDB(), object(), asset_triage=_Triage())
+        result = await pipeline.run_pipeline(
+            task_id="manual-triage",
+            project_id="project-1",
+            url_content=(
+                "https://official.example\n"
+                "https://third-party.example"
+            ),
+            enable_copywriting=False,
+            target_context={
+                "target_id": "target-1",
+                "canonical_name": "目标公司",
+                "root_domains": ["official.example"],
+            },
+        )
+
+        assert result["status"] == "completed"
+        assert result["alive_urls"] == 2
+        assert result["eligible_urls"] == 1
+        assert result["triage_discarded_urls"] == 1
+        assert len(triage_calls) == 1
+        assert triage_calls[0]["task_type"] == "url_scan"
+        assert triage_calls[0]["identity"].target_id == "target-1"
+        assert [request.target for request in tool.requests] == [
+            "https://official.example"
+        ]
+
+    asyncio.run(_run())
+
+
+def test_url_scan_does_not_repeat_upstream_asset_triage(monkeypatch):
+    async def _run():
+        tool = _FakeScanTool()
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": tool,
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        class _UnexpectedTriage:
+            async def prioritize(self, *_args, **_kwargs):
+                raise AssertionError("already-triaged assets must not be classified twice")
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        pipeline = UrlScanPipeline(
+            _FakeDB(),
+            object(),
+            asset_triage=_UnexpectedTriage(),
+        )
+        result = await pipeline.run_pipeline(
+            task_id="pretriaged-asset",
+            project_id="project-1",
+            url_content="https://official.example",
+            known_alive_urls=["https://official.example"],
+            known_alive_metadata={
+                "https://official.example": {
+                    "title": "目标公司官网",
+                    "_asset_triage_passed": True,
+                }
+            },
+            enable_copywriting=False,
+        )
+
+        assert result["status"] == "completed"
+        assert result["eligible_urls"] == 1
+        assert result["triage_discarded_urls"] == 0
+        assert len(tool.requests) == 1
+        assert "_asset_triage_passed" not in tool.requests[0].target_info
+
+    asyncio.run(_run())
+
+
+def test_url_scan_completes_without_browser_when_triage_discards_everything(
+    monkeypatch,
+):
+    async def _run():
+        tool = _FakeScanTool()
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": tool,
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        class _DiscardAllTriage:
+            async def prioritize(self, _candidates, **_kwargs):
+                return []
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        pipeline = UrlScanPipeline(
+            _FakeDB(),
+            object(),
+            asset_triage=_DiscardAllTriage(),
+        )
+        result = await pipeline.run_pipeline(
+            task_id="all-discarded",
+            project_id="project-1",
+            url_content="https://third-party.example",
+            known_alive_urls=["https://third-party.example"],
+            enable_copywriting=False,
+        )
+
+        assert result["status"] == "completed"
+        assert result["alive_urls"] == 1
+        assert result["eligible_urls"] == 0
+        assert result["triage_discarded_urls"] == 1
+        assert not tool.requests
+
+    asyncio.run(_run())
+
+
+def test_bidding_url_scan_bypasses_asset_surface_triage(monkeypatch):
+    async def _run():
+        tool = _FakeScanTool()
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": tool,
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        class _UnexpectedTriage:
+            async def prioritize(self, *_args, **_kwargs):
+                raise AssertionError("bidding documents must bypass asset triage")
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        pipeline = UrlScanPipeline(
+            _FakeDB(),
+            object(),
+            asset_triage=_UnexpectedTriage(),
+        )
+        result = await pipeline.run_pipeline(
+            task_id="bidding-source",
+            project_id="project-1",
+            source="bidding",
+            url_content="https://bidding-platform.example/notice/1",
+            known_alive_urls=["https://bidding-platform.example/notice/1"],
+            enable_copywriting=False,
+        )
+
+        assert result["status"] == "completed"
+        assert result["eligible_urls"] == 1
+        assert len(tool.requests) == 1
+
+    asyncio.run(_run())
+
+
 def test_url_scan_does_not_complete_when_terminal_persistence_is_missing(monkeypatch):
     async def _run():
         from api.dao import url_scan as url_scan_dao

@@ -11,6 +11,7 @@ import {
   DisconnectOutlined,
   MobileOutlined,
   PaperClipOutlined,
+  FontSizeOutlined,
 } from '@ant-design/icons'
 import DeviceScreen from './DeviceScreen'
 import CopilotPanel from './CopilotPanel'
@@ -19,6 +20,7 @@ import {
   getHealth,
   getCurrentApp,
   inputText,
+  restoreSystemKeyboard,
   launchApp,
   wakeUnlockDevice,
   stayAwake,
@@ -67,6 +69,7 @@ export default function DeviceConsole({
   const [appVal, setAppVal] = useState('')
   const [busy, setBusy] = useState(false)
   const [stayOn, setStayOn] = useState(false)
+  const [keyboardBusy, setKeyboardBusy] = useState(false)
   const [localVibeMode, setLocalVibeMode] = useState(() => localStorage.getItem(VIBE_KEY) === '1')
   const activeVibeMode = vibeMode ?? localVibeMode
 
@@ -169,6 +172,19 @@ export default function DeviceConsole({
     }
   }
 
+  const handleRestoreKeyboard = async () => {
+    setKeyboardBusy(true)
+    try {
+      const result = await restoreSystemKeyboard(device.device_id)
+      message.success(result.changed ? '已恢复系统输入法' : '当前已是系统输入法')
+      setLastAction('恢复系统输入法')
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '恢复输入法失败')
+    } finally {
+      setKeyboardBusy(false)
+    }
+  }
+
   const toggleVibeMode = () => {
     const next = !activeVibeMode
     setLocalVibeMode(next)
@@ -246,6 +262,15 @@ export default function DeviceConsole({
         <Tooltip title="向设备输入文本">
           <Button icon={<EditOutlined />} onClick={() => setTextOpen(true)}>
             输入文本
+          </Button>
+        </Tooltip>
+        <Tooltip title="切回手机系统输入法，恢复手动打字">
+          <Button
+            icon={<FontSizeOutlined />}
+            loading={keyboardBusy}
+            onClick={handleRestoreKeyboard}
+          >
+            恢复键盘
           </Button>
         </Tooltip>
         <Tooltip title="上传图片、音频或附件到手机">

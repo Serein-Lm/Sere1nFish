@@ -20,6 +20,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -332,9 +333,125 @@ class _CopywritingStage(Stage):
 class UrlScanPipeline:
     """URL 扫描 + 话术生成 Pipeline"""
 
-    def __init__(self, db: AsyncIOMotorDatabase, app_config: Any):
+    def __init__(
+        self,
+        db: AsyncIOMotorDatabase,
+        app_config: Any,
+        *,
+        asset_triage: Any | None = None,
+    ):
         self.db = db
         self.app_config = app_config
+        if asset_triage is None:
+            from api.services.asset_intelligence.triage import AssetTriageService
+
+            asset_triage = AssetTriageService(app_config)
+        self.asset_triage = asset_triage
+
+    async def _triage_asset_surfaces(
+        self,
+        alive: list[dict[str, Any]],
+        *,
+        project_id: str,
+        task_id: str,
+        target_id: str,
+        target_context: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Filter website assets before browser work without persisting decisions."""
+        from api.services.asset_intelligence.contracts import AssetCandidate, AssetIdentity
+
+        already_triaged: list[dict[str, Any]] = []
+        candidates: list[AssetCandidate] = []
+        source_by_candidate: dict[int, dict[str, Any]] = {}
+
+        def _source_items(values: list[AssetCandidate]) -> list[dict[str, Any]]:
+            return [
+                source_by_candidate[id(candidate)]
+                for candidate in values
+                if id(candidate) in source_by_candidate
+            ]
+
+        for raw_item in alive:
+            item = dict(raw_item)
+            if item.pop("_asset_triage_passed", False):
+                already_triaged.append(item)
+                continue
+            url = str(item.get("url") or "")
+            parsed = urlsplit(url)
+            probe = dict(item.get("probe") or {})
+            for key in ("status_code", "title", "response_time", "final_url"):
+                if key in item and key not in probe:
+                    probe[key] = item[key]
+            fingerprints = list(
+                dict.fromkeys(
+                    [
+                        *list(item.get("fingerprints") or []),
+                        *list(probe.get("fingerprints") or []),
+                    ]
+                )
+            )
+            try:
+                parsed_port = parsed.port
+            except ValueError:
+                parsed_port = None
+            candidate = AssetCandidate(
+                host=parsed.hostname or "",
+                port=str(parsed_port or "") if parsed.hostname else "",
+                protocol=parsed.scheme,
+                domain=parsed.hostname or "",
+                title=str(item.get("title") or probe.get("title") or ""),
+                link=url,
+                fingerprints=fingerprints,
+                sources=list(item.get("sources") or []),
+                is_alive=True,
+                probe=probe,
+            )
+            candidates.append(candidate)
+            source_by_candidate[id(candidate)] = item
+
+        if not candidates:
+            return already_triaged, 0
+
+        context = dict(target_context or {})
+        aliases = [str(value) for value in context.get("aliases") or [] if str(value).strip()]
+        root_domains = [
+            str(value)
+            for value in context.get("root_domains") or []
+            if str(value).strip()
+        ]
+        canonical_name = str(
+            context.get("canonical_name")
+            or context.get("normalized_name")
+            or context.get("target_name")
+            or ""
+        ).strip()
+        identity = AssetIdentity(
+            input_name=str(context.get("input_name") or canonical_name),
+            normalized_name=canonical_name,
+            root_domain=str(context.get("root_domain") or (root_domains[0] if root_domains else "")),
+            target_id=str(context.get("target_id") or target_id),
+            aliases=aliases,
+            root_domains=root_domains,
+        )
+        try:
+            prioritized = await self.asset_triage.prioritize(
+                candidates,
+                identity=identity,
+                project_id=project_id,
+                task_id=task_id,
+                task_type="url_scan",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[pipeline] task=%s URL 资产分诊不可用，保留全部待筛 URL: %s",
+                task_id,
+                exc,
+            )
+            return [*_source_items(candidates), *already_triaged], 0
+
+        prioritized_items = _source_items(prioritized)
+        discarded = len(candidates) - len(prioritized_items)
+        return [*prioritized_items, *already_triaged], discarded
 
     # ══════════════════════════════════════
     # 阶段 1: URL 解析 + 标准化
@@ -767,6 +884,7 @@ class UrlScanPipeline:
         source_metadata_by_url: dict[str, dict[str, Any]] | None = None,
         target_context: dict[str, Any] | None = None,
         agent_timeout_seconds: int | None = None,
+        enable_asset_triage: bool | None = None,
     ) -> dict[str, Any]:
         """
         完整流水线：url.txt → 探活 → 扫描 → 提取 → 话术生成 → 存储。
@@ -775,6 +893,7 @@ class UrlScanPipeline:
         """
         from core.observability import obs_log
         from api.services.info_collection.tuning import get_collection_runtime_tuning
+        from api.services.task_progress import update_source_progress
 
         runtime_tuning = (
             await get_collection_runtime_tuning(self.db)
@@ -782,6 +901,8 @@ class UrlScanPipeline:
             url_scan_agent_timeout_seconds=agent_timeout_seconds,
         )
         effective_agent_timeout = runtime_tuning.url_scan_agent_timeout_seconds
+        progress_task_id = str(parent_task_id or task_id)
+        progress_source_name = str(progress_source or f"{source}_url_scan")
 
         task_result = {
             "task_id": task_id,
@@ -793,6 +914,8 @@ class UrlScanPipeline:
             "alive_urls": 0,
             "probed_urls": 0,
             "reused_alive_urls": 0,
+            "eligible_urls": 0,
+            "triage_discarded_urls": 0,
             "scanned_urls": 0,
             "failed_urls": 0,
             "skipped_urls": 0,
@@ -925,8 +1048,53 @@ class UrlScanPipeline:
                 await self._update_task(task_id, task_result)
                 return task_result
 
+            should_triage = (
+                source in {"web_tagging", "url_scan"}
+                if enable_asset_triage is None
+                else bool(enable_asset_triage)
+            )
+            raw_alive_count = len(alive)
+            if should_triage:
+                alive, discarded_count = await self._triage_asset_surfaces(
+                    alive,
+                    project_id=project_id,
+                    task_id=task_id,
+                    target_id=target_id,
+                    target_context=target_context,
+                )
+                task_result["triage_discarded_urls"] = discarded_count
+                logger.info(
+                    "[pipeline] task=%s 阶段2b: URL 资产分诊完成 eligible=%s/%s discarded=%s",
+                    task_id,
+                    len(alive),
+                    raw_alive_count,
+                    discarded_count,
+                )
+            task_result["eligible_urls"] = len(alive)
+            await self._update_task(task_id, task_result)
+
+            if not alive:
+                logger.info(f"[pipeline] task={task_id} 无值得深扫的 URL，结束")
+                task_result["status"] = "completed"
+                await update_source_progress(
+                    self.db,
+                    task_id=progress_task_id,
+                    source=progress_source_name,
+                    total=raw_alive_count,
+                    processed=raw_alive_count,
+                    succeeded=0,
+                    skipped=task_result["triage_discarded_urls"],
+                    status="completed",
+                    message="URL 分诊完成，所有存活目标均无需深扫",
+                    extra={
+                        "triage_discarded": task_result["triage_discarded_urls"],
+                        "eligible": 0,
+                    },
+                )
+                await self._update_task(task_id, task_result)
+                return task_result
+
             from api.dao import url_scan as url_scan_dao
-            from api.services.task_progress import update_source_progress
 
             alive_urls = [str(item.get("url") or "") for item in alive]
             completed_before = await url_scan_dao.completed_urls(
@@ -939,10 +1107,6 @@ class UrlScanPipeline:
             ]
             task_result["skipped_urls"] = len(completed_before)
             task_result["remaining_urls"] = len(pending_alive)
-            progress_task_id = str(parent_task_id or task_id)
-            progress_source_name = str(
-                progress_source or f"{source}_url_scan"
-            )
             await update_source_progress(
                 self.db,
                 task_id=progress_task_id,
@@ -1263,8 +1427,8 @@ class UrlScanPipeline:
                 await self._update_task(task_id, task_result)
                 await update_source_progress(
                     self.db,
-                    task_id=str(parent_task_id or task_id),
-                    source=f"{source}_url_scan",
+                    task_id=progress_task_id,
+                    source=progress_source_name,
                     status="waiting",
                     message="模型额度暂不可用，URL 深扫等待自动恢复",
                     extra={"remaining": task_result.get("remaining_urls", 0)},

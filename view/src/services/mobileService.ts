@@ -22,6 +22,8 @@ import { redirectToLogin } from '../utils/authNavigation'
 import { getToken, clearToken } from './http'
 
 const MOBILE = '/v1/mobile'
+const pendingGetRequests = new Map<string, Promise<unknown>>()
+const GET_DEDUP_GRACE_MS = 1000
 
 // ============================================
 // 错误类型
@@ -95,25 +97,48 @@ async function extractError(resp: Response): Promise<{ message: string; path?: s
 }
 
 /** JSON 请求（带鉴权 + detail 错误 + 401 跳登录） */
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const resp = await fetch(`${API_CONFIG.BASE_URL}${path}`, {
-    ...init,
-    headers: buildHeaders(!!init.body || init.method === 'GET' || !init.method),
-  })
+function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const execute = async (): Promise<T> => {
+    const resp = await fetch(`${API_CONFIG.BASE_URL}${path}`, {
+      ...init,
+      headers: buildHeaders(!!init.body || init.method === 'GET' || !init.method),
+    })
 
-  if (resp.status === 401) {
-    handleUnauthorized()
-    throw new MobileError('登录已过期，请重新登录', 401)
+    if (resp.status === 401) {
+      handleUnauthorized()
+      throw new MobileError('登录已过期，请重新登录', 401)
+    }
+
+    if (!resp.ok) {
+      const { message, path: errorPath } = await extractError(resp)
+      throw new MobileError(message, resp.status, errorPath)
+    }
+
+    const ct = resp.headers.get('content-type')
+    if (ct?.includes('application/json')) return (await resp.json()) as T
+    return (await resp.text()) as unknown as T
   }
 
-  if (!resp.ok) {
-    const { message, path } = await extractError(resp)
-    throw new MobileError(message, resp.status, path)
-  }
+  const method = String(init.method || 'GET').toUpperCase()
+  if (method !== 'GET' || init.signal || init.body) return execute()
 
-  const ct = resp.headers.get('content-type')
-  if (ct?.includes('application/json')) return (await resp.json()) as T
-  return (await resp.text()) as unknown as T
+  const cacheKey = `${getToken() || 'anonymous'}:${path}`
+  const pending = pendingGetRequests.get(cacheKey) as Promise<T> | undefined
+  if (pending) return pending
+
+  const current = execute()
+  pendingGetRequests.set(cacheKey, current)
+  void current.then(
+    () => {
+      globalThis.setTimeout(() => {
+        if (pendingGetRequests.get(cacheKey) === current) {
+          pendingGetRequests.delete(cacheKey)
+        }
+      }, GET_DEDUP_GRACE_MS)
+    },
+    () => pendingGetRequests.delete(cacheKey),
+  )
+  return current
 }
 
 // ============================================
@@ -194,6 +219,14 @@ export interface WakeResult {
   lock_state?: { checked: boolean; locked: boolean | null }
   unlock?: { step: string; ok: boolean; stderr?: string; error?: string }[]
   unlocked?: boolean | null
+}
+
+export interface KeyboardRestoreResult {
+  ok: boolean
+  current_ime: string
+  restored_ime: string
+  changed: boolean
+  available_imes: string[]
 }
 
 export interface EasyTierAccessProfile {
@@ -426,6 +459,11 @@ export const inputText = (deviceId: string, text: string) =>
   request<{ ok: boolean }>(`${ctrl(deviceId)}/text`, {
     method: 'POST',
     body: JSON.stringify({ text }),
+  })
+
+export const restoreSystemKeyboard = (deviceId: string) =>
+  request<KeyboardRestoreResult>(`${ctrl(deviceId)}/keyboard/restore`, {
+    method: 'POST',
   })
 
 export type MobileKey =

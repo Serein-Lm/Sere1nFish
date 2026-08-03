@@ -129,6 +129,16 @@ async def run_fofa_collect(
                 min_attention_score=min_attention_score,
                 target_id=identity.target_id,
                 known_alive_urls=scan_urls,
+                known_alive_metadata=dict(
+                    assets.get("probe_metadata_by_url") or {}
+                ),
+                target_context={
+                    "target_id": identity.target_id,
+                    "canonical_name": identity.normalized_name,
+                    "aliases": list(identity.aliases)[:12],
+                    "root_domain": identity.root_domain,
+                    "root_domains": identity.domains,
+                },
                 probe_concurrency=url_probe_concurrency,
                 scan_concurrency=url_scan_concurrency,
                 copywriting_concurrency=copywriting_concurrency,

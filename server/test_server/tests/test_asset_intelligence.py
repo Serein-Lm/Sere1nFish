@@ -17,7 +17,6 @@ from api.services.asset_intelligence.contracts import (
 from api.services.asset_intelligence.service import AssetIntelligenceService
 from api.services.asset_intelligence.triage import (
     AssetTriageBatch,
-    AssetTriageDecision,
     AssetTriageService,
 )
 from crawler_tools.fofa_tools import FOFA_FIELDS, _parse_results
@@ -502,23 +501,8 @@ async def test_llm_triage_discards_third_party_and_prioritizes_business_system(
     class _Structured:
         async def ainvoke(self, _messages: Any) -> AssetTriageBatch:
             return AssetTriageBatch(
-                items=[
-                    AssetTriageDecision(
-                        index=0,
-                        category="official_public_system",
-                        relevance_score=75,
-                    ),
-                    AssetTriageDecision(
-                        index=1,
-                        category="third_party_system",
-                        relevance_score=10,
-                    ),
-                    AssetTriageDecision(
-                        index=2,
-                        category="business_system",
-                        relevance_score=96,
-                    ),
-                ]
+                high_priority_indexes=[2, 0],
+                discard_indexes=[1],
             )
 
     class _Llm:
@@ -596,19 +580,10 @@ async def test_llm_triage_splits_and_corrects_malformed_batch(
             call_sizes.append(len(assets))
             if len(assets) > 2:
                 raise ValueError("truncated json")
+            indexes = [item["index"] for item in assets]
             return AssetTriageBatch(
-                items=[
-                    AssetTriageDecision(
-                        index=item["index"],
-                        category=(
-                            "third_party_system"
-                            if item["index"] == 1
-                            else "business_system"
-                        ),
-                        relevance_score=90 - item["index"],
-                    )
-                    for item in assets
-                ]
+                high_priority_indexes=[index for index in indexes if index != 1],
+                discard_indexes=[index for index in indexes if index == 1],
             )
 
     class _Llm:
@@ -653,19 +628,10 @@ async def test_llm_triage_retries_when_structured_result_omits_an_asset(
             assets = payload["assets"]
             call_sizes.append(len(assets))
             selected = assets[:1] if len(assets) > 1 else assets
+            indexes = [item["index"] for item in selected]
             return AssetTriageBatch(
-                items=[
-                    AssetTriageDecision(
-                        index=item["index"],
-                        category=(
-                            "third_party_system"
-                            if item["index"] == 1
-                            else "business_system"
-                        ),
-                        relevance_score=90,
-                    )
-                    for item in selected
-                ]
+                high_priority_indexes=[index for index in indexes if index != 1],
+                discard_indexes=[index for index in indexes if index == 1],
             )
 
     class _Llm:

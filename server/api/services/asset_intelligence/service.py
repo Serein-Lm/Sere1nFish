@@ -75,6 +75,7 @@ class AssetIntelligenceService:
                     candidate.title = str(probe["title"])
 
         alive_candidates = [candidate for candidate in merged if candidate.is_alive]
+        triage_applied = False
         if alive_candidates and self.triage:
             try:
                 prioritized_alive = await self.triage.prioritize(
@@ -83,6 +84,7 @@ class AssetIntelligenceService:
                     project_id=project_id,
                     task_id=task_id,
                 )
+                triage_applied = True
                 kept_alive_ids = {id(candidate) for candidate in prioritized_alive}
                 merged = [
                     candidate
@@ -127,6 +129,7 @@ class AssetIntelligenceService:
                 "probe": dict(doc.get("probe") or {}),
                 "fingerprints": list(doc.get("fingerprints") or []),
                 "sources": list(doc.get("sources") or []),
+                **({"_asset_triage_passed": True} if triage_applied else {}),
             }
             asset_id = assets_dao.fofa_asset_id(
                 project_id,
