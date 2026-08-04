@@ -91,12 +91,22 @@ def _record_metrics(record: dict[str, Any]) -> tuple[int, int, float]:
     return high_risk, len(findings), max(scores, default=0.0)
 
 
-def _record_sort_key(record: dict[str, Any]) -> tuple[int, int, float, datetime, str]:
+def _record_succeeded(record: dict[str, Any]) -> bool:
+    success = record.get("success")
+    if success is not None:
+        return bool(success)
+    return not bool(str(record.get("error") or "").strip())
+
+
+def _record_sort_key(
+    record: dict[str, Any],
+) -> tuple[int, int, float, int, datetime, str]:
     high_risk, finding_count, max_score = _record_metrics(record)
     return (
         high_risk,
         finding_count,
         max_score,
+        int(_record_succeeded(record)),
         _created_at(record),
         str(record.get("_id") or record.get("id") or ""),
     )
@@ -155,6 +165,8 @@ def _adapt_url_scan_record(
         "task_id": str(scan.get("task_id") or ""),
         "source": str(scan.get("source") or "web_tagging"),
         "target_id": str(scan.get("target_id") or ""),
+        "success": bool(scan.get("success")),
+        "error": error,
         "created_at": _created_at(scan),
         "screenshot_object_id": str(scan.get("screenshot_object_id") or ""),
         "screenshot_url": str(scan.get("screenshot_url") or ""),
@@ -192,6 +204,7 @@ async def _list_url_scan_candidates(
             "high_risk_count": -1,
             "finding_count": -1,
             "max_attention_score": -1,
+            "success": -1,
             "updated_at": -1,
         }
         group_id = {

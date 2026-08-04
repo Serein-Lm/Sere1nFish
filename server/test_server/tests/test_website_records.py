@@ -233,6 +233,61 @@ async def test_website_records_join_findings_after_agent_navigates_to_detail_pat
     )
 
 
+@pytest.mark.asyncio
+async def test_website_records_keep_successful_evidence_when_latest_retry_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import website_records
+
+    db = _Db(
+        [
+            {
+                "_id": ObjectId(),
+                "project_id": "project-1",
+                "task_id": "successful-task",
+                "target_id": "target-1",
+                "source": "web_tagging",
+                "url": "https://example.com",
+                "success": True,
+                "intro": {"site_name": "浏览器可访问的业务系统"},
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": "project-1",
+                "task_id": "failed-retry",
+                "target_id": "target-1",
+                "source": "web_tagging",
+                "url": "https://example.com",
+                "success": False,
+                "error": "Tool list_pages timeout",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+        ],
+        [],
+    )
+
+    async def list_legacy(*_args: Any, **_kwargs: Any):
+        return [], 0
+
+    monkeypatch.setattr(
+        website_records.web_tagging_dao,
+        "list_web_tagging_results",
+        list_legacy,
+    )
+
+    items, total = await website_records.list_website_records(
+        db,
+        project_id="project-1",
+        limit=10,
+    )
+
+    assert total == 1
+    assert items[0]["task_id"] == "successful-task"
+    assert items[0]["success"] is True
+    assert items[0]["data"]["intro"]["site_name"] == "浏览器可访问的业务系统"
+
+
 def _legacy_record(
     record_id: ObjectId,
     url: str,
