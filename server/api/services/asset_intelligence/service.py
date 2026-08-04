@@ -11,7 +11,7 @@ from api.dao import fofa_assets as assets_dao
 from core.logger import get_logger
 from core.observability import obs_log
 
-from .adapters import HttpAssetProbe
+from .adapters import BrowserAssetProbe, HttpAssetProbe
 from .contracts import AssetCandidate, AssetIdentity, ProviderSearchResult
 from .factory import AssetProviderFactory
 from .triage import AssetTriageService
@@ -26,10 +26,12 @@ class AssetIntelligenceService:
         *,
         app_config: Any | None = None,
         probe: HttpAssetProbe | None = None,
+        browser_probe: BrowserAssetProbe | None = None,
         triage: AssetTriageService | None = None,
     ) -> None:
         self.db = db
         self.probe = probe or HttpAssetProbe()
+        self.browser_probe = browser_probe or BrowserAssetProbe()
         self.triage = triage or (AssetTriageService(app_config) if app_config else None)
 
     async def discover(
@@ -73,6 +75,48 @@ class AssetIntelligenceService:
                 candidate.is_alive = bool(probe.get("is_alive"))
                 if not candidate.title and probe.get("title"):
                     candidate.title = str(probe["title"])
+
+        unresolved_urls = list(
+            dict.fromkeys(
+                candidate.canonical_url
+                for candidate in merged
+                if candidate.canonical_url
+                and not candidate.is_alive
+                and self.browser_probe.supports(candidate.canonical_url)
+            )
+        )
+        browser_probe_by_url = await self.browser_probe.probe(
+            unresolved_urls,
+            concurrency=max(1, min(probe_concurrency, 32)),
+            timeout=max(10.0, min(probe_timeout * 2, 30.0)),
+        ) if unresolved_urls else {}
+        browser_recovered = 0
+        for candidate in merged:
+            browser_probe = browser_probe_by_url.get(candidate.canonical_url)
+            if not browser_probe:
+                continue
+            http_probe = dict(candidate.probe or {})
+            candidate.probe = {
+                **http_probe,
+                "browser_probe": browser_probe,
+                "browser_verified": bool(browser_probe.get("is_alive")),
+            }
+            if not browser_probe.get("is_alive"):
+                continue
+            browser_recovered += 1
+            candidate.is_alive = True
+            candidate.probe.update(
+                {
+                    "is_alive": True,
+                    "error": None,
+                    "http_probe_error": str(http_probe.get("error") or ""),
+                    "selected_url": candidate.canonical_url,
+                    "is_browser_accessible": True,
+                    "browser_final_url": str(browser_probe.get("final_url") or ""),
+                }
+            )
+            if not candidate.title and browser_probe.get("title"):
+                candidate.title = str(browser_probe["title"])
 
         alive_candidates = [candidate for candidate in merged if candidate.is_alive]
         triage_applied = False
@@ -161,6 +205,8 @@ class AssetIntelligenceService:
             "target_id": identity.target_id,
             "root_domain": identity.root_domain,
             "root_domains": identity.domains,
+            "browser_probe_candidates": len(unresolved_urls),
+            "browser_probe_recovered": browser_recovered,
         }
         obs_log(
             "外部资产发现完成",
@@ -173,6 +219,8 @@ class AssetIntelligenceService:
                 "discovered": result["discovered"],
                 "alive": result["alive"],
                 "changed": len(changed_ids),
+                "browser_probe_candidates": len(unresolved_urls),
+                "browser_probe_recovered": browser_recovered,
             },
         )
         return result

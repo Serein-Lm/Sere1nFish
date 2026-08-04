@@ -137,7 +137,10 @@ def _is_terminal_analysis_timeout(error: BaseException) -> bool:
             return True
         message = f"{type(current).__name__}: {current}".casefold()
         if "agent 执行失败" in message and (
-            "timeouterror" in message or "超时(" in message or "超时（" in message
+            "网页分析超过总时限" in message
+            or "agent 执行超时" in message
+            or "超时(" in message
+            or "超时（" in message
         ):
             return True
         nested = getattr(current, "exceptions", None)

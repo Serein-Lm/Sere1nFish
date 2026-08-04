@@ -26,9 +26,7 @@ logger = get_logger("api.services.info_collection.url_tools")
 
 _GENERIC_PAGE_TITLES = (
     "400 bad request",
-    "403 forbidden",
     "404 not found",
-    "access denied",
     "bad gateway",
     "default web site page",
     "error page",
@@ -37,11 +35,8 @@ _GENERIC_PAGE_TITLES = (
     "page not found",
     "service unavailable",
     "temporarily unavailable",
-    "web application firewall",
     "welcome to nginx",
     "页面不存在",
-    "访问被拒绝",
-    "网站防火墙",
 )
 
 
@@ -64,22 +59,10 @@ def _web_agent_timeout_budget(options: dict[str, Any]) -> tuple[int, int]:
 def classify_terminal_probe(target_info: dict[str, Any]) -> tuple[str, str] | None:
     """Identify deterministic error/default pages that do not need an Agent."""
     probe = target_info.get("probe") or {}
-    status = target_info.get("status_code")
-    if status is None:
-        status = probe.get("status_code")
-    try:
-        status_code = int(status) if status is not None else 0
-    except (TypeError, ValueError):
-        status_code = 0
     title = str(
         target_info.get("title") or probe.get("title") or ""
     ).strip()
     normalized_title = " ".join(title.casefold().split())
-    if status_code >= 400:
-        return (
-            "http_error",
-            f"探活已确认 HTTP {status_code}，无需启动浏览器 Agent",
-        )
     if normalized_title and any(
         marker in normalized_title for marker in _GENERIC_PAGE_TITLES
     ):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import asdict
 from typing import Any, Awaitable, Callable
@@ -319,22 +320,126 @@ class HttpAssetProbe:
             )
             alternate_results = {item.url: self._as_probe(item) for item in probed}
 
-        output: dict[str, dict[str, Any]] = {}
+        selected_before_retry: dict[str, dict[str, Any]] = {}
+        retry_url_by_requested: dict[str, str] = {}
         for requested_url in urls:
             requested = initial.get(
                 requested_url,
                 {"url": requested_url, "is_alive": False, "error": "missing probe result"},
             )
-            alternate_url = alternates.get(requested_url, "")
-            alternate = alternate_results.get(alternate_url)
+            alternate = alternate_results.get(alternates.get(requested_url, ""))
             selected = requested
             if alternate and self._probe_score(alternate) > self._probe_score(requested):
                 selected = alternate
+            selected_before_retry[requested_url] = selected
+            if not selected.get("is_alive"):
+                retry_url_by_requested[requested_url] = str(
+                    selected.get("url") or requested_url
+                )
+
+        retry_results: dict[str, dict[str, Any]] = {}
+        if retry_url_by_requested:
+            retried = await hunter_tools.probe_urls_batch(
+                list(dict.fromkeys(retry_url_by_requested.values())),
+                concurrency=max(1, min(int(concurrency), 24)),
+                timeout=max(10.0, min(float(timeout) * 2, 30.0)),
+                only_alive=False,
+            )
+            retry_results = {item.url: self._as_probe(item) for item in retried}
+
+        output: dict[str, dict[str, Any]] = {}
+        for requested_url in urls:
+            selected = selected_before_retry[requested_url]
+            retry_url = retry_url_by_requested.get(requested_url, "")
+            retry_result = retry_results.get(retry_url)
+            if retry_result and self._probe_score(retry_result) > self._probe_score(selected):
+                selected = retry_result
+            selected_url = str(selected.get("url") or requested_url)
             output[requested_url] = {
                 **selected,
                 "requested_url": requested_url,
-                "selected_url": str(selected.get("url") or requested_url),
-                "transport_fallback_used": selected is alternate,
+                "selected_url": selected_url,
+                "transport_fallback_used": selected_url != requested_url,
                 "is_content_accessible": self._content_accessible(selected),
+                "probe_attempts": 2 if retry_url else 1,
+                "probe_recovered": bool(
+                    retry_result
+                    and selected is retry_result
+                    and retry_result.get("is_alive")
+                ),
             }
         return output
+
+
+class BrowserAssetProbe:
+    """Use the managed Chrome pool only for URLs unresolved by HTTP probing."""
+
+    _NON_WEB_PORTS = frozenset({21, 22, 25, 53, 110, 143, 445, 3306, 5432, 6379})
+
+    def __init__(self, *, provider: Any | None = None, probe_func: Any | None = None) -> None:
+        self._provider = provider
+        self._probe_func = probe_func
+
+    @classmethod
+    def supports(cls, url: str) -> bool:
+        try:
+            parsed = urlsplit(str(url or ""))
+            port = parsed.port
+        except ValueError:
+            return False
+        return bool(
+            parsed.hostname
+            and parsed.scheme in {"http", "https"}
+            and port not in cls._NON_WEB_PORTS
+        )
+
+    async def probe(
+        self,
+        urls: list[str],
+        *,
+        concurrency: int,
+        timeout: float,
+    ) -> dict[str, dict[str, Any]]:
+        from browser_manager.provider import get_browser_provider
+        from api.services.web_capture import probe_cdp_page_access
+
+        selected = list(dict.fromkeys(url for url in urls if self.supports(url)))
+        if not selected:
+            return {}
+        provider = self._provider or get_browser_provider()
+        probe_func = self._probe_func or probe_cdp_page_access
+        semaphore = asyncio.Semaphore(max(1, min(int(concurrency), 32)))
+
+        async def _probe_one(url: str) -> tuple[str, dict[str, Any]]:
+            digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+            task_id = f"asset_probe_{digest}"
+            async with semaphore:
+                cdp_url = ""
+                try:
+                    cdp_url = await provider.get_cdp_endpoint(
+                        task_id=task_id,
+                        purpose="url_scan",
+                    )
+                    if not cdp_url:
+                        raise RuntimeError("无法获取 Chrome 容器")
+                    result = await probe_func(
+                        cdp_url,
+                        url,
+                        timeout_seconds=max(5.0, min(float(timeout), 30.0)),
+                    )
+                    return url, dict(result or {})
+                except Exception as exc:  # noqa: BLE001
+                    return url, {
+                        "url": url,
+                        "is_alive": False,
+                        "error": f"{type(exc).__name__}: {exc}"[:500],
+                    }
+                finally:
+                    if cdp_url:
+                        try:
+                            await provider.release_cdp_endpoint(task_id=task_id)
+                        except Exception:
+                            pass
+
+        rows = await asyncio.gather(*(_probe_one(url) for url in selected))
+        return {url: result for url, result in rows}

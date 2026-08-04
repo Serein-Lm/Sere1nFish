@@ -178,6 +178,61 @@ async def test_website_records_join_url_scan_findings_and_legacy(
     assert items[0]["data"]["findings"][0]["finding_id"] == "finding-1"
 
 
+@pytest.mark.asyncio
+async def test_website_records_join_findings_after_agent_navigates_to_detail_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import website_records
+
+    db = _Db(
+        [
+            {
+                "_id": ObjectId(),
+                "project_id": "project-1",
+                "task_id": "scan-1_url",
+                "target_id": "target-1",
+                "source": "web_tagging",
+                "url": "https://example.com",
+                "success": True,
+                "has_findings": True,
+                "finding_count": 1,
+            }
+        ],
+        [
+            {
+                "finding_id": "finding-1",
+                "project_id": "project-1",
+                "task_id": "scan-1_url",
+                "source": "web_tagging",
+                "url": "https://example.com",
+                "source_url": "https://example.com/about/contact",
+                "attention_score": 90,
+            }
+        ],
+    )
+
+    async def list_legacy(*_args: Any, **_kwargs: Any):
+        return [], 0
+
+    monkeypatch.setattr(
+        website_records.web_tagging_dao,
+        "list_web_tagging_results",
+        list_legacy,
+    )
+
+    items, total = await website_records.list_website_records(
+        db,
+        project_id="project-1",
+        limit=10,
+    )
+
+    assert total == 1
+    assert items[0]["data"]["has_findings"] is True
+    assert items[0]["data"]["findings"][0]["source_url"] == (
+        "https://example.com/about/contact"
+    )
+
+
 def _legacy_record(
     record_id: ObjectId,
     url: str,

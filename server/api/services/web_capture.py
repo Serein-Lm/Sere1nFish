@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -72,6 +73,121 @@ async def _ignore_certificate_errors(command: Any) -> None:
         "Security.setIgnoreCertificateErrors",
         params={"ignore": True},
     )
+
+
+async def probe_cdp_page_access(
+    cdp_url: str,
+    preferred_url: str,
+    *,
+    timeout_seconds: float = 20.0,
+) -> dict[str, Any]:
+    """Verify a URL with Chrome without invoking an LLM or storing an artifact."""
+    import websockets
+
+    started = time.monotonic()
+    created_target_id = ""
+    try:
+        async with asyncio.timeout(max(5.0, float(timeout_seconds))):
+            async with websockets.connect(
+                cdp_url,
+                open_timeout=5,
+                close_timeout=2,
+                max_size=4 * 1024 * 1024,
+            ) as websocket:
+                command_id = 0
+
+                async def _command(
+                    method: str,
+                    *,
+                    params: dict[str, Any] | None = None,
+                    session_id: str = "",
+                ) -> dict[str, Any]:
+                    nonlocal command_id
+                    command_id += 1
+                    return await _cdp_command(
+                        websocket,
+                        command_id,
+                        method,
+                        params=params,
+                        session_id=session_id,
+                    )
+
+                await _ignore_certificate_errors(_command)
+                created = await _command(
+                    "Target.createTarget",
+                    params={"url": "about:blank"},
+                )
+                created_target_id = str(created.get("targetId") or "")
+                if not created_target_id:
+                    raise RuntimeError("无法创建浏览器探活页面")
+                attached = await _command(
+                    "Target.attachToTarget",
+                    params={"targetId": created_target_id, "flatten": True},
+                )
+                session_id = str(attached.get("sessionId") or "")
+                if not session_id:
+                    raise RuntimeError("无法附加浏览器探活页面")
+                try:
+                    await _command("Page.enable", session_id=session_id)
+                    navigated = await _command(
+                        "Page.navigate",
+                        params={"url": preferred_url},
+                        session_id=session_id,
+                    )
+                    if navigated.get("errorText"):
+                        raise RuntimeError(str(navigated["errorText"]))
+
+                    page: dict[str, Any] = {}
+                    for _ in range(16):
+                        await asyncio.sleep(0.5)
+                        evaluated = await _command(
+                            "Runtime.evaluate",
+                            params={
+                                "expression": (
+                                    "({href:location.href,title:document.title,"
+                                    "readyState:document.readyState,"
+                                    "contentLength:(document.body?.innerText||'').length})"
+                                ),
+                                "returnByValue": True,
+                            },
+                            session_id=session_id,
+                        )
+                        page = dict(
+                            ((evaluated.get("result") or {}).get("value") or {})
+                        )
+                        if page.get("readyState") in {"interactive", "complete"}:
+                            break
+                finally:
+                    try:
+                        await _command(
+                            "Target.closeTarget",
+                            params={"targetId": created_target_id},
+                        )
+                    except Exception:
+                        pass
+
+        final_url = str(page.get("href") or preferred_url)
+        if not final_url.startswith(("http://", "https://")):
+            raise RuntimeError(f"浏览器落入错误页: {final_url[:200]}")
+        return {
+            "url": preferred_url,
+            "is_alive": True,
+            "final_url": final_url,
+            "title": str(page.get("title") or "")[:200],
+            "content_length": max(0, int(page.get("contentLength") or 0)),
+            "response_time": round(time.monotonic() - started, 3),
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "url": preferred_url,
+            "is_alive": False,
+            "final_url": "",
+            "title": "",
+            "content_length": 0,
+            "response_time": round(time.monotonic() - started, 3),
+            "error": f"{type(exc).__name__}: {exc}"[:500],
+        }
 
 
 async def capture_cdp_page_screenshot(

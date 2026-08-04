@@ -8,6 +8,7 @@ import pytest
 
 from api.dao import fofa_assets as assets_dao
 from api.services.asset_intelligence.adapters import (
+    BrowserAssetProbe,
     FofaAssetProvider,
     HttpAssetProbe,
     HunterAssetProvider,
@@ -234,6 +235,75 @@ async def test_http_probe_does_not_rewrite_explicit_application_port(
 
     assert calls == [["https://www.example.com:1443"]]
     assert result["https://www.example.com:1443"]["selected_url"] == "https://www.example.com:1443"
+
+
+@pytest.mark.asyncio
+async def test_http_probe_retries_transient_missing_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import adapters
+
+    attempts: dict[str, int] = {}
+
+    async def probe(urls: list[str], **_kwargs: Any) -> list[Any]:
+        rows = []
+        for url in urls:
+            attempts[url] = attempts.get(url, 0) + 1
+            recovered = url == "https://slow.example" and attempts[url] >= 2
+            rows.append(
+                type("Probe", (), {
+                    "url": url,
+                    "is_alive": recovered,
+                    "status_code": 200 if recovered else None,
+                    "title": "Recovered" if recovered else None,
+                    "content_length": 100 if recovered else None,
+                    "response_time": 0.1,
+                    "error": None if recovered else "timeout",
+                })()
+            )
+        return rows
+
+    monkeypatch.setattr(adapters.hunter_tools, "probe_urls_batch", probe)
+    result = await HttpAssetProbe().probe(
+        ["https://slow.example"],
+        concurrency=128,
+        timeout=5,
+    )
+
+    assert result["https://slow.example"]["is_alive"] is True
+    assert result["https://slow.example"]["probe_recovered"] is True
+    assert result["https://slow.example"]["probe_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_browser_probe_releases_managed_container() -> None:
+    class _Provider:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        async def get_cdp_endpoint(self, *, task_id: str, purpose: str) -> str:
+            assert purpose == "url_scan"
+            return "ws://chrome/cdp-proxy"
+
+        async def release_cdp_endpoint(self, *, task_id: str) -> None:
+            self.released.append(task_id)
+
+    async def probe_page(_cdp_url: str, url: str, **_kwargs: Any) -> dict[str, Any]:
+        return {"url": url, "is_alive": True, "title": "Browser Only"}
+
+    provider = _Provider()
+    result = await BrowserAssetProbe(
+        provider=provider,
+        probe_func=probe_page,
+    ).probe(
+        ["https://legacy.example", "http://dns.example:53"],
+        concurrency=8,
+        timeout=20,
+    )
+
+    assert result["https://legacy.example"]["is_alive"] is True
+    assert "http://dns.example:53" not in result
+    assert len(provider.released) == 1
 
 
 @pytest.mark.asyncio
@@ -501,6 +571,86 @@ async def test_discover_persists_once_and_returns_only_changed_alive_urls(
     assert result["alive"] == 1
     assert result["scan_urls"] == ["https://example.com"]
     assert set(result["providers"]) == {"fofa", "hunter"}
+
+
+@pytest.mark.asyncio
+async def test_discover_recovers_http_probe_failure_with_browser_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import service as module
+
+    class _DeadHttpProbe:
+        async def probe(self, urls: list[str], **_kwargs: Any) -> dict[str, dict]:
+            return {
+                url: {"url": url, "is_alive": False, "error": "tls handshake failed"}
+                for url in urls
+            }
+
+    class _BrowserFallback:
+        @staticmethod
+        def supports(_url: str) -> bool:
+            return True
+
+        async def probe(self, urls: list[str], **_kwargs: Any) -> dict[str, dict]:
+            return {
+                url: {
+                    "url": url,
+                    "is_alive": True,
+                    "final_url": f"{url}/home",
+                    "title": "浏览器可达业务系统",
+                }
+                for url in urls
+            }
+
+    candidate = AssetCandidate(
+        link="https://legacy.example",
+        ip="1.2.3.4",
+        port="443",
+        sources=["fofa"],
+    )
+    provider = _Provider("fofa", candidate)
+    persisted: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(module.AssetProviderFactory, "available", lambda: ("fofa",))
+    monkeypatch.setattr(module.AssetProviderFactory, "create", lambda _name: provider)
+
+    async def upsert(_db: Any, **kwargs: Any) -> dict[str, Any]:
+        persisted.extend(kwargs["assets"])
+        doc = kwargs["assets"][0]
+        asset_id = assets_dao.fofa_asset_id(
+            kwargs["project_id"], doc["host"], doc["ip"], doc["port"]
+        )
+        return {
+            "inserted": 1,
+            "updated": 0,
+            "unchanged": 0,
+            "total": 1,
+            "inserted_asset_ids": [asset_id],
+            "changed_asset_ids": [asset_id],
+        }
+
+    monkeypatch.setattr(module.assets_dao, "upsert_assets_batch", upsert)
+    result = await AssetIntelligenceService(
+        object(),
+        probe=_DeadHttpProbe(),
+        browser_probe=_BrowserFallback(),
+    ).discover(
+        identity=AssetIdentity(
+            input_name="Legacy",
+            normalized_name="Legacy Ltd",
+            root_domain="legacy.example",
+            target_id="tgt_legacy",
+        ),
+        project_id="project_1",
+        task_id="task_1",
+        provider_sizes={"fofa": 25},
+    )
+
+    assert result["alive_urls"] == ["https://legacy.example"]
+    assert result["browser_probe_recovered"] == 1
+    assert persisted[0]["is_alive"] is True
+    assert persisted[0]["probe"]["is_browser_accessible"] is True
+    assert persisted[0]["probe"]["http_probe_error"] == "tls handshake failed"
 
 
 @pytest.mark.asyncio

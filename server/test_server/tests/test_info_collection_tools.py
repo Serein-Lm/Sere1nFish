@@ -472,7 +472,7 @@ def test_wrapped_agent_timeout_is_terminal_without_second_agent_attempt():
             async def scan(self, _request):
                 self.calls += 1
                 raise RuntimeError(
-                    "Agent 执行失败（重试 1 次）: TimeoutError:"
+                    "Agent 执行失败（重试 1 次）: Agent 执行超时（900s）"
                 )
 
         tool = _WrappedTimeoutTool()
@@ -499,6 +499,55 @@ def test_wrapped_agent_timeout_is_terminal_without_second_agent_attempt():
         assert ok is False
         assert isinstance(error, RuntimeError)
         assert tool.calls == 1
+
+    asyncio.run(_run())
+
+
+def test_wrapped_mcp_tool_timeout_retries_with_a_fresh_browser_attempt():
+    async def _run():
+        class _TransientTool:
+            def __init__(self):
+                self.calls = 0
+
+            async def scan(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError(
+                        "Agent 执行失败（重试 1 次）: 连续 4 次工具调用失败: "
+                        "Tool 'list_pages' error: TimeoutError: 调用超过 60s"
+                    )
+                return ScanResult(
+                    source=request.source,
+                    target=request.target,
+                    success=True,
+                    data={"intro": {}, "findings": []},
+                )
+
+        tool = _TransientTool()
+        stage = _UrlScanStage(
+            concurrency=1,
+            project_id="project-1",
+            task_id="task-1",
+        )
+        ctx = _FakeContext({
+            "url_scan_tool": tool,
+            "scan_results": [],
+            "project_id": "project-1",
+            "task_id": "task-1",
+        })
+        item = type("Item", (), {
+            "payload": {"url": "https://recover.example"},
+            "meta": {},
+            "item_id": "tool-timeout-1",
+            "attempt": 0,
+        })()
+
+        ok, error = await stage._process_with_retry(item, ctx)
+
+        assert ok is True
+        assert error is None
+        assert tool.calls == 2
+        assert ctx.state["scan_results"][0]["url"] == "https://recover.example"
 
     asyncio.run(_run())
 
@@ -790,10 +839,23 @@ def test_url_scan_does_not_complete_when_terminal_persistence_is_missing(monkeyp
     asyncio.run(_run())
 
 
-def test_generic_http_error_page_bypasses_browser_agent():
+def test_access_control_page_is_verified_by_browser_agent(monkeypatch):
     async def _run():
         from api.services.info_collection import ScanRequest
         from api.services.info_collection.url_tools import UrlWebScanTool
+
+        calls = []
+
+        async def fake_scan_with_browser(self, request, **_kwargs):
+            calls.append(request.target)
+            return ScanResult(
+                source=request.source,
+                target=request.target,
+                success=True,
+                data={"intro": {}, "findings": []},
+            )
+
+        monkeypatch.setattr(UrlWebScanTool, "_scan_with_browser", fake_scan_with_browser)
 
         result = await UrlWebScanTool(app_config=object(), db=_FakeDB()).scan(
             ScanRequest(
@@ -809,9 +871,32 @@ def test_generic_http_error_page_bypasses_browser_agent():
         )
 
         assert result.success is True
+        assert calls == ["https://blocked.example"]
+
+    asyncio.run(_run())
+
+
+def test_definitive_not_found_page_bypasses_browser_agent():
+    async def _run():
+        from api.services.info_collection import ScanRequest
+        from api.services.info_collection.url_tools import UrlWebScanTool
+
+        result = await UrlWebScanTool(app_config=object(), db=_FakeDB()).scan(
+            ScanRequest(
+                source="web_tagging",
+                target="https://missing.example",
+                project_id="project-1",
+                task_id="task-1",
+                target_info={
+                    "url": "https://missing.example",
+                    "probe": {"status_code": 404, "title": "404 Not Found"},
+                },
+            )
+        )
+
+        assert result.success is True
         assert result.meta["short_circuited"] is True
-        assert result.data["findings"] == []
-        assert result.data["classification"] == "http_error"
+        assert result.data["classification"] == "generic_error_page"
 
     asyncio.run(_run())
 

@@ -250,7 +250,7 @@ async def _list_url_scan_records(
     async for finding in cursor:
         key = (
             str(finding.get("task_id") or ""),
-            endpoint_identity(str(finding.get("source_url") or finding.get("url") or "")),
+            endpoint_identity(str(finding.get("url") or finding.get("source_url") or "")),
         )
         findings_by_record[key].append(finding)
     records = []
