@@ -143,7 +143,7 @@ class ScholarContactListRequest(PageRequest):
     unit: str = Field(default="", description="单位过滤")
     target_id: str = Field(default="", description="目标 ID 过滤")
     only_corresponding: bool = Field(default=False, description="仅通讯作者")
-    only_verified: bool = Field(default=False, description="仅目标单位已验证(人物↔单位一致)")
+    only_verified: bool = Field(default=True, description="仅目标单位已验证(人物↔单位一致)")
 
 
 class ScholarArticleListRequest(PageRequest):

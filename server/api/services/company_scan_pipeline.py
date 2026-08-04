@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -2515,7 +2516,7 @@ class CompanyScanPipeline:
         *,
         explicit: str = "",
     ) -> str:
-        """Prefer an existing English company alias for institution verification."""
+        """Prefer a descriptive English institution name, not an ambiguous acronym."""
         configured = str(explicit or "").strip()
         if configured:
             return configured
@@ -2526,6 +2527,11 @@ class CompanyScanPipeline:
             and value.strip()
             and value.isascii()
             and any(character.isalpha() for character in value)
+            and len(re.findall(r"[A-Za-z]{2,}", value)) >= 2
+            and sum(
+                len(token) for token in re.findall(r"[A-Za-z]{2,}", value)
+            )
+            >= 10
         ]
         return max(candidates, key=lambda value: (len(value), value), default="")
 

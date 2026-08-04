@@ -267,6 +267,13 @@ def test_scholar_unit_en_reuses_longest_ascii_company_alias() -> None:
         ["安徽广播电视台", "AHTV"],
         explicit="Anhui Broadcasting Corporation",
     ) == "Anhui Broadcasting Corporation"
+    assert pipeline._derive_scholar_unit_en(
+        ["教育部教育考试院", "NEEA"]
+    ) == ""
+    assert pipeline._derive_scholar_unit_en(
+        ["教育部教育考试院", "NEEA"],
+        explicit="National Education Examinations Authority",
+    ) == "National Education Examinations Authority"
 
 
 def test_named_jobs_write_checkpoint_after_each_success() -> None:

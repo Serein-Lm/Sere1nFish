@@ -276,7 +276,7 @@ async def _scholar_contacts(db, project_id, limit, _access):
     from api.dao import scholar_contact
 
     items, total = await scholar_contact.query_contacts(
-        db, project_id, limit=limit
+        db, project_id, only_verified=True, limit=limit
     )
     return ProjectDatasetResult(items, total)
 
@@ -469,6 +469,7 @@ async def _query_scholar_contacts(db, project_id, query, _access):
         db,
         project_id,
         target_id=query.target_id,
+        only_verified=True,
         limit=query.limit,
         skip=query.offset,
     )

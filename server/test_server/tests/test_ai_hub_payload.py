@@ -1428,6 +1428,7 @@ async def test_project_dataset_adapters_reuse_clean_project_read_models(monkeypa
     assert calls["bidding"]["target_id"] == "target_1"
     assert calls["targets"] == {"project_id": "project_1", "compact": True}
     assert calls["scholar"]["target_id"] == "target_1"
+    assert calls["scholar"]["only_verified"] is True
     assert calls["wechat"]["archived_only"] is True
     assert calls["wechat"]["min_score"] == 70
     assert calls["assets"] == {
