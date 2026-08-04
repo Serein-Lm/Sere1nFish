@@ -2,6 +2,7 @@
 
 import base64
 import subprocess
+import time
 
 from AutoGLM_GUI.platform_utils import build_adb_command
 from AutoGLM_GUI.trace import trace_span
@@ -79,6 +80,16 @@ def detect_and_set_adb_keyboard(device_id: str | None = None) -> str:
             _run_adb_input_command(
                 adb_prefix + ["shell", "ime", "set", "com.android.adbkeyboard/.AdbIME"],
             )
+        time.sleep(0.3)
+
+    verified = _run_adb_input_command(
+        adb_prefix + ["shell", "settings", "get", "secure", "default_input_method"],
+    )
+    active_ime = (verified.stdout + verified.stderr).strip()
+    if "com.android.adbkeyboard/.AdbIME" not in active_ime:
+        raise RuntimeError(
+            f"ADB Keyboard 切换未生效，当前输入法: {active_ime or 'unknown'}"
+        )
 
     type_text("", device_id)
 

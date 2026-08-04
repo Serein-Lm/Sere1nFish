@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
@@ -86,6 +87,7 @@ class WechatArticleSearchNavigator:
     )
     _LAUNCHER_ACTIVITY = "com.tencent.mm.ui.LauncherUI"
     _LAUNCHER_SEARCH_ENTRY = (830, 67)
+    _SEARCH_EDITOR = (500, 67)
     _EXACT_QUERY_SUGGESTION = (400, 229)
 
     def __init__(
@@ -102,17 +104,115 @@ class WechatArticleSearchNavigator:
         self._sleep = sleep
 
     def _shell(self, adb_device_id: str, args: list[str], *, timeout: int = 5) -> str:
+        return self._adb(
+            ["-s", adb_device_id, "shell", *args],
+            timeout=timeout,
+        )
+
+    def _adb(self, args: list[str], *, timeout: int = 5) -> str:
         try:
-            result = self._runner(
-                ["-s", adb_device_id, "shell", *args],
-                timeout,
-            )
+            result = self._runner(args, timeout)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"ADB 命令超时: {' '.join(args[:3])}") from exc
         if result.returncode != 0:
             message = (result.stderr or result.stdout or "ADB 命令失败").strip()
             raise RuntimeError(message[:300])
         return result.stdout or ""
+
+    @staticmethod
+    def _normalize_query(value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "")).casefold()
+
+    def _read_search_query(self, adb_device_id: str) -> str | None:
+        output = self._adb(
+            [
+                "-s",
+                adb_device_id,
+                "exec-out",
+                "uiautomator",
+                "dump",
+                "--compressed",
+                "/dev/tty",
+            ],
+            timeout=10,
+        )
+        start = output.find("<?xml")
+        end = output.rfind("</hierarchy>")
+        if start < 0 or end < 0:
+            raise RuntimeError("微信搜索框校验失败: UIAutomator 未返回有效界面树")
+        try:
+            root = ET.fromstring(output[start : end + len("</hierarchy>")])
+        except ET.ParseError as exc:
+            raise RuntimeError("微信搜索框校验失败: 界面树无法解析") from exc
+
+        editors: list[tuple[bool, str]] = []
+        for node in root.iter("node"):
+            if not str(node.attrib.get("class") or "").endswith("EditText"):
+                continue
+            value = str(
+                node.attrib.get("text")
+                or node.attrib.get("content-desc")
+                or ""
+            ).strip()
+            editors.append((node.attrib.get("focused") == "true", value))
+        if not editors:
+            meaningful_nodes = [
+                node
+                for node in root.iter("node")
+                if str(node.attrib.get("class") or "").strip()
+                or str(node.attrib.get("bounds") or "").strip()
+                not in {"", "[0,0][0,0]"}
+            ]
+            if not meaningful_nodes:
+                return None
+        focused = next((value for is_focused, value in editors if is_focused), "")
+        return focused or next((value for _focused, value in editors if value), "")
+
+    def _wait_for_query(
+        self,
+        adb_device_id: str,
+        expected: str,
+        *,
+        attempts: int = 4,
+    ) -> tuple[str, str]:
+        actual = ""
+        expected_normalized = self._normalize_query(expected)
+        for attempt in range(max(1, attempts)):
+            observed = self._read_search_query(adb_device_id)
+            if observed is None:
+                return expected, "adb_keyboard_activity"
+            actual = observed
+            if self._normalize_query(actual) == expected_normalized:
+                return actual, "uiautomator_exact"
+            if attempt + 1 < attempts:
+                self._sleep(0.25)
+        raise RuntimeError(
+            "微信搜索词未生效，"
+            f"期望“{expected}”，实际“{actual or '空'}”"
+        )
+
+    def _type_verified_query(
+        self,
+        device,
+        adb_device_id: str,
+        keyword: str,
+    ) -> tuple[str, str]:
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            self._tap_normalized(
+                device,
+                adb_device_id,
+                self._SEARCH_EDITOR,
+            )
+            self._sleep(0.25)
+            device.clear_text()
+            device.type_text(keyword)
+            self._sleep(0.35)
+            try:
+                return self._wait_for_query(adb_device_id, keyword)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        raise RuntimeError(str(last_error or "微信搜索词输入失败"))
 
     def _current_activity(self, adb_device_id: str) -> str:
         output = self._shell(
@@ -251,9 +351,11 @@ class WechatArticleSearchNavigator:
             previous_ime = device.detect_and_set_adb_keyboard()
             restore_error = ""
             try:
-                device.clear_text()
-                device.type_text(normalized_keyword)
-                self._sleep(0.35)
+                verified_query, query_verification = self._type_verified_query(
+                    device,
+                    adb_device_id,
+                    normalized_keyword,
+                )
                 activity, submission = self._submit_search(
                     device,
                     adb_device_id,
@@ -268,6 +370,8 @@ class WechatArticleSearchNavigator:
             metadata = {
                 "activity": activity,
                 "keyword": normalized_keyword,
+                "verified_query": verified_query,
+                "query_verification": query_verification,
                 "app_instance": "clone" if app_instance == "clone" else "primary",
                 "submission": submission,
             }

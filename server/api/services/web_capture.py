@@ -66,6 +66,14 @@ async def _cdp_command(
         return message.get("result") or {}
 
 
+async def _ignore_certificate_errors(command: Any) -> None:
+    """Configure the current CDP connection before it navigates any page."""
+    await command(
+        "Security.setIgnoreCertificateErrors",
+        params={"ignore": True},
+    )
+
+
 async def capture_cdp_page_screenshot(
     cdp_url: str,
     preferred_url: str,
@@ -102,6 +110,7 @@ async def capture_cdp_page_screenshot(
                 session_id=session_id,
             )
 
+        await _ignore_certificate_errors(_command)
         targets_result = await _command("Target.getTargets")
         target = _select_page_target(targets_result.get("targetInfos") or [], preferred_url)
         created_target_id = ""

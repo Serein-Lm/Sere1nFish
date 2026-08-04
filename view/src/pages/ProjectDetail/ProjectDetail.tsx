@@ -666,6 +666,7 @@ export default function ProjectDetail() {
   const [wechatLoading, setWechatLoading] = useState(false)
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
   const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
+  const [targetSearchText, setTargetSearchText] = useState('')
   const [targetResearchActionId, setTargetResearchActionId] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
   const [websiteTargetId, setWebsiteTargetId] = useState('')
@@ -3695,6 +3696,42 @@ export default function ProjectDetail() {
     return sortTree(roots)
   }, [projectTargets])
 
+  const filteredTargetDashboardRows = useMemo<TargetDashboardRow[]>(() => {
+    const query = targetSearchText.trim().toLocaleLowerCase('zh-CN')
+    if (!query) return targetDashboardRows
+
+    const filterRows = (rows: TargetDashboardRow[]): TargetDashboardRow[] => rows
+      .map((row) => {
+        const searchable = [
+          row.target_name,
+          row.root_domain,
+          row.target_id,
+          row.parent_target_name,
+          ...(row.search_terms || []),
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLocaleLowerCase('zh-CN')
+        const children = filterRows(row.children || [])
+        if (!searchable.includes(query) && children.length === 0) return null
+        return {
+          ...row,
+          ...(children.length ? { children } : { children: undefined }),
+        }
+      })
+      .filter((row): row is TargetDashboardRow => row !== null)
+
+    return filterRows(targetDashboardRows)
+  }, [targetDashboardRows, targetSearchText])
+
+  const filteredTargetCount = useMemo(() => {
+    const countRows = (rows: TargetDashboardRow[]): number => rows.reduce(
+      (total, row) => total + 1 + countRows(row.children || []),
+      0,
+    )
+    return countRows(filteredTargetDashboardRows)
+  }, [filteredTargetDashboardRows])
+
   const applyTargetScope = (targetId: string) => {
     if (targetId !== selectedTargetId) {
       TARGET_DATA_TAB_KEYS.forEach((tab) => loadedTabsRef.current.delete(tab))
@@ -3892,18 +3929,28 @@ export default function ProjectDetail() {
       <div>
         <div className="project-data-toolbar">
           <Text type="secondary">按 Target 汇总项目数据并展示单位层级；展开子单位或孙单位后，可点击模块数量直接钻取。</Text>
-          <Button size="small" icon={<SyncOutlined />} onClick={() => { if (projectId) void fetchProjectTargets(projectId) }}>
-            刷新
-          </Button>
+          <div className="target-dashboard-actions">
+            <Input
+              value={targetSearchText}
+              allowClear
+              prefix={<SearchOutlined />}
+              placeholder="搜索 Target 名称、域名或关键词"
+              aria-label="搜索 Target"
+              onChange={(event) => setTargetSearchText(event.target.value)}
+            />
+            <Button size="small" icon={<SyncOutlined />} onClick={() => { if (projectId) void fetchProjectTargets(projectId) }}>
+              刷新
+            </Button>
+          </div>
         </div>
         <Table<TargetDashboardRow>
           rowKey="project_target_id"
           size="small"
           columns={columns}
-          dataSource={targetDashboardRows}
-          locale={{ emptyText: <Empty description="项目尚未关联 Target" /> }}
+          dataSource={filteredTargetDashboardRows}
+          locale={{ emptyText: <Empty description={targetSearchText.trim() ? '没有匹配的 Target' : '项目尚未关联 Target'} /> }}
           expandable={{ defaultExpandAllRows: true, indentSize: 20 }}
-          pagination={{ pageSize: 20, showTotal: () => `共 ${projectTargets.length} 个 Target` }}
+          pagination={{ pageSize: 20, showTotal: () => `共 ${filteredTargetCount} 个 Target` }}
           scroll={{ x: 1380 }}
           onRow={(target) => ({
             onClick: () => openTargetDetails(target),

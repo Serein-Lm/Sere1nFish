@@ -19,6 +19,7 @@ from ..config.models import AppConfig, McpServerConfig
 
 
 CHROME_DEVTOOLS_MCP_COMMAND = "chrome-devtools-mcp"
+CHROME_ACCEPT_INSECURE_CERTS_ARG = "--acceptInsecureCerts"
 
 
 def get_mcp_servers(
@@ -92,12 +93,15 @@ def _build_chrome_connection_dict(
     """Use the image-pinned executable instead of racing through shared npx."""
     result = _build_connection_dict(cfg)
     result["command"] = CHROME_DEVTOOLS_MCP_COMMAND
-    result["args"] = [
+    args = [
         arg
         for arg in list(cfg.args or [])
         if arg not in {"-y", "--yes", "--"}
         and not str(arg).startswith("chrome-devtools-mcp@")
     ]
+    if CHROME_ACCEPT_INSECURE_CERTS_ARG not in args:
+        args.append(CHROME_ACCEPT_INSECURE_CERTS_ARG)
+    result["args"] = args
     return result
 
 
@@ -120,6 +124,7 @@ def build_chrome_mcp_connection(browser_url: str) -> dict[str, dict[str, Any]]:
             "command": CHROME_DEVTOOLS_MCP_COMMAND,
             "args": [
                 f"--wsEndpoint={browser_url}",
+                CHROME_ACCEPT_INSECURE_CERTS_ARG,
             ],
         }
     }

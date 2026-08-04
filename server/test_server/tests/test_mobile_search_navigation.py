@@ -65,10 +65,28 @@ class _FakeLauncher:
         )
 
 
-def _activity_runner(activities: list[str]):
+def _activity_runner(activities: list[str], *, query: str | None = ""):
     pending = list(activities)
 
     def run(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+        if "uiautomator" in args:
+            if query is None:
+                output = (
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>'
+                    '<hierarchy rotation="0">'
+                    '<node class="" focused="false" text="" '
+                    'content-desc="" bounds="[0,0][0,0]" />'
+                    '</hierarchy>'
+                )
+            else:
+                output = (
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>'
+                    '<hierarchy rotation="0">'
+                    '<node class="android.widget.EditText" focused="true" '
+                    f'text="{query}" content-desc="" />'
+                    '</hierarchy>'
+                )
+            return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
         assert args[-2:] == ["dumpsys", "window"]
         activity = pending.pop(0)
         output = (
@@ -98,7 +116,8 @@ def test_wechat_search_navigator_uses_verified_activity_path(monkeypatch) -> Non
                 "com.tencent.mm.ui.LauncherUI",
                 "com.tencent.mm.plugin.fts.ui.FTSMainUI",
                 "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI",
-            ]
+            ],
+            query="安徽广播电视台 招标",
         ),
         sleep=lambda _seconds: None,
     )
@@ -113,10 +132,13 @@ def test_wechat_search_navigator_uses_verified_activity_path(monkeypatch) -> Non
     assert result.ok is True
     assert result.metadata["activity"].endswith("MMFTSSOSHomeWebViewUI")
     assert result.metadata["submission"] == "suggestion_tap"
+    assert result.metadata["verified_query"] == "安徽广播电视台 招标"
+    assert result.metadata["query_verification"] == "uiautomator_exact"
     assert launcher.calls == [("10.0.0.2:5555", "微信", "primary")]
     assert device.events == [
         ("tap", 830, 67),
         ("keyboard", "set"),
+        ("tap", 500, 67),
         ("clear",),
         ("type", "安徽广播电视台 招标"),
         ("tap", 400, 229),
@@ -170,7 +192,8 @@ def test_wechat_search_navigator_reuses_result_search_input(monkeypatch) -> None
                 "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI",
                 "com.tencent.mm.plugin.fts.ui.FTSMainUI",
                 "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI",
-            ]
+            ],
+            query="AHTV 招标",
         ),
         sleep=lambda _seconds: None,
     )
@@ -205,7 +228,8 @@ def test_wechat_search_navigator_recovers_from_article_webview(monkeypatch) -> N
                 "com.tencent.mm.ui.LauncherUI",
                 "com.tencent.mm.plugin.fts.ui.FTSMainUI",
                 "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI",
-            ]
+            ],
+            query="安徽广播电视台 招标",
         ),
         sleep=lambda _seconds: None,
     )
@@ -241,7 +265,8 @@ def test_wechat_search_navigator_retries_enter_when_suggestion_does_not_submit(
         manager_factory=lambda: _FakeManager(device),
         launcher_factory=_FakeLauncher,
         runner=_activity_runner(
-            [search_activity, *([search_activity] * 4), result_activity]
+            [search_activity, *([search_activity] * 4), result_activity],
+            query="安徽广播电视台 招标",
         ),
         sleep=lambda _seconds: None,
     )
@@ -256,6 +281,72 @@ def test_wechat_search_navigator_retries_enter_when_suggestion_does_not_submit(
     assert result.ok is True
     assert result.metadata["submission"] == "enter_retry_1"
     assert ("press", "enter") in device.events
+
+
+def test_wechat_search_navigator_rejects_stale_query(monkeypatch) -> None:
+    from core.mobile.collect import search_navigation
+
+    device = _FakeDevice()
+    monkeypatch.setattr(
+        search_navigation,
+        "resolve_tap",
+        lambda x, y, **_kwargs: (x, y),
+    )
+    navigator = WechatArticleSearchNavigator(
+        manager_factory=lambda: _FakeManager(device),
+        launcher_factory=_FakeLauncher,
+        runner=_activity_runner(
+            ["com.tencent.mm.plugin.fts.ui.FTSMainUI"],
+            query="微信团队",
+        ),
+        sleep=lambda _seconds: None,
+    )
+
+    result = navigator.navigate(
+        "device-a",
+        app_name="微信",
+        app_instance="primary",
+        keyword="教育部教育管理信息中心 招标",
+    )
+
+    assert result.ok is False
+    assert "微信搜索词未生效" in str(result.error)
+    assert ("keyboard", "restore", "original/.Ime") in device.events
+
+
+def test_wechat_search_navigator_accepts_opaque_wechat_webview(monkeypatch) -> None:
+    from core.mobile.collect import search_navigation
+
+    device = _FakeDevice()
+    monkeypatch.setattr(
+        search_navigation,
+        "resolve_tap",
+        lambda x, y, **_kwargs: (x, y),
+    )
+    navigator = WechatArticleSearchNavigator(
+        manager_factory=lambda: _FakeManager(device),
+        launcher_factory=_FakeLauncher,
+        runner=_activity_runner(
+            [
+                "com.tencent.mm.plugin.fts.ui.FTSMainUI",
+                "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI",
+            ],
+            query=None,
+        ),
+        sleep=lambda _seconds: None,
+    )
+
+    result = navigator.navigate(
+        "device-a",
+        app_name="微信",
+        app_instance="primary",
+        keyword="全国学生资助管理中心 招标",
+    )
+
+    assert result.ok is True
+    assert result.metadata["verified_query"] == "全国学生资助管理中心 招标"
+    assert result.metadata["query_verification"] == "adb_keyboard_activity"
+    assert device.events.count(("type", "全国学生资助管理中心 招标")) == 1
 
 
 def test_registered_navigation_runs_without_visual_agent(monkeypatch) -> None:

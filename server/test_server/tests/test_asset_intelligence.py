@@ -7,7 +7,11 @@ from typing import Any
 import pytest
 
 from api.dao import fofa_assets as assets_dao
-from api.services.asset_intelligence.adapters import FofaAssetProvider, HunterAssetProvider
+from api.services.asset_intelligence.adapters import (
+    FofaAssetProvider,
+    HttpAssetProbe,
+    HunterAssetProvider,
+)
 from api.services.asset_intelligence.contracts import (
     AssetCandidate,
     AssetIdentity,
@@ -148,6 +152,88 @@ def test_probe_content_length_does_not_trigger_asset_change() -> None:
     }
 
     assert assets_dao._content_hash(first) == assets_dao._content_hash(second)
+
+
+@pytest.mark.asyncio
+async def test_http_probe_uses_readable_transport_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import adapters
+
+    async def probe(urls: list[str], **_kwargs: Any) -> list[Any]:
+        rows = []
+        for url in urls:
+            if url.startswith("https://"):
+                rows.append(
+                    type("Probe", (), {
+                        "url": url,
+                        "is_alive": True,
+                        "status_code": 412,
+                        "title": "",
+                        "content_length": 3000,
+                        "response_time": 0.1,
+                        "error": None,
+                    })()
+                )
+            else:
+                rows.append(
+                    type("Probe", (), {
+                        "url": url,
+                        "is_alive": True,
+                        "status_code": 200,
+                        "title": "官网",
+                        "content_length": 12000,
+                        "response_time": 0.1,
+                        "error": None,
+                    })()
+                )
+        return rows
+
+    monkeypatch.setattr(adapters.hunter_tools, "probe_urls_batch", probe)
+    result = await HttpAssetProbe().probe(
+        ["https://www.example.com"],
+        concurrency=4,
+        timeout=5,
+    )
+
+    selected = result["https://www.example.com"]
+    assert selected["selected_url"] == "http://www.example.com"
+    assert selected["transport_fallback_used"] is True
+    assert selected["is_content_accessible"] is True
+
+
+@pytest.mark.asyncio
+async def test_http_probe_does_not_rewrite_explicit_application_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import adapters
+
+    calls: list[list[str]] = []
+
+    async def probe(urls: list[str], **_kwargs: Any) -> list[Any]:
+        calls.append(urls)
+        return [
+            type("Probe", (), {
+                "url": url,
+                "is_alive": True,
+                "status_code": 502,
+                "title": "Bad Gateway",
+                "content_length": 100,
+                "response_time": 0.1,
+                "error": None,
+            })()
+            for url in urls
+        ]
+
+    monkeypatch.setattr(adapters.hunter_tools, "probe_urls_batch", probe)
+    result = await HttpAssetProbe().probe(
+        ["https://www.example.com:1443"],
+        concurrency=4,
+        timeout=5,
+    )
+
+    assert calls == [["https://www.example.com:1443"]]
+    assert result["https://www.example.com:1443"]["selected_url"] == "https://www.example.com:1443"
 
 
 @pytest.mark.asyncio

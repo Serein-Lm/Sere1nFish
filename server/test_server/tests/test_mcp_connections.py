@@ -1,5 +1,6 @@
 from Sere1nGraph.graph.config.models import AppConfig, McpServerConfig
 from Sere1nGraph.graph.tools.mcp import (
+    CHROME_ACCEPT_INSECURE_CERTS_ARG,
     CHROME_DEVTOOLS_MCP_COMMAND,
     build_chrome_mcp_connection,
     build_mcp_connections,
@@ -14,7 +15,10 @@ def test_dynamic_chrome_connection_uses_image_pinned_binary() -> None:
     assert connection == {
         "transport": "stdio",
         "command": CHROME_DEVTOOLS_MCP_COMMAND,
-        "args": ["--wsEndpoint=ws://chrome-test:8250/cdp-proxy"],
+        "args": [
+            "--wsEndpoint=ws://chrome-test:8250/cdp-proxy",
+            CHROME_ACCEPT_INSECURE_CERTS_ARG,
+        ],
     }
 
 
@@ -41,6 +45,7 @@ def test_configured_chrome_connection_normalizes_legacy_npx_arguments() -> None:
 
     assert connection["command"] == CHROME_DEVTOOLS_MCP_COMMAND
     assert connection["args"] == [
-        "--wsEndpoint=ws://chrome-test:8250/cdp-proxy"
+        "--wsEndpoint=ws://chrome-test:8250/cdp-proxy",
+        CHROME_ACCEPT_INSECURE_CERTS_ARG,
     ]
     assert connection["env"] == {"KEEP": "1"}

@@ -6,6 +6,7 @@ import asyncio
 import time
 from dataclasses import asdict
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from crawler_tools import fofa_tools, hunter_tools
 
@@ -231,6 +232,62 @@ class HunterAssetProvider:
 
 
 class HttpAssetProbe:
+    @staticmethod
+    def _as_probe(item: Any) -> dict[str, Any]:
+        return {
+            "url": str(getattr(item, "url", "") or ""),
+            "is_alive": bool(getattr(item, "is_alive", False)),
+            "status_code": getattr(item, "status_code", None),
+            "title": getattr(item, "title", None),
+            "content_length": getattr(item, "content_length", None),
+            "response_time": getattr(item, "response_time", None),
+            "error": getattr(item, "error", None),
+        }
+
+    @staticmethod
+    def _content_accessible(probe: dict[str, Any]) -> bool:
+        try:
+            status = int(probe.get("status_code") or 0)
+            content_length = int(probe.get("content_length") or 0)
+        except (TypeError, ValueError):
+            return False
+        return bool(probe.get("is_alive")) and 200 <= status < 400 and content_length > 0
+
+    @classmethod
+    def _probe_score(cls, probe: dict[str, Any]) -> tuple[int, int, int, int]:
+        try:
+            status = int(probe.get("status_code") or 0)
+            content_length = max(0, int(probe.get("content_length") or 0))
+        except (TypeError, ValueError):
+            status = 0
+            content_length = 0
+        return (
+            int(cls._content_accessible(probe)),
+            int(bool(probe.get("is_alive")) and 200 <= status < 400),
+            int(bool(probe.get("is_alive"))),
+            min(content_length, 10_000_000),
+        )
+
+    @staticmethod
+    def _alternate_default_transport(url: str) -> str:
+        try:
+            parsed = urlsplit(str(url or ""))
+            host = parsed.hostname or ""
+            port = parsed.port
+        except ValueError:
+            return ""
+        if not host or parsed.scheme not in {"http", "https"}:
+            return ""
+        if port is not None and not (
+            (parsed.scheme == "http" and port == 80)
+            or (parsed.scheme == "https" and port == 443)
+        ):
+            return ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        alternate_scheme = "http" if parsed.scheme == "https" else "https"
+        return urlunsplit((alternate_scheme, host, parsed.path, parsed.query, ""))
+
     async def probe(
         self,
         urls: list[str],
@@ -244,14 +301,40 @@ class HttpAssetProbe:
             timeout=timeout,
             only_alive=False,
         )
-        return {
-            item.url: {
-                "is_alive": item.is_alive,
-                "status_code": item.status_code,
-                "title": item.title,
-                "content_length": item.content_length,
-                "response_time": item.response_time,
-                "error": item.error,
-            }
-            for item in results
+        initial = {item.url: self._as_probe(item) for item in results}
+        alternates = {
+            url: alternate
+            for url in urls
+            if not self._content_accessible(initial.get(url, {}))
+            and (alternate := self._alternate_default_transport(url))
+            and alternate not in initial
         }
+        alternate_results: dict[str, dict[str, Any]] = {}
+        if alternates:
+            probed = await hunter_tools.probe_urls_batch(
+                list(dict.fromkeys(alternates.values())),
+                concurrency=concurrency,
+                timeout=timeout,
+                only_alive=False,
+            )
+            alternate_results = {item.url: self._as_probe(item) for item in probed}
+
+        output: dict[str, dict[str, Any]] = {}
+        for requested_url in urls:
+            requested = initial.get(
+                requested_url,
+                {"url": requested_url, "is_alive": False, "error": "missing probe result"},
+            )
+            alternate_url = alternates.get(requested_url, "")
+            alternate = alternate_results.get(alternate_url)
+            selected = requested
+            if alternate and self._probe_score(alternate) > self._probe_score(requested):
+                selected = alternate
+            output[requested_url] = {
+                **selected,
+                "requested_url": requested_url,
+                "selected_url": str(selected.get("url") or requested_url),
+                "transport_fallback_used": selected is alternate,
+                "is_content_accessible": self._content_accessible(selected),
+            }
+        return output

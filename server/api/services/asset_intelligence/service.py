@@ -119,14 +119,16 @@ class AssetIntelligenceService:
         alive_urls: list[str] = []
         probe_metadata_by_url: dict[str, dict[str, Any]] = {}
         for doc in docs:
-            url = str(doc.get("canonical_url") or "")
+            canonical_url = str(doc.get("canonical_url") or "")
+            probe = dict(doc.get("probe") or {})
+            url = str(probe.get("selected_url") or canonical_url)
             if not url or not doc.get("is_alive"):
                 continue
             alive_urls.append(url)
             probe_metadata_by_url[url] = {
                 "url": url,
                 "title": str(doc.get("title") or ""),
-                "probe": dict(doc.get("probe") or {}),
+                "probe": probe,
                 "fingerprints": list(doc.get("fingerprints") or []),
                 "sources": list(doc.get("sources") or []),
                 **({"_asset_triage_passed": True} if triage_applied else {}),

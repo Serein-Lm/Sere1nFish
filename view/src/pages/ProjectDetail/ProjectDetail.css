@@ -446,6 +446,24 @@
   flex-wrap: wrap;
 }
 
+.target-dashboard-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(100%, 420px);
+}
+
+.target-dashboard-actions .ant-input-affix-wrapper {
+  flex: 1;
+  min-width: 220px;
+}
+
+@media (max-width: 640px) {
+  .target-dashboard-actions {
+    width: 100%;
+  }
+}
+
 .target-company-cell {
   display: flex;
   flex-direction: column;

@@ -51,3 +51,50 @@ def test_text_uses_base64_broadcast(monkeypatch) -> None:
             encoded,
         ]
     ]
+
+
+def test_detect_keyboard_verifies_active_ime(monkeypatch) -> None:
+    commands: list[list[str]] = []
+    outputs = iter(
+        [
+            "vendor/.Ime",
+            "Input method com.android.adbkeyboard/.AdbIME selected",
+            "com.android.adbkeyboard/.AdbIME",
+            "Broadcast completed: result=0",
+        ]
+    )
+
+    def run(command: list[str]):
+        commands.append(command)
+        result = _completed(command)
+        result.stdout = next(outputs)
+        return result
+
+    monkeypatch.setattr(adb_input, "_run_adb_input_command", run)
+    monkeypatch.setattr(adb_input, "build_adb_command", lambda _device_id: ["adb"])
+    monkeypatch.setattr(adb_input.time, "sleep", lambda _seconds: None)
+
+    original = adb_input.detect_and_set_adb_keyboard("device-1")
+
+    assert original == "vendor/.Ime"
+    assert ["shell", "ime", "set", "com.android.adbkeyboard/.AdbIME"] == commands[1][1:]
+
+
+def test_detect_keyboard_rejects_failed_switch(monkeypatch) -> None:
+    outputs = iter(["vendor/.Ime", "selected", "vendor/.Ime"])
+
+    def run(command: list[str]):
+        result = _completed(command)
+        result.stdout = next(outputs)
+        return result
+
+    monkeypatch.setattr(adb_input, "_run_adb_input_command", run)
+    monkeypatch.setattr(adb_input, "build_adb_command", lambda _device_id: ["adb"])
+    monkeypatch.setattr(adb_input.time, "sleep", lambda _seconds: None)
+
+    try:
+        adb_input.detect_and_set_adb_keyboard("device-1")
+    except RuntimeError as exc:
+        assert "切换未生效" in str(exc)
+    else:
+        raise AssertionError("输入法切换失败时必须抛错")

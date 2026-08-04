@@ -1,4 +1,6 @@
-from api.services.web_capture import _select_page_target
+import asyncio
+
+from api.services.web_capture import _ignore_certificate_errors, _select_page_target
 
 
 def test_page_target_prefers_exact_url_over_other_tabs() -> None:
@@ -37,3 +39,16 @@ def test_page_target_rejects_unrelated_open_tab() -> None:
     )
 
     assert selected is None
+
+
+def test_configure_cdp_security_ignores_certificate_errors() -> None:
+    calls = []
+
+    async def command(method, *, params=None):
+        calls.append((method, params))
+
+    asyncio.run(_ignore_certificate_errors(command))
+
+    assert calls == [
+        ("Security.setIgnoreCertificateErrors", {"ignore": True})
+    ]
