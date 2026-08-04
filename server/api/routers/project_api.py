@@ -209,6 +209,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         enable_asset_discovery=params.get("enable_asset_discovery", True),
         enable_xhs=params.get("enable_xhs", False),
         enable_subsidiary_xhs=params.get("enable_subsidiary_xhs", False),
+        enable_subsidiary_bidding=params.get("enable_subsidiary_bidding", False),
         xhs_target_selection_mode=params.get("xhs_target_selection_mode", "auto"),
         xhs_manual_targets=params.get("xhs_manual_targets", []),
         enable_bidding=params.get("enable_bidding", False),

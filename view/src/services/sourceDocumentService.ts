@@ -136,6 +136,40 @@ export interface ProjectTargetSummary {
   collection_complete?: boolean
   linked_project_count: number
   last_document_at?: string
+  search_match?: boolean
+  search_score?: number
+  child_count?: number
+  descendant_count?: number
+}
+
+export interface ProjectTargetOption {
+  project_target_id: string
+  target_id: string
+  target_name: string
+  root_domain?: string
+  root_target_id?: string
+  root_target_name?: string
+  parent_target_id?: string
+  parent_target_name?: string
+  relation_depth?: number
+}
+
+export interface ProjectTargetPageResponse {
+  items: ProjectTargetSummary[]
+  total: number
+  root_total: number
+  project_total: number
+  matched_total: number
+  page: number
+  page_size: number
+  matched_target_ids: string[]
+  expanded_project_target_ids: string[]
+}
+
+export interface ProjectTargetBranchResponse {
+  items: ProjectTargetSummary[]
+  total: number
+  root_target_id: string
 }
 
 export interface TargetResearchTaskResponse {
@@ -144,6 +178,23 @@ export interface TargetResearchTaskResponse {
   task_type?: 'target_research'
   status: string
   deduplicated?: boolean
+}
+
+export interface TargetResearchBatchResponse {
+  batch_id: string
+  task_type: 'target_research'
+  task_count: number
+  task_ids: string[]
+  linked_target_count: number
+  targets: Array<{ target_id: string; target_name: string }>
+  deduplicated: Array<{
+    target_id: string
+    target_name: string
+    task_id?: string
+    reason: string
+  }>
+  concurrency: number
+  status: 'pending' | 'deduplicated'
 }
 
 export interface TargetResearchResult {
@@ -169,9 +220,29 @@ export function getSourceDocument(documentId: string, projectId?: string, versio
   )
 }
 
-export function listProjectTargets(projectId: string) {
-  return apiFetch<{ items: ProjectTargetSummary[]; total: number }>(
-    `/v1/targets?project_id=${encodeURIComponent(projectId)}&compact=true`,
+export function listProjectTargets(
+  projectId: string,
+  options: { page?: number; page_size?: number; q?: string } = {},
+) {
+  const query = new URLSearchParams({
+    project_id: projectId,
+    compact: 'true',
+    page: String(options.page ?? 1),
+    page_size: String(options.page_size ?? 10),
+  })
+  if (options.q?.trim()) query.set('q', options.q.trim())
+  return apiFetch<ProjectTargetPageResponse>(`/v1/targets?${query.toString()}`)
+}
+
+export function listProjectTargetOptions(projectId: string) {
+  return apiFetch<{ items: ProjectTargetOption[]; total: number }>(
+    `/v1/targets/options?project_id=${encodeURIComponent(projectId)}`,
+  )
+}
+
+export function listProjectTargetBranch(projectId: string, targetId: string) {
+  return apiFetch<ProjectTargetBranchResponse>(
+    `/v1/targets/${encodeURIComponent(targetId)}/branch?project_id=${encodeURIComponent(projectId)}`,
   )
 }
 
@@ -198,6 +269,33 @@ export function createTargetResearch(
       }),
     },
   )
+}
+
+export function createTargetResearchBatch(
+  projectId: string,
+  targetNames: string[],
+  options?: {
+    concurrency?: number
+    scan_discovered_targets?: boolean
+    rescan_root?: boolean
+    max_related_targets?: number
+    force_refresh?: boolean
+    scan_params?: Record<string, unknown>
+  },
+) {
+  return apiFetch<TargetResearchBatchResponse>('/v1/targets/research-batch', {
+    method: 'POST',
+    body: JSON.stringify({
+      project_id: projectId,
+      target_names: targetNames,
+      concurrency: options?.concurrency ?? 4,
+      scan_discovered_targets: options?.scan_discovered_targets ?? true,
+      rescan_root: options?.rescan_root ?? true,
+      max_related_targets: options?.max_related_targets ?? 4,
+      force_refresh: options?.force_refresh ?? true,
+      scan_params: options?.scan_params ?? {},
+    }),
+  })
 }
 
 export function getTargetResearch(projectId: string, targetId: string) {

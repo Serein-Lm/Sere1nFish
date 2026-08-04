@@ -14,6 +14,7 @@ from api.db.collections import (
     FINDINGS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
     SOURCE_DOCUMENT_LINKS_COLLECTION,
+    TARGETS_COLLECTION,
     TASKS_COLLECTION,
     XHS_NOTES_COLLECTION,
 )
@@ -99,6 +100,256 @@ def _target_summary_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
         str(item.get("target_name") or "").casefold(),
         str(item.get("target_id") or ""),
     )
+
+
+def _normalized_search_values(values: list[Any]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            normalized
+            for value in values
+            if (normalized := targets_dao.normalize_target_name(str(value or "")))
+        )
+    )
+
+
+def _target_search_rank(
+    relation: dict[str, Any],
+    target: dict[str, Any],
+    query: str,
+) -> int | None:
+    """Rank a Target match while requiring every query term to be present."""
+    normalized_query = targets_dao.normalize_target_name(query)
+    if not normalized_query:
+        return 0
+    query_terms = _normalized_search_values(str(query or "").split()) or [normalized_query]
+
+    channel_terms = [
+        term
+        for terms in (relation.get("search_terms_by_channel") or {}).values()
+        if isinstance(terms, list)
+        for term in terms
+    ]
+    names = _normalized_search_values([
+        relation.get("target_name"),
+        target.get("canonical_name"),
+    ])
+    aliases = _normalized_search_values(target.get("aliases") or [])
+    domains = _normalized_search_values([
+        relation.get("root_domain"),
+        *(relation.get("root_domains") or []),
+        target.get("root_domain"),
+        *(target.get("root_domains") or []),
+    ])
+    identifiers = _normalized_search_values([
+        relation.get("target_id"),
+        relation.get("project_target_id"),
+    ])
+    context = _normalized_search_values([
+        *(relation.get("search_terms") or []),
+        *channel_terms,
+    ])
+    all_values = [*names, *aliases, *domains, *identifiers, *context]
+    if not all(any(term in value for value in all_values) for term in query_terms):
+        return None
+
+    score = 400 + min(len(query_terms), 10)
+    weighted_values = (
+        (names, 1000, 850, 700),
+        (aliases, 960, 820, 650),
+        (domains, 920, 800, 620),
+        (identifiers, 900, 780, 600),
+        (context, 720, 620, 500),
+    )
+    for values, exact_score, prefix_score, contains_score in weighted_values:
+        if normalized_query in values:
+            score = max(score, exact_score)
+        elif any(value.startswith(normalized_query) for value in values):
+            score = max(score, prefix_score)
+        elif any(normalized_query in value for value in values):
+            score = max(score, contains_score)
+    return score
+
+
+def _relation_root_target_id(
+    relation: dict[str, Any],
+    relations_by_target: dict[str, dict[str, Any]],
+) -> str:
+    target_id = str(relation.get("target_id") or "")
+    root_target_id = str(relation.get("root_target_id") or "")
+    if root_target_id and root_target_id in relations_by_target:
+        return root_target_id
+
+    current = relation
+    visited = {target_id}
+    while parent_id := str(current.get("parent_target_id") or ""):
+        if parent_id in visited or parent_id not in relations_by_target:
+            break
+        visited.add(parent_id)
+        current = relations_by_target[parent_id]
+        target_id = parent_id
+    return target_id
+
+
+def _target_hierarchy_counts(
+    relations: list[dict[str, Any]],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Return direct-child and descendant counts without loading summary metrics."""
+    relations_by_target = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if str(item.get("target_id") or "")
+    }
+    child_counts = {target_id: 0 for target_id in relations_by_target}
+    descendant_counts: dict[str, int] = {}
+    for target_id, relation in relations_by_target.items():
+        parent_target_id = str(relation.get("parent_target_id") or "")
+        if parent_target_id in child_counts and parent_target_id != target_id:
+            child_counts[parent_target_id] += 1
+        root_target_id = _relation_root_target_id(relation, relations_by_target)
+        if target_id != root_target_id:
+            descendant_counts[root_target_id] = (
+                descendant_counts.get(root_target_id, 0) + 1
+            )
+    return child_counts, descendant_counts
+
+
+def _select_target_relation_page(
+    relations: list[dict[str, Any]],
+    targets_by_id: dict[str, dict[str, Any]],
+    *,
+    query: str,
+    page: int,
+    page_size: int,
+    root_stats: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    """Select root Target groups and the minimum hierarchy needed for the page."""
+    relations_by_target = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if str(item.get("target_id") or "")
+    }
+    root_by_target = {
+        target_id: _relation_root_target_id(relation, relations_by_target)
+        for target_id, relation in relations_by_target.items()
+    }
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for target_id, relation in relations_by_target.items():
+        groups.setdefault(root_by_target[target_id], []).append(relation)
+
+    normalized_query = targets_dao.normalize_target_name(query)
+    direct_scores: dict[str, int] = {}
+    if normalized_query:
+        for target_id, relation in relations_by_target.items():
+            score = _target_search_rank(
+                relation,
+                targets_by_id.get(target_id, {}),
+                query,
+            )
+            if score is not None:
+                direct_scores[target_id] = score
+        candidate_roots = list(
+            dict.fromkeys(root_by_target[target_id] for target_id in direct_scores)
+        )
+    else:
+        candidate_roots = list(groups)
+
+    group_scores = {
+        root_id: max(
+            (direct_scores.get(str(item.get("target_id") or ""), 0) for item in groups[root_id]),
+            default=0,
+        )
+        for root_id in candidate_roots
+    }
+
+    def root_sort_key(root_id: str) -> tuple[Any, ...]:
+        relation = relations_by_target.get(root_id, {})
+        stats = root_stats.get(root_id, {})
+        return (
+            -group_scores.get(root_id, 0),
+            -int(stats.get("high_score_finding_count") or 0),
+            -int(bool(relation.get("last_collected_at"))),
+            -int(stats.get("finding_count") or 0),
+            str(relation.get("target_name") or "").casefold(),
+            root_id,
+        )
+
+    candidate_roots.sort(key=root_sort_key)
+    root_total = len(candidate_roots)
+    safe_page_size = max(1, min(int(page_size or 10), 100))
+    max_page = max(1, (root_total + safe_page_size - 1) // safe_page_size)
+    safe_page = min(max(1, int(page or 1)), max_page)
+    start = (safe_page - 1) * safe_page_size
+    selected_roots = candidate_roots[start:start + safe_page_size]
+
+    selected_target_ids: set[str] = set()
+    expanded_project_target_ids: set[str] = set()
+    if not normalized_query:
+        selected_target_ids.update(selected_roots)
+    else:
+        direct_matches = set(direct_scores)
+
+        def lineage(target_id: str) -> list[str]:
+            values: list[str] = []
+            current_id = target_id
+            visited: set[str] = set()
+            while current_id and current_id not in visited:
+                visited.add(current_id)
+                values.append(current_id)
+                current = relations_by_target.get(current_id, {})
+                current_id = str(current.get("parent_target_id") or "")
+            return values
+
+        for root_id in selected_roots:
+            group_target_ids = {
+                str(item.get("target_id") or "") for item in groups.get(root_id, [])
+            }
+            group_matches = direct_matches.intersection(group_target_ids)
+            for match_id in group_matches:
+                match_lineage = lineage(match_id)
+                selected_target_ids.update(match_lineage)
+                for ancestor_id in match_lineage[1:]:
+                    project_target_id = str(
+                        relations_by_target.get(ancestor_id, {}).get("project_target_id") or ""
+                    )
+                    if project_target_id:
+                        expanded_project_target_ids.add(project_target_id)
+
+    root_order = {root_id: index for index, root_id in enumerate(selected_roots)}
+    selected_relations = [
+        relation
+        for relation in relations
+        if str(relation.get("target_id") or "") in selected_target_ids
+    ]
+    selected_relations.sort(
+        key=lambda relation: (
+            root_order.get(
+                root_by_target.get(str(relation.get("target_id") or ""), ""),
+                len(root_order),
+            ),
+            int(relation.get("relation_depth") or 0),
+            str(relation.get("target_name") or "").casefold(),
+        )
+    )
+    child_counts, descendant_counts = _target_hierarchy_counts(relations)
+    return {
+        "relations": selected_relations,
+        "page": safe_page,
+        "page_size": safe_page_size,
+        "root_total": root_total,
+        "project_total": len(relations),
+        "matched_total": len(direct_scores) if normalized_query else len(relations),
+        "matched_target_ids": sorted(direct_scores),
+        "expanded_project_target_ids": sorted(expanded_project_target_ids),
+        "child_counts": child_counts,
+        "descendant_counts": descendant_counts,
+        "search_scores": {
+            **direct_scores,
+            **{
+                root_id: max(group_scores.get(root_id, 0), direct_scores.get(root_id, 0))
+                for root_id in selected_roots
+            },
+        },
+    }
 
 
 async def resolve_target(
@@ -255,12 +506,14 @@ async def list_project_target_summaries(
     project_id: str,
     *,
     compact: bool = False,
+    relations: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    relations = await targets_dao.list_project_targets(
-        db,
-        project_id,
-        summary_only=compact,
-    )
+    if relations is None:
+        relations = await targets_dao.list_project_targets(
+            db,
+            project_id,
+            summary_only=compact,
+        )
     target_ids = [str(item.get("target_id") or "") for item in relations]
     if not target_ids:
         return []
@@ -510,6 +763,9 @@ async def list_project_target_summaries(
                 "target_type",
                 "target_name",
                 "root_domain",
+                "root_domains",
+                "search_terms",
+                "search_terms_by_channel",
                 "root_target_id",
                 "root_target_name",
                 "parent_target_id",
@@ -604,3 +860,204 @@ async def list_project_target_summaries(
     ]
     summaries.sort(key=_target_summary_sort_key)
     return summaries
+
+
+async def list_project_target_options(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """Return the lightweight complete Target index used by project filters."""
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=True,
+    )
+    fields = (
+        "project_target_id",
+        "target_id",
+        "target_name",
+        "root_domain",
+        "root_target_id",
+        "root_target_name",
+        "parent_target_id",
+        "parent_target_name",
+        "relation_depth",
+    )
+    items = [
+        {key: relation.get(key) for key in fields if key in relation}
+        for relation in relations
+    ]
+    items.sort(
+        key=lambda item: (
+            str(item.get("root_target_name") or item.get("target_name") or "").casefold(),
+            int(item.get("relation_depth") or 0),
+            str(item.get("target_name") or "").casefold(),
+            str(item.get("target_id") or ""),
+        )
+    )
+    return items
+
+
+async def list_project_target_branch(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    target_id: str,
+) -> dict[str, Any]:
+    """Load one root hierarchy on demand for an expanded dashboard row."""
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=True,
+    )
+    relations_by_target = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if str(item.get("target_id") or "")
+    }
+    selected = relations_by_target.get(str(target_id or ""))
+    if selected is None:
+        return {"items": [], "total": 0, "root_target_id": ""}
+    root_target_id = _relation_root_target_id(selected, relations_by_target)
+    branch_relations = [
+        relation
+        for candidate_id, relation in relations_by_target.items()
+        if _relation_root_target_id(relation, relations_by_target) == root_target_id
+        and candidate_id
+    ]
+    summaries = await list_project_target_summaries(
+        db,
+        project_id,
+        compact=True,
+        relations=branch_relations,
+    )
+    child_counts, descendant_counts = _target_hierarchy_counts(relations)
+    for summary in summaries:
+        summary_target_id = str(summary.get("target_id") or "")
+        summary["child_count"] = int(child_counts.get(summary_target_id, 0))
+        summary["descendant_count"] = int(
+            descendant_counts.get(summary_target_id, 0)
+        )
+    return {
+        "items": summaries,
+        "total": len(summaries),
+        "root_target_id": root_target_id,
+    }
+
+
+async def list_project_target_summary_page(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    *,
+    page: int = 1,
+    page_size: int = 10,
+    query: str = "",
+) -> dict[str, Any]:
+    """Return one root-level page with child context and page-local statistics."""
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=True,
+    )
+    if not relations:
+        return {
+            "items": [],
+            "total": 0,
+            "root_total": 0,
+            "project_total": 0,
+            "matched_total": 0,
+            "page": 1,
+            "page_size": max(1, min(int(page_size or 10), 100)),
+            "matched_target_ids": [],
+            "expanded_project_target_ids": [],
+        }
+
+    relations_by_target = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if str(item.get("target_id") or "")
+    }
+    target_ids = list(relations_by_target)
+    root_ids = list(
+        dict.fromkeys(
+            _relation_root_target_id(relation, relations_by_target)
+            for relation in relations
+        )
+    )
+    target_docs_job = db[TARGETS_COLLECTION].find(
+        {"target_id": {"$in": target_ids}},
+        {
+            "_id": 0,
+            "target_id": 1,
+            "canonical_name": 1,
+            "aliases": 1,
+            "root_domain": 1,
+            "root_domains": 1,
+        },
+    ).to_list(len(target_ids))
+    root_stats_job = db[FINDINGS_COLLECTION].aggregate(
+        [
+            {
+                "$match": {
+                    "project_id": project_id,
+                    "target_id": {"$in": root_ids},
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$target_id",
+                    "finding_count": {"$sum": 1},
+                    "high_score_finding_count": {
+                        "$sum": {
+                            "$cond": [
+                                {"$gte": [{"$ifNull": ["$attention_score", 0]}, 70]},
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                }
+            },
+        ]
+    ).to_list(len(root_ids))
+    target_docs, root_stat_rows = await asyncio.gather(target_docs_job, root_stats_job)
+    targets_by_id = {
+        str(item.get("target_id") or ""): item for item in target_docs
+    }
+    root_stats = {
+        str(item.get("_id") or ""): item for item in root_stat_rows
+    }
+    selection = _select_target_relation_page(
+        relations,
+        targets_by_id,
+        query=query,
+        page=page,
+        page_size=page_size,
+        root_stats=root_stats,
+    )
+    summaries = await list_project_target_summaries(
+        db,
+        project_id,
+        compact=True,
+        relations=selection["relations"],
+    )
+    matched_target_ids = set(selection["matched_target_ids"])
+    search_scores = selection["search_scores"]
+    for summary in summaries:
+        target_id = str(summary.get("target_id") or "")
+        summary["search_match"] = target_id in matched_target_ids
+        summary["search_score"] = int(search_scores.get(target_id, 0))
+        summary["child_count"] = int(selection["child_counts"].get(target_id, 0))
+        summary["descendant_count"] = int(
+            selection["descendant_counts"].get(target_id, 0)
+        )
+    return {
+        "items": summaries,
+        "total": selection["root_total"],
+        "root_total": selection["root_total"],
+        "project_total": selection["project_total"],
+        "matched_total": selection["matched_total"],
+        "page": selection["page"],
+        "page_size": selection["page_size"],
+        "matched_target_ids": selection["matched_target_ids"],
+        "expanded_project_target_ids": selection["expanded_project_target_ids"],
+    }

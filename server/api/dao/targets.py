@@ -497,6 +497,8 @@ async def list_project_targets(
                 "target_name": 1,
                 "root_domain": 1,
                 "root_domains": 1,
+                "search_terms": 1,
+                "search_terms_by_channel": 1,
                 "root_target_id": 1,
                 "root_target_name": 1,
                 "parent_target_id": 1,

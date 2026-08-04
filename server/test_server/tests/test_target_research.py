@@ -7,10 +7,33 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from api.services.target_research import (
     _build_navigation_evidence_observer,
+    _candidate_scan_params,
     _eligible_related_targets,
     _extract_navigated_urls,
     _normalize_payload,
 )
+
+
+def test_related_target_scan_disables_bidding_by_default() -> None:
+    base = {
+        "enable_asset_discovery": True,
+        "enable_url_scan": True,
+        "enable_bidding": True,
+        "bidding_max_records": 5,
+    }
+
+    root = _candidate_scan_params(base, name="主目标", is_root=True)
+    related = _candidate_scan_params(base, name="子单位", is_root=False)
+    explicit = _candidate_scan_params(
+        {**base, "enable_subsidiary_bidding": True},
+        name="显式开启的子单位",
+        is_root=False,
+    )
+
+    assert root["enable_bidding"] is True
+    assert related["enable_bidding"] is False
+    assert related["enable_url_scan"] is True
+    assert explicit["enable_bidding"] is True
 
 
 def _payload(**overrides):

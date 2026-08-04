@@ -187,6 +187,7 @@ class CompanyScanPipeline:
         enable_asset_discovery: bool = True,
         enable_xhs: bool = False,
         enable_subsidiary_xhs: bool = False,
+        enable_subsidiary_bidding: bool = False,
         xhs_target_selection_mode: str = "auto",
         xhs_manual_targets: list[str] | str | None = None,
         enable_bidding: bool = False,
@@ -235,6 +236,9 @@ class CompanyScanPipeline:
         from api.services.xhs_target_selection import parse_manual_targets
 
         subsidiary_xhs_enabled = bool(enable_xhs and enable_subsidiary_xhs)
+        subsidiary_bidding_enabled = bool(
+            enable_bidding and enable_subsidiary_bidding
+        )
         manual_xhs_targets = parse_manual_targets(xhs_manual_targets)
         result = {
             "task_id": task_id,
@@ -285,6 +289,7 @@ class CompanyScanPipeline:
             },
             "bidding": {
                 "enabled": enable_bidding,
+                "subsidiaries_enabled": subsidiary_bidding_enabled,
                 "status": "pending" if enable_bidding else "disabled",
                 "query_name": "",
                 "records_fetched": 0,
@@ -1078,7 +1083,9 @@ class CompanyScanPipeline:
                     ),
                 ))
             elif wholly_owned_entities and (
-                enable_asset_discovery or selected_child_xhs or enable_bidding
+                enable_asset_discovery
+                or selected_child_xhs
+                or subsidiary_bidding_enabled
             ):
                 followup_factories.append((
                     "wholly_owned_entities",
@@ -1103,7 +1110,7 @@ class CompanyScanPipeline:
                         copywriting_concurrency=copywriting_concurrency,
                         xhs_search_concurrency=xhs_search_concurrency,
                         entity_concurrency=control_scan_concurrency,
-                        enable_bidding=enable_bidding,
+                        enable_bidding=subsidiary_bidding_enabled,
                         bidding_page_size=bidding_page_size,
                         bidding_max_records=bidding_max_records,
                         xhs_decisions=child_xhs_decisions,

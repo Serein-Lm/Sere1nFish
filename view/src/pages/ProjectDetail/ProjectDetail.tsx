@@ -63,9 +63,12 @@ import CollectRecordsView, { extractContactsFromFields } from '../../components/
 import AuthenticatedImage from '../../components/AuthenticatedImage'
 import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
 import {
-  listProjectTargets,
   createTargetResearch,
+  listProjectTargetBranch,
+  listProjectTargetOptions,
+  listProjectTargets,
   openAuthenticatedArtifact,
+  type ProjectTargetOption,
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
 import { listScholarContacts, type ScholarContact } from '../../services/scholarContactService'
@@ -134,6 +137,7 @@ type TargetHighScoreKey = 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'sc
 
 interface TargetDashboardRow extends ProjectTargetSummary {
   children?: TargetDashboardRow[]
+  isLoadingPlaceholder?: boolean
 }
 
 interface TargetModuleDefinition {
@@ -666,7 +670,20 @@ export default function ProjectDetail() {
   const [wechatLoading, setWechatLoading] = useState(false)
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
   const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
+  const [projectTargetOptions, setProjectTargetOptions] = useState<ProjectTargetOption[]>([])
+  const [targetBranches, setTargetBranches] = useState<Record<string, ProjectTargetSummary[]>>({})
+  const [targetBranchLoading, setTargetBranchLoading] = useState<Record<string, boolean>>({})
+  const [targetDashboardLoading, setTargetDashboardLoading] = useState(false)
   const [targetSearchText, setTargetSearchText] = useState('')
+  const [targetSearchQuery, setTargetSearchQuery] = useState('')
+  const [targetPage, setTargetPage] = useState(1)
+  const [targetPageSize, setTargetPageSize] = useState(10)
+  const [targetRootTotal, setTargetRootTotal] = useState(0)
+  const [projectTargetTotal, setProjectTargetTotal] = useState(0)
+  const [targetMatchedTotal, setTargetMatchedTotal] = useState(0)
+  const [targetExpandedRowKeys, setTargetExpandedRowKeys] = useState<React.Key[]>([])
+  const targetRequestRef = useRef(0)
+  const targetOptionsRequestRef = useRef(0)
   const [targetResearchActionId, setTargetResearchActionId] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
   const [websiteTargetId, setWebsiteTargetId] = useState('')
@@ -715,12 +732,71 @@ export default function ProjectDetail() {
     }
   }
 
-  const fetchProjectTargets = async (pid: string) => {
+  const fetchProjectTargets = async (
+    pid: string,
+    page = targetPage,
+    pageSize = targetPageSize,
+    query = targetSearchQuery,
+  ) => {
+    const requestId = ++targetRequestRef.current
+    setTargetDashboardLoading(true)
     try {
-      const result = await listProjectTargets(pid)
+      const result = await listProjectTargets(pid, {
+        page,
+        page_size: pageSize,
+        q: query || undefined,
+      })
+      if (requestId !== targetRequestRef.current) return
       setProjectTargets(result.items)
+      setTargetPage(result.page)
+      setTargetPageSize(result.page_size)
+      setTargetRootTotal(result.root_total)
+      setProjectTargetTotal(result.project_total)
+      setTargetMatchedTotal(result.matched_total)
+      setTargetBranches({})
+      setTargetBranchLoading({})
+      setTargetExpandedRowKeys(query ? result.expanded_project_target_ids : [])
+      loadedTabsRef.current.add('targets')
     } catch (e) {
       console.error('加载项目 Target 失败:', e)
+    } finally {
+      if (requestId === targetRequestRef.current) setTargetDashboardLoading(false)
+    }
+  }
+
+  const fetchProjectTargetOptions = async (pid: string) => {
+    const requestId = ++targetOptionsRequestRef.current
+    try {
+      const result = await listProjectTargetOptions(pid)
+      if (requestId === targetOptionsRequestRef.current) {
+        setProjectTargetOptions(result.items)
+      }
+    } catch (error) {
+      console.error('加载项目 Target 索引失败:', error)
+    }
+  }
+
+  const fetchTargetBranch = async (pid: string, rootTargetId: string) => {
+    if (targetBranches[rootTargetId] || targetBranchLoading[rootTargetId]) return
+    const requestGeneration = targetRequestRef.current
+    setTargetBranchLoading((current) => ({ ...current, [rootTargetId]: true }))
+    try {
+      const result = await listProjectTargetBranch(pid, rootTargetId)
+      if (requestGeneration !== targetRequestRef.current) return
+      setTargetBranches((current) => ({
+        ...current,
+        [rootTargetId]: result.items,
+      }))
+    } catch (error) {
+      console.error('加载 Target 关联单位失败:', error)
+      message.error(error instanceof Error ? error.message : '加载关联单位失败')
+    } finally {
+      if (requestGeneration === targetRequestRef.current) {
+        setTargetBranchLoading((current) => ({
+          ...current,
+          [rootTargetId]: false,
+        }))
+      }
     }
   }
 
@@ -1082,15 +1158,25 @@ export default function ProjectDetail() {
       setScholarTargetId('')
       setWebsitePage(1)
       setWebsitePageSize(10)
+      setProjectTargets([])
+      setProjectTargetOptions([])
+      setTargetBranches({})
+      setTargetBranchLoading({})
+      setTargetSearchText('')
+      setTargetSearchQuery('')
+      setTargetPage(1)
+      setTargetPageSize(10)
+      setTargetRootTotal(0)
+      setProjectTargetTotal(0)
+      setTargetMatchedTotal(0)
+      setTargetExpandedRowKeys([])
+      targetRequestRef.current += 1
+      targetOptionsRequestRef.current += 1
       try {
-        const [data, targetResult] = await Promise.all([
-          getProject(projectId),
-          listProjectTargets(projectId),
-        ])
+        const data = await getProject(projectId)
         if (!cancelled) {
           setProject(data)
-          setProjectTargets(targetResult.items)
-          loadedTabsRef.current.add('targets')
+          void fetchProjectTargetOptions(projectId)
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : '加载失败'
@@ -1103,6 +1189,9 @@ export default function ProjectDetail() {
           setWebsitePage(1)
           setWebsitePageSize(10)
           setProjectTargets([])
+          setProjectTargetOptions([])
+          setTargetBranches({})
+          setTargetBranchLoading({})
           setSelectedTargetId('')
           setXhsNotes([])
           setXhsProfiles([])
@@ -1133,6 +1222,19 @@ export default function ProjectDetail() {
       mobileArtifactsReqRef.current += 1
     }
   }, [projectId])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setTargetSearchQuery(targetSearchText.trim())
+      setTargetPage(1)
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [targetSearchText])
+
+  useEffect(() => {
+    if (!projectId || !project || project.id !== projectId) return
+    void fetchProjectTargets(projectId, targetPage, targetPageSize, targetSearchQuery)
+  }, [projectId, project, targetPage, targetPageSize, targetSearchQuery])
 
   useEffect(() => {
     if (
@@ -1679,7 +1781,7 @@ export default function ProjectDetail() {
       render: (_, rec) => {
         const names = rec.target_names?.length
           ? rec.target_names
-          : (rec.target_ids || []).map((id) => projectTargets.find((target) => target.target_id === id)?.target_name || id)
+          : (rec.target_ids || []).map((id) => projectTargetOptions.find((target) => target.target_id === id)?.target_name || id)
         return names.length
           ? <Space size={[4, 4]} wrap>{names.map((name) => <Tag color="geekblue" key={name}>{name}</Tag>)}</Space>
           : <Text type="secondary">未关联目标</Text>
@@ -2493,7 +2595,7 @@ export default function ProjectDetail() {
             prefix={<FilterOutlined />}
             placeholder="选择 Target"
             style={{ width: 320, maxWidth: '100%' }}
-            options={projectTargets.map((target) => ({
+            options={projectTargetOptions.map((target) => ({
               value: target.target_id,
               label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
             }))}
@@ -2615,7 +2717,7 @@ export default function ProjectDetail() {
             showSearch
             optionFilterProp="label"
             style={{ width: 320, maxWidth: '100%' }}
-            options={projectTargets.map((target) => ({
+            options={projectTargetOptions.map((target) => ({
               value: target.target_id,
               label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
             }))}
@@ -3162,9 +3264,9 @@ export default function ProjectDetail() {
               optionFilterProp="label"
               placeholder="选择 Target"
               style={{ width: 360, maxWidth: '100%' }}
-              options={projectTargets.map((target) => ({
+              options={projectTargetOptions.map((target) => ({
                 value: target.target_id,
-                label: `${(target.relation_depth ?? 0) >= 2 ? '[孙单位] ' : (target.relation_depth ?? 0) === 1 ? '[子单位] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''} (记录 ${target.record_count} · 原文 ${target.project_document_count})`,
+                label: `${(target.relation_depth ?? 0) >= 2 ? '[孙单位] ' : (target.relation_depth ?? 0) === 1 ? '[子单位] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
               }))}
               onChange={(value) => {
                 openTargetModule(value, 'wechat')
@@ -3320,7 +3422,7 @@ export default function ProjectDetail() {
               optionFilterProp="label"
               placeholder="选择 Target"
               style={{ width: 300, maxWidth: '100%' }}
-              options={projectTargets.map((target) => ({ value: target.target_id, label: target.target_name }))}
+              options={projectTargetOptions.map((target) => ({ value: target.target_id, label: target.target_name }))}
               onChange={(value) => {
                 openTargetModule(value, 'scholars')
               }}
@@ -3498,7 +3600,7 @@ export default function ProjectDetail() {
               optionFilterProp="label"
               placeholder="选择 Target"
               style={{ width: 320, maxWidth: '100%' }}
-              options={projectTargets.map((target) => ({
+              options={projectTargetOptions.map((target) => ({
                 value: target.target_id,
                 label: target.target_name,
               }))}
@@ -3649,13 +3751,18 @@ export default function ProjectDetail() {
     )
   }
 
-  const selectedTarget = useMemo(
-    () => projectTargets.find((target) => target.target_id === selectedTargetId) || null,
-    [projectTargets, selectedTargetId],
-  )
+  const selectedTarget = useMemo(() => {
+    const branchTargets = Object.values(targetBranches).flat()
+    return [...projectTargets, ...branchTargets]
+      .find((target) => target.target_id === selectedTargetId) || null
+  }, [projectTargets, selectedTargetId, targetBranches])
 
   const targetDashboardRows = useMemo<TargetDashboardRow[]>(() => {
     const compareRows = (left: TargetDashboardRow, right: TargetDashboardRow) => {
+      if (targetSearchQuery) {
+        const searchDiff = Number(right.search_score || 0) - Number(left.search_score || 0)
+        if (searchDiff) return searchDiff
+      }
       const highScoreDiff = Number(right.high_score_finding_count || 0)
         - Number(left.high_score_finding_count || 0)
       if (highScoreDiff) return highScoreDiff
@@ -3672,7 +3779,16 @@ export default function ProjectDetail() {
         ...(item.children?.length ? { children: sortTree(item.children) } : {}),
       }))
       .sort(compareRows)
-    const rows = projectTargets.map<TargetDashboardRow>((target) => ({
+    const visibleTargets = targetSearchQuery
+      ? projectTargets
+      : [
+          ...projectTargets,
+          ...projectTargets.flatMap((root) => targetBranches[root.target_id] || []),
+        ]
+    const uniqueTargets = Array.from(
+      new Map(visibleTargets.map((target) => [target.target_id, target])).values(),
+    )
+    const rows = uniqueTargets.map<TargetDashboardRow>((target) => ({
       ...target,
       children: [],
     }))
@@ -3692,45 +3808,50 @@ export default function ProjectDetail() {
     })
     rows.forEach((target) => {
       if (!target.children?.length) delete target.children
+      const isRoot = Number(target.relation_depth || 0) === 0
+        || !target.parent_target_id
+      const branchLoaded = Object.prototype.hasOwnProperty.call(
+        targetBranches,
+        target.target_id,
+      )
+      if (
+        !targetSearchQuery
+        && isRoot
+        && Number(target.child_count || 0) > 0
+        && !branchLoaded
+      ) {
+        target.children = [{
+          ...target,
+          project_target_id: `lazy:${target.project_target_id}`,
+          target_id: `lazy:${target.target_id}`,
+          target_name: targetBranchLoading[target.target_id]
+            ? '正在加载关联单位...'
+            : `展开加载 ${target.descendant_count || target.child_count || 0} 个关联单位`,
+          parent_target_id: target.target_id,
+          parent_target_name: target.target_name,
+          relation_depth: Number(target.relation_depth || 0) + 1,
+          document_count: 0,
+          project_document_count: 0,
+          record_count: 0,
+          asset_count: 0,
+          alive_asset_count: 0,
+          finding_count: 0,
+          high_score_finding_count: 0,
+          website_count: 0,
+          xhs_count: 0,
+          wechat_count: 0,
+          bidding_count: 0,
+          scholar_contact_count: 0,
+          linked_project_count: 0,
+          child_count: 0,
+          descendant_count: 0,
+          collection_complete: false,
+          isLoadingPlaceholder: true,
+        }]
+      }
     })
     return sortTree(roots)
-  }, [projectTargets])
-
-  const filteredTargetDashboardRows = useMemo<TargetDashboardRow[]>(() => {
-    const query = targetSearchText.trim().toLocaleLowerCase('zh-CN')
-    if (!query) return targetDashboardRows
-
-    const filterRows = (rows: TargetDashboardRow[]): TargetDashboardRow[] => rows
-      .map((row) => {
-        const searchable = [
-          row.target_name,
-          row.root_domain,
-          row.target_id,
-          row.parent_target_name,
-          ...(row.search_terms || []),
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLocaleLowerCase('zh-CN')
-        const children = filterRows(row.children || [])
-        if (!searchable.includes(query) && children.length === 0) return null
-        return {
-          ...row,
-          ...(children.length ? { children } : { children: undefined }),
-        }
-      })
-      .filter((row): row is TargetDashboardRow => row !== null)
-
-    return filterRows(targetDashboardRows)
-  }, [targetDashboardRows, targetSearchText])
-
-  const filteredTargetCount = useMemo(() => {
-    const countRows = (rows: TargetDashboardRow[]): number => rows.reduce(
-      (total, row) => total + 1 + countRows(row.children || []),
-      0,
-    )
-    return countRows(filteredTargetDashboardRows)
-  }, [filteredTargetDashboardRows])
+  }, [projectTargets, targetBranches, targetBranchLoading, targetSearchQuery])
 
   const applyTargetScope = (targetId: string) => {
     if (targetId !== selectedTargetId) {
@@ -3814,10 +3935,16 @@ export default function ProjectDetail() {
         title: '公司 / 机构',
         key: 'target',
         width: 280,
-        render: (_, target) => (
+        render: (_, target) => target.isLoadingPlaceholder ? (
+          <Space size={8}>
+            {targetBranchLoading[target.parent_target_id || ''] ? <Spin size="small" /> : null}
+            <Text type="secondary">{target.target_name}</Text>
+          </Space>
+        ) : (
           <div className="target-company-cell">
             <Space size={6} wrap>
               <Text strong>{target.target_name}</Text>
+              {targetSearchQuery && target.search_match ? <Tag color="blue">匹配</Tag> : null}
               {target.collection_complete ? <Tag color="success">采集完成</Tag> : <Tag>待完成</Tag>}
               {(target.relation_depth ?? 0) >= 2
                 ? <Tag color="gold">孙单位</Tag>
@@ -3843,6 +3970,7 @@ export default function ProjectDetail() {
         defaultSortOrder: 'descend',
         sortDirections: ['descend', 'ascend'],
         render: (_, target) => {
+          if (target.isLoadingPlaceholder) return null
           const total = Number(target.high_score_finding_count || 0)
           const breakdown = target.high_score_by_source || {}
           const sourceCounts = TARGET_HIGH_SCORE_LABELS
@@ -3862,7 +3990,7 @@ export default function ProjectDetail() {
       {
         title: '模块数据',
         key: 'modules',
-        render: (_, target) => (
+        render: (_, target) => target.isLoadingPlaceholder ? null : (
           <Space size={[4, 4]} wrap>
             {TARGET_MODULES.map((module) => (
               <Button
@@ -3884,14 +4012,17 @@ export default function ProjectDetail() {
         title: '资产',
         key: 'assets',
         width: 130,
-        render: (_, target) => <Text>{target.alive_asset_count || 0} / {target.asset_count || 0} 存活</Text>,
+        render: (_, target) => target.isLoadingPlaceholder
+          ? null
+          : <Text>{target.alive_asset_count || 0} / {target.asset_count || 0} 存活</Text>,
       },
       {
         title: '最近任务',
         dataIndex: 'latest_task_status',
         key: 'latest_task_status',
         width: 110,
-        render: (status: string) => {
+        render: (status: string, target) => {
+          if (target.isLoadingPlaceholder) return null
           const statusMap: Record<string, { color: string; text: string }> = {
             completed: { color: 'success', text: '已完成' },
             running: { color: 'processing', text: '运行中' },
@@ -3908,7 +4039,7 @@ export default function ProjectDetail() {
         key: 'actions',
         width: 120,
         fixed: 'right',
-        render: (_, target) => (
+        render: (_, target) => target.isLoadingPlaceholder ? null : (
           <Tooltip title="联网核验机构资料，扩展可信 Target 后自动扫描">
             <Button
               size="small"
@@ -3928,17 +4059,27 @@ export default function ProjectDetail() {
     return (
       <div>
         <div className="project-data-toolbar">
-          <Text type="secondary">按 Target 汇总项目数据并展示单位层级；展开子单位或孙单位后，可点击模块数量直接钻取。</Text>
+          <Text type="secondary">按主 Target 分页，子单位和孙单位默认折叠；点击模块数量可直接钻取。</Text>
           <div className="target-dashboard-actions">
             <Input
+              id="target-dashboard-search"
+              name="target-dashboard-search"
               value={targetSearchText}
               allowClear
               prefix={<SearchOutlined />}
+              suffix={targetDashboardLoading ? <Spin size="small" /> : null}
               placeholder="搜索 Target 名称、域名或关键词"
               aria-label="搜索 Target"
               onChange={(event) => setTargetSearchText(event.target.value)}
             />
-            <Button size="small" icon={<SyncOutlined />} onClick={() => { if (projectId) void fetchProjectTargets(projectId) }}>
+            <Button
+              size="small"
+              icon={<SyncOutlined />}
+              loading={targetDashboardLoading}
+              onClick={() => {
+                if (projectId) void fetchProjectTargets(projectId, targetPage, targetPageSize, targetSearchQuery)
+              }}
+            >
               刷新
             </Button>
           </div>
@@ -3947,14 +4088,52 @@ export default function ProjectDetail() {
           rowKey="project_target_id"
           size="small"
           columns={columns}
-          dataSource={filteredTargetDashboardRows}
-          locale={{ emptyText: <Empty description={targetSearchText.trim() ? '没有匹配的 Target' : '项目尚未关联 Target'} /> }}
-          expandable={{ defaultExpandAllRows: true, indentSize: 20 }}
-          pagination={{ pageSize: 20, showTotal: () => `共 ${filteredTargetCount} 个 Target` }}
+          dataSource={targetDashboardRows}
+          loading={targetDashboardLoading}
+          locale={{ emptyText: <Empty description={targetSearchQuery ? '没有匹配的 Target' : '项目尚未关联 Target'} /> }}
+          expandable={{
+            expandedRowKeys: targetExpandedRowKeys,
+            indentSize: 20,
+            rowExpandable: (target) => !target.isLoadingPlaceholder,
+            onExpand: (expanded, target) => {
+              setTargetExpandedRowKeys((current) => expanded
+                ? Array.from(new Set([...current, target.project_target_id]))
+                : current.filter((key) => key !== target.project_target_id))
+              if (
+                expanded
+                && projectId
+                && !targetSearchQuery
+                && Number(target.child_count || 0) > 0
+              ) {
+                void fetchTargetBranch(projectId, target.target_id)
+              }
+            },
+          }}
+          pagination={{
+            current: targetPage,
+            pageSize: targetPageSize,
+            total: targetRootTotal,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50],
+            showTotal: () => targetSearchQuery
+              ? `命中 ${targetMatchedTotal} 个 Target，分布于 ${targetRootTotal} 个主 Target`
+              : `共 ${projectTargetTotal} 个 Target，${targetRootTotal} 个主 Target`,
+            onChange: (nextPage, nextPageSize) => {
+              setTargetExpandedRowKeys([])
+              if (nextPageSize !== targetPageSize) {
+                setTargetPageSize(nextPageSize)
+                setTargetPage(1)
+              } else {
+                setTargetPage(nextPage)
+              }
+            },
+          }}
           scroll={{ x: 1380 }}
           onRow={(target) => ({
-            onClick: () => openTargetDetails(target),
-            style: { cursor: 'pointer' },
+            onClick: () => {
+              if (!target.isLoadingPlaceholder) openTargetDetails(target)
+            },
+            style: { cursor: target.isLoadingPlaceholder ? 'default' : 'pointer' },
           })}
         />
       </div>
@@ -3969,7 +4148,7 @@ export default function ProjectDetail() {
         <Space>
           <AimOutlined />
           Target 看板
-          <Tag>{projectTargets.length}</Tag>
+          <Tag>{projectTargetTotal}</Tag>
         </Space>
       ),
       children: renderTargetDashboard(),
@@ -4613,8 +4792,8 @@ export default function ProjectDetail() {
                   <Select
                     showSearch
                     optionFilterProp="label"
-                    placeholder={projectTargets.length ? '选择要补采小红书的公司' : '当前项目暂无可选目标'}
-                    options={projectTargets.map((target) => ({
+                    placeholder={projectTargetOptions.length ? '选择要补采小红书的公司' : '当前项目暂无可选目标'}
+                    options={projectTargetOptions.map((target) => ({
                       value: target.target_id,
                       label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
                     }))}
@@ -5153,8 +5332,8 @@ export default function ProjectDetail() {
                           <Select
                             showSearch
                             optionFilterProp="label"
-                            placeholder={projectTargets.length ? '选择要补采的公司' : '当前项目暂无可选目标'}
-                            options={projectTargets.map((target) => ({
+                            placeholder={projectTargetOptions.length ? '选择要补采的公司' : '当前项目暂无可选目标'}
+                            options={projectTargetOptions.map((target) => ({
                               value: target.target_id,
                               label: `${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
                             }))}

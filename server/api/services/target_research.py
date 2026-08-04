@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from langchain_core.messages import HumanMessage, ToolMessage
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from api.dao import projects as projects_dao
 from api.dao import target_research as research_dao
 from api.dao import targets as targets_dao
 from api.dao import tasks as tasks_dao
@@ -24,6 +25,8 @@ from Sere1nGraph.graph.agents.runtime import REQUIRE_EVIDENCE_TOOL_MARKER
 
 
 logger = get_logger("target_research")
+MAX_TARGET_RESEARCH_BATCH_SIZE = 100
+MAX_TARGET_RESEARCH_CONCURRENCY = 8
 _AUTO_EXPAND_RELATIONS = {
     "subsidiary",
     "controlled_entity",
@@ -325,6 +328,19 @@ async def _latest_scan_params(
     return params
 
 
+def _candidate_scan_params(
+    base_params: dict[str, Any],
+    *,
+    name: str,
+    is_root: bool,
+) -> dict[str, Any]:
+    """Apply reusable root/related-Target source policies to one scan."""
+    params = {**base_params, "company_name": name}
+    if not is_root and not bool(params.get("enable_subsidiary_bidding", False)):
+        params["enable_bidding"] = False
+    return params
+
+
 async def _schedule_company_scans(
     db: AsyncIOMotorDatabase,
     *,
@@ -380,7 +396,11 @@ async def _schedule_company_scans(
                 skipped.append({"target_id": target_id, "reason": "当前项目已有完成扫描"})
                 continue
         child_task_id = uuid.uuid4().hex[:12]
-        params = {**base_params, "company_name": name}
+        params = _candidate_scan_params(
+            base_params,
+            name=name,
+            is_root=target_id == str(root_target.get("target_id") or ""),
+        )
         documents.append(
             {
                 "task_id": child_task_id,
@@ -482,6 +502,154 @@ async def enqueue_target_research(
         "task_type": "target_research",
         "status": "pending",
         "deduplicated": False,
+    }
+
+
+async def enqueue_target_research_batch(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_names: list[str],
+    requested_by: str,
+    concurrency: int = 4,
+    scan_discovered_targets: bool = True,
+    rescan_root: bool = True,
+    max_related_targets: int = 4,
+    force_refresh: bool = True,
+    scan_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve a Target list and enqueue bounded, recoverable deep research."""
+    from api.services.project_task_batch import (
+        ProjectTaskJob,
+        parse_company_names,
+        run_project_task_batch,
+    )
+    from api.services.project_task_runtime import execute_project_task
+    from api.services.targets import resolve_target
+
+    if not await projects_dao.get_project(db, project_id):
+        raise TargetResearchTargetNotFoundError("项目不存在")
+    names = parse_company_names(target_names)
+    if not names:
+        raise ValueError("Target 列表不能为空")
+    if len(names) > MAX_TARGET_RESEARCH_BATCH_SIZE:
+        raise ValueError(
+            f"一次最多下发 {MAX_TARGET_RESEARCH_BATCH_SIZE} 个 Target"
+        )
+
+    safe_concurrency = max(
+        1,
+        min(int(concurrency or 4), MAX_TARGET_RESEARCH_CONCURRENCY, len(names)),
+    )
+    batch_id = uuid.uuid4().hex[:12]
+    now = datetime.now(timezone.utc)
+    documents: list[dict[str, Any]] = []
+    jobs: list[ProjectTaskJob] = []
+    linked_targets: list[dict[str, str]] = []
+    deduplicated: list[dict[str, str]] = []
+    seen_target_ids: set[str] = set()
+    shared_scan_params = dict(scan_params or {})
+
+    for name in names:
+        target = await resolve_target(
+            db,
+            target_name=name,
+            target_type="company",
+            aliases=[name],
+            source="target_research_batch",
+        )
+        if not target:
+            continue
+        await targets_dao.link_project_target(
+            db,
+            project_id=project_id,
+            target=target,
+            search_terms=[name],
+            objectives=["批量机构公开情报深研与扩展扫描"],
+        )
+        target_id = str(target.get("target_id") or "")
+        target_name = str(target.get("canonical_name") or name)
+        linked_targets.append({"target_id": target_id, "target_name": target_name})
+        if target_id in seen_target_ids:
+            deduplicated.append(
+                {"target_id": target_id, "target_name": target_name, "reason": "批次内重复"}
+            )
+            continue
+        seen_target_ids.add(target_id)
+        active = await tasks_dao.find_latest_matching_task(
+            db,
+            project_id=project_id,
+            task_type="target_research",
+            param_filters={"target_id": target_id},
+            statuses=["pending", "running", "pausing", "paused"],
+            projection={"_id": 0, "task_id": 1, "status": 1},
+        )
+        if active:
+            deduplicated.append({
+                "target_id": target_id,
+                "target_name": target_name,
+                "task_id": str(active.get("task_id") or ""),
+                "reason": f"已有 {active.get('status')} 深研",
+            })
+            continue
+
+        task_id = uuid.uuid4().hex[:12]
+        params = {
+            "target_id": target_id,
+            "scan_discovered_targets": bool(scan_discovered_targets),
+            "rescan_root": bool(rescan_root),
+            "max_related_targets": max(1, min(int(max_related_targets or 4), 12)),
+            "force_refresh": bool(force_refresh),
+            "scan_params": shared_scan_params,
+        }
+        documents.append({
+            "task_id": task_id,
+            "project_id": project_id,
+            "task_type": "target_research",
+            "params": params,
+            "requested_by": requested_by,
+            "batch_id": batch_id,
+            "batch_index": len(documents) + 1,
+            "batch_concurrency": safe_concurrency,
+            "status": "pending",
+            "progress": {},
+            "created_at": now,
+            "updated_at": now,
+        })
+        jobs.append(ProjectTaskJob(
+            task_id=task_id,
+            project_id=project_id,
+            task_type="target_research",
+            params={**params, "_requested_by": requested_by},
+        ))
+
+    total = len(jobs)
+    for document in documents:
+        document["batch_total"] = total
+    if documents:
+        await tasks_dao.insert_tasks(db, documents)
+        spawn_background(
+            run_project_task_batch(
+                batch_id=batch_id,
+                project_id=project_id,
+                jobs=jobs,
+                executor=execute_project_task,
+                concurrency=safe_concurrency,
+                dispatch_concurrency=safe_concurrency,
+                aggregate_notification=False,
+            ),
+            name=f"target-research-batch:{batch_id}",
+        )
+    return {
+        "batch_id": batch_id,
+        "task_type": "target_research",
+        "task_count": total,
+        "task_ids": [job.task_id for job in jobs],
+        "linked_target_count": len({item["target_id"] for item in linked_targets}),
+        "targets": linked_targets,
+        "deduplicated": deduplicated,
+        "concurrency": safe_concurrency,
+        "status": "pending" if jobs else "deduplicated",
     }
 
 

@@ -10,7 +10,13 @@ from api.dao import source_documents as source_dao
 from api.dao import targets as targets_dao
 from api.db.mongodb import get_db
 from api.services.source_documents import get_source_document_detail
-from api.services.targets import list_project_target_summaries, resolve_target
+from api.services.targets import (
+    list_project_target_branch,
+    list_project_target_options,
+    list_project_target_summaries,
+    list_project_target_summary_page,
+    resolve_target,
+)
 
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
@@ -40,16 +46,44 @@ class TargetResearchRequest(BaseModel):
     scan_params: dict = Field(default_factory=dict)
 
 
+class TargetResearchBatchRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    target_names: list[str] = Field(min_length=1, max_length=100)
+    concurrency: int = Field(default=4, ge=1, le=8)
+    scan_discovered_targets: bool = True
+    rescan_root: bool = True
+    max_related_targets: int = Field(default=4, ge=1, le=12)
+    force_refresh: bool = True
+    scan_params: dict = Field(default_factory=dict)
+
+
 @router.get("/targets")
 async def list_targets(
     project_id: str = Query(min_length=1),
     compact: bool = Query(default=False),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    q: str = Query(default="", max_length=200),
 ):
+    if page is not None or q.strip():
+        return await list_project_target_summary_page(
+            get_db(),
+            project_id,
+            page=page or 1,
+            page_size=page_size,
+            query=q,
+        )
     items = await list_project_target_summaries(
         get_db(),
         project_id,
         compact=compact,
     )
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/targets/options")
+async def list_target_options(project_id: str = Query(min_length=1)):
+    items = await list_project_target_options(get_db(), project_id)
     return {"items": items, "total": len(items)}
 
 
@@ -75,6 +109,35 @@ async def create_target(payload: TargetCreateRequest):
     return target
 
 
+@router.post("/targets/research-batch")
+async def create_target_research_batch(
+    payload: TargetResearchBatchRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    from api.services.target_research import (
+        TargetResearchTargetNotFoundError,
+        enqueue_target_research_batch,
+    )
+
+    try:
+        return await enqueue_target_research_batch(
+            get_db(),
+            project_id=payload.project_id,
+            target_names=payload.target_names,
+            requested_by=current_user.username,
+            concurrency=payload.concurrency,
+            scan_discovered_targets=payload.scan_discovered_targets,
+            rescan_root=payload.rescan_root,
+            max_related_targets=payload.max_related_targets,
+            force_refresh=payload.force_refresh,
+            scan_params=payload.scan_params,
+        )
+    except TargetResearchTargetNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/targets/{target_id}")
 async def get_target(target_id: str):
     target = await targets_dao.get_target(get_db(), target_id)
@@ -82,6 +145,14 @@ async def get_target(target_id: str):
         raise HTTPException(404, "Target 不存在")
     projects = await targets_dao.list_target_projects(get_db(), target_id)
     return {**target, "projects": projects}
+
+
+@router.get("/targets/{target_id}/branch")
+async def list_target_branch(target_id: str, project_id: str = Query(min_length=1)):
+    result = await list_project_target_branch(get_db(), project_id, target_id)
+    if not result["root_target_id"]:
+        raise HTTPException(404, "项目 Target 不存在")
+    return result
 
 
 @router.get("/targets/{target_id}/research")

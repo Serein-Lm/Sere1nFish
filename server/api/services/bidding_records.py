@@ -9,7 +9,7 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import bidding as bidding_dao
-from api.db.collections import FINDINGS_COLLECTION
+from api.db.collections import BIDDING_RECORDS_COLLECTION, FINDINGS_COLLECTION
 from api.utils.url_identity import endpoint_identity
 
 
@@ -268,19 +268,77 @@ async def count_project_bidding_records_by_target(
     project_id: str,
     target_ids: list[str],
 ) -> dict[str, int]:
-    """Count contact-bearing announcements per Target using the list read model."""
+    """Count contact-bearing announcements without rebuilding the full read model."""
     selected = {str(target_id or "").strip() for target_id in target_ids}
     selected.discard("")
     if not selected:
         return {}
-    records, _ = await list_project_bidding_records(
-        db,
-        project_id=project_id,
-        limit=5_000,
-    )
     counts = {target_id: 0 for target_id in selected}
+
+    findings = await db[FINDINGS_COLLECTION].find(
+        {"project_id": project_id, "source": "bidding"},
+        {
+            "_id": 0,
+            "bidding_record_id": 1,
+            "source_url": 1,
+            "url": 1,
+            "channel": 1,
+            "value": 1,
+            "role": 1,
+            "type": 1,
+            "party_role": 1,
+        },
+    ).to_list(None)
+    actionable_record_ids: set[str] = set()
+    legacy_endpoint_keys: set[str] = set()
+    for finding in findings:
+        if not is_actionable_bidding_contact(finding):
+            continue
+        record_id = str(finding.get("bidding_record_id") or "").strip()
+        if record_id:
+            actionable_record_ids.add(record_id)
+            continue
+        endpoint_key = endpoint_identity(
+            str(finding.get("source_url") or finding.get("url") or ""),
+            include_query=True,
+        )
+        if endpoint_key:
+            legacy_endpoint_keys.add(endpoint_key)
+    if not actionable_record_ids and not legacy_endpoint_keys:
+        return counts
+
+    record_query: dict[str, Any] = {
+        "project_ids": project_id,
+        "target_ids": {"$in": list(selected)},
+    }
+    if not legacy_endpoint_keys:
+        record_query["record_id"] = {"$in": list(actionable_record_ids)}
+    records = await db[BIDDING_RECORDS_COLLECTION].find(
+        record_query,
+        {
+            "_id": 0,
+            "record_id": 1,
+            "target_ids": 1,
+            "resolved_detail_url": 1,
+            "detail_url": 1,
+            "provider_url": 1,
+        },
+    ).to_list(None)
+    counted: dict[str, set[str]] = {target_id: set() for target_id in selected}
     for record in records:
-        for target_id in set(str(value or "") for value in record.get("target_ids") or []):
-            if target_id in counts:
-                counts[target_id] += 1
+        record_id = str(record.get("record_id") or "").strip()
+        is_actionable = record_id in actionable_record_ids
+        if not is_actionable and legacy_endpoint_keys:
+            is_actionable = bool(_record_urls(record).intersection(legacy_endpoint_keys))
+        if not is_actionable:
+            continue
+        identity = record_id or next(iter(_record_urls(record)), "")
+        if not identity:
+            continue
+        for target_id in {
+            str(value or "").strip() for value in record.get("target_ids") or []
+        }.intersection(selected):
+            counted[target_id].add(identity)
+    for target_id, identities in counted.items():
+        counts[target_id] = len(identities)
     return counts

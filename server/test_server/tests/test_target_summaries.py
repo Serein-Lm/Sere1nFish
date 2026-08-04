@@ -1,6 +1,10 @@
 """Target summary aggregation tests."""
 
-from api.services.targets import _summarize_finding_counts, _target_summary_sort_key
+from api.services.targets import (
+    _select_target_relation_page,
+    _summarize_finding_counts,
+    _target_summary_sort_key,
+)
 
 
 def test_summarize_finding_counts_groups_high_scores_by_frontend_module() -> None:
@@ -82,3 +86,146 @@ def test_target_summary_sort_prioritizes_high_scores_then_completion() -> None:
         "running-high",
         "completed-low",
     ]
+
+
+def test_target_page_paginates_roots_by_high_score() -> None:
+    relations = [
+        {
+            "project_target_id": "pt-a",
+            "target_id": "root-a",
+            "target_name": "机构 A",
+            "relation_depth": 0,
+        },
+        {
+            "project_target_id": "pt-a-child",
+            "target_id": "child-a",
+            "target_name": "机构 A 子单位",
+            "root_target_id": "root-a",
+            "parent_target_id": "root-a",
+            "relation_depth": 1,
+        },
+        {
+            "project_target_id": "pt-b",
+            "target_id": "root-b",
+            "target_name": "机构 B",
+            "relation_depth": 0,
+        },
+    ]
+
+    result = _select_target_relation_page(
+        relations,
+        {},
+        query="",
+        page=1,
+        page_size=1,
+        root_stats={
+            "root-a": {"high_score_finding_count": 2},
+            "root-b": {"high_score_finding_count": 8},
+        },
+    )
+
+    assert result["root_total"] == 2
+    assert result["project_total"] == 3
+    assert [item["target_id"] for item in result["relations"]] == ["root-b"]
+
+    second_page = _select_target_relation_page(
+        relations,
+        {},
+        query="",
+        page=2,
+        page_size=1,
+        root_stats={
+            "root-a": {"high_score_finding_count": 2},
+            "root-b": {"high_score_finding_count": 8},
+        },
+    )
+    assert [item["target_id"] for item in second_page["relations"]] == ["root-a"]
+    assert second_page["child_counts"]["root-a"] == 1
+    assert second_page["descendant_counts"]["root-a"] == 1
+
+
+def test_target_search_uses_aliases_and_returns_matching_hierarchy() -> None:
+    relations = [
+        {
+            "project_target_id": "pt-root",
+            "target_id": "root",
+            "target_name": "教育主管机构",
+            "relation_depth": 0,
+        },
+        {
+            "project_target_id": "pt-child",
+            "target_id": "child",
+            "target_name": "教育管理信息中心",
+            "root_target_id": "root",
+            "parent_target_id": "root",
+            "relation_depth": 1,
+        },
+        {
+            "project_target_id": "pt-grandchild",
+            "target_id": "grandchild",
+            "target_name": "直属数据服务单位",
+            "root_target_id": "root",
+            "parent_target_id": "child",
+            "relation_depth": 2,
+        },
+        {
+            "project_target_id": "pt-other",
+            "target_id": "other",
+            "target_name": "无关机构",
+            "relation_depth": 0,
+        },
+    ]
+    targets = {
+        "child": {
+            "target_id": "child",
+            "canonical_name": "教育管理信息中心",
+            "aliases": ["教管中心"],
+        }
+    }
+
+    result = _select_target_relation_page(
+        relations,
+        targets,
+        query="教管中心",
+        page=1,
+        page_size=10,
+        root_stats={},
+    )
+
+    assert result["matched_target_ids"] == ["child"]
+    assert [item["target_id"] for item in result["relations"]] == [
+        "root",
+        "child",
+    ]
+    assert result["expanded_project_target_ids"] == ["pt-root"]
+
+
+def test_target_search_does_not_expand_an_entire_matching_root() -> None:
+    relations = [
+        {
+            "project_target_id": "pt-root",
+            "target_id": "root",
+            "target_name": "教育主管机构",
+            "relation_depth": 0,
+        },
+        {
+            "project_target_id": "pt-child",
+            "target_id": "child",
+            "target_name": "直属服务单位",
+            "root_target_id": "root",
+            "parent_target_id": "root",
+            "relation_depth": 1,
+        },
+    ]
+
+    result = _select_target_relation_page(
+        relations,
+        {},
+        query="教育主管机构",
+        page=1,
+        page_size=10,
+        root_stats={},
+    )
+
+    assert result["matched_target_ids"] == ["root"]
+    assert [item["target_id"] for item in result["relations"]] == ["root"]
