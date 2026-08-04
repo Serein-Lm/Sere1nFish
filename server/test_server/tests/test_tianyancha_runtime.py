@@ -14,13 +14,14 @@ def test_runtime_policy_disables_provider_and_bounds_bidding_window() -> None:
                 "enabled": False,
                 "disabled_reason": "quota_insufficient",
             },
-            "bidding": {"lookback_days": 90},
+            "bidding": {"lookback_days": 90, "max_records_per_type": 2000},
         }
     )
 
     assert policy.enabled is False
     assert policy.disabled_reason == "quota_insufficient"
     assert policy.bidding_lookback_days == 30
+    assert policy.bidding_max_records_per_type == 20
 
 
 @pytest.mark.asyncio
@@ -34,7 +35,7 @@ async def test_runtime_policy_update_preserves_other_collection_settings(
             "config": {
                 "browser_workers": 88,
                 "tianyancha": {"enabled": True},
-                "bidding": {"lookback_days": 60},
+                "bidding": {"lookback_days": 60, "max_records_per_type": 10},
             }
         }
 
@@ -58,10 +59,13 @@ async def test_runtime_policy_update_preserves_other_collection_settings(
         enabled=False,
         disabled_reason="quota_insufficient",
         bidding_lookback_days=30,
+        bidding_max_records_per_type=20,
     )
 
     assert stored["browser_workers"] == 88
     assert stored["tianyancha"]["enabled"] is False
     assert stored["bidding"]["lookback_days"] == 30
+    assert stored["bidding"]["max_records_per_type"] == 20
     assert policy.enabled is False
     assert policy.bidding_lookback_days == 30
+    assert policy.bidding_max_records_per_type == 20

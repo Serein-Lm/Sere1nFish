@@ -4807,7 +4807,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 2000, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -5099,13 +5099,13 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="bidding_page_size" label="招投标单页数量" tooltip="天眼查单次请求数量；系统会自动读取后续页">
+                            <Form.Item name="bidding_page_size" label="招投标每类采集数量" tooltip="每种公告类型最多请求一次；该值与单类型上限取较小值">
                               <InputNumber min={1} max={20} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>
-                            <Form.Item name="bidding_max_records" label="招投标单类型上限" tooltip="预告、公告和中标结果分别自动分页并应用此安全上限">
-                              <InputNumber min={20} max={2000} step={20} style={{ width: '100%' }} />
+                            <Form.Item name="bidding_max_records" label="招投标单类型上限" tooltip="预告、公告和中标结果分别最多保留 20 条；历史任务传入更大值也会被截断">
+                              <InputNumber min={1} max={20} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
                           <Col xs={24} sm={6}>

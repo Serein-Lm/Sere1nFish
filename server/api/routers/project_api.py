@@ -215,7 +215,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
         bidding_max_records=max(
             1,
-            min(int(params.get("bidding_max_records") or 2000), 2000),
+            min(int(params.get("bidding_max_records") or 20), 20),
         ),
         enable_wechat=params.get("enable_wechat", False),
         wechat_device_id=params.get("wechat_device_id", ""),

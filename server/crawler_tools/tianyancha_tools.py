@@ -676,7 +676,7 @@ class TianyanchaClient:
         *,
         bid_type: str = "2",
         page_size: int = 20,
-        max_records: int = 2000,
+        max_records: int = 20,
         page_concurrency: int = 3,
         lookback_days: int = 30,
         end_date: date | None = None,
@@ -731,7 +731,8 @@ class TianyanchaClient:
         # 供应商结果按相关性动态排序，分页间可能重复或短页。对同一日期窗口
         # 重新读取全量页并取并集，避免把一次不稳定分页误判为完整。
         while (
-            pages_to_fetch >= total_pages
+            pages_to_fetch > 1
+            and pages_to_fetch >= total_pages
             and len(records_by_id) < coverage_expected
             and retry_passes < 2
         ):
@@ -770,7 +771,7 @@ class TianyanchaClient:
         *,
         bid_types: tuple[str, ...] = BIDDING_TYPES,
         page_size: int = 20,
-        max_records_per_type: int = 2000,
+        max_records_per_type: int = 20,
         page_concurrency: int = 3,
         lookback_days: int = 30,
         end_date: date | None = None,

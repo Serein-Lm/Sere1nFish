@@ -290,6 +290,35 @@ async def test_bidding_query_reads_all_pages_with_bounded_concurrency() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bidding_single_page_budget_never_retries_short_page() -> None:
+    requested_pages: list[int] = []
+
+    class _Client(TianyanchaClient):
+        def __init__(self) -> None:
+            super().__init__("test-key")
+
+        async def _request(self, _endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+            requested_pages.append(int(params["pageNum"]))
+            items = [
+                {"uuid": f"bid-{index}", "title": f"公告 {index}"}
+                for index in range(19)
+            ]
+            return {"error_code": 0, "result": {"total": 20, "items": items}}
+
+    result = await _Client().search_all_bids(
+        "安徽广播电视台",
+        page_size=20,
+        max_records=20,
+        end_date=date(2026, 7, 17),
+    )
+
+    assert requested_pages == [1]
+    assert result.pages_fetched == 1
+    assert result.retry_passes == 0
+    assert result.coverage_gap == 1
+
+
+@pytest.mark.asyncio
 async def test_bidding_query_retries_and_reports_persistent_cross_page_gap() -> None:
     class _Client(TianyanchaClient):
         def __init__(self) -> None:

@@ -191,7 +191,7 @@ class CompanyScanPipeline:
         xhs_manual_targets: list[str] | str | None = None,
         enable_bidding: bool = False,
         bidding_page_size: int = 20,
-        bidding_max_records: int = 2000,
+        bidding_max_records: int = 20,
         enable_wechat: bool = False,
         wechat_device_id: str = "",
         wechat_target_selection_mode: str = "auto",
@@ -1627,7 +1627,7 @@ class CompanyScanPipeline:
         entity_concurrency: int,
         enable_bidding: bool = False,
         bidding_page_size: int = 20,
-        bidding_max_records: int = 2000,
+        bidding_max_records: int = 20,
         xhs_decisions: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """关联单位限流采集；招投标固定单通道，资产和社媒沿用资源池。"""

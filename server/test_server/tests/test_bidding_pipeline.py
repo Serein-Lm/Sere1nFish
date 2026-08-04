@@ -30,6 +30,7 @@ async def test_pipeline_skips_provider_when_runtime_policy_is_disabled(
             enabled=False,
             disabled_reason="quota_insufficient",
             bidding_lookback_days=30,
+            bidding_max_records_per_type=20,
         )
 
     async def _unexpected_client() -> Any:
@@ -221,7 +222,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
         async def search_all_bid_types(self, company_name: str, **kwargs: Any) -> BiddingSearchResult:
             assert company_name == "安徽广播电视台"
             assert kwargs["page_size"] == 20
-            assert kwargs["max_records_per_type"] == 2000
+            assert kwargs["max_records_per_type"] == 20
             assert kwargs["lookback_days"] == 30
             return BiddingSearchResult(
                 records=[record],
@@ -303,6 +304,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
         parent_task_id="company-task-1",
         company_name="安徽广播电视台",
         page_size=20,
+        max_records=2000,
     )
 
     stored_record = persisted["records"][0]

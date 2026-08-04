@@ -772,7 +772,7 @@ class BiddingPipeline:
         target_id: str = "",
         parent_task_id: str = "",
         page_size: int = 20,
-        max_records: int = 2000,
+        max_records: int = 20,
         lookback_days: int = BIDDING_LOOKBACK_DAYS,
         enable_visual_analysis: bool = True,
         enable_copywriting: bool = True,
@@ -796,6 +796,17 @@ class BiddingPipeline:
                 policy.bidding_lookback_days,
             ),
         )
+        requested_page_size = max(1, min(int(page_size), 20))
+        safe_max_records = max(
+            1,
+            min(
+                int(max_records),
+                requested_page_size,
+                policy.bidding_max_records_per_type,
+            ),
+        )
+        # 单页大小与总预算保持一致，保证每种公告类型最多一次供应商请求。
+        safe_page_size = safe_max_records
         if not policy.enabled:
             obs_log(
                 "招投标采集已跳过：天眼查供应商停用",
@@ -825,8 +836,8 @@ class BiddingPipeline:
             event="pipeline_start",
             data={
                 "company_name": company_name,
-                "page_size": page_size,
-                "max_records": max_records,
+                "page_size": safe_page_size,
+                "max_records": safe_max_records,
                 "lookback_days": safe_lookback_days,
                 "bid_types": list(BIDDING_TYPES),
             },
@@ -835,8 +846,8 @@ class BiddingPipeline:
             client = await TianyanchaClient.from_runtime_config()
             search = await client.search_all_bid_types(
                 company_name,
-                page_size=page_size,
-                max_records_per_type=max_records,
+                page_size=safe_page_size,
+                max_records_per_type=safe_max_records,
                 lookback_days=safe_lookback_days,
             )
         except TianyanchaApiError as exc:

@@ -1,7 +1,7 @@
 """天眼查供应商运行策略。
 
-供应商总开关与招投标时间窗统一保存在 ``collection_runtime``，避免业务
-流水线各自判断余额、重复请求或散落固定时间范围。
+供应商总开关与招投标时间窗、单类型记录预算统一保存在
+``collection_runtime``，避免业务流水线各自判断余额、重复请求或散落固定预算。
 """
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ logger = get_logger("tianyancha_runtime")
 
 DEFAULT_BIDDING_LOOKBACK_DAYS = 30
 MAX_BIDDING_LOOKBACK_DAYS = 30
+DEFAULT_BIDDING_MAX_RECORDS_PER_TYPE = 20
+MAX_BIDDING_MAX_RECORDS_PER_TYPE = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +28,7 @@ class TianyanchaRuntimePolicy:
     enabled: bool = True
     disabled_reason: str = ""
     bidding_lookback_days: int = DEFAULT_BIDDING_LOOKBACK_DAYS
+    bidding_max_records_per_type: int = DEFAULT_BIDDING_MAX_RECORDS_PER_TYPE
 
 
 def parse_tianyancha_runtime_policy(config: dict[str, Any] | None) -> TianyanchaRuntimePolicy:
@@ -41,10 +44,21 @@ def parse_tianyancha_runtime_policy(config: dict[str, Any] | None) -> Tianyancha
         )
     except (TypeError, ValueError):
         lookback_days = DEFAULT_BIDDING_LOOKBACK_DAYS
+    try:
+        max_records_per_type = int(
+            bidding.get("max_records_per_type")
+            or DEFAULT_BIDDING_MAX_RECORDS_PER_TYPE
+        )
+    except (TypeError, ValueError):
+        max_records_per_type = DEFAULT_BIDDING_MAX_RECORDS_PER_TYPE
     return TianyanchaRuntimePolicy(
         enabled=provider.get("enabled", True) is not False,
         disabled_reason=str(provider.get("disabled_reason") or "").strip(),
         bidding_lookback_days=max(1, min(lookback_days, MAX_BIDDING_LOOKBACK_DAYS)),
+        bidding_max_records_per_type=max(
+            1,
+            min(max_records_per_type, MAX_BIDDING_MAX_RECORDS_PER_TYPE),
+        ),
     )
 
 
@@ -68,6 +82,7 @@ async def set_tianyancha_runtime_policy(
     enabled: bool | None = None,
     disabled_reason: str | None = None,
     bidding_lookback_days: int | None = None,
+    bidding_max_records_per_type: int | None = None,
     db: AsyncIOMotorDatabase | None = None,
 ) -> TianyanchaRuntimePolicy:
     """Update Tianyancha-owned fields while preserving other collection tuning."""
@@ -91,6 +106,14 @@ async def set_tianyancha_runtime_policy(
         bidding["lookback_days"] = max(
             1,
             min(int(bidding_lookback_days), MAX_BIDDING_LOOKBACK_DAYS),
+        )
+    if bidding_max_records_per_type is not None:
+        bidding["max_records_per_type"] = max(
+            1,
+            min(
+                int(bidding_max_records_per_type),
+                MAX_BIDDING_MAX_RECORDS_PER_TYPE,
+            ),
         )
 
     runtime["tianyancha"] = provider
