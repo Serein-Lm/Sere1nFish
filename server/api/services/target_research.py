@@ -246,6 +246,88 @@ def _normalize_payload(
     }
 
 
+def _prepare_payload_for_validation(
+    value: dict[str, Any],
+    *,
+    navigated_urls: set[str] | None = None,
+) -> dict[str, Any]:
+    """Drop derived facts whose evidence cannot survive source validation."""
+    data = dict(value)
+    known_urls: set[str] = set()
+    for source in data.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        url = _canonical_browser_url(source.get("url"))
+        if (
+            url
+            and not _is_search_result_url(url)
+            and (navigated_urls is None or url in navigated_urls)
+        ):
+            known_urls.add(url)
+
+    def valid_urls(raw: Any) -> list[str]:
+        values = raw if isinstance(raw, list) else [raw]
+        return list(
+            dict.fromkeys(
+                url
+                for item in values
+                if (url := _canonical_browser_url(item)) in known_urls
+            )
+        )
+
+    dropped = 0
+
+    def prepare_many(field: str) -> None:
+        nonlocal dropped
+        prepared: list[dict[str, Any]] = []
+        for raw_item in data.get(field) or []:
+            if not isinstance(raw_item, dict):
+                dropped += 1
+                continue
+            urls = valid_urls(raw_item.get("source_urls"))
+            if not urls:
+                dropped += 1
+                continue
+            prepared.append({**raw_item, "source_urls": urls})
+        data[field] = prepared
+
+    for field in ("evidence", "key_people", "related_targets"):
+        prepare_many(field)
+
+    contacts: list[dict[str, Any]] = []
+    for raw_item in data.get("public_contacts") or []:
+        if not isinstance(raw_item, dict):
+            dropped += 1
+            continue
+        urls = valid_urls(raw_item.get("source_url"))
+        if not urls:
+            dropped += 1
+            continue
+        contacts.append({**raw_item, "source_url": urls[0]})
+    data["public_contacts"] = contacts
+    if dropped:
+        logger.warning(
+            "机构深研预校验已丢弃无有效来源的派生事实 | count=%s",
+            dropped,
+        )
+    return data
+
+
+def _validate_research_payload(
+    value: dict[str, Any],
+    *,
+    navigated_urls: set[str] | None = None,
+) -> dict[str, Any]:
+    prepared = _prepare_payload_for_validation(
+        value,
+        navigated_urls=navigated_urls,
+    )
+    return _normalize_payload(
+        TargetResearchPayload.model_validate(prepared),
+        navigated_urls=navigated_urls,
+    )
+
+
 def _eligible_related_targets(
     data: dict[str, Any],
     *,
@@ -346,6 +428,8 @@ def _candidate_scan_params(
     params = {**base_params, "company_name": name}
     if not is_root and not bool(params.get("enable_subsidiary_bidding", False)):
         params["enable_bidding"] = False
+    if not is_root and not bool(params.get("enable_subsidiary_wechat", False)):
+        params["enable_wechat"] = False
     return params
 
 
@@ -735,30 +819,33 @@ async def run_target_research(
             "合作方、供应商、媒体转载主体和同名第三方不得标记为自动扫描。"
             f"\n{REQUIRE_EVIDENCE_TOOL_MARKER}"
         )
-        with observation_context(
-            project_id=project_id,
-            task_id=task_id,
-            phase="target_research",
-            agent="target_research",
-            task_type="target_research",
-        ):
-            raw = await agent({"messages": [HumanMessage(content=query)]})
+        prompt = load_prompt("target_research/target_research")
+
+        async def run_research_pass(pass_query: str, *, phase: str) -> dict[str, Any] | None:
+            with observation_context(
+                project_id=project_id,
+                task_id=task_id,
+                phase=phase,
+                agent="target_research",
+                task_type="target_research",
+            ):
+                raw = await agent({"messages": [HumanMessage(content=pass_query)]})
             navigated_urls.update(_extract_navigated_urls(raw))
             content_urls = sorted(
                 url for url in navigated_urls if not _is_search_result_url(url)
             )
 
             def validate_research_payload(value: dict[str, Any]) -> None:
-                _normalize_payload(
-                    TargetResearchPayload.model_validate(value),
+                _validate_research_payload(
+                    value,
                     navigated_urls=navigated_urls,
                 )
 
-            parsed = await extract_with_retry(
+            return await extract_with_retry(
                 raw,
                 worker_config,
                 max_retries=1,
-                system_prompt=load_prompt("target_research/target_research"),
+                system_prompt=prompt,
                 validator=validate_research_payload,
                 repair_context=(
                     "以下 URL 由本轮浏览器实际打开并读取。sources、evidence、联系方式、"
@@ -767,13 +854,31 @@ async def run_target_research(
                     + "\n".join(content_urls)
                 ),
             )
+
+        parsed = await run_research_pass(query, phase="target_research")
+        if not parsed:
+            logger.warning(
+                "机构深研首次浏览证据不足，启动一次补充检索 | target=%s navigated=%s",
+                target_id,
+                len(navigated_urls),
+            )
+            retry_query = (
+                query
+                + "\n\n上一次浏览没有形成可校验结果。请重新检索并实际打开、读取至少两个正文页面，"
+                "其中至少一个必须是官网、政府、监管或机构一手来源。不要输出搜索结果页，"
+                "不要引用未打开的 URL；先完成补证，再输出完整 JSON。"
+            )
+            parsed = await run_research_pass(
+                retry_query,
+                phase="target_research_evidence_retry",
+            )
     finally:
         await provider.release_cdp_endpoint(browser_task_id)
     if not parsed:
         raise ValueError("机构深研 Agent 未返回可解析的结构化结果")
 
-    data = _normalize_payload(
-        TargetResearchPayload.model_validate(parsed),
+    data = _validate_research_payload(
+        parsed,
         navigated_urls=navigated_urls,
     )
     await update_task_stage(

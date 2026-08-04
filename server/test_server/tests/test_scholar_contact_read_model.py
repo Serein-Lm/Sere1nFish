@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import urllib.error
 
 import pytest
 
@@ -127,6 +128,33 @@ def test_discover_keeps_partial_sources_when_openalex_is_limited(monkeypatch) ->
 
     assert result["api_results"]["error"] == "HTTP 429"
     assert result["email_extraction"] == extracted
+
+
+def test_scholar_rate_limit_opens_shared_provider_circuit(monkeypatch) -> None:
+    calls = 0
+    url = "https://api.openalex.org/institutions?search=test"
+
+    def rate_limited(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError(
+            url,
+            429,
+            "Too Many Requests",
+            {"Retry-After": "30"},
+            None,
+        )
+
+    scholar_tools._PROVIDER_CIRCUIT_UNTIL.clear()
+    monkeypatch.setattr(scholar_tools.urllib.request, "urlopen", rate_limited)
+    try:
+        with pytest.raises(urllib.error.HTTPError):
+            scholar_tools._get(url)
+        with pytest.raises(scholar_tools.ScholarProviderTemporarilyUnavailable):
+            scholar_tools._get(url)
+        assert calls == 1
+    finally:
+        scholar_tools._PROVIDER_CIRCUIT_UNTIL.clear()
 
 
 class _Cursor:

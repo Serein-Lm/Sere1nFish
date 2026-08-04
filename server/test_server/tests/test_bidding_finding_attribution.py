@@ -44,6 +44,19 @@ def _tagging_payload() -> dict:
     }
 
 
+def test_web_tagging_allows_explicit_no_finding_result() -> None:
+    output = WebTaggingOutput.model_validate({
+        "intro": {"url": "https://third-party.example"},
+        "site_category": "third_party",
+        "target_relation": "not_target",
+        "excluded": True,
+        "no_findings_reason": "第三方通用系统",
+    })
+
+    assert output.has_findings is False
+    assert output.findings == []
+
+
 def test_web_tagging_schema_validates_bidding_party_attribution() -> None:
     output = WebTaggingOutput.model_validate(_tagging_payload())
     finding = output.findings[0]

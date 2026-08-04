@@ -29,6 +29,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -39,6 +40,35 @@ from typing import Any, Optional
 
 UA = "acad-collab-finder/1.0 (mailto:contact@example.com)"
 logger = logging.getLogger(__name__)
+
+_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS = 5 * 60
+_PROVIDER_CIRCUIT_LOCK = threading.Lock()
+_PROVIDER_CIRCUIT_UNTIL: dict[str, float] = {}
+
+
+class ScholarProviderTemporarilyUnavailable(RuntimeError):
+    """One optional scholar provider is cooling down after rate limiting."""
+
+
+def _provider_circuit_remaining(host: str) -> float:
+    with _PROVIDER_CIRCUIT_LOCK:
+        blocked_until = _PROVIDER_CIRCUIT_UNTIL.get(host, 0.0)
+    return max(0.0, blocked_until - time.monotonic())
+
+
+def _trip_provider_circuit(host: str, *, retry_after: float = 0.0) -> float:
+    cooldown = max(_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS, retry_after)
+    with _PROVIDER_CIRCUIT_LOCK:
+        _PROVIDER_CIRCUIT_UNTIL[host] = max(
+            _PROVIDER_CIRCUIT_UNTIL.get(host, 0.0),
+            time.monotonic() + cooldown,
+        )
+    return cooldown
+
+
+def _clear_provider_circuit(host: str) -> None:
+    with _PROVIDER_CIRCUIT_LOCK:
+        _PROVIDER_CIRCUIT_UNTIL.pop(host, None)
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
@@ -69,16 +99,23 @@ def _get(url: str, headers: dict | None = None, retries: int = 4,
          timeout: int = 25) -> Any:
     """GET JSON with bounded provider-aware retries. Proxy comes from env."""
     hdr = {"User-Agent": UA, **(headers or {})}
+    host = urllib.parse.urlsplit(url).hostname or "unknown"
     last: Exception | None = None
     for i in range(retries):
+        circuit_remaining = _provider_circuit_remaining(host)
+        if circuit_remaining > 0:
+            raise ScholarProviderTemporarilyUnavailable(
+                f"Scholar provider {host} cooling down for "
+                f"{circuit_remaining:.0f}s after rate limiting"
+            )
         try:
             req = urllib.request.Request(url, headers=hdr)
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8"))
+                result = json.loads(r.read().decode("utf-8"))
+            _clear_provider_circuit(host)
+            return result
         except Exception as exc:  # noqa: BLE001
             last = exc
-            if i + 1 >= retries:
-                break
             retry_after = 0.0
             status = 0
             if isinstance(exc, urllib.error.HTTPError):
@@ -87,14 +124,28 @@ def _get(url: str, headers: dict | None = None, retries: int = 4,
                     retry_after = float(exc.headers.get("Retry-After") or 0)
                 except (TypeError, ValueError):
                     retry_after = 0.0
+            if status == 429:
+                cooldown = _trip_provider_circuit(
+                    host,
+                    retry_after=retry_after,
+                )
+                logger.warning(
+                    "Scholar provider rate limited; circuit opened "
+                    "host=%s cooldown=%.0fs",
+                    host,
+                    cooldown,
+                )
+                break
+            if i + 1 >= retries:
+                break
             delay = 1.2 * (i + 1)
-            if status == 429 or status in {500, 502, 503, 504}:
+            if status in {500, 502, 503, 504}:
                 delay = max(retry_after, 2.0 ** (i + 1))
             delay = min(30.0, delay) + random.uniform(0.0, 0.4)
             logger.warning(
                 "Scholar provider request failed; retrying host=%s status=%s "
                 "attempt=%s/%s delay=%.1fs",
-                urllib.parse.urlsplit(url).hostname or "unknown",
+                host,
                 status or type(exc).__name__,
                 i + 1,
                 retries,

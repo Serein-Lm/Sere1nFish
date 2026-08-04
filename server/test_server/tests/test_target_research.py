@@ -11,30 +11,39 @@ from api.services.target_research import (
     _eligible_related_targets,
     _extract_navigated_urls,
     _normalize_payload,
+    _prepare_payload_for_validation,
     _schedule_company_scans,
 )
 
 
-def test_related_target_scan_disables_bidding_by_default() -> None:
+def test_related_target_scan_disables_costly_mobile_and_bidding_by_default() -> None:
     base = {
         "enable_asset_discovery": True,
         "enable_url_scan": True,
         "enable_bidding": True,
+        "enable_wechat": True,
         "bidding_max_records": 5,
     }
 
     root = _candidate_scan_params(base, name="主目标", is_root=True)
     related = _candidate_scan_params(base, name="子单位", is_root=False)
     explicit = _candidate_scan_params(
-        {**base, "enable_subsidiary_bidding": True},
+        {
+            **base,
+            "enable_subsidiary_bidding": True,
+            "enable_subsidiary_wechat": True,
+        },
         name="显式开启的子单位",
         is_root=False,
     )
 
     assert root["enable_bidding"] is True
+    assert root["enable_wechat"] is True
     assert related["enable_bidding"] is False
+    assert related["enable_wechat"] is False
     assert related["enable_url_scan"] is True
     assert explicit["enable_bidding"] is True
+    assert explicit["enable_wechat"] is True
 
 
 def _payload(**overrides):
@@ -101,6 +110,27 @@ def test_target_research_drops_unregistered_evidence_url() -> None:
     payload["evidence"][0]["source_urls"] = ["https://unknown.example/evidence"]
     normalized = _normalize_payload(TargetResearchPayload.model_validate(payload))
     assert [item["dimension"] for item in normalized["evidence"]] == ["domain"]
+
+
+def test_target_research_prevalidation_drops_invalid_nested_evidence() -> None:
+    payload = _payload()
+    payload["evidence"].append({
+        "dimension": "invalid",
+        "finding": "引用了未打开页面",
+        "confidence": 0.8,
+        "source_urls": ["https://unknown.example/evidence"],
+    })
+
+    prepared = _prepare_payload_for_validation(
+        payload,
+        navigated_urls={
+            "https://www.example.edu.cn/about",
+            "https://gov.example.cn/unit",
+        },
+    )
+    validated = TargetResearchPayload.model_validate(prepared)
+
+    assert [item.dimension for item in validated.evidence] == ["identity", "domain"]
 
 
 def test_target_research_requires_sources_to_be_actually_navigated() -> None:

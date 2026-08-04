@@ -73,5 +73,5 @@ class TargetResearchPayload(BaseModel):
     key_people: list[TargetKeyPerson] = Field(default_factory=list, max_length=50)
     related_targets: list[RelatedTargetCandidate] = Field(default_factory=list, max_length=40)
     sources: list[TargetResearchSource] = Field(min_length=2, max_length=100)
-    evidence: list[TargetResearchEvidence] = Field(min_length=2, max_length=200)
+    evidence: list[TargetResearchEvidence] = Field(min_length=1, max_length=200)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)

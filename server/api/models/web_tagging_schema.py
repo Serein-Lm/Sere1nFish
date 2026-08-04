@@ -99,6 +99,6 @@ class WebTaggingOutput(BaseModel):
     target_relation: TargetRelation = "uncertain"
     target_relation_reason: str = ""
     excluded: bool = False
-    has_findings: bool
+    has_findings: bool = False
     no_findings_reason: str | None = None
-    findings: list[WebTaggingFinding]
+    findings: list[WebTaggingFinding] = Field(default_factory=list)
