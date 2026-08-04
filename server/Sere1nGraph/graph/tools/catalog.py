@@ -113,10 +113,28 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
     }
     osint = _unique_tools(
         list(OSINT_TOOLS),
+        list(CONTEXT_TOOLS),
         list(PERSONA_COLLECTION_TOOLS),
         list(PERSONA_TOOLS),
         list(SKILL_TOOLS),
         list(WORD_TOOLS),
+        list(ARTIFACT_QUERY_TOOLS),
+        [
+            tool
+            for tool in (
+                list(READ_TOOLS) + list(ANALYSIS_TOOLS) + list(PROJECT_DATA_TOOLS)
+            )
+            if _name(tool) in osint_context_names
+        ],
+    )
+    strategy = _unique_tools(
+        list(CONTEXT_TOOLS),
+        list(OSINT_TOOLS),
+        list(PERSONA_COLLECTION_TOOLS),
+        list(PERSONA_TOOLS),
+        list(SKILL_TOOLS),
+        list(WORD_TOOLS),
+        list(PAYLOAD_WORD_TOOLS),
         list(ARTIFACT_QUERY_TOOLS),
         [
             tool
@@ -132,6 +150,7 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
         "content": content,
         "payload": payload,
         "osint": osint,
+        "strategy": strategy,
     }
 
 
@@ -212,6 +231,12 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
                 "tools": assignments["osint"],
                 "mcp_servers": ["chrome-devtools"],
             },
+            {
+                "name": "strategy",
+                "prompt": "hub/strategy",
+                "tools": assignments["strategy"],
+                "mcp_servers": ["chrome-devtools"],
+            },
         ],
         "tools": sorted(all_tools.values(), key=lambda item: item["name"]),
         "project_datasets": project_datasets,
@@ -220,7 +245,7 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
                 "name": "chrome-devtools",
                 "purpose": "人物/内容公网检索、来源核验与虚构人设背景主动研究",
                 "configured": chrome_configured,
-                "agents": ["persona", "payload", "osint"],
+                "agents": ["persona", "payload", "osint", "strategy"],
             }
         ],
         "audit": {

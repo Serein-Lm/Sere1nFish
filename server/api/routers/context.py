@@ -46,6 +46,34 @@ async def get_company_context(
     )
 
 
+@router.get("/engagement")
+async def get_engagement_context(
+    finding_id: str = "",
+    target_id: str = "",
+    target_name: str = "",
+    project_id: str = "",
+    person_intel_id: str = "",
+    person_query: str = "",
+) -> dict:
+    """聚合 Finding、机构业务、网站、人物情报与人设候选。"""
+    if not any(
+        (finding_id, target_id, target_name, person_intel_id, person_query)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="需提供 finding_id、target_id、target_name、person_intel_id 或 person_query 之一",
+        )
+    return await context_resolver.resolve_engagement_context(
+        get_db(),
+        finding_id=finding_id,
+        target_id=target_id,
+        target_name=target_name,
+        project_id=project_id,
+        person_intel_id=person_intel_id,
+        person_query=person_query,
+    )
+
+
 @router.get("/relations")
 async def get_entity_relations(
     entity_type: str,

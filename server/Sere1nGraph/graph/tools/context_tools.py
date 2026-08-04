@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain.tools import tool
@@ -176,5 +177,49 @@ def get_entity_context(person_id: str = "", company: str = "", root_domain: str 
     return "\n".join(lines)
 
 
+@tool(
+    "get_engagement_context",
+    description=(
+        "为话术升级或完整沟通方案一次性构建有界上下文：指定 finding_id、target_id/target_name "
+        "或 person_intel_id/person_query 后，聚合 Target 深研、官网业务与架构、Finding 证据、"
+        "来源原文、真实人物情报、已有话术及虚构人设候选。返回 facts/inferences 边界和缺口。"
+        "这是完整方案 Agent 的首选入口；参数至少提供一个实体标识，project_id 可选。"
+    ),
+)
+def get_engagement_context(
+    finding_id: str = "",
+    target_id: str = "",
+    target_name: str = "",
+    project_id: str = "",
+    person_intel_id: str = "",
+    person_query: str = "",
+) -> str:
+    if not any((finding_id, target_id, target_name, person_intel_id, person_query)):
+        return (
+            "请至少提供 finding_id、target_id、target_name、person_intel_id "
+            "或 person_query 其中之一。"
+        )
+
+    async def _load() -> dict[str, Any]:
+        from api.db.mongodb import get_db
+        from api.services import context_resolver
+
+        return await context_resolver.resolve_engagement_context(
+            get_db(),
+            finding_id=finding_id.strip(),
+            target_id=target_id.strip(),
+            target_name=target_name.strip(),
+            project_id=project_id.strip(),
+            person_intel_id=person_intel_id.strip(),
+            person_query=person_query.strip(),
+        )
+
+    try:
+        bundle = _run_coro_sync(_load())
+    except Exception as exc:  # noqa: BLE001
+        return f"构建方案上下文失败：{exc}"
+    return json.dumps(bundle, ensure_ascii=False, default=str, indent=2)
+
+
 # 供 Agent 复用的上下文聚合工具集
-CONTEXT_TOOLS = [get_entity_context]
+CONTEXT_TOOLS = [get_entity_context, get_engagement_context]

@@ -75,7 +75,12 @@ async def clear_hub_context(conversation_id: str) -> dict[str, int]:
     from api.dao import ai_hub as ai_hub_dao
     from api.db.mongodb import get_db
 
-    return await ai_hub_dao.clear_conversation_messages(get_db(), conversation_id)
+    db = get_db()
+    result = await ai_hub_dao.clear_conversation_messages(db, conversation_id)
+    result["turns_cancelled"] = await ai_hub_dao.cancel_conversation_turns(
+        db, conversation_id
+    )
+    return result
 
 
 def _extract_final_text(event: dict[str, Any], sections: dict[str, str]) -> None:
@@ -207,6 +212,7 @@ async def run_hub_query(
     owner: str,
     conversation_id: str,
     channel: str,
+    turn_id: str = "",
     on_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run the unified AI Hub stream for an IM channel.
@@ -222,7 +228,6 @@ async def run_hub_query(
     from core.observability import observation_context
     from Sere1nGraph.graph.workflow.executor import execute_stream
 
-    app_config = await get_runtime_app_config()
     db = get_db()
     execution_query = query
     context_version: int | None = None
@@ -234,12 +239,38 @@ async def run_hub_query(
             owner=owner,
         )
         context_version = int(conversation.get("context_version") or 0)
+        if turn_id:
+            persisted_assistant = await ai_hub_dao.get_message_by_id(
+                db,
+                f"{turn_id}:assistant",
+            )
+            if persisted_assistant:
+                meta = (
+                    persisted_assistant.get("meta")
+                    if isinstance(persisted_assistant.get("meta"), dict)
+                    else {}
+                )
+                return (
+                    str(persisted_assistant.get("content") or ""),
+                    list(meta.get("artifacts") or []),
+                )
         history = await ai_hub_dao.list_recent_messages(
             db,
             conversation_id,
             limit=12,
             context_version=context_version,
         )
+        if turn_id:
+            current_turn_message_ids = {
+                f"{turn_id}:user",
+                f"{turn_id}:assistant",
+            }
+            history = [
+                message
+                for message in history
+                if str(message.get("message_id") or "")
+                not in current_turn_message_ids
+            ]
         execution_query = compose_conversation_query(query, history)
         await ai_hub_dao.append_message(
             db,
@@ -247,15 +278,17 @@ async def run_hub_query(
             role="user",
             content=query,
             workflow=_HUB_WORKFLOW,
-            meta={"channel": channel},
+            meta={"channel": channel, "turn_id": turn_id},
             context_version=context_version,
+            message_id=f"{turn_id}:user" if turn_id else "",
         )
 
+    app_config = await get_runtime_app_config()
     sections: dict[str, str] = {}
     artifact_run = None
     with observation_context(
         task_id=conversation_id,
-        turn_id=conversation_id,
+        turn_id=turn_id or conversation_id,
         phase="dingtalk_hub",
         agent="dingtalk",
         task_type=_HUB_WORKFLOW,
@@ -286,7 +319,8 @@ async def run_hub_query(
             role="assistant",
             content=final_text,
             workflow=_HUB_WORKFLOW,
-            meta={"channel": channel, "artifacts": artifacts},
+            meta={"channel": channel, "turn_id": turn_id, "artifacts": artifacts},
             context_version=context_version,
+            message_id=f"{turn_id}:assistant" if turn_id else "",
         )
     return final_text, artifacts

@@ -108,6 +108,8 @@ PERSON_INTELLIGENCE_COLLECTION = "person_intelligence"
 # AI 中枢对话留存（会话 + 消息）
 AI_HUB_CONVERSATIONS_COLLECTION = "ai_hub_conversations"
 AI_HUB_MESSAGES_COLLECTION = "ai_hub_messages"
+# 外部渠道对话轮次。先持久化再执行，支持钉钉 Stream 在热重载后续跑。
+AI_HUB_TURNS_COLLECTION = "ai_hub_turns"
 
 # 产物（Word 文档 / 招股书 / 人物背景报告 / 话术包）
 ARTIFACTS_COLLECTION = "artifacts"

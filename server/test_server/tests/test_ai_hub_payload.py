@@ -1295,8 +1295,9 @@ def test_hub_prompts_are_repository_seeds() -> None:
         "persona",
         "content",
         "payload",
-        "osint",
-        "response_style",
+            "osint",
+            "strategy",
+            "response_style",
     }
     assert expected == {path.stem for path in (PROMPTS_DIR / "hub").glob("*.md")}
     for prompt_name in ("data", "persona", "content", "payload", "osint"):
@@ -2323,6 +2324,9 @@ async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monke
         appended.append(kwargs)
         return kwargs
 
+    async def fake_get_message(_db, _message_id):
+        return None
+
     async def fake_execute_stream(*, query, **_kwargs):
         executed["query"] = query
         yield {
@@ -2335,6 +2339,7 @@ async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monke
     monkeypatch.setattr(ai_hub_dao, "ensure_conversation", fake_ensure)
     monkeypatch.setattr(ai_hub_dao, "list_recent_messages", fake_recent)
     monkeypatch.setattr(ai_hub_dao, "append_message", fake_append)
+    monkeypatch.setattr(ai_hub_dao, "get_message_by_id", fake_get_message)
     monkeypatch.setattr(executor, "execute_stream", fake_execute_stream)
 
     final_text, artifacts = await dingtalk_bridge.run_hub_query(
@@ -2342,6 +2347,7 @@ async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monke
         owner="dingtalk:user_1",
         conversation_id="dingtalk:conversation",
         channel="dingtalk_stream",
+        turn_id="turn_1",
     )
 
     assert "target_id=tgt_1" in executed["query"]
@@ -2352,8 +2358,50 @@ async def test_dingtalk_hub_uses_and_persists_bounded_conversation_context(monke
     assert all(message["context_version"] == 3 for message in appended)
     assert appended[0]["content"] == "继续给这个 Target 生成三条话术"
     assert appended[1]["content"] == "已生成三条话术"
+    assert [message["message_id"] for message in appended] == [
+        "turn_1:user",
+        "turn_1:assistant",
+    ]
     assert final_text == "已生成三条话术"
     assert artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_hub_reuses_persisted_turn_response(monkeypatch) -> None:
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db import mongodb
+    from api.services import dingtalk_bridge
+
+    async def fake_ensure(_db, **_kwargs):
+        return {"conversation_id": "dingtalk:conversation", "context_version": 1}
+
+    async def fake_get_message(_db, message_id: str):
+        assert message_id == "turn_ready:assistant"
+        return {
+            "message_id": message_id,
+            "role": "assistant",
+            "content": "已持久化的答案",
+            "meta": {"artifacts": [{"artifact_id": "artifact_1"}]},
+        }
+
+    async def unexpected_recent(*_args, **_kwargs):
+        raise AssertionError("已有本轮答案时不应重建上下文")
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(ai_hub_dao, "ensure_conversation", fake_ensure)
+    monkeypatch.setattr(ai_hub_dao, "get_message_by_id", fake_get_message)
+    monkeypatch.setattr(ai_hub_dao, "list_recent_messages", unexpected_recent)
+
+    final_text, artifacts = await dingtalk_bridge.run_hub_query(
+        "不会被再次执行的问题",
+        owner="dingtalk:user_1",
+        conversation_id="dingtalk:conversation",
+        channel="dingtalk_stream",
+        turn_id="turn_ready",
+    )
+
+    assert final_text == "已持久化的答案"
+    assert artifacts == [{"artifact_id": "artifact_1"}]
 
 
 @pytest.mark.asyncio
@@ -2594,6 +2642,213 @@ def test_hub_synthesis_prompt_is_evidence_closed() -> None:
     assert "为空、未找到或为 0" in prompt
     assert "不得补造示例、历史值或离线记录" in prompt
     assert "互相冲突时明确指出冲突" in prompt
+
+
+def test_hub_routes_multi_layer_delivery_to_strategy() -> None:
+    from Sere1nGraph.graph.workflow.hub import (
+        _direct_url_classifications,
+        _strategy_classifications,
+    )
+
+    request = (
+        "仔细了解 Yan Lu 的完整信息，结合机构业务生成邮箱话术，"
+        "并输出简历 Word 文档"
+    )
+    assert _strategy_classifications(request) == [
+        {"source": "strategy", "query": request, "requires_tools": True}
+    ]
+
+    simple_url = "总结 https://example.test/report 并生成 Word"
+    assert _strategy_classifications(simple_url) is None
+    assert _direct_url_classifications(simple_url)[0]["source"] == "payload"
+
+
+def test_hub_strategy_exposes_unified_context_and_delivery_tools() -> None:
+    from Sere1nGraph.graph.tools.catalog import get_hub_tool_groups
+
+    names = {tool.name for tool in get_hub_tool_groups()["strategy"]}
+    assert "get_engagement_context" in names
+    assert "search_person_intelligence" in names
+    assert "search_personas" in names
+    assert "generate_document_artifact" in names
+    assert "generate_payload_word" in names
+    assert "link_person_intelligence_artifact" in names
+
+
+@pytest.mark.asyncio
+async def test_ai_hub_external_turn_encrypts_callback_and_claims_idempotently() -> None:
+    from types import SimpleNamespace
+
+    from api.dao import ai_hub as ai_hub_dao
+    from api.utils.config_crypto import encrypt_value, is_encrypted_value
+
+    captured: dict[str, object] = {}
+
+    class FakeCollection:
+        async def update_one(self, query, update, **_kwargs):
+            captured["ensure_query"] = query
+            captured["ensure_update"] = update
+            return SimpleNamespace(modified_count=1)
+
+        async def find_one(self, _query, _projection):
+            return {"turn_id": "turn_test", "status": "queued"}
+
+        async def find_one_and_update(self, query, update, **_kwargs):
+            captured["claim_query"] = query
+            captured["claim_update"] = update
+            return {
+                "turn_id": "turn_test",
+                "status": "queued",
+                "attempts": 0,
+                "callback": {"session_webhook": encrypt_value("https://example.test/session")},
+            }
+
+    class FakeDb:
+        collection = FakeCollection()
+
+        def __getitem__(self, _name):
+            return self.collection
+
+    db = FakeDb()
+    await ai_hub_dao.ensure_external_turn(
+        db,
+        turn_id="turn_test",
+        external_message_id="message_1",
+        conversation_id="conversation_1",
+        owner="dingtalk:user_1",
+        channel="dingtalk_stream",
+        bot_name="default",
+        sender_id="user_1",
+        query="测试问题",
+        session_webhook="https://example.test/session",
+    )
+    encrypted = captured["ensure_update"]["$set"]["callback"]["session_webhook"]
+    assert is_encrypted_value(encrypted)
+    assert "https://example.test/session" not in str(captured["ensure_update"])
+
+    claimed = await ai_hub_dao.claim_external_turn(
+        db,
+        turn_id="turn_test",
+        worker_id="worker_1",
+    )
+    assert claimed["callback"]["session_webhook"] == "https://example.test/session"
+    assert claimed["_claimed_from_status"] == "queued"
+    assert captured["claim_query"]["turn_id"] == "turn_test"
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_recovery_delivers_ready_response_without_rerunning(
+    monkeypatch,
+) -> None:
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db import mongodb
+    from api.services import artifact_access, dingtalk_bridge
+    from api.services import dingtalk_stream as stream_module
+    from crawler_tools import dingtalk_bot
+
+    completed: list[tuple[str, str]] = []
+    replies: list[str] = []
+
+    async def unexpected_query(*_args, **_kwargs):
+        raise AssertionError("response_ready 轮次不应重新执行 Agent")
+
+    async def fake_attach(_db, artifacts, **_kwargs):
+        return artifacts
+
+    async def fake_reply(*_args, **kwargs):
+        replies.append(kwargs["text"])
+        return dingtalk_bot.SendResult(success=True, message="ok")
+
+    async def fake_completed(_db, *, turn_id: str, worker_id: str):
+        completed.append((turn_id, worker_id))
+        return True
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(dingtalk_bridge, "run_hub_query", unexpected_query)
+    monkeypatch.setattr(artifact_access, "attach_temporary_download_urls", fake_attach)
+    monkeypatch.setattr(dingtalk_bot, "reply_to_session_webhook", fake_reply)
+    monkeypatch.setattr(ai_hub_dao, "mark_external_turn_completed", fake_completed)
+
+    adapter = stream_module.DingTalkStreamAdapter(
+        "default",
+        {"public_base_url": "https://example.test"},
+        worker_id="worker_1",
+    )
+    await adapter._recover_turn(
+        {
+            "turn_id": "turn_ready",
+            "_claimed_from_status": "response_ready",
+            "conversation_id": "conversation_1",
+            "owner": "dingtalk:user_1",
+            "sender_id": "user_1",
+            "callback": {"session_webhook": "https://example.test/session"},
+            "final_text": "已完成的关键结果",
+            "artifacts": [],
+        }
+    )
+
+    assert replies == ["已完成的关键结果"]
+    assert completed == [("turn_ready", "worker_1")]
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_recovery_terminalizes_expired_ready_callback(
+    monkeypatch,
+) -> None:
+    from api.dao import ai_hub as ai_hub_dao
+    from api.db import mongodb
+    from api.services import artifact_access, dingtalk_bridge
+    from api.services import dingtalk_stream as stream_module
+    from crawler_tools import dingtalk_bot
+
+    failed: list[tuple[str, str]] = []
+
+    async def unexpected_query(*_args, **_kwargs):
+        raise AssertionError("response_ready 轮次不应重新执行 Agent")
+
+    async def fake_attach(_db, artifacts, **_kwargs):
+        return artifacts
+
+    async def fake_reply(*_args, **_kwargs):
+        return dingtalk_bot.SendResult(success=False, message="session expired")
+
+    async def fake_failed(_db, *, turn_id: str, worker_id: str, error: str):
+        failed.append((turn_id, error))
+        return True
+
+    async def unexpected_interrupted(*_args, **_kwargs):
+        raise AssertionError("已完成答案的回推失败应进入终态")
+
+    monkeypatch.setattr(mongodb, "get_db", lambda: object())
+    monkeypatch.setattr(dingtalk_bridge, "run_hub_query", unexpected_query)
+    monkeypatch.setattr(artifact_access, "attach_temporary_download_urls", fake_attach)
+    monkeypatch.setattr(dingtalk_bot, "reply_to_session_webhook", fake_reply)
+    monkeypatch.setattr(ai_hub_dao, "mark_external_turn_failed", fake_failed)
+    monkeypatch.setattr(
+        ai_hub_dao,
+        "mark_external_turn_interrupted",
+        unexpected_interrupted,
+    )
+
+    adapter = stream_module.DingTalkStreamAdapter(
+        "default",
+        {"public_base_url": "https://example.test"},
+        worker_id="worker_1",
+    )
+    await adapter._recover_turn(
+        {
+            "turn_id": "turn_expired",
+            "_claimed_from_status": "response_ready",
+            "conversation_id": "conversation_1",
+            "owner": "dingtalk:user_1",
+            "sender_id": "user_1",
+            "callback": {"session_webhook": "https://example.test/session"},
+            "final_text": "已完成但尚未投递的结果",
+            "artifacts": [],
+        }
+    )
+
+    assert failed == [("turn_expired", "恢复回推失败：session expired")]
 
 
 def test_dingtalk_stream_requires_complete_credentials() -> None:

@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,9 +51,16 @@ def _message_text(incoming: Any) -> str:
 
 
 class DingTalkStreamAdapter:
-    def __init__(self, bot_name: str, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        bot_name: str,
+        config: dict[str, Any],
+        *,
+        worker_id: str = "",
+    ) -> None:
         self.bot_name = bot_name
         self.config = dict(config)
+        self.worker_id = worker_id or f"dingtalk:{os.getpid()}:{uuid.uuid4().hex[:12]}"
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task[Any] | None = None
         self._client: Any = None
@@ -128,9 +137,75 @@ class DingTalkStreamAdapter:
         handler: Any,
         incoming: Any,
         query: str,
+        prepared_turn_id: str = "",
     ) -> None:
         async with self._conversation_turn(self._conversation_turn_key(incoming)):
-            await self._process_message(handler, incoming, query)
+            await self._process_message(
+                handler,
+                incoming,
+                query,
+                prepared_turn_id=prepared_turn_id,
+            )
+
+    async def _prepare_persisted_turn(
+        self,
+        incoming: Any,
+        query: str,
+    ) -> str | None:
+        """Persist and claim a Stream delivery before returning its ACK."""
+        external_message_id = str(getattr(incoming, "message_id", "") or "").strip()
+        if not external_message_id:
+            return ""
+        try:
+            from api.dao import ai_hub as ai_hub_dao
+            from api.db.mongodb import get_db
+            from api.services.dingtalk_bridge import build_dingtalk_conversation_id
+
+            sender_id = str(
+                getattr(incoming, "sender_staff_id", "")
+                or getattr(incoming, "sender_id", "")
+                or "unknown"
+            )
+            source_conversation_id = str(
+                getattr(incoming, "conversation_id", "") or sender_id
+            )
+            conversation_id = build_dingtalk_conversation_id(
+                bot_name=self.bot_name,
+                conversation_id=source_conversation_id,
+                sender_id=sender_id,
+                conversation_type=str(
+                    getattr(incoming, "conversation_type", "") or ""
+                ),
+            )
+            turn_id = ai_hub_dao.external_turn_id(
+                channel="dingtalk_stream",
+                bot_name=self.bot_name,
+                external_message_id=external_message_id,
+            )
+            db = get_db()
+            await ai_hub_dao.ensure_external_turn(
+                db,
+                turn_id=turn_id,
+                external_message_id=external_message_id,
+                conversation_id=conversation_id,
+                owner=f"dingtalk:{sender_id}",
+                channel="dingtalk_stream",
+                bot_name=self.bot_name,
+                sender_id=sender_id,
+                query=query,
+                session_webhook=str(
+                    getattr(incoming, "session_webhook", "") or ""
+                ),
+            )
+            claimed = await ai_hub_dao.claim_external_turn(
+                db,
+                turn_id=turn_id,
+                worker_id=self.worker_id,
+            )
+            return turn_id if claimed else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("钉钉 Stream ACK 前持久化失败，降级执行本轮: %s", exc)
+            return ""
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -239,15 +314,173 @@ class DingTalkStreamAdapter:
                     return dingtalk_stream.AckMessage.STATUS_OK, "ignored empty message"
                 if not adapter._claim_message_id(getattr(incoming, "message_id", "")):
                     return dingtalk_stream.AckMessage.STATUS_OK, "ignored duplicate message"
+                prepared_turn_id = await adapter._prepare_persisted_turn(incoming, query)
+                if prepared_turn_id is None:
+                    return dingtalk_stream.AckMessage.STATUS_OK, "ignored persisted duplicate"
                 spawn_background(
-                    adapter._process_serialized_message(self, incoming, query),
+                    adapter._process_serialized_message(
+                        self,
+                        incoming,
+                        query,
+                        prepared_turn_id=prepared_turn_id,
+                    ),
                     name=f"dingtalk_hub:{adapter.bot_name}",
                 )
                 return dingtalk_stream.AckMessage.STATUS_OK, "accepted"
 
         return HubChatbotHandler()
 
-    async def _process_message(self, handler: Any, incoming: Any, query: str) -> None:
+    async def recover_pending_turns(self) -> int:
+        """Claim and resume Stream turns left by a previous backend process."""
+        from api.dao import ai_hub as ai_hub_dao
+        from api.db.mongodb import get_db
+
+        turns = await ai_hub_dao.claim_recoverable_turns(
+            get_db(),
+            bot_name=self.bot_name,
+            worker_id=self.worker_id,
+            limit=20,
+        )
+        for turn in turns:
+            spawn_background(
+                self._recover_serialized_turn(turn),
+                name=f"dingtalk_recover:{self.bot_name}:{turn.get('turn_id', '')}",
+            )
+        if turns:
+            logger.warning(
+                "钉钉 Stream 已认领待恢复轮次 bot=%s count=%s",
+                self.bot_name,
+                len(turns),
+            )
+        return len(turns)
+
+    async def _recover_serialized_turn(self, turn: dict[str, Any]) -> None:
+        conversation_id = str(turn.get("conversation_id") or "unknown")
+        async with self._conversation_turn(conversation_id):
+            await self._recover_turn(turn)
+
+    async def _recover_turn(self, turn: dict[str, Any]) -> None:
+        """Resume inference or deliver a response that was ready before reload."""
+        from api.dao import ai_hub as ai_hub_dao
+        from api.db.mongodb import get_db
+        from api.services.artifact_access import attach_temporary_download_urls
+        from api.services.dingtalk_bridge import run_hub_query
+        from crawler_tools.dingtalk_bot import reply_to_session_webhook
+
+        db = get_db()
+        turn_id = str(turn.get("turn_id") or "")
+        conversation_id = str(turn.get("conversation_id") or "")
+        sender_id = str(turn.get("sender_id") or "unknown")
+        owner = str(turn.get("owner") or f"dingtalk:{sender_id}")
+        callback = turn.get("callback") if isinstance(turn.get("callback"), dict) else {}
+        session_webhook = str(callback.get("session_webhook") or "").strip()
+        response_ready = (
+            str(turn.get("_claimed_from_status") or "") == "response_ready"
+            and bool(str(turn.get("final_text") or "").strip())
+        )
+        started_at = time.monotonic()
+        try:
+            if response_ready:
+                final_text = str(turn.get("final_text") or "")
+                artifacts = list(turn.get("artifacts") or [])
+            else:
+                final_text, artifacts = await run_hub_query(
+                    str(turn.get("query") or ""),
+                    owner=owner,
+                    conversation_id=conversation_id,
+                    channel=str(turn.get("channel") or "dingtalk_stream"),
+                    turn_id=turn_id,
+                )
+                response_ready = await ai_hub_dao.mark_external_turn_response_ready(
+                    db,
+                    turn_id=turn_id,
+                    worker_id=self.worker_id,
+                    final_text=final_text,
+                    artifacts=artifacts,
+                )
+                if not response_ready:
+                    logger.info("钉钉恢复轮次已取消 turn=%s", turn_id)
+                    return
+
+            try:
+                artifacts = await attach_temporary_download_urls(
+                    db,
+                    artifacts,
+                    owner=owner,
+                    expires_seconds=3600,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("钉钉恢复轮次产物临时链接生成失败: %s", exc)
+
+            renderer = DingTalkCardRenderer()
+            markdown = renderer.render_final(
+                final_text,
+                artifacts,
+                base_url=str(self.config.get("public_base_url") or ""),
+                max_chars=_MAX_CARD_CHARS,
+                include_execution_summary=False,
+            )
+            if not session_webhook:
+                raise RuntimeError("恢复轮次缺少可用的 sessionWebhook")
+            result = await reply_to_session_webhook(
+                session_webhook,
+                title="AI 中枢回复（已恢复）",
+                text=markdown,
+                at_user_ids=[sender_id] if sender_id != "unknown" else [],
+            )
+            if not result.success:
+                raise RuntimeError(result.message or "钉钉回推失败")
+            await ai_hub_dao.mark_external_turn_completed(
+                db,
+                turn_id=turn_id,
+                worker_id=self.worker_id,
+            )
+            logger.info(
+                "钉钉 Stream 恢复轮次完成 bot=%s turn=%s elapsed=%.2fs",
+                self.bot_name,
+                turn_id,
+                time.monotonic() - started_at,
+            )
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    ai_hub_dao.mark_external_turn_interrupted(
+                        db,
+                        turn_id=turn_id,
+                        worker_id=self.worker_id,
+                        error="恢复过程再次被服务重载中断",
+                        preserve_response=response_ready,
+                    )
+                )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("钉钉 Stream 恢复轮次失败 turn=%s: %s", turn_id, exc)
+            if response_ready:
+                # A sessionWebhook is short-lived. Replaying the same completed
+                # response after every restart would never heal an expired callback.
+                await ai_hub_dao.mark_external_turn_failed(
+                    db,
+                    turn_id=turn_id,
+                    worker_id=self.worker_id,
+                    error=f"恢复回推失败：{exc}",
+                )
+            else:
+                await ai_hub_dao.mark_external_turn_interrupted(
+                    db,
+                    turn_id=turn_id,
+                    worker_id=self.worker_id,
+                    error=str(exc),
+                    preserve_response=False,
+                )
+
+    async def _process_message(
+        self,
+        handler: Any,
+        incoming: Any,
+        query: str,
+        *,
+        prepared_turn_id: str = "",
+    ) -> None:
         from api.services.dingtalk_bridge import (
             build_dingtalk_conversation_id,
             clear_hub_context,
@@ -271,6 +504,53 @@ class DingTalkStreamAdapter:
             sender_id=sender_id,
             conversation_type=str(getattr(incoming, "conversation_type", "") or ""),
         )
+        turn_id = str(prepared_turn_id or "")
+        turn_db: Any = None
+        external_message_id = str(getattr(incoming, "message_id", "") or "").strip()
+        if turn_id:
+            from api.db.mongodb import get_db
+
+            turn_db = get_db()
+        elif external_message_id:
+            try:
+                from api.dao import ai_hub as ai_hub_dao
+                from api.db.mongodb import get_db
+
+                turn_db = get_db()
+                turn_id = ai_hub_dao.external_turn_id(
+                    channel="dingtalk_stream",
+                    bot_name=self.bot_name,
+                    external_message_id=external_message_id,
+                )
+                await ai_hub_dao.ensure_external_turn(
+                    turn_db,
+                    turn_id=turn_id,
+                    external_message_id=external_message_id,
+                    conversation_id=hub_conversation_id,
+                    owner=f"dingtalk:{sender_id}",
+                    channel="dingtalk_stream",
+                    bot_name=self.bot_name,
+                    sender_id=sender_id,
+                    query=query,
+                    session_webhook=str(
+                        getattr(incoming, "session_webhook", "") or ""
+                    ),
+                )
+                claimed = await ai_hub_dao.claim_external_turn(
+                    turn_db,
+                    turn_id=turn_id,
+                    worker_id=self.worker_id,
+                )
+                if not claimed:
+                    logger.info(
+                        "钉钉 Stream 忽略已处理或正在处理的持久轮次 turn=%s",
+                        turn_id,
+                    )
+                    return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("钉钉 Stream 轮次持久化失败，降级为本次执行: %s", exc)
+                turn_id = ""
+                turn_db = None
         started_at = time.monotonic()
         logger.info(
             "钉钉 Stream 消息开始 bot=%s conversation=%s sender=%s chars=%s",
@@ -280,7 +560,7 @@ class DingTalkStreamAdapter:
             len(query),
         )
 
-        async def _send_markdown(title: str, text: str) -> None:
+        async def _send_markdown(title: str, text: str) -> bool:
             result = await reply_to_session_webhook(
                 str(getattr(incoming, "session_webhook", "") or ""),
                 title=title,
@@ -289,6 +569,7 @@ class DingTalkStreamAdapter:
             )
             if not result.success:
                 logger.warning(f"钉钉 Stream 回退回复失败: {result.message}")
+            return bool(result.success)
 
         if is_clear_context_command(query):
             try:
@@ -320,6 +601,7 @@ class DingTalkStreamAdapter:
         last_sent_content = ""
         last_sent_at = 0.0
         last_preparations = ""
+        response_ready = False
 
         async def _activate_card(
             *,
@@ -417,8 +699,22 @@ class DingTalkStreamAdapter:
                 owner=f"dingtalk:{sender_id}",
                 conversation_id=hub_conversation_id,
                 channel="dingtalk_stream",
+                turn_id=turn_id,
                 on_event=_on_event,
             )
+            if turn_id and turn_db is not None:
+                from api.dao import ai_hub as ai_hub_dao
+
+                response_ready = await ai_hub_dao.mark_external_turn_response_ready(
+                    turn_db,
+                    turn_id=turn_id,
+                    worker_id=self.worker_id,
+                    final_text=final_text,
+                    artifacts=artifacts,
+                )
+                if not response_ready:
+                    logger.info("钉钉 Stream 轮次已被取消 turn=%s", turn_id)
+                    return
             from api.db.mongodb import get_db
             from api.services.artifact_access import attach_temporary_download_urls
 
@@ -454,9 +750,19 @@ class DingTalkStreamAdapter:
                         card.fail("卡片更新失败，最终结果已通过普通消息发送。"),
                         name=f"dingtalk_card_final_fail:{self.bot_name}",
                     )
-                    await _send_markdown("AI 中枢回复", final_markdown)
+                    if not await _send_markdown("AI 中枢回复", final_markdown):
+                        raise RuntimeError("钉钉 Card 和 Markdown 回推均失败") from exc
             else:
-                await _send_markdown("AI 中枢回复", final_markdown)
+                if not await _send_markdown("AI 中枢回复", final_markdown):
+                    raise RuntimeError("钉钉 Markdown 回推失败")
+            if turn_id and turn_db is not None:
+                from api.dao import ai_hub as ai_hub_dao
+
+                await ai_hub_dao.mark_external_turn_completed(
+                    turn_db,
+                    turn_id=turn_id,
+                    worker_id=self.worker_id,
+                )
             logger.info(
                 "钉钉 Stream 消息完成 bot=%s conversation=%s elapsed=%.2fs artifacts=%s",
                 self.bot_name,
@@ -471,6 +777,19 @@ class DingTalkStreamAdapter:
                 hub_conversation_id,
                 time.monotonic() - started_at,
             )
+            if turn_id and turn_db is not None:
+                from api.dao import ai_hub as ai_hub_dao
+
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(
+                        ai_hub_dao.mark_external_turn_interrupted(
+                            turn_db,
+                            turn_id=turn_id,
+                            worker_id=self.worker_id,
+                            error="服务热重载中断",
+                            preserve_response=response_ready,
+                        )
+                    )
             interrupted = "服务正在重载，本次处理已中断，请稍后重新发送该问题。"
             if card is None:
                 with contextlib.suppress(Exception):
@@ -487,6 +806,24 @@ class DingTalkStreamAdapter:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"钉钉 Stream AI 中枢处理失败: {exc}")
+            if turn_id and turn_db is not None:
+                from api.dao import ai_hub as ai_hub_dao
+
+                if response_ready:
+                    await ai_hub_dao.mark_external_turn_interrupted(
+                        turn_db,
+                        turn_id=turn_id,
+                        worker_id=self.worker_id,
+                        error=str(exc),
+                        preserve_response=True,
+                    )
+                else:
+                    await ai_hub_dao.mark_external_turn_failed(
+                        turn_db,
+                        turn_id=turn_id,
+                        worker_id=self.worker_id,
+                        error=str(exc),
+                    )
             error_text = f"处理问题时发生错误：{exc}"[:1000]
             if card is None:
                 with contextlib.suppress(Exception):
@@ -516,6 +853,7 @@ class DingTalkStreamManager:
     def __init__(self) -> None:
         self._adapters: dict[str, DingTalkStreamAdapter] = {}
         self._lock = asyncio.Lock()
+        self._worker_id = f"dingtalk:{os.getpid()}:{uuid.uuid4().hex[:12]}"
 
     @classmethod
     def get_instance(cls) -> "DingTalkStreamManager":
@@ -543,9 +881,15 @@ class DingTalkStreamManager:
             self._adapters.clear()
             for bot_name, config in configs.items():
                 if self._enabled(config):
-                    adapter = DingTalkStreamAdapter(bot_name, config)
+                    adapter = DingTalkStreamAdapter(
+                        bot_name,
+                        config,
+                        worker_id=self._worker_id,
+                    )
                     self._adapters[bot_name] = adapter
                     await adapter.start()
+            for adapter in self._adapters.values():
+                await adapter.recover_pending_turns()
 
     async def reload_bot(self, bot_name: str) -> None:
         from api.dao import config as config_dao
@@ -557,9 +901,14 @@ class DingTalkStreamManager:
             if previous:
                 await previous.stop()
             if self._enabled(config):
-                adapter = DingTalkStreamAdapter(bot_name, config)
+                adapter = DingTalkStreamAdapter(
+                    bot_name,
+                    config,
+                    worker_id=self._worker_id,
+                )
                 self._adapters[bot_name] = adapter
                 await adapter.start()
+                await adapter.recover_pending_turns()
 
     async def stop(self) -> None:
         async with self._lock:

@@ -7,7 +7,7 @@ AI 中枢路由工作流（复用 router.py 的 LangGraph 路由架构）。
   「专家子 Agent」，每个子 Agent 只携带内聚的只读工具组并叠加 SummarizationMiddleware，
   使单个子 Agent 上下文有界；子 Agent 内部的工具选择/顺序仍由其自主决定（ReAct，无固定编排）。
 
-拓扑：START → classify → {data | persona | content | payload | osint}（Send 并行）→ synthesize → END
+拓扑：START → classify → {data | persona | content | payload | osint | strategy}（Send 并行）→ synthesize → END
 
 事件复用 router 既有词汇（router_start/classify_*/agent_*/synthesis_*），
 因此 executor._convert_graph_event 无需改动即可渲染思维链。
@@ -29,7 +29,7 @@ from ..agents.factory import create_hub_specialist_agent
 from ..agents.runtime import REQUIRE_EVIDENCE_TOOL_MARKER, create_llm
 from ..prompts.loader import load_prompt
 
-HubTarget = Literal["data", "persona", "content", "payload", "osint"]
+HubTarget = Literal["data", "persona", "content", "payload", "osint", "strategy"]
 _PUBLIC_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _OSINT_INTENT_RE = re.compile(
     r"(?:\bOSINT\b|开源情报|背景调查|深入了解|仔细了解|"
@@ -40,6 +40,19 @@ _PERSONA_COLLECTION_INTENT_RE = re.compile(
     r"(?:(?:主动|联网|公网|网上|持续|重新|补充|新增|创建|生成|采集|收集|爬取|研究)"
     r".{0,32}(?:人设|虚构画像)|(?:人设|虚构画像).{0,32}"
     r"(?:主动|联网|公网|网上|持续|重新|补充|新增|创建|生成|采集|收集|爬取|研究))",
+    re.IGNORECASE,
+)
+_STRATEGY_EXPLICIT_RE = re.compile(
+    r"(?:深度.{0,8}上下文|完整(?:沟通|业务|接触|触达|话术|邮件)?方案|"
+    r"(?:升级|优化|重构).{0,12}(?:话术|邮件|方案)|"
+    r"(?:话术|邮件|方案).{0,12}(?:升级|优化|重构))",
+    re.IGNORECASE,
+)
+_STRATEGY_DELIVERY_RE = re.compile(
+    r"(?:话术|邮件|简历|文档|Word|产物|方案|应对|异议)", re.IGNORECASE
+)
+_STRATEGY_CONTEXT_RE = re.compile(
+    r"(?:Finding|业务|架构|网站|人物|人设|背景|信息|职责|上下游|高校|客户)",
     re.IGNORECASE,
 )
 _CURRENT_REQUEST_MARKER = "【本轮用户请求】"
@@ -59,6 +72,18 @@ _OSINT_SUMMARY_PROMPT = """你正在压缩一项尚未完成的人物公开情�
 7. 待完成事项：尚需检索、保存、关联产物或最终回答的具体步骤。
 
 不要给用户作答，不要声称任务已经完成。以下是需要压缩的消息：
+{messages}"""
+_STRATEGY_SUMMARY_PROMPT = """你正在压缩一项尚未完成的深度业务方案。必须保留后续 Agent 完成闭环所需的状态，不得提前向用户作答。
+
+按以下结构总结：
+1. 原始任务：保留 Finding、Target、项目、人物、链接、交付格式和用户约束。
+2. 已有上下文：记录 get_engagement_context 返回的稳定 ID、业务事实、已有话术与缺口。
+3. 业务分析：网站/应用架构、职责、业务链、利益相关方；逐项区分 fact 与 inference 并保留 URL。
+4. 人物与人设：真实人物消歧结果、person_intel_id、候选/新建虚构 person_id 及匹配依据。
+5. 方案状态：场景、触达顺序、话术、异议应对、发送产物和仍待完成步骤。
+6. 持久化状态：已保存的人物情报、已生成 artifact_id 及尚未关联的对象。
+
+不要重复访问已经核验的页面，不要声称未执行的步骤已完成。以下是需要压缩的消息：
 {messages}"""
 
 
@@ -131,11 +156,33 @@ def _has_persona_collection_intent(query: str) -> bool:
     return bool(_PERSONA_COLLECTION_INTENT_RE.search(text))
 
 
+def _has_strategy_intent(query: str) -> bool:
+    """Detect a multi-layer context-to-deliverable request by capability signals."""
+    text = str(query or "")
+    if _CURRENT_REQUEST_MARKER in text:
+        text = text.rpartition(_CURRENT_REQUEST_MARKER)[2]
+    if _STRATEGY_EXPLICIT_RE.search(text):
+        return True
+    delivery_signals = {
+        match.group(0).casefold() for match in _STRATEGY_DELIVERY_RE.finditer(text)
+    }
+    if _has_osint_intent(text) and len(delivery_signals) >= 2:
+        return True
+    return bool(len(delivery_signals) >= 2 and _STRATEGY_CONTEXT_RE.search(text))
+
+
 def _direct_url_classifications(query: str) -> list[Classification] | None:
     """Bypass one router-model call for the unambiguous exact-URL workflow."""
     if not _has_direct_public_url(query):
         return None
     return [{"source": "payload", "query": query, "requires_tools": True}]
+
+
+def _strategy_classifications(query: str) -> list[Classification] | None:
+    """Route complete context-and-delivery requests to the strategy specialist."""
+    if not _has_strategy_intent(query):
+        return None
+    return [{"source": "strategy", "query": query, "requires_tools": True}]
 
 
 def _osint_classifications(query: str) -> list[Classification] | None:
@@ -209,7 +256,9 @@ async def build_hub_graph(app_config: Any):
         await emit_event({"type": "router_start", "timestamp": _ts()})
         await emit_event({"type": "classify_start", "timestamp": _ts()})
 
-        classifications = _direct_url_classifications(state["query"])
+        classifications = _strategy_classifications(state["query"])
+        if classifications is None:
+            classifications = _direct_url_classifications(state["query"])
         if classifications is None:
             classifications = _persona_collection_classifications(state["query"])
         if classifications is None:
@@ -351,6 +400,20 @@ async def build_hub_graph(app_config: Any):
             summary_trim_tokens=None,
         )
 
+    async def query_strategy(state: AgentInput) -> dict:
+        return await _query_browser_specialist(
+            source="strategy",
+            purpose="hub_strategy",
+            prompt_name="hub/strategy",
+            query=state["query"],
+            timeout=420,
+            mcp_tool_limit=18,
+            summary_trigger_tokens=36_000,
+            summary_keep_messages=20,
+            summary_prompt=_STRATEGY_SUMMARY_PROMPT,
+            summary_trim_tokens=None,
+        )
+
     async def synthesize_results(state: HubState) -> dict:
         await emit_event({"type": "synthesis_start", "timestamp": _ts()})
 
@@ -419,18 +482,20 @@ async def build_hub_graph(app_config: Any):
         .add_node("content", query_content)
         .add_node("payload", query_payload)
         .add_node("osint", query_osint)
+        .add_node("strategy", query_strategy)
         .add_node("synthesize", synthesize_results)
         .add_edge(START, "classify")
         .add_conditional_edges(
             "classify",
             route_to_agents,
-            ["data", "persona", "content", "payload", "osint"],
+            ["data", "persona", "content", "payload", "osint", "strategy"],
         )
         .add_edge("data", "synthesize")
         .add_edge("persona", "synthesize")
         .add_edge("content", "synthesize")
         .add_edge("payload", "synthesize")
         .add_edge("osint", "synthesize")
+        .add_edge("strategy", "synthesize")
         .add_edge("synthesize", END)
     )
     return builder.compile()

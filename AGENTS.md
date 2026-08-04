@@ -100,6 +100,8 @@
 - 配置读取和敏感字段处理应通过 `api.services.runtime_config`、`api.dao.config`、配置加密工具或既有配置入口接入，不在业务模块散落解析逻辑。
 - AI 技能、提示词、模型客户端和 AIGC 能力应通过技能/提示词库、runtime service 或模型适配层接入；业务模块不要直接绑定单一模型供应商。
 - 人物 OSINT 是 AI 中枢的一等核心能力：真实人物的公网检索、身份消歧、来源核验、事实/推断分层、画像、公开职业联系方式、沟通方案和话术统一通过独立 OSINT Agent 与 `person_intelligence` 领域层处理。真实人物情报不得写入虚构人设 `persons`；虚构人设只能用于渐进式匹配沟通风格，不能作为真实事实。任何基于真实人物生成的话术都必须保留可追溯公开来源，AI 中枢与钉钉入口复用同一工具、Prompt、Chrome Provider 和持久化服务。
+- 深度业务方案统一通过 Strategy Agent 与 `api.services.context_resolver.resolve_engagement_context` 构建：先聚合 Finding、Target 深研、网站/应用架构、来源证据、真实人物情报和虚构人设候选，再由 Agent 只补公网缺口，完成职责推断、利益相关方、发送产物、话术和异议应对。事实与推断必须分层，禁止业务模块另写平行聚合逻辑。
+- 钉钉等提前 ACK 的外部渠道必须把执行轮次持久化到 `ai_hub_turns`，回调凭据加密保存；消息写入使用稳定 turn/message ID 保证幂等。热重载中断时保留 `interrupted` 或 `response_ready` 状态，由新进程续跑或只补发结果，禁止只依赖进程内后台任务。
 - 人物方案链路统一为“身份消歧 -> 按新鲜度复用或刷新 OSINT -> 当前时间与热点信号 -> 主动采集/匹配虚构人设 -> 沟通场景 -> 话术 -> 可选产物”。不是每次请求都重新检索：身份一致、信息完整且 30 天内的新鲜记录可直接复用；缺少匹配人设时由 Agent 主动研究公开的行业/岗位通用背景，并按严格 Schema 生成、校验、入库完全虚构且自洽的人设，代码不得硬编码人物样本。事实来源链和生成决策链分别保存，由 service 自动生成稳定 node/edge，前端只消费统一 lineage，不自行推断关联。
 - 手机相关能力通过 `core/mobile/*`、设备池、预约 DAO、mobile router/service 统一接入；不要在业务流程里直接写 ADB、EasyTier 或设备协议细节。
 - 手机附件、图片和音频传递统一通过 `api.services.mobile_transfer` 接入：先写私有对象存储留档，再按媒体类型推送到 Android 公共媒体目录并触发媒体扫描；上传临时文件必须在成功、失败和取消分支释放，页面不得直接执行 ADB。
