@@ -203,6 +203,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
     result = await pipeline.run_pipeline(
         task_id=task_id, project_id=project_id,
         company_name=params.get("company_name", ""),
+        target_id=str(params.get("target_id") or ""),
         batch_id=str(params.get("_batch_id") or ""),
         url_text=params.get("url_text", ""), urls=params.get("urls", []),
         enable_url_scan=params.get("enable_url_scan", True),

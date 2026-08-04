@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
+class ScanInfrastructureError(RuntimeError):
+    """A retryable adapter/runtime failure unrelated to target content."""
+
+
 @dataclass(frozen=True)
 class SearchRequest:
     source: str

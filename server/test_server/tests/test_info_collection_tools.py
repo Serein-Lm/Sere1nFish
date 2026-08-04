@@ -1,13 +1,19 @@
 import asyncio
 import logging
 
+import pytest
+
 from api.db.collections import COPYWRITINGS_COLLECTION
 from api.services.company_scan_pipeline import (
     PROFILE_COPYWRITINGS_COLLECTION,
     _ProfileCopywritingStage,
 )
 from api.services.url_scan_pipeline import _CopywritingStage as _UrlCopywritingStage
-from api.services.url_scan_pipeline import _UrlScanStage, UrlScanPipeline
+from api.services.url_scan_pipeline import (
+    _ScanFailureCollector,
+    _UrlScanStage,
+    UrlScanPipeline,
+)
 from api.services.info_collection import (
     CopywritingRequest,
     CopywritingResult,
@@ -30,8 +36,14 @@ from api.services.info_collection import (
     XhsSearchStage,
     XhsTaggingStage,
 )
+from api.services.info_collection.contracts import ScanInfrastructureError
+from browser_manager.provider import is_browser_infrastructure_error
 from api.services.info_collection.copywriting_tools import AgentCopywritingTool
-from api.services.info_collection.url_tools import HunterSearchProbeTool, UrlProbeTool
+from api.services.info_collection.url_tools import (
+    HunterSearchProbeTool,
+    UrlProbeTool,
+    UrlWebScanTool,
+)
 from api.services.info_collection.xhs_tools import XhsDetailTool, XhsProfileTool, XhsSearchTool
 
 
@@ -550,6 +562,151 @@ def test_wrapped_mcp_tool_timeout_retries_with_a_fresh_browser_attempt():
         assert ctx.state["scan_results"][0]["url"] == "https://recover.example"
 
     asyncio.run(_run())
+
+
+def test_scan_infrastructure_error_gets_additional_fresh_browser_attempts():
+    async def _run():
+        class _TransientTool:
+            def __init__(self):
+                self.calls = 0
+
+            async def scan(self, _request):
+                self.calls += 1
+                if self.calls < 4:
+                    raise ScanInfrastructureError("temporary MCP transport failure")
+                return ScanResult(
+                    source="web_tagging",
+                    target="https://recover.example",
+                    success=True,
+                    data={"intro": {}, "findings": []},
+                )
+
+        tool = _TransientTool()
+        stage = _UrlScanStage(
+            concurrency=1,
+            project_id="project-1",
+            task_id="task-1",
+        )
+        ctx = _FakeContext({
+            "url_scan_tool": tool,
+            "scan_results": [],
+            "project_id": "project-1",
+            "task_id": "task-1",
+        })
+        item = type("Item", (), {
+            "payload": {"url": "https://recover.example"},
+            "meta": {},
+            "item_id": "infrastructure-timeout-1",
+            "attempt": 0,
+        })()
+
+        ok, error = await stage._process_with_retry(item, ctx)
+
+        assert ok is True
+        assert error is None
+        assert tool.calls == 4
+
+    asyncio.run(_run())
+
+
+def test_url_web_scan_wraps_mcp_timeout_and_releases_browser():
+    async def _run():
+        class _Provider:
+            def __init__(self):
+                self.released = []
+
+            async def get_cdp_endpoint(self, **_kwargs):
+                return "ws://chrome.example/devtools/browser/test"
+
+            async def release_cdp_endpoint(self, **kwargs):
+                self.released.append(kwargs["task_id"])
+
+        class _Config:
+            mcp_servers = {}
+
+        async def create_agent(*_args, **_kwargs):
+            async def execute(_messages):
+                raise RuntimeError(
+                    "Tool 'list_pages' error: TimeoutError: 调用超过 60s"
+                )
+
+            return execute
+
+        class _Observation:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        provider = _Provider()
+        request = type("Request", (), {
+            "source": "web_tagging",
+            "target": "https://example.com",
+            "project_id": "project-1",
+            "task_id": "task-1",
+            "target_info": {},
+            "options": {"agent_timeout_seconds": 60},
+        })()
+
+        with pytest.raises(ScanInfrastructureError, match="list_pages"):
+            await UrlWebScanTool(
+                app_config=_Config(),
+                db=_FakeDB(),
+            )._scan_with_browser(
+                request,
+                url=request.target,
+                worker_id=1,
+                attempt=1,
+                source_context="",
+                target_context={},
+                url_task_id="url-task-1",
+                provider=provider,
+                observation_context=lambda **_kwargs: _Observation(),
+                human_message_type=lambda **kwargs: kwargs,
+                create_web_tagging_agent=create_agent,
+                extract_with_retry=lambda *_args, **_kwargs: None,
+            )
+
+        assert provider.released == ["url-task-1"]
+
+    asyncio.run(_run())
+
+
+def test_scan_failure_collector_keeps_infrastructure_failure_retryable():
+    async def _run():
+        results = []
+        persisted = []
+
+        async def persist(result):
+            persisted.append(result)
+
+        collector = _ScanFailureCollector(results, on_result=persist)
+        item = type("Item", (), {
+            "payload": {"url": "https://retry.example"},
+        })()
+        await collector.record(
+            stage="scan",
+            item=item,
+            error=ScanInfrastructureError("temporary CDP outage"),
+        )
+
+        assert results[0]["retryable"] is True
+        assert results[0]["failure_class"] == "browser_infrastructure"
+        assert persisted == results
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Tool 'navigate_page' error: TimeoutError: 调用超过 60s",
+        "Tool 'evaluate_script' error: TimeoutError: 调用超过 60s",
+    ],
+)
+def test_browser_tool_timeouts_are_infrastructure_failures(message: str):
+    assert is_browser_infrastructure_error(RuntimeError(message)) is True
 
 
 def test_url_scan_restart_skips_same_task_terminal_urls(monkeypatch):

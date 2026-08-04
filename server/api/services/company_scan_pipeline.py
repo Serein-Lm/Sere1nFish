@@ -181,6 +181,7 @@ class CompanyScanPipeline:
         task_id: str,
         project_id: str,
         company_name: str,
+        target_id: str = "",
         batch_id: str = "",
         url_text: str = "",
         urls: list[str] | None = None,
@@ -434,9 +435,19 @@ class CompanyScanPipeline:
             logger.info(f"[company_scan] task={task_id} 阶段1: 识别公司 '{company_name}'")
             await self._update_progress(task_id, "routing", "识别法定主体、根域名和搜索别名...")
             from api.dao import company_meta as company_meta_dao
+            from api.dao import targets as targets_dao
             from api.services.company_normalize import normalize_company
             from api.services.targets import attach_normalized_company
             from Sere1nGraph.graph.company_router.router import CompanyRouterResult
+
+            requested_target_id = str(target_id or "").strip()
+            pinned_target = (
+                await targets_dao.get_target(self.db, requested_target_id)
+                if requested_target_id
+                else None
+            )
+            if requested_target_id and pinned_target is None:
+                raise ValueError(f"指定的 Target 不存在: {requested_target_id}")
 
             if restore_core_context:
                 normalized_result = await company_meta_dao.get_company_meta(
@@ -488,29 +499,91 @@ class CompanyScanPipeline:
 
             router_profile = router_output.company_profile if router_output.success else None
             router_legal_name = str(getattr(router_profile, "icp_name", "") or "").strip()
-            normalized_name = str(company_meta.get("normalized_name") or company_name).strip()
-            if normalized_name == company_name and router_legal_name:
-                normalized_name = router_legal_name
-            aliases = self._dedupe_text(
-                [
-                    company_name,
-                    normalized_name,
-                    *[str(item) for item in company_meta.get("aliases") or []],
-                    *list(getattr(router_profile, "colloquial_names", []) or []),
-                    router_legal_name,
-                ]
-            )[:20]
-            resolved_scholar_unit_en = self._derive_scholar_unit_en(
-                aliases,
-                explicit=scholar_unit_en,
-            )
-            root_domain = str(company_meta.get("root_domain") or "").strip()
-            root_domains = self._dedupe_text(
-                [root_domain, *list(company_meta.get("icp_domains") or [])]
-            )[:6]
             provenance = dict(company_meta.get("provenance") or {})
             normalization_error = normalization_error or str(
                 provenance.get("browser_error") or ""
+            )
+            candidate_name = str(
+                company_meta.get("normalized_name") or company_name
+            ).strip()
+            if candidate_name == company_name and router_legal_name:
+                candidate_name = router_legal_name
+            candidate_key = targets_dao.normalize_target_name(candidate_name)
+            candidate_root_domain = str(company_meta.get("root_domain") or "").strip()
+            candidate_root_domains = self._dedupe_text(
+                [
+                    candidate_root_domain,
+                    *list(company_meta.get("icp_domains") or []),
+                ]
+            )[:6]
+
+            if pinned_target is not None:
+                normalized_name = str(
+                    pinned_target.get("canonical_name") or company_name
+                ).strip()
+                pinned_key = targets_dao.normalize_target_name(normalized_name)
+                normalization_matches_target = bool(
+                    candidate_key and candidate_key == pinned_key
+                )
+                root_domains = self._dedupe_text(
+                    [
+                        str(pinned_target.get("root_domain") or ""),
+                        *list(pinned_target.get("root_domains") or []),
+                        *(candidate_root_domains if normalization_matches_target else []),
+                    ]
+                )[:6]
+                root_domain = root_domains[0] if root_domains else ""
+                router_matches_target = (
+                    targets_dao.normalize_target_name(router_legal_name) == pinned_key
+                )
+                aliases = self._dedupe_text(
+                    [
+                        company_name,
+                        normalized_name,
+                        *list(pinned_target.get("identity_aliases") or []),
+                        *(
+                            [str(item) for item in company_meta.get("aliases") or []]
+                            if normalization_matches_target
+                            else []
+                        ),
+                        *(
+                            list(getattr(router_profile, "colloquial_names", []) or [])
+                            if router_matches_target
+                            else []
+                        ),
+                    ]
+                )[:20]
+                provenance.update(
+                    {
+                        "pinned_target_id": requested_target_id,
+                        "normalization_candidate_name": candidate_name,
+                        "normalization_identity_mismatch": not normalization_matches_target,
+                    }
+                )
+                if not normalization_matches_target:
+                    logger.warning(
+                        "[company_scan] task=%s 忽略与固定 Target 不一致的规范化身份: %s -> %s",
+                        task_id,
+                        normalized_name,
+                        candidate_name,
+                    )
+            else:
+                normalized_name = candidate_name
+                root_domain = candidate_root_domain
+                root_domains = candidate_root_domains
+                aliases = self._dedupe_text(
+                    [
+                        company_name,
+                        normalized_name,
+                        *[str(item) for item in company_meta.get("aliases") or []],
+                        *list(getattr(router_profile, "colloquial_names", []) or []),
+                        router_legal_name,
+                    ]
+                )[:20]
+
+            resolved_scholar_unit_en = self._derive_scholar_unit_en(
+                aliases,
+                explicit=scholar_unit_en,
             )
             target = await attach_normalized_company(
                 self.db,
@@ -525,6 +598,7 @@ class CompanyScanPipeline:
                     provenance.get("normalization_version") or 0
                 )
                 or None,
+                preferred_target_id=requested_target_id,
             )
             target_id = str(target.get("target_id") or "")
             company_meta = await company_meta_dao.upsert_company_meta(

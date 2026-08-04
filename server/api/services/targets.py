@@ -133,7 +133,9 @@ def _target_search_rank(
         relation.get("target_name"),
         target.get("canonical_name"),
     ])
-    aliases = _normalized_search_values(target.get("aliases") or [])
+    aliases = _normalized_search_values(
+        target.get("identity_aliases") or target.get("aliases") or []
+    )
     domains = _normalized_search_values([
         relation.get("root_domain"),
         *(relation.get("root_domains") or []),
@@ -478,17 +480,59 @@ async def attach_normalized_company(
     aliases: list[str] | None = None,
     task_id: str = "",
     normalization_version: int | None = None,
+    preferred_target_id: str = "",
 ) -> dict[str, Any]:
     """把 company_meta 的项目级规范化结果挂到全局 Target 聚类。"""
+    canonical_name = str(normalized_name or input_name).strip()
+    input_key = targets_dao.normalize_target_name(input_name)
+    canonical_key = targets_dao.normalize_target_name(canonical_name)
+    existing = await targets_dao.get_target(db, preferred_target_id)
+    if preferred_target_id and existing is None:
+        raise ValueError(f"指定的 Target 不存在: {preferred_target_id}")
+    if existing is not None:
+        canonical_name = str(existing.get("canonical_name") or canonical_name).strip()
+        canonical_key = targets_dao.normalize_target_name(canonical_name)
+    else:
+        existing = await targets_dao.find_target_exact_name(
+            db,
+            name=canonical_name,
+            target_type="company",
+        )
+    promoted_brand_target = False
+    if existing is None and input_key and input_key != canonical_key:
+        # The only cross-name identity promotion allowed here is a Target that
+        # was originally created under the exact user-supplied brand name.
+        brand_target = await targets_dao.find_target_exact_name(
+            db,
+            name=input_name,
+            target_type="company",
+        )
+        if (
+            brand_target
+            and targets_dao.normalize_target_name(
+                str(brand_target.get("canonical_name") or "")
+            ) == input_key
+        ):
+            existing = brand_target
+            promoted_brand_target = True
+    trusted_identity_aliases = (
+        [input_name]
+        if input_key == canonical_key or promoted_brand_target
+        else []
+    )
     target = await targets_dao.upsert_target(
         db,
-        name=normalized_name or input_name,
+        name=canonical_name,
         target_type="company",
         root_domain=root_domain,
         root_domains=root_domains,
         aliases=[input_name, *(aliases or [])],
         source="company_normalize",
         normalization_version=normalization_version,
+        match_aliases=False,
+        preferred_target_id=str((existing or {}).get("target_id") or ""),
+        identity_aliases=trusted_identity_aliases,
+        preserve_canonical_name=bool(preferred_target_id),
     )
     if project_id:
         await targets_dao.link_project_target(
@@ -989,6 +1033,7 @@ async def list_project_target_summary_page(
             "_id": 0,
             "target_id": 1,
             "canonical_name": 1,
+            "identity_aliases": 1,
             "aliases": 1,
             "root_domain": 1,
             "root_domains": 1,

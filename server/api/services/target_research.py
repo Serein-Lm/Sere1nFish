@@ -27,6 +27,7 @@ from Sere1nGraph.graph.agents.runtime import REQUIRE_EVIDENCE_TOOL_MARKER
 logger = get_logger("target_research")
 MAX_TARGET_RESEARCH_BATCH_SIZE = 100
 MAX_TARGET_RESEARCH_CONCURRENCY = 8
+TARGET_RESEARCH_BROWSER_ATTEMPTS = 3
 _AUTO_EXPAND_RELATIONS = {
     "subsidiary",
     "controlled_entity",
@@ -422,10 +423,13 @@ def _candidate_scan_params(
     base_params: dict[str, Any],
     *,
     name: str,
+    target_id: str = "",
     is_root: bool,
 ) -> dict[str, Any]:
     """Apply reusable root/related-Target source policies to one scan."""
     params = {**base_params, "company_name": name}
+    if target_id:
+        params["target_id"] = target_id
     if not is_root and not bool(params.get("enable_subsidiary_bidding", False)):
         params["enable_bidding"] = False
     if not is_root and not bool(params.get("enable_subsidiary_wechat", False)):
@@ -500,6 +504,7 @@ async def _schedule_company_scans(
         params = _candidate_scan_params(
             base_params,
             name=name,
+            target_id=target_id,
             is_root=target_id == str(root_target.get("target_id") or ""),
         )
         documents.append(
@@ -789,89 +794,156 @@ async def run_target_research(
         db, task_id=task_id, stage="target_research", message="正在深研机构身份、业务与关联 Target..."
     )
     from api.services.info_collection.url_tools import _build_worker_chrome_config
-    from browser_manager.provider import get_browser_provider
+    from browser_manager.provider import (
+        get_browser_provider,
+        is_browser_infrastructure_error,
+    )
     from Sere1nGraph.graph.agents.factory import create_target_research_agent
     from Sere1nGraph.graph.agents.runtime import extract_with_retry
     from Sere1nGraph.graph.prompts.loader import load_prompt
 
     provider = get_browser_provider()
     browser_task_id = f"target_research_{task_id}"
-    cdp_url = await provider.get_cdp_endpoint(
-        task_id=browser_task_id, purpose="target_research"
+    query = (
+        "请对以下公司/机构执行公开互联网深度研究，并严格输出 Prompt 规定的 JSON。\n"
+        f"project_id: {project_id}\n"
+        f"target_id: {target_id}\n"
+        f"机构名称: {target.get('canonical_name') or ''}\n"
+        f"可信身份别名: {target.get('identity_aliases') or []}\n"
+        f"已有根域名: {target.get('root_domains') or []}\n"
+        "目标：补全机构信息，识别可继续扫描的明确隶属、控制、直属服务或平台运营单位；"
+        "合作方、供应商、媒体转载主体和同名第三方不得标记为自动扫描。"
+        f"\n{REQUIRE_EVIDENCE_TOOL_MARKER}"
     )
-    if not cdp_url:
-        raise RuntimeError("无法获取项目 Chrome 执行机构深研")
+    prompt = load_prompt("target_research/target_research")
+    parsed: dict[str, Any] | None = None
+    navigated_urls: set[str] = set()
     try:
-        worker_config = _build_worker_chrome_config(app_config, cdp_url)
-        navigated_urls: set[str] = set()
-        agent = await create_target_research_agent(
-            worker_config,
-            mcp_result_observer=_build_navigation_evidence_observer(navigated_urls),
-        )
-        query = (
-            "请对以下公司/机构执行公开互联网深度研究，并严格输出 Prompt 规定的 JSON。\n"
-            f"project_id: {project_id}\n"
-            f"target_id: {target_id}\n"
-            f"机构名称: {target.get('canonical_name') or ''}\n"
-            f"已有别名: {target.get('aliases') or []}\n"
-            f"已有根域名: {target.get('root_domains') or []}\n"
-            "目标：补全机构信息，识别可继续扫描的明确隶属、控制、直属服务或平台运营单位；"
-            "合作方、供应商、媒体转载主体和同名第三方不得标记为自动扫描。"
-            f"\n{REQUIRE_EVIDENCE_TOOL_MARKER}"
-        )
-        prompt = load_prompt("target_research/target_research")
+        cdp_url = ""
+        for browser_attempt in range(1, TARGET_RESEARCH_BROWSER_ATTEMPTS + 1):
+            attempt_urls: set[str] = set()
+            try:
+                if browser_attempt == 1:
+                    cdp_url = await provider.get_cdp_endpoint(
+                        task_id=browser_task_id,
+                        purpose="target_research",
+                    )
+                else:
+                    cdp_url = await provider.hot_swap_container(
+                        task_id=browser_task_id,
+                        purpose="target_research",
+                    )
+                    if not cdp_url:
+                        await provider.release_cdp_endpoint(browser_task_id)
+                        cdp_url = await provider.get_cdp_endpoint(
+                            task_id=browser_task_id,
+                            purpose="target_research",
+                        )
+                if not cdp_url:
+                    raise RuntimeError("无法获取 Chrome 容器执行机构深研")
 
-        async def run_research_pass(pass_query: str, *, phase: str) -> dict[str, Any] | None:
-            with observation_context(
-                project_id=project_id,
-                task_id=task_id,
-                phase=phase,
-                agent="target_research",
-                task_type="target_research",
-            ):
-                raw = await agent({"messages": [HumanMessage(content=pass_query)]})
-            navigated_urls.update(_extract_navigated_urls(raw))
-            content_urls = sorted(
-                url for url in navigated_urls if not _is_search_result_url(url)
-            )
+                if browser_attempt > 1:
+                    await update_task_stage(
+                        db,
+                        task_id=task_id,
+                        stage="target_research",
+                        message=(
+                            "已切换浏览器，正在重新执行机构深研 "
+                            f"{browser_attempt}/{TARGET_RESEARCH_BROWSER_ATTEMPTS}..."
+                        ),
+                    )
 
-            def validate_research_payload(value: dict[str, Any]) -> None:
-                _validate_research_payload(
-                    value,
-                    navigated_urls=navigated_urls,
+                worker_config = _build_worker_chrome_config(app_config, cdp_url)
+                agent = await create_target_research_agent(
+                    worker_config,
+                    mcp_result_observer=_build_navigation_evidence_observer(
+                        attempt_urls
+                    ),
                 )
 
-            return await extract_with_retry(
-                raw,
-                worker_config,
-                max_retries=1,
-                system_prompt=prompt,
-                validator=validate_research_payload,
-                repair_context=(
-                    "以下 URL 由本轮浏览器实际打开并读取。sources、evidence、联系方式、"
-                    "关键人物和关联 Target 只能引用其中的正文 URL；Bing 等搜索结果页只用于"
-                    "发现候选，不得作为来源。至少选择两个正文来源：\n"
-                    + "\n".join(content_urls)
-                ),
-            )
+                async def run_research_pass(
+                    pass_query: str,
+                    *,
+                    phase: str,
+                ) -> dict[str, Any] | None:
+                    with observation_context(
+                        project_id=project_id,
+                        task_id=task_id,
+                        phase=phase,
+                        agent="target_research",
+                        task_type="target_research",
+                    ):
+                        raw = await agent(
+                            {"messages": [HumanMessage(content=pass_query)]}
+                        )
+                    attempt_urls.update(_extract_navigated_urls(raw))
+                    content_urls = sorted(
+                        url
+                        for url in attempt_urls
+                        if not _is_search_result_url(url)
+                    )
 
-        parsed = await run_research_pass(query, phase="target_research")
-        if not parsed:
-            logger.warning(
-                "机构深研首次浏览证据不足，启动一次补充检索 | target=%s navigated=%s",
-                target_id,
-                len(navigated_urls),
-            )
-            retry_query = (
-                query
-                + "\n\n上一次浏览没有形成可校验结果。请重新检索并实际打开、读取至少两个正文页面，"
-                "其中至少一个必须是官网、政府、监管或机构一手来源。不要输出搜索结果页，"
-                "不要引用未打开的 URL；先完成补证，再输出完整 JSON。"
-            )
-            parsed = await run_research_pass(
-                retry_query,
-                phase="target_research_evidence_retry",
-            )
+                    def validate_research_payload(value: dict[str, Any]) -> None:
+                        _validate_research_payload(
+                            value,
+                            navigated_urls=attempt_urls,
+                        )
+
+                    return await extract_with_retry(
+                        raw,
+                        worker_config,
+                        max_retries=1,
+                        system_prompt=prompt,
+                        validator=validate_research_payload,
+                        repair_context=(
+                            "以下 URL 由本轮浏览器实际打开并读取。sources、evidence、联系方式、"
+                            "关键人物和关联 Target 只能引用其中的正文 URL；Bing 等搜索结果页只用于"
+                            "发现候选，不得作为来源。至少选择两个正文来源：\n"
+                            + "\n".join(content_urls)
+                        ),
+                    )
+
+                parsed = await run_research_pass(query, phase="target_research")
+                if not parsed:
+                    logger.warning(
+                        "机构深研首次浏览证据不足，启动一次补充检索 | target=%s navigated=%s",
+                        target_id,
+                        len(attempt_urls),
+                    )
+                    retry_query = (
+                        query
+                        + "\n\n上一次浏览没有形成可校验结果。请重新检索并实际打开、读取至少两个正文页面，"
+                        "其中至少一个必须是官网、政府、监管或机构一手来源。不要输出搜索结果页，"
+                        "不要引用未打开的 URL；先完成补证，再输出完整 JSON。"
+                    )
+                    parsed = await run_research_pass(
+                        retry_query,
+                        phase="target_research_evidence_retry",
+                    )
+                navigated_urls = attempt_urls
+                break
+            except Exception as exc:
+                if (
+                    browser_attempt >= TARGET_RESEARCH_BROWSER_ATTEMPTS
+                    or not is_browser_infrastructure_error(exc)
+                ):
+                    raise
+                logger.warning(
+                    "机构深研浏览器故障，准备热切换重试 | target=%s attempt=%s/%s error=%s",
+                    target_id,
+                    browser_attempt,
+                    TARGET_RESEARCH_BROWSER_ATTEMPTS,
+                    exc,
+                )
+                await update_task_stage(
+                    db,
+                    task_id=task_id,
+                    stage="target_research_browser_retry",
+                    message=(
+                        "浏览器连接异常，正在切换容器重试 "
+                        f"{browser_attempt + 1}/{TARGET_RESEARCH_BROWSER_ATTEMPTS}..."
+                    ),
+                )
     finally:
         await provider.release_cdp_endpoint(browser_task_id)
     if not parsed:
@@ -899,11 +971,19 @@ async def run_target_research(
         db,
         project_id=project_id,
         target=enriched_target,
-        search_terms=list(data.get("business_keywords") or []),
+        search_terms=_clean_strings(
+            [
+                str(enriched_target.get("canonical_name") or ""),
+                *(enriched_target.get("identity_aliases") or []),
+                *(data.get("business_keywords") or []),
+            ],
+            limit=100,
+        ),
         search_terms_by_channel=dict(data.get("search_terms_by_channel") or {}),
         objectives=["机构公开情报深研与高置信关联 Target 扩展"],
         task_def_id=task_id,
         relation=_preserved_relation(relation),
+        replace_search_terms=True,
     )
 
     current_depth = max(0, int(relation.get("relation_depth") or 0))
@@ -928,10 +1008,9 @@ async def run_target_research(
             [candidate_name, *(candidate.get("aliases") or [])],
             limit=30,
         )
-        existing_related = await targets_dao.find_target(
+        existing_related = await targets_dao.find_target_exact_name(
             db,
             name=candidate_name,
-            root_domain=domains[0] if domains else "",
         )
         if (
             existing_related
@@ -969,6 +1048,9 @@ async def run_target_research(
             aliases=candidate_aliases,
             source="target_research",
             normalization_version=NORMALIZATION_VERSION if domains else None,
+            match_aliases=False,
+            preferred_target_id=str((existing_related or {}).get("target_id") or ""),
+            identity_aliases=[candidate_name],
         )
         related_target_id = str(related.get("target_id") or "")
         if related_target_id == target_id:

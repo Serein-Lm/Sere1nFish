@@ -199,6 +199,7 @@ def _wrap_tools_with_error_handling(
     *,
     tool_timeout: int = DEFAULT_TOOL_TIMEOUT,
     max_calls: int = 0,
+    max_consecutive_errors: int = 4,
     call_guard: Callable[
         [str, tuple[Any, ...], dict[str, Any]], str | None
     ] | None = None,
@@ -218,7 +219,7 @@ def _wrap_tools_with_error_handling(
     # 共享的连续错误计数器
     error_state = {
         "consecutive": 0,
-        "max_consecutive": 4,          # 通用错误 4 次中断（原 5 次）
+        "max_consecutive": max(1, min(int(max_consecutive_errors or 4), 20)),
         "container_error_consecutive": 0,
         "max_container_errors": 3,     # 容器级错误 3 次中断
         "calls": 0,
@@ -425,6 +426,7 @@ def create_agent_node(
     streaming: bool = True,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     mcp_tool_limit: int = 0,
+    mcp_error_limit: int = 4,
     max_attempts: int = 3,
     mcp_call_guard: Callable[
         [str, tuple[Any, ...], dict[str, Any]], str | None
@@ -446,6 +448,7 @@ def create_agent_node(
     - streaming: LLM 是否使用流式输出（默认 True，关闭可获得完整 token 统计）
     - timeout: Agent 执行超时秒数（默认从 config.runtime.agent_timeout 读取，fallback 500s，0 表示不限）
     - mcp_tool_names: 专用 Agent 可见的 MCP 工具白名单；None 表示保留全部工具
+    - mcp_error_limit: 同一 MCP 会话连续工具错误上限；由外层换容器的 Agent 可设为 1
     - mcp_result_transform: MCP 工具结果进入模型上下文前的统一转换器
     - mcp_result_observer: 在压缩前观察原始 MCP 工具结果，用于独立证据账本等运行时状态
     
@@ -484,6 +487,7 @@ def create_agent_node(
                         mcp_tools = _wrap_tools_with_error_handling(
                             mcp_tools,
                             max_calls=mcp_tool_limit,
+                            max_consecutive_errors=mcp_error_limit,
                             call_guard=mcp_call_guard,
                             result_transform=mcp_result_transform,
                             result_observer=mcp_result_observer,
@@ -505,6 +509,7 @@ def create_agent_node(
                     mcp_tools = _wrap_tools_with_error_handling(
                         mcp_tools,
                         max_calls=mcp_tool_limit,
+                        max_consecutive_errors=mcp_error_limit,
                         call_guard=mcp_call_guard,
                         result_transform=mcp_result_transform,
                         result_observer=mcp_result_observer,
@@ -570,6 +575,7 @@ def create_agent_node(
                             mcp_tools = _wrap_tools_with_error_handling(
                                 mcp_tools,
                                 max_calls=mcp_tool_limit,
+                                max_consecutive_errors=mcp_error_limit,
                                 call_guard=mcp_call_guard,
                                 result_transform=mcp_result_transform,
                                 result_observer=mcp_result_observer,
@@ -582,6 +588,7 @@ def create_agent_node(
                         mcp_tools = _wrap_tools_with_error_handling(
                             mcp_tools,
                             max_calls=mcp_tool_limit,
+                            max_consecutive_errors=mcp_error_limit,
                             call_guard=mcp_call_guard,
                             result_transform=mcp_result_transform,
                             result_observer=mcp_result_observer,

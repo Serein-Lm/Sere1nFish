@@ -87,6 +87,7 @@ async def test_retryable_result_keeps_attempt_history_without_completion() -> No
 
     assert result["terminal"] is False
     assert result["retryable"] is True
+    assert result["failure_class"] == "infrastructure"
     assert db.collection.update["$unset"] == {"completed_at": ""}
     assert db.collection.update["$push"]["attempt_errors"]["$slice"] == -10
 

@@ -380,8 +380,11 @@ async def create_target_research_agent(
         mcp_server_name=server_name,
         mcp_tool_names=("navigate_page", "evaluate_script"),
         mcp_tool_limit=20,
+        mcp_error_limit=1,
         timeout=900,
-        max_attempts=2,
+        # Browser transport retries are owned by target_research so every
+        # retry gets a different managed Chrome container.
+        max_attempts=1,
         output_mode=output_mode,
         mcp_call_guard=_build_persona_research_guard(),
         mcp_result_transform=_compact_persona_research_result,

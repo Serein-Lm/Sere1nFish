@@ -95,6 +95,7 @@ async def upsert_retryable_result(
     source: str,
     target_id: str = "",
     error: str = "",
+    failure_class: str = "infrastructure",
 ) -> dict[str, Any]:
     """Persist an infrastructure failure without treating the URL as completed."""
     now = _now()
@@ -113,6 +114,7 @@ async def upsert_retryable_result(
         "success": False,
         "terminal": False,
         "retryable": True,
+        "failure_class": str(failure_class or "infrastructure"),
         "error": entry["error"] or None,
         "updated_at": now,
     }

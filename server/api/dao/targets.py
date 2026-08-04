@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import ReturnDocument
+from pymongo import ReturnDocument, UpdateOne
 
 from api.db.collections import PROJECT_TARGETS_COLLECTION, TARGETS_COLLECTION
 
@@ -61,6 +61,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await targets.create_index("root_domain", sparse=True)
     await targets.create_index("root_domains", sparse=True)
     await targets.create_index("aliases_normalized")
+    await targets.create_index("identity_aliases_normalized")
 
     links = db[PROJECT_TARGETS_COLLECTION]
     await links.create_index("project_target_id", unique=True)
@@ -75,6 +76,70 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     )
 
 
+def trusted_identity_aliases(target: dict[str, Any]) -> list[str]:
+    """Keep only canonical names and the deterministic name that seeded the Target."""
+    target_id = str(target.get("target_id") or "")
+    canonical_name = str(target.get("canonical_name") or "").strip()
+    candidates = list(
+        dict.fromkeys(
+            value.strip()
+            for value in [canonical_name, *(target.get("aliases") or [])]
+            if isinstance(value, str) and value.strip()
+        )
+    )
+    return [
+        value
+        for value in candidates
+        if value == canonical_name
+        or target_id_for_name(value, str(target.get("target_type") or "company"))
+        == target_id
+    ]
+
+
+async def rebuild_identity_aliases(db: AsyncIOMotorDatabase) -> int:
+    """Idempotently remove legacy search aliases from Target identity matching."""
+    collection = db[TARGETS_COLLECTION]
+    updates: list[UpdateOne] = []
+    async for target in collection.find(
+        {},
+        {
+            "_id": 0,
+            "target_id": 1,
+            "target_type": 1,
+            "canonical_name": 1,
+            "aliases": 1,
+            "identity_aliases": 1,
+            "identity_aliases_normalized": 1,
+        },
+    ):
+        aliases = trusted_identity_aliases(target)
+        normalized = list(
+            dict.fromkeys(normalize_target_name(value) for value in aliases)
+        )
+        if (
+            aliases == list(target.get("identity_aliases") or [])
+            and normalized
+            == list(target.get("identity_aliases_normalized") or [])
+        ):
+            continue
+        updates.append(
+            UpdateOne(
+                {"target_id": str(target.get("target_id") or "")},
+                {
+                    "$set": {
+                        "identity_aliases": aliases,
+                        "identity_aliases_normalized": normalized,
+                        "updated_at": _now(),
+                    }
+                },
+            )
+        )
+    if not updates:
+        return 0
+    result = await collection.bulk_write(updates, ordered=False)
+    return int(result.modified_count or 0)
+
+
 async def get_target(
     db: AsyncIOMotorDatabase, target_id: str
 ) -> dict[str, Any] | None:
@@ -85,6 +150,22 @@ async def get_target(
     )
 
 
+async def find_target_exact_name(
+    db: AsyncIOMotorDatabase,
+    *,
+    name: str,
+    target_type: str = "company",
+) -> dict[str, Any] | None:
+    """Resolve one Target only by its canonical normalized name."""
+    key = normalize_target_name(name)
+    if not key:
+        return None
+    return await db[TARGETS_COLLECTION].find_one(
+        {"target_type": target_type, "normalized_name": key},
+        {"_id": 0},
+    )
+
+
 async def find_target(
     db: AsyncIOMotorDatabase,
     *,
@@ -92,28 +173,33 @@ async def find_target(
     root_domain: str = "",
     target_type: str = "company",
 ) -> dict[str, Any] | None:
-    if root_domain:
-        found = await db[TARGETS_COLLECTION].find_one(
+    key = normalize_target_name(name)
+    if key:
+        exact = await find_target_exact_name(
+            db,
+            name=name,
+            target_type=target_type,
+        )
+        if exact:
+            return exact
+        alias = await db[TARGETS_COLLECTION].find_one(
             {
                 "target_type": target_type,
-                "$or": [
-                    {"root_domain": root_domain.strip().lower()},
-                    {"root_domains": root_domain.strip().lower()},
-                ],
+                "identity_aliases_normalized": key,
             },
             {"_id": 0},
         )
-        if found:
-            return found
-    key = normalize_target_name(name)
-    if not key:
+        if alias:
+            return alias
+    if not root_domain:
         return None
+    normalized_domain = root_domain.strip().lower()
     return await db[TARGETS_COLLECTION].find_one(
         {
             "target_type": target_type,
             "$or": [
-                {"normalized_name": key},
-                {"aliases_normalized": key},
+                {"root_domain": normalized_domain},
+                {"root_domains": normalized_domain},
             ],
         },
         {"_id": 0},
@@ -131,8 +217,11 @@ async def upsert_target(
     source: str = "",
     normalization_version: int | None = None,
     match_aliases: bool = True,
+    preferred_target_id: str = "",
+    identity_aliases: list[str] | None = None,
+    preserve_canonical_name: bool = False,
 ) -> dict[str, Any]:
-    """按根域名/规范名称复用 Target；不存在时创建稳定实体。"""
+    """Upsert one entity; domains are metadata, never an identity key."""
     display_name = str(name or "").strip()
     if not display_name:
         raise ValueError("Target 名称不能为空")
@@ -145,33 +234,36 @@ async def upsert_target(
     alias_keys = list(
         dict.fromkeys(normalize_target_name(value) for value in alias_values)
     )
-    if match_aliases:
+    identity_alias_values = list(
+        dict.fromkeys(
+            value.strip()
+            for value in [display_name, *(identity_aliases or [])]
+            if isinstance(value, str) and value.strip()
+        )
+    )
+    identity_alias_keys = list(
+        dict.fromkeys(
+            normalize_target_name(value) for value in identity_alias_values
+        )
+    )
+    existing = (
+        await get_target(db, preferred_target_id)
+        if str(preferred_target_id or "").strip()
+        else None
+    )
+    if existing is None and match_aliases:
         existing = await find_target(
             db,
             name=display_name,
-            root_domain=root_domain,
             target_type=target_type,
         )
-    else:
+    elif existing is None:
         # Legal entities in a control tree may share a brand alias or related
         # domain. Only an exact normalized legal name may reuse an identity.
-        existing = await db[TARGETS_COLLECTION].find_one(
-            {
-                "target_type": target_type,
-                "normalized_name": normalize_target_name(display_name),
-            },
-            {"_id": 0},
-        )
-    if existing is None and alias_keys and match_aliases:
-        existing = await db[TARGETS_COLLECTION].find_one(
-            {
-                "target_type": target_type,
-                "$or": [
-                    {"normalized_name": {"$in": alias_keys}},
-                    {"aliases_normalized": {"$in": alias_keys}},
-                ],
-            },
-            {"_id": 0},
+        existing = await find_target_exact_name(
+            db,
+            name=display_name,
+            target_type=target_type,
         )
     target_id = (
         str(existing.get("target_id"))
@@ -180,7 +272,7 @@ async def upsert_target(
     )
     now = _now()
     canonical_name = display_name
-    if existing and source != "company_normalize":
+    if existing and (source != "company_normalize" or preserve_canonical_name):
         canonical_name = str(existing.get("canonical_name") or display_name)
     set_fields: dict[str, Any] = {
         "target_id": target_id,
@@ -218,6 +310,8 @@ async def upsert_target(
         update["$addToSet"] = {
             "aliases": {"$each": alias_values},
             "aliases_normalized": {"$each": alias_keys},
+            "identity_aliases": {"$each": identity_alias_values},
+            "identity_aliases_normalized": {"$each": identity_alias_keys},
         }
     await db[TARGETS_COLLECTION].update_one(
         {"target_id": target_id}, update, upsert=True
@@ -326,6 +420,7 @@ async def link_project_target(
     objectives: list[str] | None = None,
     task_def_id: str = "",
     relation: dict[str, Any] | None = None,
+    replace_search_terms: bool = False,
 ) -> dict[str, Any]:
     if not project_id:
         raise ValueError("project_id 不能为空")
@@ -361,20 +456,29 @@ async def link_project_target(
     additions: dict[str, Any] = {}
     terms = [str(term).strip() for term in (search_terms or []) if str(term).strip()]
     goals = [str(goal).strip() for goal in (objectives or []) if str(goal).strip()]
-    if terms:
+    channel_map: dict[str, list[str]] = {}
+    for channel, channel_terms in (search_terms_by_channel or {}).items():
+        channel_key = re.sub(r"[^a-z0-9_]", "", str(channel).strip().lower())
+        values = list(
+            dict.fromkeys(
+                str(term).strip()
+                for term in (channel_terms or [])
+                if str(term).strip()
+            )
+        )
+        if channel_key and values:
+            channel_map[channel_key] = values
+    if replace_search_terms:
+        update["$set"]["search_terms"] = list(dict.fromkeys(terms))
+        update["$set"]["search_terms_by_channel"] = channel_map
+    elif terms:
         additions["search_terms"] = {"$each": terms}
     if goals:
         additions["objectives"] = {"$each": goals}
     if task_def_id:
         additions["task_def_ids"] = task_def_id
-    for channel, channel_terms in (search_terms_by_channel or {}).items():
-        channel_key = re.sub(r"[^a-z0-9_]", "", str(channel).strip().lower())
-        values = [
-            str(term).strip()
-            for term in (channel_terms or [])
-            if str(term).strip()
-        ]
-        if channel_key and values:
+    if not replace_search_terms:
+        for channel_key, values in channel_map.items():
             additions[f"search_terms_by_channel.{channel_key}"] = {"$each": values}
     if relation:
         relation_doc = {

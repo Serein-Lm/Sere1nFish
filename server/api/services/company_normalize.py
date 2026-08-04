@@ -144,6 +144,7 @@ async def normalize_company(
     from langchain_core.messages import HumanMessage
 
     from api.dao import company_meta as company_meta_dao
+    from api.dao import targets as targets_dao
     from api.services.info_collection.url_tools import _build_worker_chrome_config
     from core.observability import observation_context
     from Sere1nGraph.graph.agents.factory import create_company_normalize_agent
@@ -175,7 +176,22 @@ async def normalize_company(
             )
         )
     ):
-        if not cached.get("target_id"):
+        cached_target = None
+        if cached.get("target_id"):
+            cached_target = await targets_dao.get_target(
+                db,
+                str(cached.get("target_id") or ""),
+            )
+        target_identity_changed = bool(
+            cached_target
+            and targets_dao.normalize_target_name(
+                str(cached_target.get("canonical_name") or "")
+            )
+            != targets_dao.normalize_target_name(
+                str(cached.get("normalized_name") or "")
+            )
+        )
+        if not cached_target or target_identity_changed:
             from api.services.targets import attach_normalized_company
 
             target = await attach_normalized_company(
@@ -211,10 +227,12 @@ async def normalize_company(
         )
         return cached
 
-    # 2. 跨项目复用全局 Target 别名。品牌名（如“B站”）已聚类过时，不再重复启动浏览器。
-    from api.dao import targets as targets_dao
-
-    existing_target = await targets_dao.find_target(db, name=input_name)
+    # 2. 跨项目只复用精确正式名称。品牌别名必须重新经过规范化，避免把
+    # 共用品牌、域名的父子单位错误合并成同一个 Target。
+    existing_target = await targets_dao.find_target_exact_name(
+        db,
+        name=input_name,
+    )
     if (
         existing_target
         and existing_target.get("canonical_name")

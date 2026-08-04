@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import pytest
 
 from api.models.target_research import TargetResearchPayload
@@ -13,6 +16,7 @@ from api.services.target_research import (
     _normalize_payload,
     _prepare_payload_for_validation,
     _schedule_company_scans,
+    run_target_research,
 )
 
 
@@ -26,7 +30,12 @@ def test_related_target_scan_disables_costly_mobile_and_bidding_by_default() -> 
     }
 
     root = _candidate_scan_params(base, name="主目标", is_root=True)
-    related = _candidate_scan_params(base, name="子单位", is_root=False)
+    related = _candidate_scan_params(
+        base,
+        name="子单位",
+        target_id="target-child",
+        is_root=False,
+    )
     explicit = _candidate_scan_params(
         {
             **base,
@@ -42,6 +51,7 @@ def test_related_target_scan_disables_costly_mobile_and_bidding_by_default() -> 
     assert related["enable_bidding"] is False
     assert related["enable_wechat"] is False
     assert related["enable_url_scan"] is True
+    assert related["target_id"] == "target-child"
     assert explicit["enable_bidding"] is True
     assert explicit["enable_wechat"] is True
 
@@ -211,12 +221,157 @@ async def test_company_scan_dispatch_deduplicates_same_target_identity(
         "主目标",
         "独立子单位",
     ]
+    assert [item["params"]["target_id"] for item in inserted] == [
+        "target-root",
+        "target-child",
+    ]
     assert inserted[0]["params"]["enable_bidding"] is True
     assert inserted[1]["params"]["enable_bidding"] is False
     assert skipped == [{
         "target_id": "target-root",
         "reason": "与本轮其他扫描归并为同一 Target",
     }]
+
+
+@pytest.mark.asyncio
+async def test_target_research_hot_swaps_after_browser_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import target_research as research_dao
+    from api.dao import targets as targets_dao
+    from api.services import target_research
+    from browser_manager import provider as browser_provider
+    from Sere1nGraph.graph.agents import factory as agent_factory
+    from Sere1nGraph.graph.agents import runtime as agent_runtime
+    from Sere1nGraph.graph.prompts import loader as prompt_loader
+
+    target = {
+        "target_id": "target-1",
+        "canonical_name": "教育机构 A",
+        "identity_aliases": ["教育机构 A"],
+        "root_domains": ["example.edu.cn"],
+        "aliases": ["教育机构 A"],
+    }
+
+    class Provider:
+        def __init__(self) -> None:
+            self.hot_swaps = 0
+            self.releases = 0
+
+        async def get_cdp_endpoint(self, **_kwargs):
+            return "ws://chrome-first"
+
+        async def hot_swap_container(self, **_kwargs):
+            self.hot_swaps += 1
+            return "ws://chrome-second"
+
+        async def release_cdp_endpoint(self, *_args, **_kwargs):
+            self.releases += 1
+
+    provider = Provider()
+    agent_creations = 0
+    linked_targets: list[dict] = []
+
+    async def create_agent(*_args, **_kwargs):
+        nonlocal agent_creations
+        agent_creations += 1
+        attempt = agent_creations
+
+        async def agent(_request):
+            if attempt == 1:
+                raise RuntimeError(
+                    "Tool 'navigate_page' error: TimeoutError: 调用超过 60s"
+                )
+            return {
+                "messages": [
+                    ToolMessage(
+                        name="navigate_page",
+                        tool_call_id="official",
+                        content=(
+                            "Successfully navigated to "
+                            "https://www.example.edu.cn/about."
+                        ),
+                    ),
+                    ToolMessage(
+                        name="navigate_page",
+                        tool_call_id="government",
+                        content=(
+                            "Successfully navigated to "
+                            "https://gov.example.cn/unit."
+                        ),
+                    ),
+                ]
+            }
+
+        return agent
+
+    async def extract(_raw, _config, **kwargs):
+        payload = _payload(related_targets=[])
+        kwargs["validator"](payload)
+        return payload
+
+    async def get_target(*_args, **_kwargs):
+        return dict(target)
+
+    async def get_relation(*_args, **_kwargs):
+        return {
+            "target_id": "target-1",
+            "target_name": "教育机构 A",
+            "relation_depth": 0,
+        }
+
+    async def merge(*_args, **_kwargs):
+        return dict(target)
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    async def link_target(*_args, **kwargs):
+        linked_targets.append(kwargs)
+        return {}
+
+    async def save(_db, **kwargs):
+        return {
+            **kwargs["document"],
+            "research_id": "research-1",
+        }
+
+    async def enrich(*_args, **_kwargs):
+        return dict(target)
+
+    monkeypatch.setattr(browser_provider, "get_browser_provider", lambda: provider)
+    monkeypatch.setattr(agent_factory, "create_target_research_agent", create_agent)
+    monkeypatch.setattr(agent_runtime, "extract_with_retry", extract)
+    monkeypatch.setattr(prompt_loader, "load_prompt", lambda _slug: "prompt")
+    monkeypatch.setattr(targets_dao, "get_target", get_target)
+    monkeypatch.setattr(targets_dao, "get_project_target", get_relation)
+    monkeypatch.setattr(targets_dao, "merge_target_research_identity", merge)
+    monkeypatch.setattr(targets_dao, "link_project_target", link_target)
+    monkeypatch.setattr(targets_dao, "enrich_target_from_research", enrich)
+    monkeypatch.setattr(research_dao, "save_research", save)
+    monkeypatch.setattr(target_research, "update_task_stage", noop)
+    monkeypatch.setattr(target_research, "observation_context", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(target_research, "obs_log", lambda *_args, **_kwargs: None)
+
+    result = await run_target_research(
+        object(),
+        SimpleNamespace(
+            mcp_servers={"chrome-devtools": SimpleNamespace(args=[])}
+        ),
+        task_id="task-1",
+        project_id="project-1",
+        target_id="target-1",
+        scan_discovered_targets=False,
+        rescan_root=False,
+    )
+
+    assert result["research_id"] == "research-1"
+    assert result["source_count"] == 2
+    assert provider.hot_swaps == 1
+    assert provider.releases == 1
+    assert agent_creations == 2
+    assert linked_targets[0]["replace_search_terms"] is True
+    assert linked_targets[0]["search_terms"] == ["教育机构 A"]
 
 
 def test_target_research_rejects_unconfirmed_navigation_tool_call() -> None:

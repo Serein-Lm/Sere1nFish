@@ -342,6 +342,93 @@ class _PipelineDb:
 
 
 @pytest.mark.asyncio
+async def test_company_scan_keeps_a_pinned_related_target_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import company_meta as company_meta_dao
+    from api.dao import targets as targets_dao
+    from api.services import company_normalize
+    from api.services import targets as targets_service
+    from Sere1nGraph.graph.company_router.router import CompanyRouterResult
+
+    db = _PipelineDb()
+    pipeline = CompanyScanPipeline(db, object())  # type: ignore[arg-type]
+    attached: dict[str, Any] = {}
+    stored_meta: dict[str, Any] = {}
+
+    async def get_target(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "target_id": "target-child",
+            "canonical_name": "目标子公司",
+            "root_domain": "child.example",
+            "root_domains": ["child.example"],
+            "aliases": ["目标子公司", "污染母公司"],
+            "identity_aliases": ["目标子公司"],
+        }
+
+    async def normalize(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "normalized_name": "错误母公司",
+            "root_domain": "parent.example",
+            "icp_domains": ["parent.example"],
+            "aliases": ["错误母公司", "母公司平台"],
+            "source": "test",
+            "provenance": {},
+        }
+
+    async def route(*_args: Any, **_kwargs: Any) -> CompanyRouterResult:
+        return CompanyRouterResult(success=False, error="test fallback")
+
+    async def attach(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        attached.update(kwargs)
+        return {
+            "target_id": "target-child",
+            "canonical_name": "目标子公司",
+        }
+
+    async def upsert_meta(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        stored_meta.update(kwargs)
+        return dict(kwargs)
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(targets_dao, "get_target", get_target)
+    monkeypatch.setattr(company_normalize, "normalize_company", normalize)
+    monkeypatch.setattr(targets_service, "attach_normalized_company", attach)
+    monkeypatch.setattr(company_meta_dao, "upsert_company_meta", upsert_meta)
+    monkeypatch.setattr(targets_dao, "link_project_target", noop)
+    monkeypatch.setattr(targets_dao, "touch_project_target_collection", noop)
+    monkeypatch.setattr(pipeline, "_run_company_router", route)
+    monkeypatch.setattr(pipeline, "_update_progress", noop)
+
+    result = await pipeline.run_pipeline(
+        task_id="task-pinned-target",
+        project_id="project-1",
+        company_name="目标子公司",
+        target_id="target-child",
+        enable_url_scan=False,
+        enable_asset_discovery=False,
+        enable_xhs=False,
+        enable_bidding=False,
+        enable_wechat=False,
+        enable_scholar=False,
+        enable_control_structure=False,
+        enable_copywriting=False,
+    )
+
+    assert attached["preferred_target_id"] == "target-child"
+    assert attached["normalized_name"] == "目标子公司"
+    assert attached["root_domains"] == ["child.example"]
+    assert "错误母公司" not in attached["aliases"]
+    assert "污染母公司" not in attached["aliases"]
+    assert stored_meta["target_id"] == "target-child"
+    assert stored_meta["normalized_name"] == "目标子公司"
+    assert result["identity"]["target_id"] == "target-child"
+    assert result["identity"]["normalization_error"] is None
+
+
+@pytest.mark.asyncio
 async def test_mobile_wait_does_not_block_wholly_owned_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -715,7 +802,7 @@ async def test_retryable_url_child_reopens_only_asset_module_checkpoint(
 
 
 @pytest.mark.asyncio
-async def test_legal_company_reuses_existing_brand_target(
+async def test_legal_company_does_not_reuse_an_untrusted_search_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.dao import targets as targets_dao
@@ -725,7 +812,7 @@ async def test_legal_company_reuses_existing_brand_target(
 
     monkeypatch.setattr(targets_dao, "find_target", no_direct_match)
     collection = _TargetCollection()
-    target = await targets_dao.upsert_target(
+    await targets_dao.upsert_target(
         _TargetDb(collection),
         name="上海宽娱数码科技有限公司",
         root_domain="bilibili.com",
@@ -733,27 +820,189 @@ async def test_legal_company_reuses_existing_brand_target(
         source="company_normalize",
     )
 
-    assert collection.update_filter == {"target_id": "tgt_brand"}
+    assert collection.update_filter == {
+        "target_id": targets_dao.target_id_for_name("上海宽娱数码科技有限公司")
+    }
     assert collection.update["$set"]["canonical_name"] == "上海宽娱数码科技有限公司"
-    assert target["target_id"] == "tgt_brand"
+
+
+def test_trusted_identity_aliases_keep_only_canonical_and_seed_name() -> None:
+    from api.dao import targets as targets_dao
+
+    target = {
+        "target_id": targets_dao.target_id_for_name("B站"),
+        "target_type": "company",
+        "canonical_name": "上海宽娱数码科技有限公司",
+        "aliases": [
+            "B站",
+            "哔哩哔哩",
+            "上海宽娱数码科技有限公司",
+            "无关子公司",
+        ],
+    }
+
+    assert targets_dao.trusted_identity_aliases(target) == [
+        "上海宽娱数码科技有限公司",
+        "B站",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_low_authority_alias_does_not_downgrade_canonical_target(
+async def test_normalized_company_promotes_only_the_exact_brand_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+    from api.services import targets as targets_service
+
+    upsert_kwargs: dict[str, Any] = {}
+
+    async def find_exact(_db: Any, *, name: str, **_kwargs: Any):
+        if name == "B站":
+            return {
+                "target_id": "tgt_brand",
+                "canonical_name": "B站",
+            }
+        return None
+
+    async def upsert(_db: Any, **kwargs: Any) -> dict[str, Any]:
+        upsert_kwargs.update(kwargs)
+        return {
+            "target_id": kwargs.get("preferred_target_id") or "new-target",
+            "canonical_name": kwargs["name"],
+        }
+
+    async def link(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(targets_dao, "find_target_exact_name", find_exact)
+    monkeypatch.setattr(targets_dao, "upsert_target", upsert)
+    monkeypatch.setattr(targets_dao, "link_project_target", link)
+
+    target = await targets_service.attach_normalized_company(
+        object(),
+        project_id="project-1",
+        input_name="B站",
+        normalized_name="上海宽娱数码科技有限公司",
+        root_domain="bilibili.com",
+        aliases=["哔哩哔哩"],
+    )
+
+    assert target["target_id"] == "tgt_brand"
+    assert upsert_kwargs["match_aliases"] is False
+    assert upsert_kwargs["preferred_target_id"] == "tgt_brand"
+    assert upsert_kwargs["identity_aliases"] == ["B站"]
+    assert upsert_kwargs["preserve_canonical_name"] is False
+
+
+@pytest.mark.asyncio
+async def test_normalized_company_preserves_an_explicit_target_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+    from api.services import targets as targets_service
+
+    upsert_kwargs: dict[str, Any] = {}
+
+    async def get_target(_db: Any, target_id: str) -> dict[str, Any]:
+        assert target_id == "target-child"
+        return {
+            "target_id": "target-child",
+            "canonical_name": "目标子公司",
+        }
+
+    async def upsert(_db: Any, **kwargs: Any) -> dict[str, Any]:
+        upsert_kwargs.update(kwargs)
+        return {
+            "target_id": "target-child",
+            "canonical_name": kwargs["name"],
+        }
+
+    async def link(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(targets_dao, "get_target", get_target)
+    monkeypatch.setattr(targets_dao, "upsert_target", upsert)
+    monkeypatch.setattr(targets_dao, "link_project_target", link)
+
+    target = await targets_service.attach_normalized_company(
+        object(),
+        project_id="project-1",
+        input_name="子公司平台",
+        normalized_name="错误母公司",
+        root_domain="child.example",
+        preferred_target_id="target-child",
+    )
+
+    assert target["target_id"] == "target-child"
+    assert upsert_kwargs["name"] == "目标子公司"
+    assert upsert_kwargs["preferred_target_id"] == "target-child"
+    assert upsert_kwargs["preserve_canonical_name"] is True
+    assert upsert_kwargs["identity_aliases"] == []
+
+
+@pytest.mark.asyncio
+async def test_normalized_legal_entities_do_not_merge_by_shared_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+    from api.services import targets as targets_service
+
+    upserts: list[dict[str, Any]] = []
+
+    async def no_exact(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def upsert(_db: Any, **kwargs: Any) -> dict[str, Any]:
+        upserts.append(kwargs)
+        return {
+            "target_id": targets_dao.target_id_for_name(kwargs["name"]),
+            "canonical_name": kwargs["name"],
+        }
+
+    async def link(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(targets_dao, "find_target_exact_name", no_exact)
+    monkeypatch.setattr(targets_dao, "upsert_target", upsert)
+    monkeypatch.setattr(targets_dao, "link_project_target", link)
+
+    first = await targets_service.attach_normalized_company(
+        object(),
+        project_id="project-1",
+        input_name="广州港集团有限公司",
+        normalized_name="广州港集团有限公司",
+        root_domain="gzport.com",
+    )
+    second = await targets_service.attach_normalized_company(
+        object(),
+        project_id="project-1",
+        input_name="广州港物流有限公司",
+        normalized_name="广州港物流有限公司",
+        root_domain="gzport.com",
+    )
+
+    assert first["target_id"] != second["target_id"]
+    assert all(item["match_aliases"] is False for item in upserts)
+    assert all(not item["preferred_target_id"] for item in upserts)
+
+
+@pytest.mark.asyncio
+async def test_trusted_identity_alias_does_not_downgrade_canonical_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.dao import targets as targets_dao
 
-    async def no_direct_match(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr(targets_dao, "find_target", no_direct_match)
     collection = _TargetCollection()
     collection.existing.update(
         canonical_name="上海宽娱数码科技有限公司",
         normalized_name="上海宽娱数码科技有限公司",
         root_domain="bilibili.com",
     )
+
+    async def trusted_match(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return dict(collection.existing)
+
+    monkeypatch.setattr(targets_dao, "find_target", trusted_match)
     await targets_dao.upsert_target(
         _TargetDb(collection),
         name="B站",

@@ -273,3 +273,45 @@ async def test_pipeline_abort_stops_queued_items_without_dlq() -> None:
         )
     assert entered.is_set()
     assert dlq.entries == []
+
+
+@pytest.mark.asyncio
+async def test_retry_policy_can_extend_attempts_for_selected_errors() -> None:
+    class _InfrastructureError(RuntimeError):
+        pass
+
+    class _DynamicRetry(Stage):
+        name = "dynamic-retry"
+        retry = RetryPolicy(
+            max_attempts=2,
+            base_delay=0,
+            jitter=False,
+            max_attempts_for=lambda error: (
+                4 if isinstance(error, _InfrastructureError) else 2
+            ),
+        )
+
+        async def handle(self, item, ctx):
+            attempts = ctx.state.setdefault("attempts", {})
+            attempts[item.payload] = attempts.get(item.payload, 0) + 1
+            if item.payload == "infrastructure":
+                raise _InfrastructureError("temporary browser failure")
+            if item.payload == "mixed" and item.attempt == 1:
+                raise _InfrastructureError("temporary browser failure")
+            raise RuntimeError("content failure")
+
+    dlq = InMemoryDeadLetter()
+    pipe = Pipeline(dlq=dlq, pipeline_id="dynamic-retry-test")
+    pipe.add(_DynamicRetry())
+
+    await pipe.run(
+        seeds=["infrastructure", "content", "mixed"],
+        entry="dynamic-retry",
+    )
+
+    assert pipe.state["attempts"] == {
+        "infrastructure": 4,
+        "content": 2,
+        "mixed": 2,
+    }
+    assert len(dlq.entries) == 3

@@ -111,6 +111,13 @@ class _ScanFailureCollector(DeadLetter):
             "url": url_info.get("url", ""),
             "error": f"{type(error).__name__}: {error}" if error else "扫描失败（已重试）",
         }
+        from api.services.info_collection.contracts import ScanInfrastructureError
+
+        if isinstance(error, ScanInfrastructureError):
+            result.update(
+                retryable=True,
+                failure_class="browser_infrastructure",
+            )
         self.results.append(result)
         if self.on_result:
             try:
@@ -157,6 +164,12 @@ def _retry_url_scan_error(error: BaseException) -> bool:
     return not _is_terminal_analysis_timeout(error)
 
 
+def _url_scan_attempt_limit(error: BaseException) -> int:
+    from api.services.info_collection.contracts import ScanInfrastructureError
+
+    return 4 if isinstance(error, ScanInfrastructureError) else 2
+
+
 class _UrlScanStage(Stage):
     """
     单 URL 扫描编排阶段. 实际扫描由 url_scan_tool 提供.
@@ -172,6 +185,7 @@ class _UrlScanStage(Stage):
         max_delay=8.0,
         jitter=True,
         retry_on=_retry_url_scan_error,
+        max_attempts_for=_url_scan_attempt_limit,
     )
 
     def __init__(
@@ -1161,6 +1175,20 @@ class UrlScanPipeline:
                 success = bool(result.get("success"))
                 data = result.get("data") or {}
                 meta = result.get("meta") or {}
+                if result.get("retryable"):
+                    await url_scan_dao.upsert_retryable_result(
+                        self.db,
+                        task_id=task_id,
+                        project_id=project_id,
+                        target_id=target_id,
+                        source=source,
+                        url=str(result.get("url") or ""),
+                        error=str(result.get("error") or ""),
+                        failure_class=str(
+                            result.get("failure_class") or "infrastructure"
+                        ),
+                    )
+                    return
                 await url_scan_dao.upsert_terminal_result(
                     self.db,
                     task_id=task_id,

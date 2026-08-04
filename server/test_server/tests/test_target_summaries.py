@@ -1,10 +1,55 @@
 """Target summary aggregation tests."""
 
+import pytest
+
+from api.dao import targets as targets_dao
 from api.services.targets import (
     _select_target_relation_page,
     _summarize_finding_counts,
     _target_summary_sort_key,
+    list_project_target_summary_page,
 )
+
+
+@pytest.mark.asyncio
+async def test_project_target_can_replace_authoritative_search_terms() -> None:
+    class Collection:
+        update = None
+
+        async def find_one_and_update(self, _query, update, **_kwargs):
+            self.update = update
+            return {"project_target_id": "pt-1"}
+
+    class Db:
+        collection = Collection()
+
+        def __getitem__(self, _name):
+            return self.collection
+
+    db = Db()
+    await targets_dao.link_project_target(
+        db,
+        project_id="project-1",
+        target={
+            "target_id": "target-1",
+            "canonical_name": "目标机构",
+        },
+        search_terms=["目标机构", "目标机构"],
+        search_terms_by_channel={
+            "web": ["目标机构 官网", "目标机构 官网"],
+        },
+        objectives=["深研"],
+        task_def_id="task-1",
+        replace_search_terms=True,
+    )
+
+    assert db.collection.update["$set"]["search_terms"] == ["目标机构"]
+    assert db.collection.update["$set"]["search_terms_by_channel"] == {
+        "web": ["目标机构 官网"],
+    }
+    additions = db.collection.update["$addToSet"]
+    assert "search_terms" not in additions
+    assert all(not key.startswith("search_terms_by_channel") for key in additions)
 
 
 def test_summarize_finding_counts_groups_high_scores_by_frontend_module() -> None:
@@ -198,6 +243,108 @@ def test_target_search_uses_aliases_and_returns_matching_hierarchy() -> None:
         "child",
     ]
     assert result["expanded_project_target_ids"] == ["pt-root"]
+
+
+def test_target_search_ignores_untrusted_legacy_aliases() -> None:
+    relations = [{
+        "project_target_id": "pt-health",
+        "target_id": "health",
+        "target_name": "医疗管理服务指导中心",
+        "relation_depth": 0,
+    }]
+    targets = {
+        "health": {
+            "target_id": "health",
+            "canonical_name": "医疗管理服务指导中心",
+            "identity_aliases": ["医管中心"],
+            "aliases": ["医管中心", "电子税务"],
+        }
+    }
+
+    trusted = _select_target_relation_page(
+        relations,
+        targets,
+        query="医管中心",
+        page=1,
+        page_size=10,
+        root_stats={},
+    )
+    polluted = _select_target_relation_page(
+        relations,
+        targets,
+        query="电子税务",
+        page=1,
+        page_size=10,
+        root_stats={},
+    )
+
+    assert trusted["matched_target_ids"] == ["health"]
+    assert polluted["matched_target_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_target_summary_page_loads_trusted_identity_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relations = [{
+        "project_target_id": "pt-health",
+        "target_id": "health",
+        "target_name": "医疗管理服务指导中心",
+        "relation_depth": 0,
+    }]
+    target_doc = {
+        "target_id": "health",
+        "canonical_name": "医疗管理服务指导中心",
+        "identity_aliases": ["医管中心"],
+        "aliases": ["医管中心", "电子税务"],
+    }
+
+    class Cursor:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def to_list(self, _length):
+            return self.rows
+
+    class TargetCollection:
+        def find(self, _query, projection):
+            projected = {
+                key: value
+                for key, value in target_doc.items()
+                if projection.get(key)
+            }
+            return Cursor([projected])
+
+    class FindingCollection:
+        def aggregate(self, _pipeline):
+            return Cursor([])
+
+    class Db:
+        def __getitem__(self, name):
+            if name == "targets":
+                return TargetCollection()
+            return FindingCollection()
+
+    async def list_relations(*_args, **_kwargs):
+        return relations
+
+    async def list_summaries(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(targets_dao, "list_project_targets", list_relations)
+    monkeypatch.setattr(
+        "api.services.targets.list_project_target_summaries",
+        list_summaries,
+    )
+
+    result = await list_project_target_summary_page(
+        Db(),
+        "project-1",
+        query="电子税务",
+    )
+
+    assert result["matched_total"] == 0
+    assert result["matched_target_ids"] == []
 
 
 def test_target_search_does_not_expand_an_entire_matching_root() -> None:

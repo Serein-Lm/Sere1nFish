@@ -418,14 +418,17 @@ class UrlWebScanTool:
         create_web_tagging_agent: Any,
         extract_with_retry: Any,
     ) -> ScanResult:
-        cdp_url = await provider.get_cdp_endpoint(
-            task_id=url_task_id,
-            purpose="url_scan",
-        )
-        if not cdp_url:
-            raise RuntimeError(f"无法获取 Chrome 容器 (url={url})")
+        from api.services.info_collection.contracts import ScanInfrastructureError
+        from browser_manager.provider import is_browser_infrastructure_error
 
+        cdp_url = ""
         try:
+            cdp_url = await provider.get_cdp_endpoint(
+                task_id=url_task_id,
+                purpose="url_scan",
+            )
+            if not cdp_url:
+                raise RuntimeError(f"无法获取 Chrome 容器 (url={url})")
             logger.info(
                 f"[scan-w{worker_id}] 扫描 {url} (attempt={attempt}) | 容器={cdp_url}"
             )
@@ -536,8 +539,15 @@ class UrlWebScanTool:
                     "findings_count": findings_count,
                 },
             )
+        except ScanInfrastructureError:
+            raise
+        except Exception as exc:
+            if is_browser_infrastructure_error(exc):
+                raise ScanInfrastructureError(str(exc) or type(exc).__name__) from exc
+            raise
         finally:
-            try:
-                await provider.release_cdp_endpoint(task_id=url_task_id)
-            except Exception:
-                pass
+            if cdp_url:
+                try:
+                    await provider.release_cdp_endpoint(task_id=url_task_id)
+                except Exception:
+                    pass

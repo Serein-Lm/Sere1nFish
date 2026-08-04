@@ -1737,6 +1737,31 @@ async def test_mcp_tool_timeout_returns_recoverable_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_error_limit_can_fail_fast_for_outer_failover() -> None:
+    from langchain_core.tools import StructuredTool
+
+    from Sere1nGraph.graph.agents.runtime import _wrap_tools_with_error_handling
+
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.05)
+        return "done"
+
+    tool = StructuredTool.from_function(
+        coroutine=slow_tool,
+        name="slow_tool",
+        description="用于验证外层浏览器切换的快速失败",
+    )
+    wrapped = _wrap_tools_with_error_handling(
+        [tool],
+        tool_timeout=0.01,
+        max_consecutive_errors=1,
+    )
+
+    with pytest.raises(RuntimeError, match="连续 1 次工具调用失败"):
+        await wrapped[0].ainvoke({})
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_budget_does_not_call_adapter_after_limit() -> None:
     from langchain_core.tools import StructuredTool
 

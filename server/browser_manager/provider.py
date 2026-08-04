@@ -31,6 +31,41 @@ _BULK_BROWSER_PURPOSES = frozenset({"url_scan"})
 MAX_CHROME_CONTAINERS = 96
 
 
+def is_browser_infrastructure_error(error: BaseException) -> bool:
+    """Classify Chrome/CDP/MCP transport failures shared by browser workflows."""
+    message = f"{type(error).__name__}: {error}".casefold()
+    if "tool '" in message and " error:" in message and any(
+        marker in message
+        for marker in (
+            "timeouterror",
+            "timed out",
+            "调用超过",
+            "connection closed",
+            "connection reset",
+        )
+    ):
+        return True
+    markers = (
+        "network.enable timed out",
+        "获取 cdp ws url 失败",
+        "无法获取 chrome 容器",
+        "browsercontext.new_page",
+        "target page, context or browser has been closed",
+        "等待空闲容器超时",
+    )
+    if any(marker in message for marker in markers):
+        return True
+    if "cdp" in message and any(
+        marker in message for marker in ("timeout", "timed out", "不可用", "失败")
+    ):
+        return True
+    if "mcp" in message and any(
+        marker in message for marker in ("timeout", "timed out", "connection")
+    ):
+        return True
+    return "容器 chrome-" in message and "启动超时" in message
+
+
 # ── 数据结构 ──────────────────────────────────────────────
 
 @dataclass

@@ -261,6 +261,12 @@ async def lifespan(app: FastAPI):
         from api.dao import target_research as target_research_dao
         from api.dao import source_documents as source_documents_dao
         await targets_dao.ensure_indexes(db)
+        rebuilt_target_aliases = await targets_dao.rebuild_identity_aliases(db)
+        if rebuilt_target_aliases:
+            logger.info(
+                "Target 身份别名已收敛: updated=%s",
+                rebuilt_target_aliases,
+            )
         await target_research_dao.ensure_indexes(db)
         await source_documents_dao.ensure_indexes(db)
         # 学者学术联系发现索引

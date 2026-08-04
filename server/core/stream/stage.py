@@ -29,6 +29,7 @@ class RetryPolicy:
     max_delay: float = 30.0
     jitter: bool = True
     retry_on: Callable[[BaseException], bool] = field(default=lambda e: True)
+    max_attempts_for: Callable[[BaseException], int] | None = None
 
     def delay_for(self, attempt: int) -> float:
         """attempt 从 1 起计."""
@@ -36,6 +37,17 @@ class RetryPolicy:
         if self.jitter:
             d *= 0.5 + random.random()
         return d
+
+    def attempt_limit_for(self, error: BaseException) -> int:
+        """Return a bounded, error-specific attempt limit."""
+        limit = max(1, int(self.max_attempts or 1))
+        if self.max_attempts_for is None:
+            return limit
+        try:
+            dynamic_limit = int(self.max_attempts_for(error) or limit)
+        except Exception:
+            return limit
+        return max(limit, min(dynamic_limit, 32))
 
 
 class Stage(ABC):
@@ -95,7 +107,8 @@ class Stage(ABC):
         """
         last_err: BaseException | None = None
         policy = self.retry
-        for attempt in range(1, max(1, policy.max_attempts) + 1):
+        attempt = 1
+        while True:
             item.attempt = attempt
             try:
                 await self.handle(item, ctx)
@@ -106,8 +119,9 @@ class Stage(ABC):
                 raise
             except BaseException as e:
                 last_err = e
+                attempt_limit = policy.attempt_limit_for(e)
                 will_retry = (
-                    attempt < policy.max_attempts and policy.retry_on(e)
+                    attempt < attempt_limit and policy.retry_on(e)
                 )
                 project_id = str(ctx.state.get("project_id") or "")
                 task_id = str(
@@ -119,10 +133,10 @@ class Stage(ABC):
                     f"[{ctx.pipeline.pipeline_id}/{self.name}/w{ctx.worker_id}] "
                     f"handle 失败 project={project_id or '-'} "
                     f"task={task_id or '-'} "
-                    f"item={item.item_id} attempt={attempt}/{policy.max_attempts} "
+                    f"item={item.item_id} attempt={attempt}/{attempt_limit} "
                     f"err={type(e).__name__}: {e} | retry={will_retry}"
                 )
                 if not will_retry:
                     return False, e
                 await asyncio.sleep(policy.delay_for(attempt))
-        return False, last_err
+                attempt += 1
