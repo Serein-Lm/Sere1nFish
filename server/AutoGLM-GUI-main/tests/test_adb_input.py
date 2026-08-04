@@ -22,7 +22,18 @@ def test_empty_text_uses_clear_broadcast(monkeypatch) -> None:
 
     adb_input.type_text("", "device-1")
 
-    assert commands == [["adb", "shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"]]
+    assert commands == [
+        [
+            "adb",
+            "shell",
+            "am",
+            "broadcast",
+            "-a",
+            "ADB_CLEAR_TEXT",
+            "-p",
+            "com.android.adbkeyboard",
+        ]
+    ]
 
 
 def test_text_uses_base64_broadcast(monkeypatch) -> None:
@@ -46,6 +57,8 @@ def test_text_uses_base64_broadcast(monkeypatch) -> None:
             "broadcast",
             "-a",
             "ADB_INPUT_B64",
+            "-p",
+            "com.android.adbkeyboard",
             "--es",
             "msg",
             encoded,

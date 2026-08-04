@@ -8,6 +8,7 @@ from AutoGLM_GUI.platform_utils import build_adb_command
 from AutoGLM_GUI.trace import trace_span
 
 _ADB_INPUT_TIMEOUT = 10
+_ADB_KEYBOARD_PACKAGE = "com.android.adbkeyboard"
 
 
 def _run_adb_input_command(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -32,7 +33,16 @@ def type_text(text: str, device_id: str | None = None) -> None:
     ):
         if not text:
             _run_adb_input_command(
-                adb_prefix + ["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"]
+                adb_prefix
+                + [
+                    "shell",
+                    "am",
+                    "broadcast",
+                    "-a",
+                    "ADB_CLEAR_TEXT",
+                    "-p",
+                    _ADB_KEYBOARD_PACKAGE,
+                ]
             )
             return
         encoded_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
@@ -44,6 +54,8 @@ def type_text(text: str, device_id: str | None = None) -> None:
                 "broadcast",
                 "-a",
                 "ADB_INPUT_B64",
+                "-p",
+                _ADB_KEYBOARD_PACKAGE,
                 "--es",
                 "msg",
                 encoded_text,
@@ -56,7 +68,16 @@ def clear_text(device_id: str | None = None) -> None:
 
     with trace_span("adb.clear_text", attrs={"device_id": device_id}):
         _run_adb_input_command(
-            adb_prefix + ["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"]
+            adb_prefix
+            + [
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                "ADB_CLEAR_TEXT",
+                "-p",
+                _ADB_KEYBOARD_PACKAGE,
+            ]
         )
 
 

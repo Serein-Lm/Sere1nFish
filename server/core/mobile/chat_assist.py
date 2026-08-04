@@ -418,10 +418,10 @@ def _do_send_sequence(
 
     切 ADB Keyboard -> 聚焦输入框 -> 清空 -> 输入 -> 点发送 -> 恢复输入法。
     """
-    import base64
     import subprocess
     import time
 
+    from AutoGLM_GUI.adb.input import clear_text, type_text
     from AutoGLM_GUI.platform_utils import build_adb_command
 
     prefix = build_adb_command(adb_id)
@@ -467,13 +467,12 @@ def _do_send_sequence(
         time.sleep(0.8)
 
         # 5) 清空输入框
-        _sh(["am", "broadcast", "-a", "ADB_CLEAR_TEXT"])
+        clear_text(adb_id)
         time.sleep(0.5)
 
         # 6) 输入文本(base64,避免空串/特殊字符问题)
-        encoded = base64.b64encode(text.encode("utf-8")).decode("utf-8")
-        ri = _sh(["am", "broadcast", "-a", "ADB_INPUT_B64", "--es", "msg", encoded])
-        typed = "result=0" in (ri.stdout + ri.stderr) or ri.returncode == 0
+        type_text(text, adb_id)
+        typed = True
         time.sleep(0.8)
 
         # 7) 点发送键:优先传入坐标,否则微信稳定位置(右下角)
