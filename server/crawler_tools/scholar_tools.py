@@ -26,8 +26,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import random
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -35,6 +38,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 UA = "acad-collab-finder/1.0 (mailto:contact@example.com)"
+logger = logging.getLogger(__name__)
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
@@ -61,9 +65,9 @@ _TLD_STOP = re.compile(
 # HTTP 基础
 # ════════════════════════════════════════════════════════════
 
-def _get(url: str, headers: dict | None = None, retries: int = 3,
+def _get(url: str, headers: dict | None = None, retries: int = 4,
          timeout: int = 25) -> Any:
-    """GET JSON，带重试。代理走环境变量。"""
+    """GET JSON with bounded provider-aware retries. Proxy comes from env."""
     hdr = {"User-Agent": UA, **(headers or {})}
     last: Exception | None = None
     for i in range(retries):
@@ -71,9 +75,32 @@ def _get(url: str, headers: dict | None = None, retries: int = 3,
             req = urllib.request.Request(url, headers=hdr)
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
-        except Exception as e:  # noqa: BLE001
-            last = e
-            time.sleep(1.2 * (i + 1))
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if i + 1 >= retries:
+                break
+            retry_after = 0.0
+            status = 0
+            if isinstance(exc, urllib.error.HTTPError):
+                status = int(exc.code or 0)
+                try:
+                    retry_after = float(exc.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+            delay = 1.2 * (i + 1)
+            if status == 429 or status in {500, 502, 503, 504}:
+                delay = max(retry_after, 2.0 ** (i + 1))
+            delay = min(30.0, delay) + random.uniform(0.0, 0.4)
+            logger.warning(
+                "Scholar provider request failed; retrying host=%s status=%s "
+                "attempt=%s/%s delay=%.1fs",
+                urllib.parse.urlsplit(url).hostname or "unknown",
+                status or type(exc).__name__,
+                i + 1,
+                retries,
+                delay,
+            )
+            time.sleep(delay)
     raise last  # type: ignore[misc]
 
 
@@ -590,13 +617,20 @@ def discover(unit: str, direction: str, unit_en: str = "", limit: int = 10,
         unit_en : 英文机构名，用于 PubMed/EuropePMC/DOAJ 检索(默认回退 unit)。
         limit   : OpenAlex 返回文章数。
     """
-    api_results = _openalex_articles(
-        unit,
-        direction,
-        limit,
-        unit_en or "",
-        enrich_orcid_email,
-    )
+    try:
+        api_results = _openalex_articles(
+            unit,
+            direction,
+            limit,
+            unit_en or "",
+            enrich_orcid_email,
+        )
+    except Exception as exc:  # noqa: BLE001
+        api_results = {
+            "error": str(exc),
+            "articles": [],
+            "institution_verified": False,
+        }
 
     try:
         email_extraction = _extract_all(unit_en or unit, direction)

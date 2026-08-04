@@ -109,6 +109,26 @@ def test_pubmed_acronym_matches_a_standalone_affiliation_token() -> None:
     ) is True
 
 
+def test_discover_keeps_partial_sources_when_openalex_is_limited(monkeypatch) -> None:
+    def fail_openalex(*_args, **_kwargs):
+        raise RuntimeError("HTTP 429")
+
+    extracted = {
+        "unit": "Example University",
+        "direction": "security",
+        "sources": {"pubmed": {"articles": []}},
+    }
+    monkeypatch.setattr(scholar_tools, "_openalex_articles", fail_openalex)
+    monkeypatch.setattr(scholar_tools, "_extract_all", lambda *_args: extracted)
+
+    result = scholar_tools.discover(
+        "示例大学", "网络安全", "Example University", limit=10
+    )
+
+    assert result["api_results"]["error"] == "HTTP 429"
+    assert result["email_extraction"] == extracted
+
+
 class _Cursor:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows

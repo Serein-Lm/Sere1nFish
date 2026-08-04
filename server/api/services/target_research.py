@@ -155,65 +155,73 @@ def _normalize_payload(
 ) -> dict[str, Any]:
     data = payload.model_dump()
     sources_by_url: dict[str, dict[str, Any]] = {}
+    dropped_source_urls: list[str] = []
     for source in data.get("sources") or []:
         url = canonicalize_source_url(str(source.get("url") or ""))
         if not url.startswith(("http://", "https://")):
-            raise ValueError("机构深研来源必须是 HTTP(S) URL")
+            dropped_source_urls.append(str(source.get("url") or ""))
+            continue
         if _is_search_result_url(url):
-            raise ValueError("机构深研 sources 不得使用搜索结果页，必须引用实际读取的正文页面")
+            dropped_source_urls.append(url)
+            continue
+        if navigated_urls is not None and url not in navigated_urls:
+            dropped_source_urls.append(url)
+            continue
         sources_by_url[url] = {
             **source,
             "url": url,
             "published_at": str(source.get("published_at") or ""),
         }
+    if dropped_source_urls:
+        logger.warning(
+            "机构深研已丢弃未核验来源 | count=%s urls=%s",
+            len(dropped_source_urls),
+            dropped_source_urls,
+        )
     if len(sources_by_url) < 2:
-        raise ValueError("机构深研至少需要两个实际访问的公开来源")
+        raise ValueError("机构深研至少需要两个本轮浏览器实际导航并读取的正文来源")
     if not any(
         str(source.get("source_type") or "").strip().lower() in _TRUSTED_SOURCE_TYPES
         for source in sources_by_url.values()
     ):
         raise ValueError("机构深研至少需要一个官方、政府、监管或机构一手来源")
-    if navigated_urls is not None:
-        verified = set(sources_by_url).intersection(navigated_urls)
-        if len(verified) < 2 or verified != set(sources_by_url):
-            missing = sorted(set(sources_by_url).difference(navigated_urls))
-            logger.warning(
-                "机构深研来源证据不完整 | missing=%s navigated_count=%s",
-                missing,
-                len(navigated_urls),
-            )
-            raise ValueError(
-                f"机构深研来源必须全部来自本轮浏览器实际导航记录（未验证 {len(missing)} 个）"
-            )
     known_urls = set(sources_by_url)
 
-    def normalize_urls(values: list[Any], *, field: str) -> list[str]:
-        urls = list(
-            dict.fromkeys(canonicalize_source_url(str(value or "")) for value in values)
-        )
-        if not urls or any(url not in known_urls for url in urls):
-            raise ValueError(f"{field} 必须引用本轮 sources 中已核验的 URL")
-        return urls
+    def normalize_urls(values: list[Any]) -> list[str]:
+        urls = [
+            canonicalize_source_url(str(value or ""))
+            for value in values
+        ]
+        return list(dict.fromkeys(url for url in urls if url in known_urls))
 
-    evidence = [
-        {**item, "source_urls": normalize_urls(item.get("source_urls") or [], field="证据")}
-        for item in data.get("evidence") or []
-    ]
-    contacts = [
-        {
-            **item,
-            "source_url": normalize_urls([item.get("source_url")], field="公开联系方式")[0],
-        }
-        for item in data.get("public_contacts") or []
-    ]
-    key_people = [
-        {**item, "source_urls": normalize_urls(item.get("source_urls") or [], field="关键人物")}
-        for item in data.get("key_people") or []
-    ]
-    related = [
-        {**item, "source_urls": normalize_urls(item.get("source_urls") or [], field="关联 Target")}
-        for item in data.get("related_targets") or []
-    ]
+    dropped_derived = 0
+
+    def normalize_many(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        nonlocal dropped_derived
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            urls = normalize_urls(item.get("source_urls") or [])
+            if not urls:
+                dropped_derived += 1
+                continue
+            normalized.append({**item, "source_urls": urls})
+        return normalized
+
+    evidence = normalize_many(list(data.get("evidence") or []))
+    key_people = normalize_many(list(data.get("key_people") or []))
+    related = normalize_many(list(data.get("related_targets") or []))
+    contacts: list[dict[str, Any]] = []
+    for item in data.get("public_contacts") or []:
+        urls = normalize_urls([item.get("source_url")])
+        if not urls:
+            dropped_derived += 1
+            continue
+        contacts.append({**item, "source_url": urls[0]})
+    if dropped_derived:
+        logger.warning(
+            "机构深研已丢弃无有效来源的派生事实 | count=%s",
+            dropped_derived,
+        )
     root_domains = _clean_strings(
         [normalize_root_domain(value) for value in data.get("root_domains") or []],
         limit=12,
@@ -366,12 +374,21 @@ async def _schedule_company_scans(
     documents: list[dict[str, Any]] = []
     runtime_jobs: list[tuple[str, dict[str, Any]]] = []
     skipped: list[dict[str, str]] = []
+    seen_candidates: set[str] = set()
     now = datetime.now(timezone.utc)
     for candidate in candidates:
         name = str(candidate.get("canonical_name") or candidate.get("name") or "").strip()
         target_id = str(candidate.get("target_id") or "")
         if not name:
             continue
+        identity = f"target:{target_id}" if target_id else f"name:{name.casefold()}"
+        if identity in seen_candidates:
+            skipped.append({
+                "target_id": target_id,
+                "reason": "与本轮其他扫描归并为同一 Target",
+            })
+            continue
+        seen_candidates.add(identity)
         active = await tasks_dao.find_latest_matching_task(
             db,
             project_id=project_id,
@@ -791,6 +808,7 @@ async def run_target_research(
         limit=max_related_targets,
     ) if current_depth < 2 else []
     expanded: list[dict[str, Any]] = []
+    expanded_target_ids: set[str] = set()
     root_target_id = str(relation.get("root_target_id") or target_id)
     root_target_name = str(
         relation.get("root_target_name") or enriched_target.get("canonical_name") or ""
@@ -800,15 +818,65 @@ async def run_target_research(
             [normalize_root_domain(value) for value in candidate.get("root_domains") or []],
             limit=12,
         )
+        candidate_name = str(candidate.get("name") or "").strip()
+        candidate_aliases = _clean_strings(
+            [candidate_name, *(candidate.get("aliases") or [])],
+            limit=30,
+        )
+        existing_related = await targets_dao.find_target(
+            db,
+            name=candidate_name,
+            root_domain=domains[0] if domains else "",
+        )
+        if (
+            existing_related
+            and str(existing_related.get("target_id") or "") == target_id
+        ):
+            enriched_target = await targets_dao.merge_target_research_identity(
+                db,
+                target_id=target_id,
+                root_domains=domains,
+                aliases=candidate_aliases,
+            ) or enriched_target
+            await targets_dao.link_project_target(
+                db,
+                project_id=project_id,
+                target=enriched_target,
+                search_terms=candidate_aliases,
+                objectives=["机构深研识别的自营平台或同主体能力"],
+                task_def_id=task_id,
+                relation=_preserved_relation(relation),
+            )
+            continue
         related = await targets_dao.upsert_target(
             db,
-            name=str(candidate.get("name") or ""),
-            root_domain=domains[0] if domains else "",
+            name=(
+                str(existing_related.get("canonical_name") or candidate_name)
+                if existing_related
+                else candidate_name
+            ),
+            root_domain=(
+                str(existing_related.get("root_domain") or "")
+                if existing_related
+                else domains[0] if domains else ""
+            ),
             root_domains=domains,
-            aliases=list(candidate.get("aliases") or []),
+            aliases=candidate_aliases,
             source="target_research",
             normalization_version=NORMALIZATION_VERSION if domains else None,
         )
+        related_target_id = str(related.get("target_id") or "")
+        if related_target_id == target_id:
+            enriched_target = await targets_dao.merge_target_research_identity(
+                db,
+                target_id=target_id,
+                root_domains=domains,
+                aliases=candidate_aliases,
+            ) or enriched_target
+            continue
+        if not related_target_id or related_target_id in expanded_target_ids:
+            continue
+        expanded_target_ids.add(related_target_id)
         relation_depth = current_depth + 1
         relation_doc = {
             "root_target_id": root_target_id,

@@ -11,6 +11,7 @@ from api.services.target_research import (
     _eligible_related_targets,
     _extract_navigated_urls,
     _normalize_payload,
+    _schedule_company_scans,
 )
 
 
@@ -95,11 +96,11 @@ def test_target_research_normalizes_domains_and_traceable_urls() -> None:
     ]
 
 
-def test_target_research_rejects_unregistered_evidence_url() -> None:
+def test_target_research_drops_unregistered_evidence_url() -> None:
     payload = _payload()
     payload["evidence"][0]["source_urls"] = ["https://unknown.example/evidence"]
-    with pytest.raises(ValueError, match="sources"):
-        _normalize_payload(TargetResearchPayload.model_validate(payload))
+    normalized = _normalize_payload(TargetResearchPayload.model_validate(payload))
+    assert [item["dimension"] for item in normalized["evidence"]] == ["domain"]
 
 
 def test_target_research_requires_sources_to_be_actually_navigated() -> None:
@@ -111,11 +112,81 @@ def test_target_research_requires_sources_to_be_actually_navigated() -> None:
         )
 
 
-def test_target_research_rejects_search_result_as_source() -> None:
+def test_target_research_drops_search_result_source() -> None:
     payload = _payload()
+    payload["sources"].append({
+        "title": "监管页面",
+        "url": "https://regulator.example.cn/entity",
+        "source_type": "regulator",
+    })
     payload["sources"][0]["url"] = "https://cn.bing.com/search?q=education"
-    with pytest.raises(ValueError, match="搜索结果页"):
-        _normalize_payload(TargetResearchPayload.model_validate(payload))
+    normalized = _normalize_payload(TargetResearchPayload.model_validate(payload))
+    assert len(normalized["sources"]) == 2
+    assert all("bing.com/search" not in item["url"] for item in normalized["sources"])
+
+
+@pytest.mark.asyncio
+async def test_company_scan_dispatch_deduplicates_same_target_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inserted: list[dict] = []
+
+    async def latest_params(*_args, **_kwargs):
+        return {"enable_url_scan": True, "enable_bidding": True}
+
+    async def no_existing(*_args, **_kwargs):
+        return None
+
+    async def insert_tasks(_db, documents):
+        inserted.extend(documents)
+
+    def close_background(coro, **_kwargs):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(
+        "api.services.target_research._latest_scan_params", latest_params
+    )
+    monkeypatch.setattr(
+        "api.services.target_research.tasks_dao.find_latest_matching_task",
+        no_existing,
+    )
+    monkeypatch.setattr(
+        "api.services.target_research.tasks_dao.insert_tasks", insert_tasks
+    )
+    monkeypatch.setattr(
+        "api.services.target_research.spawn_background", close_background
+    )
+
+    task_ids, skipped = await _schedule_company_scans(
+        object(),
+        project_id="project-1",
+        root_target={
+            "target_id": "target-root",
+            "canonical_name": "主目标",
+            "latest_research_id": "research-1",
+        },
+        expanded_targets=[
+            {"target_id": "target-root", "canonical_name": "主目标平台"},
+            {"target_id": "target-child", "canonical_name": "独立子单位"},
+        ],
+        task_id="research-task",
+        requested_by="admin",
+        scan_params=None,
+        rescan_root=True,
+    )
+
+    assert len(task_ids) == 2
+    assert [item["params"]["company_name"] for item in inserted] == [
+        "主目标",
+        "独立子单位",
+    ]
+    assert inserted[0]["params"]["enable_bidding"] is True
+    assert inserted[1]["params"]["enable_bidding"] is False
+    assert skipped == [{
+        "target_id": "target-root",
+        "reason": "与本轮其他扫描归并为同一 Target",
+    }]
 
 
 def test_target_research_rejects_unconfirmed_navigation_tool_call() -> None:

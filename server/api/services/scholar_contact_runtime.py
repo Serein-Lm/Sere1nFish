@@ -32,7 +32,7 @@ async def scholar_collection_slot(db, *, task_id: str = ""):
     from api.services.info_collection.tuning import get_collection_runtime_tuning
 
     tuning = await get_collection_runtime_tuning(db)
-    limiter = _get_limiter(tuning.company_scan_concurrency)
+    limiter = _get_limiter(tuning.scholar_concurrency)
     await limiter.acquire()
     logger.info(
         "学者采集资源已分配 | task=%s active=%s/%s waiting=%s",
