@@ -6,6 +6,7 @@ Target 表示跨项目复用的真实实体（当前主要是公司/机构）；
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -30,6 +31,24 @@ _PROJECT_TARGET_RELATION_FIELDS = (
     "lineage_target_names",
 )
 
+_PROJECT_TARGET_RELATION_PROJECTION = {
+    "_id": 0,
+    "project_target_id": 1,
+    "project_id": 1,
+    "target_id": 1,
+    "target_name": 1,
+    "root_target_id": 1,
+    "root_target_name": 1,
+    "parent_target_id": 1,
+    "parent_target_name": 1,
+    "relation_type": 1,
+    "relation_depth": 1,
+    "ownership_percent": 1,
+    "relation_source": 1,
+    "lineage_target_ids": 1,
+    "lineage_target_names": 1,
+}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -52,6 +71,198 @@ def target_id_for_name(name: str, target_type: str = "company") -> str:
 def project_target_id(project_id: str, target_id: str) -> str:
     raw = f"project-target:{project_id}:{target_id}".encode("utf-8")
     return "pt_" + hashlib.sha1(raw).hexdigest()[:20]
+
+
+def _ownership_percent(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0 or parsed > 100:
+        return None
+    return parsed
+
+
+def build_project_target_relation_view(
+    relation: dict[str, Any],
+    relations_by_target: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a stable Target-to-root relationship snapshot for read models."""
+    target_id = str(relation.get("target_id") or "")
+    target_name = str(relation.get("target_name") or "")
+
+    lineage_ids = [
+        str(value or "").strip()
+        for value in relation.get("lineage_target_ids") or []
+        if str(value or "").strip()
+    ]
+    if not lineage_ids:
+        lineage_ids = []
+        current_id = target_id
+        visited: set[str] = set()
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            lineage_ids.append(current_id)
+            current = relations_by_target.get(current_id, {})
+            current_id = str(current.get("parent_target_id") or "")
+        lineage_ids.reverse()
+    elif target_id and target_id not in lineage_ids:
+        lineage_ids.append(target_id)
+
+    root_target_id = str(relation.get("root_target_id") or "")
+    if not root_target_id:
+        root_target_id = lineage_ids[0] if lineage_ids else target_id
+    if root_target_id and root_target_id not in lineage_ids:
+        lineage_ids.insert(0, root_target_id)
+
+    stored_names = [
+        str(value or "").strip()
+        for value in relation.get("lineage_target_names") or []
+    ]
+    lineage_names: list[str] = []
+    for index, lineage_id in enumerate(lineage_ids):
+        lineage_relation = relations_by_target.get(lineage_id, {})
+        fallback_name = stored_names[index] if index < len(stored_names) else ""
+        lineage_names.append(
+            str(lineage_relation.get("target_name") or fallback_name or lineage_id)
+        )
+
+    root_relation = relations_by_target.get(root_target_id, {})
+    root_target_name = str(
+        relation.get("root_target_name")
+        or root_relation.get("target_name")
+        or (lineage_names[0] if lineage_names else target_name)
+    )
+    is_primary = not target_id or target_id == root_target_id
+
+    effective_percent: float | None = None
+    if not is_primary and len(lineage_ids) > 1:
+        effective = 1.0
+        complete = True
+        for child_id in lineage_ids[1:]:
+            child_relation = relations_by_target.get(child_id, {})
+            percent = _ownership_percent(child_relation.get("ownership_percent"))
+            if percent is None:
+                complete = False
+                break
+            effective *= percent / 100.0
+        if complete:
+            effective_percent = round(effective * 100.0, 4)
+
+    direct_percent = _ownership_percent(relation.get("ownership_percent"))
+    relation_type = str(relation.get("relation_type") or "").casefold()
+    if is_primary:
+        control_kind = "primary"
+    elif (
+        effective_percent is not None
+        and math.isclose(
+            effective_percent,
+            100.0,
+            rel_tol=0,
+            abs_tol=0.0001,
+        )
+    ) or "wholly_owned" in relation_type:
+        control_kind = "wholly_owned"
+    elif effective_percent is not None and effective_percent > 50:
+        control_kind = "controlled"
+    elif any(marker in relation_type for marker in ("control", "subsidiary")):
+        control_kind = "controlled"
+    else:
+        control_kind = "related"
+
+    try:
+        relation_depth = max(0, int(relation.get("relation_depth") or 0))
+    except (TypeError, ValueError):
+        relation_depth = max(0, len(lineage_ids) - 1)
+    if not relation_depth and not is_primary:
+        relation_depth = max(1, len(lineage_ids) - 1)
+
+    return {
+        "target_id": target_id,
+        "target_name": target_name,
+        "root_target_id": root_target_id,
+        "root_target_name": root_target_name,
+        "parent_target_id": str(relation.get("parent_target_id") or ""),
+        "parent_target_name": str(relation.get("parent_target_name") or ""),
+        "relation_type": str(relation.get("relation_type") or ""),
+        "relation_depth": relation_depth,
+        "ownership_percent": direct_percent,
+        "effective_ownership_percent": effective_percent,
+        "control_kind": control_kind,
+        "is_primary": is_primary,
+        "lineage_target_ids": lineage_ids,
+        "lineage_target_names": lineage_names,
+    }
+
+
+async def get_project_target_relation_views(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Load requested Target relations and the ancestors needed for ownership."""
+    selected_ids = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in target_ids
+            if str(value or "").strip()
+        )
+    )
+    if not project_id or not selected_ids:
+        return {}
+
+    collection = db[PROJECT_TARGETS_COLLECTION]
+    requested = await collection.find(
+        {
+            "project_id": project_id,
+            "active": {"$ne": False},
+            "target_id": {"$in": selected_ids},
+        },
+        _PROJECT_TARGET_RELATION_PROJECTION,
+    ).to_list(len(selected_ids))
+    relations_by_target = {
+        str(item.get("target_id") or ""): item
+        for item in requested
+        if str(item.get("target_id") or "")
+    }
+
+    ancestor_ids = {
+        str(value or "").strip()
+        for relation in requested
+        for value in [
+            relation.get("root_target_id"),
+            relation.get("parent_target_id"),
+            *(relation.get("lineage_target_ids") or []),
+        ]
+        if str(value or "").strip()
+    }
+    missing_ids = sorted(ancestor_ids.difference(relations_by_target))
+    if missing_ids:
+        ancestors = await collection.find(
+            {
+                "project_id": project_id,
+                "active": {"$ne": False},
+                "target_id": {"$in": missing_ids},
+            },
+            _PROJECT_TARGET_RELATION_PROJECTION,
+        ).to_list(len(missing_ids))
+        relations_by_target.update(
+            {
+                str(item.get("target_id") or ""): item
+                for item in ancestors
+                if str(item.get("target_id") or "")
+            }
+        )
+
+    return {
+        target_id: build_project_target_relation_view(
+            relation,
+            relations_by_target,
+        )
+        for target_id in selected_ids
+        if (relation := relations_by_target.get(target_id)) is not None
+    }
 
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:

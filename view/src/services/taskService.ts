@@ -1,5 +1,5 @@
 import { apiFetch } from './http'
-import type { PaginatedResponse } from './projectService'
+import type { PaginatedResponse, ProjectTargetRelation } from './projectService'
 
 // ============================================
 // 任务
@@ -260,6 +260,11 @@ export interface UnifiedFinding {
   url?: string
   attention_score: number
   attention_reason?: string
+  target_id?: string
+  target_ids?: string[]
+  target_name?: string
+  target_relation?: ProjectTargetRelation
+  target_relations?: ProjectTargetRelation[]
   has_profile?: boolean
   notes_count?: number
 }

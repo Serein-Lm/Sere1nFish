@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import datetime, timezone
 from typing import Any
@@ -58,6 +59,75 @@ def stable_finding_id(finding: dict[str, Any]) -> str:
     ]
     digest = hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:24]
     return "fnd_" + digest
+
+
+def _finding_target_ids(finding: dict[str, Any]) -> list[str]:
+    raw_target_ids = finding.get("target_ids") or []
+    if isinstance(raw_target_ids, str):
+        raw_target_ids = [raw_target_ids]
+    elif not isinstance(raw_target_ids, (list, tuple, set)):
+        raw_target_ids = []
+    return list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in [
+                finding.get("target_id"),
+                *raw_target_ids,
+            ]
+            if str(value or "").strip()
+        )
+    )
+
+
+async def enrich_with_target_relations(
+    db: AsyncIOMotorDatabase,
+    findings: list[dict[str, Any]],
+    *,
+    project_id: str = "",
+) -> list[dict[str, Any]]:
+    """Attach current ProjectTarget ownership without duplicating it in Finding."""
+    from api.dao import targets as targets_dao
+
+    if not findings:
+        return []
+    target_ids_by_project: dict[str, list[str]] = {}
+    for finding in findings:
+        resolved_project_id = str(project_id or finding.get("project_id") or "")
+        if not resolved_project_id:
+            continue
+        target_ids_by_project.setdefault(resolved_project_id, []).extend(
+            _finding_target_ids(finding)
+        )
+    project_ids = list(target_ids_by_project)
+    loaded_views = await asyncio.gather(
+        *(
+            targets_dao.get_project_target_relation_views(
+                db,
+                project_id=resolved_project_id,
+                target_ids=list(
+                    dict.fromkeys(target_ids_by_project[resolved_project_id])
+                ),
+            )
+            for resolved_project_id in project_ids
+        )
+    )
+    views_by_project = dict(zip(project_ids, loaded_views, strict=True))
+    enriched: list[dict[str, Any]] = []
+    for finding in findings:
+        item = dict(finding)
+        resolved_project_id = str(project_id or finding.get("project_id") or "")
+        relation_views = views_by_project.get(resolved_project_id, {})
+        relations = [
+            relation_views[target_id]
+            for target_id in _finding_target_ids(finding)
+            if target_id in relation_views
+        ]
+        if relations:
+            item["target_relation"] = relations[0]
+            item["target_relations"] = relations
+            item.setdefault("target_name", relations[0].get("target_name") or "")
+        enriched.append(item)
+    return enriched
 
 
 async def upsert_findings_batch(
@@ -133,12 +203,23 @@ async def query_findings(
     cursor = db[FINDINGS_COLLECTION].find(query, {"_id": 0}).sort(sort_spec).skip(skip).limit(limit)
     findings = await cursor.to_list(limit)
 
-    return findings, total
+    return await enrich_with_target_relations(
+        db,
+        findings,
+        project_id=project_id,
+    ), total
 
 
 async def get_finding(db: AsyncIOMotorDatabase, finding_id: str) -> dict[str, Any] | None:
     """获取单个 finding"""
-    return await db[FINDINGS_COLLECTION].find_one({"finding_id": finding_id}, {"_id": 0})
+    finding = await db[FINDINGS_COLLECTION].find_one(
+        {"finding_id": finding_id},
+        {"_id": 0},
+    )
+    if not finding:
+        return None
+    enriched = await enrich_with_target_relations(db, [finding])
+    return enriched[0]
 
 
 async def query_target_findings_with_copywriting(
@@ -178,6 +259,11 @@ async def query_target_findings_with_copywriting(
         .to_list(bounded_limit)
     )
 
+    findings = await enrich_with_target_relations(
+        db,
+        findings,
+        project_id=project_id,
+    )
     finding_ids = [
         str(item.get("finding_id") or "") for item in findings if item.get("finding_id")
     ]

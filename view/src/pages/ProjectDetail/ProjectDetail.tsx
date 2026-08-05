@@ -62,6 +62,7 @@ import {
 import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
 import AuthenticatedImage from '../../components/AuthenticatedImage'
 import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
+import TargetRelationLabel from '../../components/TargetRelationLabel'
 import {
   createTargetResearch,
   listProjectTargetBranch,
@@ -336,8 +337,13 @@ const taggingColumns: ColumnsType<WebTaggingRecord> = [
   {
     title: '主体',
     key: 'entity',
-    width: 140,
-    render: (_, rec) => rec.data?.intro?.entity_name || <Text type="secondary">-</Text>,
+    width: 300,
+    render: (_, rec) => (
+      <TargetRelationLabel
+        name={rec.data?.intro?.entity_name}
+        relation={rec.target_relation}
+      />
+    ),
   },
   {
     title: '风险状态',
@@ -378,6 +384,17 @@ const findingsColumns = (onViewCopywriting?: (finding: WebTaggingFinding) => voi
     width: 120,
     fixed: 'left',
     render: (val: string) => <Text strong>{val || '未命名入口'}</Text>,
+  },
+  {
+    title: '主体',
+    key: 'target',
+    width: 300,
+    render: (_, finding) => (
+      <TargetRelationLabel
+        name={finding.target_relation?.target_name}
+        relation={finding.target_relation}
+      />
+    ),
   },
   {
     title: '角色',
@@ -479,7 +496,12 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
           <Descriptions.Item label="最终 URL">{record.data?.intro?.final_url ? renderFindingValue(record.data.intro.final_url, { copyable: true, maxWidth: 420 }) : '-'}</Descriptions.Item>
           <Descriptions.Item label="域名">{record.data?.intro?.domain || '-'}</Descriptions.Item>
           <Descriptions.Item label="站点名称">{record.data?.intro?.site_name || '-'}</Descriptions.Item>
-          <Descriptions.Item label="主体名称">{record.data?.intro?.entity_name || '-'}</Descriptions.Item>
+          <Descriptions.Item label="主体名称">
+            <TargetRelationLabel
+              name={record.data?.intro?.entity_name}
+              relation={record.target_relation}
+            />
+          </Descriptions.Item>
           <Descriptions.Item label="页面截图">
             {record.data?.screenshot_url ? (
               <AuthenticatedImage

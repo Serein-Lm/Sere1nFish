@@ -2,6 +2,7 @@
 
 import pytest
 
+from api.dao import findings as findings_dao
 from api.dao import targets as targets_dao
 from api.services.targets import (
     _select_target_relation_page,
@@ -9,6 +10,115 @@ from api.services.targets import (
     _target_summary_sort_key,
     list_project_target_summary_page,
 )
+
+
+def test_target_relation_view_calculates_effective_root_ownership() -> None:
+    relations = {
+        "root": {
+            "target_id": "root",
+            "target_name": "主目标集团",
+        },
+        "child": {
+            "target_id": "child",
+            "target_name": "一级单位",
+            "root_target_id": "root",
+            "parent_target_id": "root",
+            "relation_depth": 1,
+            "ownership_percent": 80,
+            "lineage_target_ids": ["root", "child"],
+        },
+        "grandchild": {
+            "target_id": "grandchild",
+            "target_name": "二级单位",
+            "root_target_id": "root",
+            "root_target_name": "主目标集团",
+            "parent_target_id": "child",
+            "parent_target_name": "一级单位",
+            "relation_type": "controlled_entity",
+            "relation_depth": 2,
+            "ownership_percent": 75,
+            "lineage_target_ids": ["root", "child", "grandchild"],
+            "lineage_target_names": ["主目标集团", "一级单位", "二级单位"],
+        },
+    }
+
+    result = targets_dao.build_project_target_relation_view(
+        relations["grandchild"],
+        relations,
+    )
+
+    assert result["root_target_name"] == "主目标集团"
+    assert result["ownership_percent"] == 75
+    assert result["effective_ownership_percent"] == 60
+    assert result["control_kind"] == "controlled"
+    assert result["lineage_target_names"] == ["主目标集团", "一级单位", "二级单位"]
+
+
+def test_target_relation_view_keeps_explicit_wholly_owned_without_ratio() -> None:
+    relations = {
+        "root": {"target_id": "root", "target_name": "主目标集团"},
+        "child": {
+            "target_id": "child",
+            "target_name": "全资单位",
+            "root_target_id": "root",
+            "parent_target_id": "root",
+            "relation_type": "wholly_owned_direct_investment",
+            "relation_depth": 1,
+            "lineage_target_ids": ["root", "child"],
+        },
+    }
+
+    result = targets_dao.build_project_target_relation_view(
+        relations["child"],
+        relations,
+    )
+
+    assert result["effective_ownership_percent"] is None
+    assert result["control_kind"] == "wholly_owned"
+
+
+def test_finding_target_ids_accepts_legacy_scalar_value() -> None:
+    assert findings_dao._finding_target_ids({"target_ids": "child"}) == ["child"]
+
+
+@pytest.mark.asyncio
+async def test_finding_read_model_attaches_current_target_relation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def load_relations(_db, *, project_id, target_ids):
+        assert project_id == "project-1"
+        assert target_ids == ["child"]
+        return {
+            "child": {
+                "target_id": "child",
+                "target_name": "子单位",
+                "root_target_id": "root",
+                "root_target_name": "主目标",
+                "relation_depth": 1,
+                "effective_ownership_percent": 100,
+                "control_kind": "wholly_owned",
+                "is_primary": False,
+            }
+        }
+
+    monkeypatch.setattr(
+        targets_dao,
+        "get_project_target_relation_views",
+        load_relations,
+    )
+
+    result = await findings_dao.enrich_with_target_relations(
+        object(),
+        [{
+            "finding_id": "finding-1",
+            "project_id": "project-1",
+            "target_id": "child",
+        }],
+    )
+
+    assert result[0]["target_name"] == "子单位"
+    assert result[0]["target_relation"]["root_target_name"] == "主目标"
+    assert result[0]["target_relations"] == [result[0]["target_relation"]]
 
 
 @pytest.mark.asyncio

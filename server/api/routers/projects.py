@@ -51,6 +51,7 @@ def _tag_out(doc: dict) -> WebTaggingResultOut:
         task_id=doc.get("task_id", ""),
         source=doc.get("source", "web_tagging"),
         target_id=doc.get("target_id", ""),
+        target_relation=doc.get("target_relation"),
         created_at=doc.get("created_at"),
         data=raw,
     )

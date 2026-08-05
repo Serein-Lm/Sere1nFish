@@ -111,10 +111,16 @@ class _Collection:
 
 
 class _Db:
-    def __init__(self, scans: list[dict[str, Any]], findings: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        scans: list[dict[str, Any]],
+        findings: list[dict[str, Any]],
+        relations: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.collections = {
             "url_scan_results": _Collection(scans),
             "findings": _Collection(findings),
+            "project_targets": _Collection(relations or []),
         }
 
     def __getitem__(self, name: str) -> _Collection:
@@ -153,6 +159,27 @@ async def test_website_records_join_url_scan_findings_and_legacy(
                 "attention_score": 80,
             }
         ],
+        [
+            {
+                "project_id": "project-1",
+                "target_id": "root-1",
+                "target_name": "主目标集团",
+            },
+            {
+                "project_id": "project-1",
+                "target_id": "target-1",
+                "target_name": "示例公司",
+                "root_target_id": "root-1",
+                "root_target_name": "主目标集团",
+                "parent_target_id": "root-1",
+                "parent_target_name": "主目标集团",
+                "relation_type": "wholly_owned_direct_investment",
+                "relation_depth": 1,
+                "ownership_percent": 100,
+                "lineage_target_ids": ["root-1", "target-1"],
+                "lineage_target_names": ["主目标集团", "示例公司"],
+            },
+        ],
     )
 
     async def list_legacy(*_args: Any, **_kwargs: Any):
@@ -176,6 +203,11 @@ async def test_website_records_join_url_scan_findings_and_legacy(
     assert items[0]["data"]["intro"]["site_name"] == "示例站点"
     assert items[0]["data"]["has_findings"] is True
     assert items[0]["data"]["findings"][0]["finding_id"] == "finding-1"
+    assert items[0]["target_relation"]["root_target_name"] == "主目标集团"
+    assert items[0]["target_relation"]["effective_ownership_percent"] == 100
+    assert items[0]["data"]["findings"][0]["target_relation"]["control_kind"] == (
+        "wholly_owned"
+    )
 
 
 @pytest.mark.asyncio

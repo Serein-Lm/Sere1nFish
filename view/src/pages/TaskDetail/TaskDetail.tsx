@@ -16,6 +16,7 @@ import CopywritingRenderer, {
   FINDING_TYPE_ICONS, CHANNEL_TYPE_LABELS,
 } from '../../components/CopywritingRenderer/CopywritingRenderer'
 import { renderFindingValue } from '../../utils/findingValueRenderer'
+import TargetRelationLabel from '../../components/TargetRelationLabel'
 import {
   getTask, getTaskStats, deleteTask, listProjectFindings, getFindingCopywriting,
   pauseTask, resumeTask,
@@ -227,6 +228,17 @@ export default function TaskDetail() {
 
   const findingsColumns: ColumnsType<UnifiedFinding> = [
     { title: '来源', key: 'source', width: 70, render: (_, r) => <span>{SOURCE_ICONS[r.source] || '📌'} {r.source}</span> },
+    {
+      title: '主体',
+      key: 'target',
+      width: 300,
+      render: (_, r) => (
+        <TargetRelationLabel
+          name={r.target_name}
+          relation={r.target_relation}
+        />
+      ),
+    },
     { title: '类型', dataIndex: 'type', key: 'type', width: 120, render: (v: string) => <Tag color="volcano">{FINDING_TYPE_ICONS[v] || '📌'} {v}</Tag> },
     { title: '标签', dataIndex: 'label', key: 'label', width: 160, render: (v: string | null) => <Text strong>{v || '-'}</Text> },
     { title: '值', dataIndex: 'value', key: 'value', width: 200, render: (v: string | null) => renderFindingValue(v, { copyable: true, maxWidth: 180 }) },

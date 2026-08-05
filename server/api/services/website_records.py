@@ -12,6 +12,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
 
+from api.dao import targets as targets_dao
 from api.dao import web_tagging as web_tagging_dao
 from api.db.collections import FINDINGS_COLLECTION, URL_SCAN_RESULTS_COLLECTION
 from api.services.site_relevance import classify_generic_surface
@@ -345,7 +346,29 @@ async def list_website_records(
         project_id=project_id,
         target_id=str(target_id or "").strip(),
     )
-    return records[bounded_skip : bounded_skip + bounded_limit], len(records)
+    page = records[bounded_skip : bounded_skip + bounded_limit]
+    relation_views = await targets_dao.get_project_target_relation_views(
+        db,
+        project_id=project_id,
+        target_ids=[str(item.get("target_id") or "") for item in page],
+    )
+    enriched_page: list[dict[str, Any]] = []
+    for record in page:
+        item = dict(record)
+        relation = relation_views.get(str(record.get("target_id") or ""))
+        if relation:
+            item["target_relation"] = relation
+            data = dict(item.get("data") or {})
+            data["findings"] = [
+                {
+                    **finding,
+                    "target_relation": relation,
+                }
+                for finding in data.get("findings") or []
+            ]
+            item["data"] = data
+        enriched_page.append(item)
+    return enriched_page, len(records)
 
 
 async def count_project_website_records_by_target(

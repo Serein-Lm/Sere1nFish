@@ -45,6 +45,25 @@ export interface WebTaggingIntro {
   summary: string | null
 }
 
+export type TargetControlKind = 'primary' | 'wholly_owned' | 'controlled' | 'related'
+
+export interface ProjectTargetRelation {
+  target_id: string
+  target_name: string
+  root_target_id: string
+  root_target_name: string
+  parent_target_id: string
+  parent_target_name: string
+  relation_type: string
+  relation_depth: number
+  ownership_percent?: number | null
+  effective_ownership_percent?: number | null
+  control_kind: TargetControlKind
+  is_primary: boolean
+  lineage_target_ids: string[]
+  lineage_target_names: string[]
+}
+
 export interface WebTaggingFinding {
   finding_id: string
   task_id?: string
@@ -64,6 +83,7 @@ export interface WebTaggingFinding {
   attention_reason: string
   screenshot_object_id?: string
   screenshot_url?: string
+  target_relation?: ProjectTargetRelation
 }
 
 export interface WebTaggingData {
@@ -86,6 +106,7 @@ export interface WebTaggingRecord {
   task_id?: string
   source: string
   target_id?: string
+  target_relation?: ProjectTargetRelation
   created_at: string
   data: WebTaggingData
 }
