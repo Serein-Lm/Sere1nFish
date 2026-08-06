@@ -287,7 +287,7 @@ async def _dispatch_scholar_contact(task_id: str, project_id: str, params: dict)
 
     db = get_db()
     runtime_config = await get_runtime_app_config()
-    await run_scholar_contact_collect(
+    return await run_scholar_contact_collect(
         db, runtime_config, task_id=task_id, project_id=project_id,
         target_id=params.get("target_id", ""),
         unit=params.get("unit", ""), direction=params.get("direction", ""),
