@@ -262,12 +262,29 @@ async def _run_scholar_contact_collect(
                     extra = await _chrome_pmc_enrich(
                         task_id=task_id, pmcids=pmcids, articles_by_pmcid=articles_by_pmcid,
                     )
+                    existing_contact_keys = {
+                        (
+                            scholar_tools.normalize_email(
+                                str(contact.get("email") or "")
+                            ),
+                            str(contact.get("article_id") or ""),
+                        )
+                        for contact in contact_docs
+                    }
                     for c in extra:
                         em = scholar_tools.normalize_email(c["email"])
-                        if em and not scholar_tools.is_noise_email(em):
-                            c["email"] = em
-                            c["unit"] = unit
-                            contact_docs.append(c)
+                        key = (em, str(c.get("article_id") or ""))
+                        if (
+                            not em
+                            or scholar_tools.is_noise_email(em)
+                            or key in existing_contact_keys
+                        ):
+                            continue
+                        c["email"] = em
+                        c["unit"] = unit
+                        c["verification_authoritative"] = False
+                        contact_docs.append(c)
+                        existing_contact_keys.add(key)
 
             summary["articles_total"] = len(article_docs)
             summary["verified_articles_total"] = sum(

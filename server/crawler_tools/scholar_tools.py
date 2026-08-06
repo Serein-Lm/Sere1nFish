@@ -80,13 +80,14 @@ _NOISE_LOCAL = {
 }
 _NOISE_DOMAIN_KEYS = (
     "sciengine.com", "mdpi.com/journal", "elsevier.com", "springer.com",
-    "wiley.com", "example.",
+    "wiley.com", "plos.org", "example.",
 )
 
 # 多段 cn 顶级域放最前，避免 chenmy@sysucc.org.cn 被截成 .org。
 _TLD_STOP = re.compile(
     r"^([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+?\.(?:edu\.cn|org\.cn|com\.cn|"
-    r"gov\.cn|ac\.cn|net\.cn|com|org|net|edu|gov|cn|io|co|de|jp|uk|fr|au|ca))",
+    r"gov\.cn|ac\.cn|net\.cn|com|org|net|edu|gov|cn|io|co|de|jp|uk|fr|au|ca))"
+    r"(?![A-Za-z0-9])",
     re.I,
 )
 
@@ -169,6 +170,16 @@ def _clean_emails(text: str) -> list[str]:
     ]
 
 
+def _clean_emails_in_order(text: str) -> list[str]:
+    output: list[str] = []
+    for value in EMAIL_RE.findall(text):
+        if value.lower().endswith((".png", ".jpg", ".gif", ".svg", ".css", ".js")):
+            continue
+        if value not in output:
+            output.append(value)
+    return output
+
+
 # ════════════════════════════════════════════════════════════
 # 邮箱归一 / 去噪
 # ════════════════════════════════════════════════════════════
@@ -224,6 +235,7 @@ class Contact:
     is_corresponding: bool = False
     unit: Optional[str] = None
     unit_verified: bool = False
+    verification_authoritative: bool = False
     evidence: str = ""
     email_kind: str = ""
 
@@ -498,6 +510,7 @@ def _parse_pubmed_articles(xml: str, *, unit: str) -> list[dict[str, Any]]:
                         "author_name": author_name or None,
                         "is_corresponding": corresponding,
                         "unit_verified": verified,
+                        "verification_authoritative": True,
                         "evidence": affiliation[:240],
                         "email_kind": _email_kind(email),
                     }
@@ -523,6 +536,261 @@ def _parse_pubmed_articles(xml: str, *, unit: str) -> list[dict[str, Any]]:
             }
         )
     return output
+
+
+def _local_name(tag: str) -> str:
+    return str(tag or "").rsplit("}", 1)[-1]
+
+
+def _jats_element_id(node: ET.Element) -> str:
+    return str(
+        node.attrib.get("id")
+        or node.attrib.get("{http://www.w3.org/XML/1998/namespace}id")
+        or ""
+    ).strip()
+
+
+def _jats_descendants(node: ET.Element, name: str) -> list[ET.Element]:
+    return [item for item in node.iter() if _local_name(item.tag) == name]
+
+
+def _jats_text(node: ET.Element) -> str:
+    return re.sub(r"\s+", " ", " ".join(node.itertext())).strip()
+
+
+def _jats_xref_ids(node: ET.Element, ref_type: str) -> list[str]:
+    output: list[str] = []
+    for xref in _jats_descendants(node, "xref"):
+        if str(xref.attrib.get("ref-type") or "").casefold() != ref_type.casefold():
+            continue
+        output.extend(
+            part for part in re.split(r"[\s,;]+", str(xref.attrib.get("rid") or ""))
+            if part
+        )
+    return list(dict.fromkeys(output))
+
+
+def _jats_author_name(contrib: ET.Element) -> str:
+    surname = next(
+        (_element_text(item) for item in _jats_descendants(contrib, "surname") if _element_text(item)),
+        "",
+    )
+    given = next(
+        (_element_text(item) for item in _jats_descendants(contrib, "given-names") if _element_text(item)),
+        "",
+    )
+    if surname or given:
+        return " ".join(value for value in (given, surname) if value)
+    return next(
+        (
+            _element_text(item)
+            for item in _jats_descendants(contrib, "collab")
+            if _element_text(item)
+        ),
+        "",
+    )
+
+
+def _verify_bound_evidence(evidence_blocks: list[str], unit: str) -> tuple[bool, str]:
+    """Verify only evidence explicitly linked to one author/contact."""
+    positive, negative = _unit_aliases(unit)
+    cleaned = [re.sub(r"\s+", " ", value).strip() for value in evidence_blocks if value]
+    for value in cleaned:
+        if any(_text_matches_organization_alias(value, alias) for alias in negative):
+            return False, "NEG:" + value[:200]
+    for value in cleaned:
+        if any(_text_matches_organization_alias(value, alias) for alias in positive):
+            return True, value[:240]
+    return False, (cleaned[0][:240] if cleaned else "")
+
+
+def _parse_europepmc_full_text(xml: str, *, unit: str) -> dict[str, Any]:
+    """Parse JATS XML with exact author -> affiliation -> email bindings.
+
+    Article-wide affiliations are valid article evidence, but are never used to
+    verify an unrelated author's email. Unbound emails are returned as an
+    authoritative negative so a later rerun can correct legacy false positives.
+    """
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return {
+            "emails": [],
+            "contacts": [],
+            "corresp": [],
+            "affs": [],
+            "unit_verified": False,
+            "match_evidence": "",
+        }
+
+    affiliation_by_id: dict[str, str] = {}
+    affiliation_blocks: list[str] = []
+    for node in _jats_descendants(root, "aff"):
+        value = _jats_text(node)
+        if not value:
+            continue
+        affiliation_blocks.append(value[:400])
+        node_id = _jats_element_id(node)
+        if node_id:
+            affiliation_by_id[node_id] = value
+
+    correspondence_by_id: dict[str, dict[str, Any]] = {}
+    correspondence_entries: list[tuple[str, dict[str, Any]]] = []
+    correspondence_blocks: list[str] = []
+    for node in _jats_descendants(root, "corresp"):
+        text = _jats_text(node)
+        emails = [
+            normalize_email(value)
+            for value in _clean_emails_in_order(text)
+            if normalize_email(value) and not is_noise_email(normalize_email(value))
+        ]
+        block = {"text": text, "emails": list(dict.fromkeys(emails))}
+        correspondence_blocks.append(text[:400])
+        node_id = _jats_element_id(node)
+        correspondence_entries.append((node_id, block))
+        if node_id:
+            correspondence_by_id[node_id] = block
+
+    contacts: dict[str, dict[str, Any]] = {}
+
+    def register_contact(
+        email: str,
+        *,
+        author_name: str = "",
+        corresponding: bool = False,
+        evidence_blocks: list[str] | None = None,
+    ) -> None:
+        normalized = normalize_email(email)
+        if not normalized or is_noise_email(normalized):
+            return
+        verified, evidence = _verify_bound_evidence(evidence_blocks or [], unit)
+        candidate = {
+            "email": normalized,
+            "author_name": author_name or None,
+            "is_corresponding": bool(corresponding),
+            "unit_verified": verified,
+            "verification_authoritative": True,
+            "evidence": evidence,
+            "email_kind": _email_kind(normalized),
+        }
+        existing = contacts.get(normalized)
+        if existing is None or (
+            candidate["unit_verified"],
+            candidate["is_corresponding"],
+            bool(candidate["author_name"]),
+        ) > (
+            existing["unit_verified"],
+            existing["is_corresponding"],
+            bool(existing["author_name"]),
+        ):
+            contacts[normalized] = candidate
+
+    author_contribs = [
+        contrib
+        for contrib in _jats_descendants(root, "contrib")
+        if str(contrib.attrib.get("contrib-type") or "author").casefold()
+        in {"", "author"}
+    ]
+    correspondence_authors: dict[str, list[ET.Element]] = {}
+    for contrib in author_contribs:
+        for corresp_id in _jats_xref_ids(contrib, "corresp"):
+            correspondence_authors.setdefault(corresp_id, []).append(contrib)
+
+    referenced_correspondence_ids: set[str] = set()
+    for contrib in author_contribs:
+        contrib_type = str(contrib.attrib.get("contrib-type") or "author").casefold()
+        if contrib_type not in {"", "author"}:
+            continue
+        author_name = _jats_author_name(contrib)
+        affiliation_ids = _jats_xref_ids(contrib, "aff")
+        author_affiliations = [
+            affiliation_by_id[aff_id]
+            for aff_id in affiliation_ids
+            if aff_id in affiliation_by_id
+        ]
+        for embedded_affiliation in _jats_descendants(contrib, "aff"):
+            value = _jats_text(embedded_affiliation)
+            if value and value not in author_affiliations:
+                author_affiliations.append(value)
+
+        corresp_ids = _jats_xref_ids(contrib, "corresp")
+        referenced_correspondence_ids.update(corresp_ids)
+        corresp_blocks = [
+            correspondence_by_id[corresp_id]
+            for corresp_id in corresp_ids
+            if corresp_id in correspondence_by_id
+        ]
+        direct_emails = {
+            normalize_email(raw_email)
+            for email_node in _jats_descendants(contrib, "email")
+            for raw_email in _clean_emails(_jats_text(email_node))
+        }
+        linked_emails = set(direct_emails)
+        if not linked_emails:
+            for corresp_id in corresp_ids:
+                block = correspondence_by_id.get(corresp_id) or {}
+                block_emails = list(block.get("emails") or [])
+                referencing_authors = correspondence_authors.get(corresp_id) or []
+                if len(block_emails) == 1:
+                    linked_emails.add(block_emails[0])
+                elif len(block_emails) == len(referencing_authors):
+                    try:
+                        linked_emails.add(
+                            block_emails[referencing_authors.index(contrib)]
+                        )
+                    except (IndexError, ValueError):
+                        pass
+        linked_evidence = [*author_affiliations] or [
+            str(block.get("text") or "") for block in corresp_blocks
+        ]
+        is_corresponding = (
+            str(contrib.attrib.get("corresp") or "").casefold() in {"yes", "true", "1"}
+            or bool(corresp_blocks)
+            or bool(direct_emails)
+        )
+        for email in linked_emails:
+            register_contact(
+                email,
+                author_name=author_name,
+                corresponding=is_corresponding,
+                evidence_blocks=linked_evidence,
+            )
+
+    for corresp_id, block in correspondence_entries:
+        if corresp_id in referenced_correspondence_ids:
+            continue
+        block_emails = list(block.get("emails") or [])
+        for email in block_emails:
+            register_contact(
+                email,
+                corresponding=True,
+                evidence_blocks=(
+                    [str(block.get("text") or "")]
+                    if len(block_emails) == 1
+                    else []
+                ),
+            )
+
+    all_emails = {
+        normalize_email(raw_email)
+        for raw_email in _clean_emails(xml)
+    }
+    for email in all_emails:
+        if email and email not in contacts:
+            register_contact(email, evidence_blocks=[])
+
+    article_verified, article_evidence = _verify_bound_evidence(
+        affiliation_blocks,
+        unit,
+    )
+    return {
+        "emails": sorted(contacts),
+        "contacts": list(contacts.values()),
+        "corresp": correspondence_blocks,
+        "affs": affiliation_blocks,
+        "unit_verified": article_verified,
+        "match_evidence": article_evidence,
+    }
 
 
 def _pubmed(unit: str, direction: str, retmax: int = 8) -> dict:
@@ -576,15 +844,7 @@ def _europepmc(unit: str, direction: str, page_size: int = 8) -> dict:
             try:
                 xml = _get_text(
                     f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML")
-                item["emails"] = _clean_emails(xml)
-                corr = re.findall(r"<corresp[^>]*>(.*?)</corresp>", xml, re.S)
-                item["corresp"] = [
-                    re.sub(r"<[^>]+>", " ", c).strip()[:400] for c in corr
-                ]
-                affs = re.findall(r"<aff[^>]*>(.*?)</aff>", xml, re.S)
-                item["affs"] = [
-                    re.sub(r"<[^>]+>", " ", a).strip()[:400] for a in affs
-                ]
+                item.update(_parse_europepmc_full_text(xml, unit=unit))
             except Exception:  # noqa: BLE001
                 item["emails"] = []
         arts.append(item)
@@ -734,11 +994,7 @@ def _europepmc_bulk(unit_en: str, max_articles: int = 2000,
                 try:
                     xml = _get_text(
                         f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML")
-                    item["emails"] = _clean_emails(xml)
-                    corr = re.findall(r"<corresp[^>]*>(.*?)</corresp>", xml, re.S)
-                    item["corresp"] = [
-                        re.sub(r"<[^>]+>", " ", c).strip()[:200] for c in corr
-                    ]
+                    item.update(_parse_europepmc_full_text(xml, unit=unit_en))
                 except Exception:  # noqa: BLE001
                     item["emails"] = []
             arts.append(item)
@@ -788,15 +1044,7 @@ def europepmc_bulk_pages(unit_en: str, max_articles: int = 2000,
                 try:
                     xml = _get_text(
                         f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML")
-                    item["emails"] = _clean_emails(xml)
-                    corr = re.findall(r"<corresp[^>]*>(.*?)</corresp>", xml, re.S)
-                    item["corresp"] = [
-                        re.sub(r"<[^>]+>", " ", c).strip()[:400] for c in corr
-                    ]
-                    affs = re.findall(r"<aff[^>]*>(.*?)</aff>", xml, re.S)
-                    item["affs"] = [
-                        re.sub(r"<[^>]+>", " ", a).strip()[:400] for a in affs
-                    ]
+                    item.update(_parse_europepmc_full_text(xml, unit=unit_en))
                 except Exception:  # noqa: BLE001
                     item["emails"] = []
             batch.append(item)
@@ -846,9 +1094,11 @@ def _verify_person_unit(
     aff_blocks: list[str],
     unit: str,
 ) -> tuple[bool, str]:
-    """判断该 email 在这篇文章内是否真的绑定到目标 unit。
-    优先看 email 所在的 <corresp> 段；若无 corresp 段，回落到 <aff> 全集。
-    返回 (unit_verified, evidence_snippet)。
+    """Legacy fallback: verify only the correspondence block hosting email.
+
+    Article-wide affiliations cannot prove that a particular email belongs to
+    the target institution. ``aff_blocks`` remains in the signature for old
+    normalized payload compatibility and is deliberately not used.
     """
     pos, neg = _unit_aliases(unit)
     if not pos:
@@ -866,12 +1116,6 @@ def _verify_person_unit(
         if any(_text_matches_organization_alias(hosting, key) for key in pos):
             return True, hosting[:200]
         return False, hosting[:120]
-    # 2) 无 corresp 段，回落 aff 拼接
-    joined = " || ".join(aff_blocks or [])
-    if any(_text_matches_organization_alias(joined, key) for key in neg):
-        return False, "NEG-AFF"
-    if any(_text_matches_organization_alias(joined, key) for key in pos):
-        return True, joined[:200]
     return False, ""
 
 
@@ -891,7 +1135,7 @@ def _email_kind(email: str) -> str:
 def normalize_bulk_batch(unit: str, articles: list[dict[str, Any]]):
     """把一批 EuropePMC 文章(europepmc_bulk_pages 的 articles)归一化为
     (article_docs, contact_docs)，并强制人物↔单位一致性验证：
-    - 每个 email 必须在其所在 <corresp> 段（或全文 <aff>）里出现 unit 的别名，
+    - 每个 email 必须通过 JATS 作者引用绑定到目标单位，或在其自身 <corresp> 段出现单位别名，
       否则 unit_verified=False；命中 NEG 别名(如 NSYSU/国立中山大学)直接标 False。
     - 已知别名冲突域名（如 mail.nsysu.edu*）直接丢弃，不入库。
     """
@@ -903,14 +1147,39 @@ def normalize_bulk_batch(unit: str, articles: list[dict[str, Any]]):
         aid = _article_id(a.get("doi"), a.get("pmcid"), a.get("title"))
         corresp_blocks = a.get("corresp", []) or []
         aff_blocks = a.get("affs", []) or []
+        exact_contacts = a.get("contacts")
+        article_verified = bool(a.get("unit_verified", False))
+        article_evidence = str(a.get("match_evidence") or "")
         art_docs.append({
             "article_id": aid, "title": a.get("title", ""),
             "year": str(a.get("year") or ""), "doi": a.get("doi"),
             "pmcid": a.get("pmcid"), "unit": unit, "direction": "",
             "source_keys": ["europepmc"], "landing_page": None,
-            "unit_verified": True,
-            "match_evidence": f"Europe PMC AFF={unit}",
+            "unit_verified": article_verified,
+            "match_evidence": article_evidence,
         })
+        if isinstance(exact_contacts, list):
+            for contact in exact_contacts:
+                e = normalize_email(contact.get("email") or "")
+                if not e or is_noise_email(e) or (e, aid) in seen_contacts:
+                    continue
+                dom = e.rsplit("@", 1)[-1].lower()
+                if dom in dom_block:
+                    continue
+                seen_contacts.add((e, aid))
+                con_docs.append({
+                    "email": e,
+                    "article_id": aid,
+                    "source_key": "europepmc",
+                    "author_name": contact.get("author_name"),
+                    "is_corresponding": bool(contact.get("is_corresponding")),
+                    "unit": unit,
+                    "unit_verified": bool(contact.get("unit_verified")),
+                    "verification_authoritative": True,
+                    "evidence": str(contact.get("evidence") or "")[:240],
+                    "email_kind": contact.get("email_kind") or _email_kind(e),
+                })
+            continue
         pairs = _parse_corresp(corresp_blocks)
         bound = {normalize_email(e) for _, e in pairs}
         for name, em in pairs:
@@ -926,6 +1195,7 @@ def normalize_bulk_batch(unit: str, articles: list[dict[str, Any]]):
                 "email": e, "article_id": aid, "source_key": "europepmc",
                 "author_name": name, "is_corresponding": True, "unit": unit,
                 "unit_verified": verified, "evidence": evidence[:200],
+                "verification_authoritative": True,
                 "email_kind": _email_kind(e),
             })
         for em in a.get("emails", []):
@@ -941,6 +1211,7 @@ def normalize_bulk_batch(unit: str, articles: list[dict[str, Any]]):
                 "email": e, "article_id": aid, "source_key": "europepmc",
                 "author_name": None, "is_corresponding": False, "unit": unit,
                 "unit_verified": verified, "evidence": evidence[:200],
+                "verification_authoritative": True,
                 "email_kind": _email_kind(e),
             })
     return art_docs, con_docs
@@ -1125,6 +1396,7 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
         corr=False,
         *,
         unit_verified=False,
+        verification_authoritative=False,
         evidence="",
         email_kind="",
     ) -> None:
@@ -1137,6 +1409,9 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
             contacts[key] = Contact(email=email, article_id=aid, source_key=src,
                                     author_name=name, is_corresponding=corr,
                                     unit=unit, unit_verified=bool(unit_verified),
+                                    verification_authoritative=bool(
+                                        verification_authoritative
+                                    ),
                                     evidence=str(evidence or ""),
                                     email_kind=str(email_kind or _email_kind(email)))
         else:
@@ -1147,6 +1422,8 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
             if unit_verified:
                 c.unit_verified = True
                 c.evidence = str(evidence or c.evidence)
+            if verification_authoritative:
+                c.verification_authoritative = True
 
     # --- OpenAlex / ORCID ---
     api = discover_output.get("api_results", {}) or {}
@@ -1185,6 +1462,10 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
                 contact.get("author_name"),
                 corr=contact.get("is_corresponding", False),
                 unit_verified=contact.get("unit_verified", False),
+                verification_authoritative=contact.get(
+                    "verification_authoritative",
+                    True,
+                ),
                 evidence=contact.get("evidence", ""),
                 email_kind=contact.get("email_kind", ""),
             )
@@ -1194,6 +1475,7 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
         corresp_blocks = a.get("corresp", []) or []
         aff_blocks = a.get("affs", []) or []
         query_unit = discover_output.get("unit_en") or unit
+        exact_contacts = a.get("contacts")
         verification = {
             normalize_email(email): _verify_person_unit(
                 normalize_email(email), corresp_blocks, aff_blocks, query_unit
@@ -1201,14 +1483,38 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
             for email in a.get("emails", []) or []
             if normalize_email(email)
         }
-        article_verified = any(item[0] for item in verification.values())
+        article_verified = bool(a.get("unit_verified", False)) if isinstance(
+            exact_contacts, list
+        ) else any(item[0] for item in verification.values())
         aid = upsert_article(a.get("doi"), a.get("pmcid"), a.get("title"),
                              str(a.get("year") or ""), src="europepmc",
                              unit_verified=article_verified,
-                             match_evidence=next(
-                                 (evidence for verified, evidence in verification.values() if verified),
-                                 "",
+                             match_evidence=(
+                                 str(a.get("match_evidence") or "")
+                                 if isinstance(exact_contacts, list)
+                                 else next(
+                                     (
+                                         evidence
+                                         for verified, evidence in verification.values()
+                                         if verified
+                                     ),
+                                     "",
+                                 )
                              ))
+        if isinstance(exact_contacts, list):
+            for contact in exact_contacts:
+                add_contact(
+                    contact.get("email"),
+                    aid,
+                    "europepmc",
+                    contact.get("author_name"),
+                    corr=contact.get("is_corresponding", False),
+                    unit_verified=contact.get("unit_verified", False),
+                    verification_authoritative=True,
+                    evidence=contact.get("evidence", ""),
+                    email_kind=contact.get("email_kind", ""),
+                )
+            continue
         pairs = _parse_corresp(corresp_blocks)
         bound = {normalize_email(e) for _, e in pairs}
         for name, em in pairs:
@@ -1224,6 +1530,7 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
                 name,
                 corr=True,
                 unit_verified=verified,
+                verification_authoritative=True,
                 evidence=evidence,
             )
         for em in a.get("emails", []):
@@ -1237,6 +1544,7 @@ def normalize_to_docs(discover_output: dict) -> tuple[list[Source], list[Article
                     None,
                     corr=False,
                     unit_verified=verified,
+                    verification_authoritative=True,
                     evidence=evidence,
                 )
 

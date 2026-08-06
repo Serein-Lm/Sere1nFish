@@ -22,6 +22,15 @@ def test_scholar_article_url_requires_a_public_source() -> None:
     assert scholar_dao.scholar_article_url({"article_id": "synthetic"}) == ""
 
 
+def test_email_normalization_does_not_truncate_unknown_cn_subdomains() -> None:
+    assert scholar_tools.normalize_email("kzhang6@siii.cas.cn") == (
+        "kzhang6@siii.cas.cn"
+    )
+    assert scholar_tools._clean_emails_in_order(
+        "second@example.org then first@example.org then second@example.org"
+    ) == ["second@example.org", "first@example.org"]
+
+
 def test_pubmed_contacts_are_bound_to_article_and_author_evidence() -> None:
     xml = """
     <PubmedArticleSet>
@@ -56,6 +65,7 @@ def test_pubmed_contacts_are_bound_to_article_and_author_evidence() -> None:
             "author_name": "Li Ming",
             "is_corresponding": True,
             "unit_verified": True,
+            "verification_authoritative": True,
             "evidence": "Anhui Broadcasting Corporation, Electronic address: li.ming@media-lab.org",
             "email_kind": "institutional",
         }
@@ -108,6 +118,110 @@ def test_pubmed_acronym_matches_a_standalone_affiliation_token() -> None:
         "China Information and Communication Technologies Group (CICT), Wuhan.",
         "CICT",
     ) is True
+
+
+def test_europepmc_jats_binds_each_email_to_its_own_author_affiliation() -> None:
+    xml = """
+    <article>
+      <front><article-meta>
+        <contrib-group>
+          <contrib contrib-type="author" corresp="yes">
+            <name><surname>Biao</surname><given-names>Kan</given-names></name>
+            <xref ref-type="aff" rid="Aff1" />
+            <xref ref-type="corresp" rid="Cor1" />
+          </contrib>
+          <contrib contrib-type="author">
+            <name><surname>Smith</surname><given-names>Alice</given-names></name>
+            <xref ref-type="aff" rid="Aff2" />
+            <email>alice@mcmaster.ca</email>
+          </contrib>
+        </contrib-group>
+        <aff id="Aff1">
+          National Institute for Communicable Disease Control and Prevention,
+          Chinese Center for Disease Control and Prevention, Beijing, China.
+        </aff>
+        <aff id="Aff2">McMaster University, Hamilton, Canada.</aff>
+        <author-notes>
+          <corresp id="Cor1">Correspondence: kanbiao@icdc.cn</corresp>
+        </author-notes>
+        <permissions>Figures: figures@plos.org</permissions>
+      </article-meta></front>
+    </article>
+    """
+
+    parsed = scholar_tools._parse_europepmc_full_text(
+        xml,
+        unit=(
+            "National Institute for Communicable Disease Control and Prevention, "
+            "Chinese Center for Disease Control and Prevention"
+        ),
+    )
+    contacts = {item["email"]: item for item in parsed["contacts"]}
+
+    assert parsed["unit_verified"] is True
+    assert contacts["kanbiao@icdc.cn"]["author_name"] == "Kan Biao"
+    assert contacts["kanbiao@icdc.cn"]["unit_verified"] is True
+    assert contacts["kanbiao@icdc.cn"]["verification_authoritative"] is True
+    assert contacts["alice@mcmaster.ca"]["unit_verified"] is False
+    assert contacts["alice@mcmaster.ca"]["evidence"].startswith("McMaster University")
+    assert "figures@plos.org" not in contacts
+
+
+def test_europepmc_shared_correspondence_pairs_emails_without_sharing_units() -> None:
+    xml = """
+    <article><front><article-meta>
+      <contrib-group>
+        <contrib contrib-type="author" corresp="yes">
+          <name><surname>Zhang</surname><given-names>Ke</given-names></name>
+          <xref ref-type="aff" rid="Aff1" />
+          <xref ref-type="corresp" rid="Cor1" />
+          <email>kzhang6@siii.cas.cn</email>
+        </contrib>
+        <contrib contrib-type="author" corresp="yes">
+          <name><surname>Zheng</surname><given-names>Lishu</given-names></name>
+          <xref ref-type="aff" rid="Aff2" />
+          <xref ref-type="corresp" rid="Cor1" />
+          <email>zhengls@ivdc.chinacdc.cn</email>
+        </contrib>
+      </contrib-group>
+      <aff id="Aff1">Shanghai Institute of Immunity and Infection.</aff>
+      <aff id="Aff2">
+        National Institute for Viral Disease Control and Prevention,
+        Chinese Center for Disease Control and Prevention.
+      </aff>
+      <corresp id="Cor1">
+        Corresponding authors: Shanghai Institute (K. Zhang); National Institute
+        for Viral Disease Control and Prevention (L. Zheng).
+        kzhang6@siii.cas.cn zhengls@ivdc.chinacdc.cn
+      </corresp>
+    </article-meta></front></article>
+    """
+
+    parsed = scholar_tools._parse_europepmc_full_text(
+        xml,
+        unit=(
+            "National Institute for Viral Disease Control and Prevention, "
+            "Chinese Center for Disease Control and Prevention"
+        ),
+    )
+    contacts = {item["email"]: item for item in parsed["contacts"]}
+
+    assert contacts["kzhang6@siii.cas.cn"]["author_name"] == "Ke Zhang"
+    assert contacts["kzhang6@siii.cas.cn"]["unit_verified"] is False
+    assert contacts["zhengls@ivdc.chinacdc.cn"]["author_name"] == "Lishu Zheng"
+    assert contacts["zhengls@ivdc.chinacdc.cn"]["unit_verified"] is True
+
+
+def test_legacy_europepmc_verification_does_not_use_article_wide_affiliations() -> None:
+    verified, evidence = scholar_tools._verify_person_unit(
+        "collaborator@example.edu",
+        [],
+        ["National Institute for Communicable Disease Control and Prevention"],
+        "National Institute for Communicable Disease Control and Prevention",
+    )
+
+    assert verified is False
+    assert evidence == ""
 
 
 def test_discover_keeps_partial_sources_when_openalex_is_limited(monkeypatch) -> None:
@@ -235,7 +349,102 @@ async def test_target_scholar_counts_include_only_verified_contacts() -> None:
     )
 
     assert result == {"target-1": 0}
-    assert db.contacts.pipelines[0][0]["$match"]["unit_verified"] is True
+    pipeline = db.contacts.pipelines[0]
+    assert "verified_target_ids" in repr(pipeline)
+    assert "target_verification.target-1.verified" in repr(pipeline)
+
+
+@pytest.mark.asyncio
+async def test_target_contact_query_prefers_target_specific_verification() -> None:
+    db = _Db()
+
+    await scholar_dao.query_contacts(
+        db,  # type: ignore[arg-type]
+        "project-1",
+        target_id="target-1",
+        only_verified=True,
+        limit=20,
+    )
+
+    query = db.contacts.count_query
+    assert {"target_ids": "target-1"} in query["$and"][0]["$or"]
+    assert {
+        "target_verification.target-1.verified": True
+    } in query["$and"][1]["$or"]
+    legacy_fallback = query["$and"][1]["$or"][1]
+    assert legacy_fallback["target_verification"] == {"$exists": False}
+    context_stage = db.contacts.pipelines[0][1]["$set"]
+    assert context_stage["unit_verified"]["$cond"][2] == (
+        "$target_verification.target-1.verified"
+    )
+
+
+@pytest.mark.asyncio
+async def test_authoritative_negative_removes_target_from_verified_set() -> None:
+    class _Result:
+        upserted_id = None
+        modified_count = 1
+
+    class _ArticleCollection:
+        def find(self, *_args: Any, **_kwargs: Any) -> _Cursor:
+            return _Cursor([
+                {
+                    "article_id": "article-1",
+                    "doi": "10.1000/article-1",
+                }
+            ])
+
+    class _ContactCollection:
+        def __init__(self) -> None:
+            self.updates: list[dict[str, Any]] = []
+
+        async def update_one(
+            self,
+            _query: dict[str, Any],
+            update: dict[str, Any],
+            *,
+            upsert: bool,
+        ) -> _Result:
+            assert upsert is True
+            self.updates.append(update)
+            return _Result()
+
+    class _WriteDb:
+        def __init__(self) -> None:
+            self.articles = _ArticleCollection()
+            self.contacts = _ContactCollection()
+
+        def __getitem__(self, name: str) -> Any:
+            if name == "scholar_articles":
+                return self.articles
+            if name == "scholar_contacts":
+                return self.contacts
+            raise KeyError(name)
+
+    db = _WriteDb()
+    await scholar_dao.upsert_contacts_batch(
+        db,  # type: ignore[arg-type]
+        project_id="project-1",
+        unit="目标单位",
+        direction="传染病",
+        target_id="target-1",
+        task_id="task-1",
+        contacts=[
+            {
+                "email": "author@example.edu",
+                "article_id": "article-1",
+                "unit_verified": False,
+                "verification_authoritative": True,
+                "evidence": "合作大学",
+            }
+        ],
+    )
+
+    update = db.contacts.updates[0]
+    context = update["$set"]["target_verification.target-1"]
+    assert context["verified"] is False
+    assert context["evidence"] == "合作大学"
+    assert update["$pull"] == {"verified_target_ids": "target-1"}
 
 
 @pytest.mark.asyncio

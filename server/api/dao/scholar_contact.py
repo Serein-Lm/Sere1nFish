@@ -37,6 +37,10 @@ def scholar_contact_id(project_id: str, email: str, article_id: str) -> str:
     return "sc_" + hashlib.sha1(raw).hexdigest()[:20]
 
 
+def _supports_target_context(target_id: str) -> bool:
+    return bool(target_id) and "." not in target_id and not target_id.startswith("$")
+
+
 def scholar_article_url(article: dict[str, Any]) -> str:
     doi = str(article.get("doi") or "").strip()
     if doi.startswith("10."):
@@ -69,6 +73,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await cons.create_index([("project_id", 1), ("unit", 1)])
     await cons.create_index([("project_id", 1), ("target_id", 1)])
     await cons.create_index([("project_id", 1), ("target_ids", 1)])
+    await cons.create_index([("project_id", 1), ("verified_target_ids", 1)])
     await cons.create_index([("project_id", 1), ("is_corresponding", 1)])
     await cons.create_index("email")
     await cons.create_index("updated_at")
@@ -218,6 +223,8 @@ async def upsert_contacts_batch(
     """批量增量入库联系渠道（contacts 为 scholar_tools.Contact asdict 列表）。"""
     if not contacts:
         return {"inserted": 0, "updated": 0, "total": 0}
+    if target_id and not _supports_target_context(target_id):
+        raise ValueError("target_id contains unsupported MongoDB field characters")
 
     article_ids = {
         str(contact.get("article_id") or "").strip()
@@ -257,6 +264,9 @@ async def upsert_contacts_batch(
             continue
         doc_id = scholar_contact_id(project_id, email, article_id)
         unit_verified = bool(c.get("unit_verified", False))
+        verification_authoritative = bool(
+            c.get("verification_authoritative", False)
+        )
         evidence = str(c.get("evidence") or "")
         set_fields = {
             "doc_id": doc_id,
@@ -270,9 +280,19 @@ async def upsert_contacts_batch(
             "unit": c.get("unit") or unit,
             "direction": direction,
             "email_kind": c.get("email_kind") or "",
+            "verification_authoritative": verification_authoritative,
             "latest_task_id": task_id,
             "updated_at": now,
         }
+        if target_id and (unit_verified or verification_authoritative):
+            set_fields[f"target_verification.{target_id}"] = {
+                "verified": unit_verified,
+                "unit": c.get("unit") or unit,
+                "direction": direction,
+                "evidence": evidence,
+                "task_id": task_id,
+                "updated_at": now,
+            }
         if unit_verified:
             set_fields["unit_verified"] = True
             if evidence:
@@ -290,8 +310,12 @@ async def upsert_contacts_batch(
             additions["task_ids"] = task_id
         if target_id:
             additions["target_ids"] = target_id
+            if unit_verified:
+                additions["verified_target_ids"] = target_id
         if additions:
             update["$addToSet"] = additions
+        if target_id and verification_authoritative and not unit_verified:
+            update["$pull"] = {"verified_target_ids": target_id}
         result = await coll.update_one({"doc_id": doc_id}, update, upsert=True)
         if result.upserted_id is not None:
             inserted += 1
@@ -359,6 +383,78 @@ def _contact_article_join_stages() -> list[dict[str, Any]]:
     ]
 
 
+def _target_association_query(target_id: str) -> dict[str, Any]:
+    return {
+        "$or": [
+            {"target_ids": target_id},
+            {"target_id": target_id},
+        ]
+    }
+
+
+def _target_verified_query(target_id: str) -> dict[str, Any]:
+    context_path = f"target_verification.{target_id}.verified"
+    return {
+        "$or": [
+            {context_path: True},
+            {
+                context_path: {"$exists": False},
+                "target_verification": {"$exists": False},
+                "unit_verified": True,
+            },
+        ]
+    }
+
+
+def _globally_verified_query() -> dict[str, Any]:
+    return {
+        "$or": [
+            {"verified_target_ids.0": {"$exists": True}},
+            {
+                "verified_target_ids": {"$exists": False},
+                "target_verification": {"$exists": False},
+                "unit_verified": True,
+            },
+        ]
+    }
+
+
+def _target_context_stage(target_id: str) -> dict[str, Any]:
+    context = f"$target_verification.{target_id}"
+    return {
+        "$set": {
+            "unit_verified": {
+                "$cond": [
+                    {
+                        "$eq": [
+                            {"$type": f"{context}.verified"},
+                            "missing",
+                        ]
+                    },
+                    {
+                        "$cond": [
+                            {
+                                "$eq": [
+                                    {"$type": "$target_verification"},
+                                    "missing",
+                                ]
+                            },
+                            "$unit_verified",
+                            False,
+                        ]
+                    },
+                    f"{context}.verified",
+                ]
+            },
+            "unit": {"$ifNull": [f"{context}.unit", "$unit"]},
+            "direction": {
+                "$ifNull": [f"{context}.direction", "$direction"]
+            },
+            "evidence": {"$ifNull": [f"{context}.evidence", "$evidence"]},
+        }
+    }
+
+
 async def query_contacts(
     db: AsyncIOMotorDatabase,
     project_id: str,
@@ -375,20 +471,35 @@ async def query_contacts(
         "email": {"$nin": [None, ""]},
         "article_url": {"$regex": r"^https?://", "$options": "i"},
     }
-    if unit:
-        query["unit"] = unit
+    conditions: list[dict[str, Any]] = []
     if target_id:
-        query["$or"] = [
-            {"target_ids": target_id},
-            {"target_id": target_id},
-        ]
+        if not _supports_target_context(target_id):
+            return [], 0
+        conditions.append(_target_association_query(target_id))
+        if unit:
+            context_unit = f"target_verification.{target_id}.unit"
+            conditions.append({
+                "$or": [
+                    {context_unit: unit},
+                    {context_unit: {"$exists": False}, "unit": unit},
+                ]
+            })
+    elif unit:
+        query["unit"] = unit
     if only_corresponding:
         query["is_corresponding"] = True
     if only_verified:
-        query["unit_verified"] = True
+        conditions.append(
+            _target_verified_query(target_id)
+            if target_id
+            else _globally_verified_query()
+        )
+    if conditions:
+        query["$and"] = conditions
     coll = db[SCHOLAR_CONTACTS_COLLECTION]
     items_pipeline: list[dict[str, Any]] = [
         {"$match": query},
+        *([_target_context_stage(target_id)] if target_id else []),
         {
             "$addFields": {
                 "_kind_rank": {
@@ -414,6 +525,8 @@ async def query_contacts(
                 "_art": 0,
                 "_kind_rank": 0,
                 "_verified_rank": 0,
+                "target_verification": 0,
+                "verified_target_ids": 0,
             }
         },
     ]
@@ -455,39 +568,80 @@ async def count_contacts_by_target(
     project_id: str,
     target_ids: list[str],
 ) -> dict[str, int]:
-    selected = [str(value or "").strip() for value in target_ids if str(value or "").strip()]
+    selected = [
+        normalized
+        for value in target_ids
+        if (normalized := str(value or "").strip())
+        and _supports_target_context(normalized)
+    ]
     counts = {target_id: 0 for target_id in selected}
     if not selected:
         return counts
+    association_match = {
+        "$or": [
+            {"target_ids": {"$in": selected}},
+            {"target_id": {"$in": selected}},
+        ]
+    }
+    legacy_target_arrays = [
+        {
+            "$cond": [
+                {
+                    "$and": [
+                        {"$eq": ["$unit_verified", True]},
+                        {
+                            "$eq": [
+                                {
+                                    "$type": (
+                                        f"$target_verification.{target_id}.verified"
+                                    )
+                                },
+                                "missing",
+                            ]
+                        },
+                        {
+                            "$eq": [
+                                {"$type": "$target_verification"},
+                                "missing",
+                            ]
+                        },
+                        {
+                            "$or": [
+                                {
+                                    "$in": [
+                                        target_id,
+                                        {"$ifNull": ["$target_ids", []]},
+                                    ]
+                                },
+                                {"$eq": ["$target_id", target_id]},
+                            ]
+                        },
+                    ]
+                },
+                [target_id],
+                [],
+            ]
+        }
+        for target_id in selected
+    ]
     pipeline = [
         {"$match": {
             "project_id": project_id,
             "email": {"$nin": [None, ""]},
             "article_url": {"$regex": r"^https?://", "$options": "i"},
-            "unit_verified": True,
-            "$or": [
-                {"target_ids": {"$in": selected}},
-                {"target_id": {"$in": selected}},
-            ],
+            **association_match,
         }},
         {
             "$set": {
                 "_resolved_target_ids": {
                     "$setUnion": [
                         {
-                            "$cond": [
-                                {"$isArray": "$target_ids"},
-                                "$target_ids",
-                                [],
+                            "$setIntersection": [
+                                {"$ifNull": ["$verified_target_ids", []]},
+                                selected,
                             ]
                         },
-                        {
-                            "$cond": [
-                                {"$in": ["$target_id", selected]},
-                                ["$target_id"],
-                                [],
-                            ]
-                        },
+                        *legacy_target_arrays,
                     ]
                 }
             }
@@ -518,7 +672,7 @@ async def list_units(db: AsyncIOMotorDatabase, project_id: str) -> list[dict[str
             "project_id": project_id,
             "email": {"$nin": [None, ""]},
             "article_url": {"$regex": r"^https?://", "$options": "i"},
-            "unit_verified": True,
+            **_globally_verified_query(),
         }},
         {"$group": {
             "_id": "$unit",
