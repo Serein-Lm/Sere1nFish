@@ -8,6 +8,7 @@ from api.services.targets import (
     _select_target_relation_page,
     _summarize_finding_counts,
     _target_summary_sort_key,
+    assign_project_target_batches,
     list_project_target_summary_page,
 )
 
@@ -75,6 +76,12 @@ def test_target_relation_view_keeps_explicit_wholly_owned_without_ratio() -> Non
 
     assert result["effective_ownership_percent"] is None
     assert result["control_kind"] == "wholly_owned"
+
+
+def test_target_batch_tags_are_normalized_and_deduplicated() -> None:
+    assert targets_dao.normalize_batch_tags(
+        [" 第一批 ", "第一批", "教育   专项", ""]
+    ) == ["第一批", "教育 专项"]
 
 
 def test_finding_target_ids_accepts_legacy_scalar_value() -> None:
@@ -160,6 +167,85 @@ async def test_project_target_can_replace_authoritative_search_terms() -> None:
     additions = db.collection.update["$addToSet"]
     assert "search_terms" not in additions
     assert all(not key.startswith("search_terms_by_channel") for key in additions)
+
+
+@pytest.mark.asyncio
+async def test_child_project_target_inherits_parent_batch_tags() -> None:
+    class Collection:
+        update = None
+
+        async def find_one(self, _query, _projection, **_kwargs):
+            return {"batch_tags": ["第一批", "教育专项"]}
+
+        async def find_one_and_update(self, _query, update, **_kwargs):
+            self.update = update
+            return {"project_target_id": "pt-child"}
+
+    class Db:
+        collection = Collection()
+
+        def __getitem__(self, _name):
+            return self.collection
+
+    db = Db()
+    await targets_dao.link_project_target(
+        db,
+        project_id="project-1",
+        target={"target_id": "child", "canonical_name": "子单位"},
+        relation={
+            "root_target_id": "root",
+            "parent_target_id": "root",
+            "relation_depth": 1,
+        },
+    )
+
+    assert db.collection.update["$addToSet"]["batch_tags"] == {
+        "$each": ["第一批", "教育专项"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_batch_assignment_propagates_only_to_selected_descendants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relations = [
+        {"target_id": "root"},
+        {"target_id": "child", "parent_target_id": "root"},
+        {
+            "target_id": "grandchild",
+            "root_target_id": "root",
+            "parent_target_id": "child",
+            "lineage_target_ids": ["root", "child", "grandchild"],
+        },
+        {"target_id": "other"},
+    ]
+    mutation: dict = {}
+
+    async def list_relations(*_args, **_kwargs):
+        return relations
+
+    async def update_tags(_db, **kwargs):
+        mutation.update(kwargs)
+        return {"matched_count": 3, "modified_count": 3}
+
+    monkeypatch.setattr(targets_dao, "list_project_targets", list_relations)
+    monkeypatch.setattr(
+        targets_dao,
+        "update_project_target_batch_tags",
+        update_tags,
+    )
+
+    result = await assign_project_target_batches(
+        object(),
+        project_id="project-1",
+        target_ids=["root"],
+        batch_tags=["第一批"],
+        include_descendants=True,
+    )
+
+    assert mutation["target_ids"] == ["child", "grandchild", "root"]
+    assert "other" not in mutation["target_ids"]
+    assert result["target_count"] == 3
 
 
 def test_summarize_finding_counts_groups_high_scores_by_frontend_module() -> None:
@@ -297,6 +383,50 @@ def test_target_page_paginates_roots_by_high_score() -> None:
     assert [item["target_id"] for item in second_page["relations"]] == ["root-a"]
     assert second_page["child_counts"]["root-a"] == 1
     assert second_page["descendant_counts"]["root-a"] == 1
+
+
+def test_target_page_filters_business_batch_and_keeps_branch_context() -> None:
+    relations = [
+        {
+            "project_target_id": "pt-a",
+            "target_id": "root-a",
+            "target_name": "第一批机构",
+            "batch_tags": ["第一批"],
+            "relation_depth": 0,
+        },
+        {
+            "project_target_id": "pt-a-child",
+            "target_id": "child-a",
+            "target_name": "第一批子单位",
+            "root_target_id": "root-a",
+            "parent_target_id": "root-a",
+            "relation_depth": 1,
+        },
+        {
+            "project_target_id": "pt-b",
+            "target_id": "root-b",
+            "target_name": "第二批机构",
+            "batch_tags": ["第二批"],
+            "relation_depth": 0,
+        },
+    ]
+
+    result = _select_target_relation_page(
+        relations,
+        {},
+        query="",
+        batch_tag="第一批",
+        page=1,
+        page_size=10,
+        root_stats={},
+    )
+
+    assert result["root_total"] == 1
+    assert result["project_total"] == 2
+    assert result["all_root_total"] == 2
+    assert result["all_project_total"] == 3
+    assert [item["target_id"] for item in result["relations"]] == ["root-a"]
+    assert result["descendant_counts"]["root-a"] == 1
 
 
 def test_target_search_uses_aliases_and_returns_matching_hierarchy() -> None:

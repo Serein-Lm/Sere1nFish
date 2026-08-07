@@ -65,11 +65,14 @@ import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
 import {
   createTargetResearch,
+  getProjectTargetSummary,
   listProjectTargetBranch,
+  listProjectTargetBatches,
   listProjectTargetOptions,
   listProjectTargets,
   openAuthenticatedArtifact,
   type ProjectTargetOption,
+  type ProjectTargetBatchOption,
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
 import { listScholarContacts, type ScholarContact } from '../../services/scholarContactService'
@@ -693,19 +696,26 @@ export default function ProjectDetail() {
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
   const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
   const [projectTargetOptions, setProjectTargetOptions] = useState<ProjectTargetOption[]>([])
+  const [targetBatchOptions, setTargetBatchOptions] = useState<ProjectTargetBatchOption[]>([])
   const [targetBranches, setTargetBranches] = useState<Record<string, ProjectTargetSummary[]>>({})
   const [targetBranchLoading, setTargetBranchLoading] = useState<Record<string, boolean>>({})
   const [targetDashboardLoading, setTargetDashboardLoading] = useState(false)
   const [targetSearchText, setTargetSearchText] = useState('')
   const [targetSearchQuery, setTargetSearchQuery] = useState('')
+  const [targetBatchTag, setTargetBatchTag] = useState('')
   const [targetPage, setTargetPage] = useState(1)
   const [targetPageSize, setTargetPageSize] = useState(10)
   const [targetRootTotal, setTargetRootTotal] = useState(0)
   const [projectTargetTotal, setProjectTargetTotal] = useState(0)
+  const [allTargetRootTotal, setAllTargetRootTotal] = useState(0)
+  const [allProjectTargetTotal, setAllProjectTargetTotal] = useState(0)
   const [targetMatchedTotal, setTargetMatchedTotal] = useState(0)
   const [targetExpandedRowKeys, setTargetExpandedRowKeys] = useState<React.Key[]>([])
   const targetRequestRef = useRef(0)
   const targetOptionsRequestRef = useRef(0)
+  const targetSummaryRequestRef = useRef<Record<string, number>>({})
+  const targetSummaryPendingRef = useRef<Set<string>>(new Set())
+  const [targetSummaryLoading, setTargetSummaryLoading] = useState(false)
   const [targetResearchActionId, setTargetResearchActionId] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
   const [websiteTargetId, setWebsiteTargetId] = useState('')
@@ -722,6 +732,36 @@ export default function ProjectDetail() {
   const [biddingPage, setBiddingPage] = useState(1)
   const [biddingPageSize, setBiddingPageSize] = useState(20)
   const [biddingTargetId, setBiddingTargetId] = useState('')
+
+  const syncProjectTargetSummary = async (pid: string, targetId: string) => {
+    if (!targetId) return
+    const requestKey = `${pid}:${targetId}`
+    const requestId = (targetSummaryRequestRef.current[requestKey] || 0) + 1
+    targetSummaryRequestRef.current[requestKey] = requestId
+    targetSummaryPendingRef.current.add(requestKey)
+    setTargetSummaryLoading(true)
+    try {
+      const { item } = await getProjectTargetSummary(pid, targetId)
+      if (requestId !== targetSummaryRequestRef.current[requestKey]) return
+      const mergeSummary = (target: ProjectTargetSummary) => (
+        target.target_id === targetId ? { ...target, ...item } : target
+      )
+      setProjectTargets((current) => current.map(mergeSummary))
+      setTargetBranches((current) => Object.fromEntries(
+        Object.entries(current).map(([rootId, branch]) => [
+          rootId,
+          branch.map(mergeSummary),
+        ]),
+      ))
+    } catch (error) {
+      console.error('刷新 Target 实时统计失败:', error)
+    } finally {
+      if (requestId === targetSummaryRequestRef.current[requestKey]) {
+        targetSummaryPendingRef.current.delete(requestKey)
+        setTargetSummaryLoading(targetSummaryPendingRef.current.size > 0)
+      }
+    }
+  }
 
   // 话术 Drawer 状态
   const [copywritingDrawerOpen, setCopywritingDrawerOpen] = useState(false)
@@ -747,6 +787,7 @@ export default function ProjectDetail() {
       setTaggingTotal(res.total)
       setWebsitePage(res.page)
       setWebsitePageSize(res.page_size)
+      if (targetId) void syncProjectTargetSummary(pid, targetId)
     } catch (e) {
       console.error(e)
     } finally {
@@ -759,6 +800,7 @@ export default function ProjectDetail() {
     page = targetPage,
     pageSize = targetPageSize,
     query = targetSearchQuery,
+    batchTag = targetBatchTag,
   ) => {
     const requestId = ++targetRequestRef.current
     setTargetDashboardLoading(true)
@@ -767,6 +809,7 @@ export default function ProjectDetail() {
         page,
         page_size: pageSize,
         q: query || undefined,
+        batch_tag: batchTag || undefined,
       })
       if (requestId !== targetRequestRef.current) return
       setProjectTargets(result.items)
@@ -774,6 +817,8 @@ export default function ProjectDetail() {
       setTargetPageSize(result.page_size)
       setTargetRootTotal(result.root_total)
       setProjectTargetTotal(result.project_total)
+      setAllTargetRootTotal(result.all_root_total)
+      setAllProjectTargetTotal(result.all_project_total)
       setTargetMatchedTotal(result.matched_total)
       setTargetBranches({})
       setTargetBranchLoading({})
@@ -789,9 +834,13 @@ export default function ProjectDetail() {
   const fetchProjectTargetOptions = async (pid: string) => {
     const requestId = ++targetOptionsRequestRef.current
     try {
-      const result = await listProjectTargetOptions(pid)
+      const [result, batches] = await Promise.all([
+        listProjectTargetOptions(pid),
+        listProjectTargetBatches(pid),
+      ])
       if (requestId === targetOptionsRequestRef.current) {
         setProjectTargetOptions(result.items)
+        setTargetBatchOptions(batches.items)
       }
     } catch (error) {
       console.error('加载项目 Target 索引失败:', error)
@@ -845,6 +894,7 @@ export default function ProjectDetail() {
       })
       setWechatRecords(sorted)
       setWechatRecordsTotal(res.total)
+      if (selectedTargetId) void syncProjectTargetSummary(pid, selectedTargetId)
     } catch (e) {
       console.error('加载公众号采集记录失败:', e)
     } finally {
@@ -872,6 +922,8 @@ export default function ProjectDetail() {
       })
       setScholarContacts(res.items)
       setScholarContactsTotal(res.total)
+      const resolvedTargetId = targetId ?? scholarTargetId
+      if (resolvedTargetId) void syncProjectTargetSummary(pid, resolvedTargetId)
     } catch (e) {
       console.error('加载学者学术联系失败:', e)
     } finally {
@@ -901,6 +953,7 @@ export default function ProjectDetail() {
       setBiddingRecordsTotal(result.total)
       setBiddingPage(result.page)
       setBiddingPageSize(result.page_size)
+      if (targetId) void syncProjectTargetSummary(pid, targetId)
     } catch (e) {
       console.error('加载招投标公告失败:', e)
       message.error(e instanceof Error ? e.message : '加载招投标公告失败')
@@ -1093,6 +1146,7 @@ export default function ProjectDetail() {
       const res = await listXhsNotes(pid, { page, page_size: pageSize, target_id: targetId || undefined })
       setXhsNotes(res.items)
       setXhsNotesTotal(res.total)
+      if (targetId) void syncProjectTargetSummary(pid, targetId)
     } catch (e) {
       console.error('Failed to load XHS notes:', e)
     } finally {
@@ -1182,18 +1236,25 @@ export default function ProjectDetail() {
       setWebsitePageSize(10)
       setProjectTargets([])
       setProjectTargetOptions([])
+      setTargetBatchOptions([])
       setTargetBranches({})
       setTargetBranchLoading({})
       setTargetSearchText('')
       setTargetSearchQuery('')
+      setTargetBatchTag('')
       setTargetPage(1)
       setTargetPageSize(10)
       setTargetRootTotal(0)
       setProjectTargetTotal(0)
+      setAllTargetRootTotal(0)
+      setAllProjectTargetTotal(0)
       setTargetMatchedTotal(0)
       setTargetExpandedRowKeys([])
       targetRequestRef.current += 1
       targetOptionsRequestRef.current += 1
+      targetSummaryRequestRef.current = {}
+      targetSummaryPendingRef.current = new Set()
+      setTargetSummaryLoading(false)
       try {
         const data = await getProject(projectId)
         if (!cancelled) {
@@ -1212,6 +1273,7 @@ export default function ProjectDetail() {
           setWebsitePageSize(10)
           setProjectTargets([])
           setProjectTargetOptions([])
+          setTargetBatchOptions([])
           setTargetBranches({})
           setTargetBranchLoading({})
           setSelectedTargetId('')
@@ -1255,8 +1317,14 @@ export default function ProjectDetail() {
 
   useEffect(() => {
     if (!projectId || !project || project.id !== projectId) return
-    void fetchProjectTargets(projectId, targetPage, targetPageSize, targetSearchQuery)
-  }, [projectId, project, targetPage, targetPageSize, targetSearchQuery])
+    void fetchProjectTargets(
+      projectId,
+      targetPage,
+      targetPageSize,
+      targetSearchQuery,
+      targetBatchTag,
+    )
+  }, [projectId, project, targetPage, targetPageSize, targetSearchQuery, targetBatchTag])
 
   useEffect(() => {
     if (
@@ -3901,6 +3969,7 @@ export default function ProjectDetail() {
     if (!projectId || !targetId) return
     blurFocusedTabPaneElement()
     applyTargetScope(targetId)
+    void syncProjectTargetSummary(projectId, targetId)
     loadedTabsRef.current.add(tab)
     setActiveTab(tab)
     if (tab === 'website') {
@@ -3966,6 +4035,9 @@ export default function ProjectDetail() {
           <div className="target-company-cell">
             <Space size={6} wrap>
               <Text strong>{target.target_name}</Text>
+              {(target.batch_tags || []).map((batchTag) => (
+                <Tag key={batchTag} color="processing">{batchTag}</Tag>
+              ))}
               {targetSearchQuery && target.search_match ? <Tag color="blue">匹配</Tag> : null}
               {target.collection_complete ? <Tag color="success">采集完成</Tag> : <Tag>待完成</Tag>}
               {(target.relation_depth ?? 0) >= 2
@@ -4083,6 +4155,22 @@ export default function ProjectDetail() {
         <div className="project-data-toolbar">
           <Text type="secondary">按主 Target 分页，子单位和孙单位默认折叠；点击模块数量可直接钻取。</Text>
           <div className="target-dashboard-actions">
+            <Select
+              className="target-dashboard-batch-filter"
+              value={targetBatchTag || undefined}
+              allowClear
+              placeholder="全部批次"
+              aria-label="按 Target 批次筛选"
+              options={targetBatchOptions.map((batch) => ({
+                value: batch.batch_tag,
+                label: `${batch.batch_tag} · ${batch.root_count} 个主目标`,
+              }))}
+              onChange={(value) => {
+                setTargetBatchTag(value || '')
+                setTargetPage(1)
+                setTargetExpandedRowKeys([])
+              }}
+            />
             <Input
               id="target-dashboard-search"
               name="target-dashboard-search"
@@ -4099,7 +4187,16 @@ export default function ProjectDetail() {
               icon={<SyncOutlined />}
               loading={targetDashboardLoading}
               onClick={() => {
-                if (projectId) void fetchProjectTargets(projectId, targetPage, targetPageSize, targetSearchQuery)
+                if (projectId) {
+                  void fetchProjectTargets(
+                    projectId,
+                    targetPage,
+                    targetPageSize,
+                    targetSearchQuery,
+                    targetBatchTag,
+                  )
+                  void fetchProjectTargetOptions(projectId)
+                }
               }}
             >
               刷新
@@ -4139,6 +4236,8 @@ export default function ProjectDetail() {
             pageSizeOptions: [10, 20, 50],
             showTotal: () => targetSearchQuery
               ? `命中 ${targetMatchedTotal} 个 Target，分布于 ${targetRootTotal} 个主 Target`
+              : targetBatchTag
+              ? `${targetBatchTag}：${projectTargetTotal} 个 Target，${targetRootTotal} 个主 Target；项目共 ${allProjectTargetTotal} 个 Target，${allTargetRootTotal} 个主 Target`
               : `共 ${projectTargetTotal} 个 Target，${targetRootTotal} 个主 Target`,
             onChange: (nextPage, nextPageSize) => {
               setTargetExpandedRowKeys([])
@@ -4170,7 +4269,7 @@ export default function ProjectDetail() {
         <Space>
           <AimOutlined />
           Target 看板
-          <Tag>{projectTargetTotal}</Tag>
+          <Tag>{targetBatchTag ? `${projectTargetTotal}/${allProjectTargetTotal}` : projectTargetTotal}</Tag>
         </Space>
       ),
       children: renderTargetDashboard(),
@@ -4682,6 +4781,9 @@ export default function ProjectDetail() {
                   <Space size={[6, 4]} wrap>
                     <Text type="secondary">当前 Target</Text>
                     <Text strong>{selectedTarget.target_name}</Text>
+                    {(selectedTarget.batch_tags || []).map((batchTag) => (
+                      <Tag key={batchTag} color="processing">{batchTag}</Tag>
+                    ))}
                     {selectedTarget.relation_type === 'primary' && <Tag color="blue">主目标</Tag>}
                     {(selectedTarget.relation_depth ?? 0) >= 2
                       ? <Tag color="gold">孙单位</Tag>
@@ -4700,6 +4802,18 @@ export default function ProjectDetail() {
                   <Tag color={selectedTarget.high_score_finding_count > 0 ? 'red' : 'default'}>
                     高分 {selectedTarget.high_score_finding_count || 0}
                   </Tag>
+                  <Tooltip title="从实际存储重新聚合当前 Target 统计">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<SyncOutlined spin={targetSummaryLoading} />}
+                      disabled={targetSummaryLoading}
+                      aria-label="刷新当前 Target 统计"
+                      onClick={() => {
+                        if (projectId) void syncProjectTargetSummary(projectId, selectedTarget.target_id)
+                      }}
+                    />
+                  </Tooltip>
                 </div>
               </div>
             )}
@@ -4875,6 +4989,12 @@ export default function ProjectDetail() {
                   let companyNames: string[] = []
                   if (taskType === 'company_scan') {
                     companyNames = parseCompanyNames(values.company_names)
+                    const targetBatchTags = Array.isArray(values.target_batch_tags)
+                      ? values.target_batch_tags
+                        .map((value: unknown) => String(value || '').trim())
+                        .filter(Boolean)
+                      : []
+                    if (targetBatchTags.length) params.target_batch_tags = targetBatchTags
                     if (values.urls) {
                       const urlList = values.urls.split('\n').map((u: string) => u.trim()).filter(Boolean)
                       if (urlList.length > 0) params.urls = urlList
@@ -5054,6 +5174,22 @@ export default function ProjectDetail() {
                               </div>
                             ) : null
                           }}
+                        </Form.Item>
+                        <Form.Item
+                          name="target_batch_tags"
+                          label="Target 批次"
+                          extra="可选择已有批次或直接输入新标签；扫描发现的子、孙单位会自动继承。"
+                        >
+                          <Select
+                            mode="tags"
+                            maxTagCount="responsive"
+                            tokenSeparators={[',', '，']}
+                            placeholder="如：第三批、教育专项"
+                            options={targetBatchOptions.map((batch) => ({
+                              value: batch.batch_tag,
+                              label: `${batch.batch_tag} · ${batch.root_count} 个主目标`,
+                            }))}
+                          />
                         </Form.Item>
                         <Form.Item
                           name="urls"

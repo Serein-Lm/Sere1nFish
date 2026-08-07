@@ -47,7 +47,11 @@ _PROJECT_TARGET_RELATION_PROJECTION = {
     "relation_source": 1,
     "lineage_target_ids": 1,
     "lineage_target_names": 1,
+    "batch_tags": 1,
 }
+
+MAX_TARGET_BATCH_TAGS = 12
+MAX_TARGET_BATCH_TAG_LENGTH = 40
 
 
 def _now() -> datetime:
@@ -58,6 +62,25 @@ def normalize_target_name(value: str) -> str:
     """生成用于实体匹配的稳定名称键，不改变展示名称。"""
     text = str(value or "").strip().casefold()
     return re.sub(r"[\s\-_·•,，。.;；:：()（）\[\]【】]+", "", text)
+
+
+def normalize_batch_tags(values: list[str] | tuple[str, ...] | str | None) -> list[str]:
+    """Validate and deduplicate user-facing ProjectTarget batch labels."""
+    raw_values = [values] if isinstance(values, str) else list(values or [])
+    tags: list[str] = []
+    for value in raw_values:
+        tag = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not tag:
+            continue
+        if len(tag) > MAX_TARGET_BATCH_TAG_LENGTH:
+            raise ValueError(
+                f"Target 批次标签不能超过 {MAX_TARGET_BATCH_TAG_LENGTH} 个字符"
+            )
+        if tag not in tags:
+            tags.append(tag)
+    if len(tags) > MAX_TARGET_BATCH_TAGS:
+        raise ValueError(f"单个 Target 最多关联 {MAX_TARGET_BATCH_TAGS} 个批次标签")
+    return tags
 
 
 def target_id_for_name(name: str, target_type: str = "company") -> str:
@@ -285,6 +308,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await links.create_index(
         [("project_id", 1), ("root_target_id", 1), ("relation_depth", 1)]
     )
+    await links.create_index([("project_id", 1), ("batch_tags", 1), ("active", 1)])
 
 
 def trusted_identity_aliases(target: dict[str, Any]) -> list[str]:
@@ -631,6 +655,7 @@ async def link_project_target(
     objectives: list[str] | None = None,
     task_def_id: str = "",
     relation: dict[str, Any] | None = None,
+    batch_tags: list[str] | tuple[str, ...] | str | None = None,
     replace_search_terms: bool = False,
 ) -> dict[str, Any]:
     if not project_id:
@@ -688,6 +713,36 @@ async def link_project_target(
         additions["objectives"] = {"$each": goals}
     if task_def_id:
         additions["task_def_ids"] = task_def_id
+    resolved_batch_tags = (
+        normalize_batch_tags(batch_tags) if batch_tags is not None else []
+    )
+    if relation and batch_tags is None:
+        anchor_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in (
+                    relation.get("parent_target_id"),
+                    relation.get("root_target_id"),
+                )
+                if str(value or "").strip()
+            )
+        )
+        if anchor_ids:
+            anchor = await db[PROJECT_TARGETS_COLLECTION].find_one(
+                {
+                    "project_id": project_id,
+                    "target_id": {"$in": anchor_ids},
+                    "active": {"$ne": False},
+                },
+                {"_id": 0, "batch_tags": 1},
+                sort=[("relation_depth", -1)],
+            )
+            if anchor:
+                resolved_batch_tags = normalize_batch_tags(
+                    anchor.get("batch_tags") or []
+                )
+    if resolved_batch_tags:
+        additions["batch_tags"] = {"$each": resolved_batch_tags}
     if not replace_search_terms:
         for channel_key, values in channel_map.items():
             additions[f"search_terms_by_channel.{channel_key}"] = {"$each": values}
@@ -824,6 +879,7 @@ async def list_project_targets(
                 "relation_source": 1,
                 "lineage_target_ids": 1,
                 "lineage_target_names": 1,
+                "batch_tags": 1,
                 "run_task_ids": 1,
                 "task_def_ids": 1,
                 "last_collected_at": 1,
@@ -833,6 +889,64 @@ async def list_project_targets(
         {"project_id": project_id, "active": {"$ne": False}}, projection
     ).sort("updated_at", -1)
     return [doc async for doc in cursor]
+
+
+async def update_project_target_batch_tags(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_ids: list[str],
+    batch_tags: list[str],
+    operation: str,
+) -> dict[str, int]:
+    """Apply one normalized batch-label mutation to ProjectTarget relations."""
+    normalized_target_ids = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in target_ids
+            if str(value or "").strip()
+        )
+    )
+    normalized_tags = normalize_batch_tags(batch_tags)
+    if not project_id or not normalized_target_ids:
+        return {"matched_count": 0, "modified_count": 0}
+
+    if operation == "add":
+        if not normalized_tags:
+            raise ValueError("新增批次标签时至少需要一个标签")
+        update: dict[str, Any] = {
+            "$addToSet": {"batch_tags": {"$each": normalized_tags}},
+            "$set": {"updated_at": _now()},
+        }
+    elif operation == "remove":
+        if not normalized_tags:
+            raise ValueError("移除批次标签时至少需要一个标签")
+        update = {
+            "$pull": {"batch_tags": {"$in": normalized_tags}},
+            "$set": {"updated_at": _now()},
+        }
+    elif operation == "replace":
+        update = {
+            "$set": {
+                "batch_tags": normalized_tags,
+                "updated_at": _now(),
+            }
+        }
+    else:
+        raise ValueError(f"不支持的批次标签操作: {operation}")
+
+    result = await db[PROJECT_TARGETS_COLLECTION].update_many(
+        {
+            "project_id": project_id,
+            "target_id": {"$in": normalized_target_ids},
+            "active": {"$ne": False},
+        },
+        update,
+    )
+    return {
+        "matched_count": int(result.matched_count or 0),
+        "modified_count": int(result.modified_count or 0),
+    }
 
 
 async def list_target_projects(

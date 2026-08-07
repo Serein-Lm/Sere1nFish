@@ -183,6 +183,7 @@ class CompanyScanPipeline:
         company_name: str,
         target_id: str = "",
         batch_id: str = "",
+        target_batch_tags: list[str] | tuple[str, ...] | str | None = None,
         url_text: str = "",
         urls: list[str] | None = None,
         enable_url_scan: bool = True,
@@ -599,6 +600,7 @@ class CompanyScanPipeline:
                 )
                 or None,
                 preferred_target_id=requested_target_id,
+                batch_tags=target_batch_tags,
             )
             target_id = str(target.get("target_id") or "")
             company_meta = await company_meta_dao.upsert_company_meta(
@@ -791,6 +793,7 @@ class CompanyScanPipeline:
                 search_terms=aliases,
                 search_terms_by_channel=channel_terms,
                 task_def_id=task_id,
+                batch_tags=target_batch_tags,
             )
 
             if not router_output.success:

@@ -220,6 +220,7 @@ def _select_target_relation_page(
     targets_by_id: dict[str, dict[str, Any]],
     *,
     query: str,
+    batch_tag: str = "",
     page: int,
     page_size: int,
     root_stats: dict[str, dict[str, int]],
@@ -238,10 +239,29 @@ def _select_target_relation_page(
     for target_id, relation in relations_by_target.items():
         groups.setdefault(root_by_target[target_id], []).append(relation)
 
+    normalized_batch_tag = str(batch_tag or "").strip()
+    eligible_roots = [
+        root_id
+        for root_id, group in groups.items()
+        if not normalized_batch_tag
+        or any(
+            normalized_batch_tag
+            in targets_dao.normalize_batch_tags(relation.get("batch_tags") or [])
+            for relation in group
+        )
+    ]
+    eligible_target_ids = {
+        str(relation.get("target_id") or "")
+        for root_id in eligible_roots
+        for relation in groups[root_id]
+    }
+
     normalized_query = targets_dao.normalize_target_name(query)
     direct_scores: dict[str, int] = {}
     if normalized_query:
         for target_id, relation in relations_by_target.items():
+            if target_id not in eligible_target_ids:
+                continue
             score = _target_search_rank(
                 relation,
                 targets_by_id.get(target_id, {}),
@@ -253,7 +273,7 @@ def _select_target_relation_page(
             dict.fromkeys(root_by_target[target_id] for target_id in direct_scores)
         )
     else:
-        candidate_roots = list(groups)
+        candidate_roots = list(eligible_roots)
 
     group_scores = {
         root_id: max(
@@ -277,6 +297,7 @@ def _select_target_relation_page(
 
     candidate_roots.sort(key=root_sort_key)
     root_total = len(candidate_roots)
+    filtered_project_total = sum(len(groups[root_id]) for root_id in eligible_roots)
     safe_page_size = max(1, min(int(page_size or 10), 100))
     max_page = max(1, (root_total + safe_page_size - 1) // safe_page_size)
     safe_page = min(max(1, int(page or 1)), max_page)
@@ -338,8 +359,12 @@ def _select_target_relation_page(
         "page": safe_page,
         "page_size": safe_page_size,
         "root_total": root_total,
-        "project_total": len(relations),
-        "matched_total": len(direct_scores) if normalized_query else len(relations),
+        "project_total": filtered_project_total,
+        "all_root_total": len(groups),
+        "all_project_total": len(relations),
+        "matched_total": (
+            len(direct_scores) if normalized_query else filtered_project_total
+        ),
         "matched_target_ids": sorted(direct_scores),
         "expanded_project_target_ids": sorted(expanded_project_target_ids),
         "child_counts": child_counts,
@@ -481,6 +506,7 @@ async def attach_normalized_company(
     task_id: str = "",
     normalization_version: int | None = None,
     preferred_target_id: str = "",
+    batch_tags: list[str] | tuple[str, ...] | str | None = None,
 ) -> dict[str, Any]:
     """把 company_meta 的项目级规范化结果挂到全局 Target 聚类。"""
     canonical_name = str(normalized_name or input_name).strip()
@@ -541,6 +567,7 @@ async def attach_normalized_company(
             target=target,
             search_terms=[input_name],
             task_def_id=task_id,
+            batch_tags=batch_tags,
         )
     return target
 
@@ -803,6 +830,7 @@ async def list_project_target_summaries(
             key: relation.get(key)
             for key in (
                 "project_target_id",
+                "project_id",
                 "target_id",
                 "target_type",
                 "target_name",
@@ -820,6 +848,7 @@ async def list_project_target_summaries(
                 "relation_source",
                 "lineage_target_ids",
                 "lineage_target_names",
+                "batch_tags",
             )
             if key in relation
         }
@@ -926,6 +955,7 @@ async def list_project_target_options(
         "parent_target_id",
         "parent_target_name",
         "relation_depth",
+        "batch_tags",
     )
     items = [
         {key: relation.get(key) for key in fields if key in relation}
@@ -940,6 +970,149 @@ async def list_project_target_options(
         )
     )
     return items
+
+
+async def list_project_target_batches(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """Return batch labels derived from the ProjectTarget source of truth."""
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=True,
+    )
+    relations_by_target = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if str(item.get("target_id") or "")
+    }
+    counts: dict[str, dict[str, set[str]]] = {}
+    for target_id, relation in relations_by_target.items():
+        root_target_id = _relation_root_target_id(relation, relations_by_target)
+        for batch_tag in targets_dao.normalize_batch_tags(
+            relation.get("batch_tags") or []
+        ):
+            values = counts.setdefault(
+                batch_tag,
+                {"target_ids": set(), "root_target_ids": set()},
+            )
+            values["target_ids"].add(target_id)
+            values["root_target_ids"].add(root_target_id)
+    return [
+        {
+            "batch_tag": batch_tag,
+            "target_count": len(values["target_ids"]),
+            "root_count": len(values["root_target_ids"]),
+        }
+        for batch_tag, values in sorted(counts.items())
+    ]
+
+
+async def assign_project_target_batches(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_ids: list[str],
+    batch_tags: list[str],
+    operation: str = "add",
+    include_descendants: bool = True,
+) -> dict[str, Any]:
+    """Assign business batch labels and optionally propagate them down a branch."""
+    requested_ids = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in target_ids
+            if str(value or "").strip()
+        )
+    )
+    if not requested_ids:
+        raise ValueError("至少需要选择一个 Target")
+    normalized_tags = targets_dao.normalize_batch_tags(batch_tags)
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=True,
+    )
+    relations_by_target = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if str(item.get("target_id") or "")
+    }
+    missing_ids = [
+        target_id
+        for target_id in requested_ids
+        if target_id not in relations_by_target
+    ]
+    if missing_ids:
+        raise ValueError(f"以下 Target 不属于当前项目: {', '.join(missing_ids)}")
+
+    selected_ids = set(requested_ids)
+    if include_descendants:
+        seed_ids = set(requested_ids)
+        for candidate_id, candidate in relations_by_target.items():
+            stored_ancestors = {
+                str(value or "").strip()
+                for value in [
+                    candidate.get("root_target_id"),
+                    *(candidate.get("lineage_target_ids") or []),
+                ]
+                if str(value or "").strip()
+            }
+            if stored_ancestors.intersection(seed_ids):
+                selected_ids.add(candidate_id)
+                continue
+            current_id = candidate_id
+            visited: set[str] = set()
+            while current_id and current_id not in visited:
+                if current_id in selected_ids:
+                    selected_ids.add(candidate_id)
+                    break
+                visited.add(current_id)
+                current_id = str(
+                    relations_by_target.get(current_id, {}).get("parent_target_id")
+                    or ""
+                )
+
+    result = await targets_dao.update_project_target_batch_tags(
+        db,
+        project_id=project_id,
+        target_ids=sorted(selected_ids),
+        batch_tags=normalized_tags,
+        operation=operation,
+    )
+    return {
+        **result,
+        "project_id": project_id,
+        "target_ids": sorted(selected_ids),
+        "target_count": len(selected_ids),
+        "batch_tags": normalized_tags,
+        "operation": operation,
+        "include_descendants": include_descendants,
+    }
+
+
+async def get_project_target_summary(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+) -> dict[str, Any] | None:
+    """Recompute one Target summary from persisted module collections."""
+    relation = await targets_dao.get_project_target(
+        db,
+        project_id=project_id,
+        target_id=target_id,
+    )
+    if not relation or relation.get("active") is False:
+        return None
+    summaries = await list_project_target_summaries(
+        db,
+        project_id,
+        compact=True,
+        relations=[relation],
+    )
+    return summaries[0] if summaries else None
 
 
 async def list_project_target_branch(
@@ -995,6 +1168,7 @@ async def list_project_target_summary_page(
     page: int = 1,
     page_size: int = 10,
     query: str = "",
+    batch_tag: str = "",
 ) -> dict[str, Any]:
     """Return one root-level page with child context and page-local statistics."""
     relations = await targets_dao.list_project_targets(
@@ -1008,6 +1182,8 @@ async def list_project_target_summary_page(
             "total": 0,
             "root_total": 0,
             "project_total": 0,
+            "all_root_total": 0,
+            "all_project_total": 0,
             "matched_total": 0,
             "page": 1,
             "page_size": max(1, min(int(page_size or 10), 100)),
@@ -1075,6 +1251,7 @@ async def list_project_target_summary_page(
         relations,
         targets_by_id,
         query=query,
+        batch_tag=batch_tag,
         page=page,
         page_size=page_size,
         root_stats=root_stats,
@@ -1100,6 +1277,8 @@ async def list_project_target_summary_page(
         "total": selection["root_total"],
         "root_total": selection["root_total"],
         "project_total": selection["project_total"],
+        "all_root_total": selection["all_root_total"],
+        "all_project_total": selection["all_project_total"],
         "matched_total": selection["matched_total"],
         "page": selection["page"],
         "page_size": selection["page_size"],

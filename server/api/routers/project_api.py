@@ -81,6 +81,13 @@ async def _normalize_xhs_target_params(
 
 def _validate_company_scan_params(params: dict[str, Any]) -> None:
     """Validate optional company-scan modules before creating task records."""
+    from api.dao.targets import normalize_batch_tags
+
+    if "target_batch_tags" in params:
+        params["target_batch_tags"] = normalize_batch_tags(
+            params.get("target_batch_tags")
+        )
+
     if params.get("enable_control_structure", False):
         try:
             control_max_depth = int(params.get("control_max_depth") or 1)
@@ -205,6 +212,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         company_name=params.get("company_name", ""),
         target_id=str(params.get("target_id") or ""),
         batch_id=str(params.get("_batch_id") or ""),
+        target_batch_tags=params.get("target_batch_tags", []),
         url_text=params.get("url_text", ""), urls=params.get("urls", []),
         enable_url_scan=params.get("enable_url_scan", True),
         enable_asset_discovery=params.get("enable_asset_discovery", True),

@@ -450,7 +450,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  width: min(100%, 420px);
+  width: min(100%, 680px);
+}
+
+.target-dashboard-batch-filter {
+  flex: 0 1 210px;
+  min-width: 170px;
 }
 
 .target-dashboard-actions .ant-input-affix-wrapper {
@@ -461,6 +466,13 @@
 @media (max-width: 640px) {
   .target-dashboard-actions {
     width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .target-dashboard-batch-filter,
+  .target-dashboard-actions .ant-input-affix-wrapper {
+    flex: 1 1 100%;
+    min-width: 0;
   }
 }
 

@@ -114,6 +114,7 @@ export interface ProjectTargetSummary {
   relation_source?: string
   lineage_target_ids?: string[]
   lineage_target_names?: string[]
+  batch_tags?: string[]
   relation?: Record<string, unknown>
   task_def_ids?: string[]
   document_count: number
@@ -152,6 +153,13 @@ export interface ProjectTargetOption {
   parent_target_id?: string
   parent_target_name?: string
   relation_depth?: number
+  batch_tags?: string[]
+}
+
+export interface ProjectTargetBatchOption {
+  batch_tag: string
+  target_count: number
+  root_count: number
 }
 
 export interface ProjectTargetPageResponse {
@@ -159,6 +167,8 @@ export interface ProjectTargetPageResponse {
   total: number
   root_total: number
   project_total: number
+  all_root_total: number
+  all_project_total: number
   matched_total: number
   page: number
   page_size: number
@@ -222,7 +232,7 @@ export function getSourceDocument(documentId: string, projectId?: string, versio
 
 export function listProjectTargets(
   projectId: string,
-  options: { page?: number; page_size?: number; q?: string } = {},
+  options: { page?: number; page_size?: number; q?: string; batch_tag?: string } = {},
 ) {
   const query = new URLSearchParams({
     project_id: projectId,
@@ -231,6 +241,7 @@ export function listProjectTargets(
     page_size: String(options.page_size ?? 10),
   })
   if (options.q?.trim()) query.set('q', options.q.trim())
+  if (options.batch_tag?.trim()) query.set('batch_tag', options.batch_tag.trim())
   return apiFetch<ProjectTargetPageResponse>(`/v1/targets?${query.toString()}`)
 }
 
@@ -244,6 +255,45 @@ export function listProjectTargetBranch(projectId: string, targetId: string) {
   return apiFetch<ProjectTargetBranchResponse>(
     `/v1/targets/${encodeURIComponent(targetId)}/branch?project_id=${encodeURIComponent(projectId)}`,
   )
+}
+
+export function listProjectTargetBatches(projectId: string) {
+  return apiFetch<{ items: ProjectTargetBatchOption[]; total: number }>(
+    `/v1/targets/batches?project_id=${encodeURIComponent(projectId)}`,
+  )
+}
+
+export function getProjectTargetSummary(projectId: string, targetId: string) {
+  return apiFetch<{ item: ProjectTargetSummary }>(
+    `/v1/targets/${encodeURIComponent(targetId)}/summary?project_id=${encodeURIComponent(projectId)}`,
+  )
+}
+
+export function assignProjectTargetBatches(
+  projectId: string,
+  targetIds: string[],
+  batchTags: string[],
+  options: {
+    operation?: 'add' | 'remove' | 'replace'
+    include_descendants?: boolean
+  } = {},
+) {
+  return apiFetch<{
+    matched_count: number
+    modified_count: number
+    target_count: number
+    target_ids: string[]
+    batch_tags: string[]
+  }>('/v1/targets/batches/assign', {
+    method: 'POST',
+    body: JSON.stringify({
+      project_id: projectId,
+      target_ids: targetIds,
+      batch_tags: batchTags,
+      operation: options.operation ?? 'add',
+      include_descendants: options.include_descendants ?? true,
+    }),
+  })
 }
 
 export function createTargetResearch(

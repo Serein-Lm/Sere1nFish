@@ -1,6 +1,8 @@
 """永久来源文档与 Target 聚类查询 API。"""
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -11,7 +13,10 @@ from api.dao import targets as targets_dao
 from api.db.mongodb import get_db
 from api.services.source_documents import get_source_document_detail
 from api.services.targets import (
+    assign_project_target_batches,
+    get_project_target_summary,
     list_project_target_branch,
+    list_project_target_batches,
     list_project_target_options,
     list_project_target_summaries,
     list_project_target_summary_page,
@@ -57,6 +62,14 @@ class TargetResearchBatchRequest(BaseModel):
     scan_params: dict = Field(default_factory=dict)
 
 
+class ProjectTargetBatchAssignRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    target_ids: list[str] = Field(min_length=1, max_length=500)
+    batch_tags: list[str] = Field(default_factory=list, max_length=12)
+    operation: Literal["add", "remove", "replace"] = "add"
+    include_descendants: bool = True
+
+
 @router.get("/targets")
 async def list_targets(
     project_id: str = Query(min_length=1),
@@ -64,14 +77,16 @@ async def list_targets(
     page: int | None = Query(default=None, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
     q: str = Query(default="", max_length=200),
+    batch_tag: str = Query(default="", max_length=40),
 ):
-    if page is not None or q.strip():
+    if page is not None or q.strip() or batch_tag.strip():
         return await list_project_target_summary_page(
             get_db(),
             project_id,
             page=page or 1,
             page_size=page_size,
             query=q,
+            batch_tag=batch_tag,
         )
     items = await list_project_target_summaries(
         get_db(),
@@ -85,6 +100,27 @@ async def list_targets(
 async def list_target_options(project_id: str = Query(min_length=1)):
     items = await list_project_target_options(get_db(), project_id)
     return {"items": items, "total": len(items)}
+
+
+@router.get("/targets/batches")
+async def list_target_batches(project_id: str = Query(min_length=1)):
+    items = await list_project_target_batches(get_db(), project_id)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/targets/batches/assign")
+async def assign_target_batches(payload: ProjectTargetBatchAssignRequest):
+    try:
+        return await assign_project_target_batches(
+            get_db(),
+            project_id=payload.project_id,
+            target_ids=payload.target_ids,
+            batch_tags=payload.batch_tags,
+            operation=payload.operation,
+            include_descendants=payload.include_descendants,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/targets")
@@ -153,6 +189,18 @@ async def list_target_branch(target_id: str, project_id: str = Query(min_length=
     if not result["root_target_id"]:
         raise HTTPException(404, "项目 Target 不存在")
     return result
+
+
+@router.get("/targets/{target_id}/summary")
+async def get_target_summary(target_id: str, project_id: str = Query(min_length=1)):
+    item = await get_project_target_summary(
+        get_db(),
+        project_id=project_id,
+        target_id=target_id,
+    )
+    if item is None:
+        raise HTTPException(404, "项目 Target 不存在")
+    return {"item": item}
 
 
 @router.get("/targets/{target_id}/research")

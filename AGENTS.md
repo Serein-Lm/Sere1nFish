@@ -69,7 +69,7 @@
 
 - `Project` 是一次工作的组织边界，承载任务、搜索目标和项目内展示；它不是公司实体，也不能作为跨项目公司的唯一标识。
 - `Target` 是跨项目复用的全局目标实体，当前主要表示公司或机构，持久化在 `targets`。公司规范化结果通过 `target_id` 归入同一实体，名称别名和根域名只用于解析，调用侧使用稳定 `target_id`。
-- `ProjectTarget` 是项目关注某个 Target 的关系，持久化在 `project_targets`，保存搜索词、目标、采集任务和最近增量采集时间。一个 Project 可关联多个 Target，一个 Target 也可被多个 Project 复用。
+- `ProjectTarget` 是项目关注某个 Target 的关系，持久化在 `project_targets`，保存搜索词、目标、采集任务、最近增量采集时间和项目内业务批次标签 `batch_tags`。一个 Project 可关联多个 Target，一个 Target 也可被多个 Project 复用；一个 ProjectTarget 可属于多个业务批次，子、孙单位继承主 Target 的批次标签。业务批次不得复用任务调度 `batch_id`，历史重跑不会自动形成新业务批次。
 - 全资单位关系归属于 ProjectTarget 的项目场景：根单位、直接上级、`relation_depth` 和完整 `lineage_target_ids/lineage_target_names` 必须同时保存。扫描支持直属子单位或继续钻取一层孙单位；每一条边都必须是直接 100% 持股，禁止把根单位到孙单位的间接持股伪装为直接关系。项目详情按这些稳定字段构建层级树，不能依赖名称前缀临时推断。
 - `SourceDocument` 是按规范 URL 全局去重的来源文档，持久化在 `source_documents`；同一文章在不同项目或 Target 中只保存一份来源身份。
 - `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
