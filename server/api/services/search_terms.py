@@ -17,6 +17,11 @@ CHANNEL_SKILLS = {
     "weixin": "wechat-keywords",
 }
 
+CHANNEL_TERM_POLICIES = {
+    "xhs": {"generated_weight": 3},
+    "weixin": {"generated_weight": 5},
+}
+
 FALLBACK_TEMPLATES = {
     "xhs": [
         "{company} 实习",
@@ -25,16 +30,31 @@ FALLBACK_TEMPLATES = {
         "{company} 工作体验",
     ],
     "weixin": [
+        "{company}",
+        "{company} 公众号",
+        "{company} 官方",
+        "{company} 新闻",
+        "{company} 公告",
         "{company} 招标",
         "{company} 采购",
         "{company} 招商",
         "{company} 合作",
         "{company} 联系方式",
-        "{company} 公众号",
     ],
 }
 
 _CODE_TEMPLATE_RE = re.compile(r"`([^`]*\{company\}[^`]*)`")
+
+
+def _extract_table_templates(body: str) -> list[str]:
+    """只从 Markdown 表格提取显式模板，避免把说明文字当成关键词。"""
+    templates: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "{company}" not in stripped:
+            continue
+        templates.extend(_CODE_TEMPLATE_RE.findall(stripped))
+    return _dedupe(templates)
 
 
 def _dedupe(values: list[str], *, limit: int | None = None) -> list[str]:
@@ -53,8 +73,9 @@ def _merge_generated_and_routed(
     routed: list[str],
     *,
     limit: int,
+    generated_weight: int = 3,
 ) -> list[str]:
-    """以 3:1 合并稳定 Skill 词和 Agent 路由词，避免任一来源独占上限。"""
+    """按渠道权重合并稳定 Skill 词和 Agent 路由词。"""
     merged: list[str] = []
     seen: set[str] = set()
     generated_index = 0
@@ -69,7 +90,7 @@ def _merge_generated_and_routed(
     while len(merged) < limit and (
         generated_index < len(generated) or routed_index < len(routed)
     ):
-        for _ in range(3):
+        for _ in range(max(1, generated_weight)):
             if generated_index >= len(generated):
                 break
             _append(generated[generated_index])
@@ -104,6 +125,9 @@ def get_keyword_skill_context(channels: list[str]) -> str:
 def get_keyword_templates(channel: str) -> list[str]:
     channel = str(channel or "").strip().lower()
     _, body = load_keyword_skill(channel)
+    table_templates = _extract_table_templates(body)
+    if table_templates:
+        return table_templates
     templates = [
         template
         for template in _CODE_TEMPLATE_RE.findall(body)
@@ -131,6 +155,9 @@ def build_channel_terms(
         _dedupe(generated),
         _dedupe(list(routed_terms or [])),
         limit=max(1, limit),
+        generated_weight=int(
+            CHANNEL_TERM_POLICIES.get(channel, {}).get("generated_weight", 3)
+        ),
     )
 
 
@@ -241,8 +268,15 @@ async def resolve_project_target_terms(
         by_channel = doc.get("search_terms_by_channel") or {}
         stored = by_channel.get(channel) if isinstance(by_channel, dict) else []
         channel_terms = [str(term) for term in (stored or []) if str(term).strip()]
-        if not channel_terms and doc_name:
-            channel_terms = build_channel_terms(channel=channel, names=[doc_name])
+        if doc_name:
+            # 历史关系中的词可能由旧 Prompt 生成。每次执行都与当前 DB Skill
+            # 合并，确保词库升级立即生效，同时保留原有场景化词。
+            channel_terms = build_channel_terms(
+                channel=channel,
+                names=[doc_name],
+                routed_terms=channel_terms,
+                limit=max(keyword_limit, 30),
+            )
         term_groups.append(
             (
                 _dedupe(channel_terms),

@@ -421,6 +421,29 @@ def test_keyword_skill_ignores_standalone_company_placeholder(
     assert search_terms.get_keyword_templates("weixin") == ["{company} 招标"]
 
 
+def test_keyword_skill_accepts_standalone_template_from_markdown_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import search_terms
+
+    monkeypatch.setattr(
+        search_terms,
+        "load_keyword_skill",
+        lambda _channel: (
+            "wechat-keywords",
+            "将 `{company}` 替换为目标名称。\n"
+            "| 场景 | 搜索词模板 |\n"
+            "| --- | --- |\n"
+            "| 官方主体 | `{company}`、`{company} 公众号` |",
+        ),
+    )
+
+    assert search_terms.get_keyword_templates("weixin") == [
+        "{company}",
+        "{company} 公众号",
+    ]
+
+
 def test_channel_terms_interleave_aliases_before_applying_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -747,6 +770,10 @@ async def test_project_terms_merge_root_and_direct_children(
 
     monkeypatch.setattr(targets_dao, "get_project_target", _root)
     monkeypatch.setattr(targets_dao, "list_project_target_descendants", _children)
+    monkeypatch.setattr(
+        "api.services.search_terms.get_keyword_templates",
+        lambda _channel: ["{company}", "{company} 公众号"],
+    )
     result = await resolve_project_target_terms(
         object(),
         project_id="project-1",
@@ -756,14 +783,79 @@ async def test_project_terms_merge_root_and_direct_children(
         explicit_keywords=["根公司 公告"],
     )
 
-    assert result.keywords == ["根公司 公告", "根公司 招标", "全资子公司 采购"]
+    assert result.keywords == [
+        "根公司 公告",
+        "根公司",
+        "全资子公司",
+        "根公司 公众号",
+        "全资子公司 公众号",
+        "根公司 招标",
+        "全资子公司 采购",
+    ]
     assert result.target_ids == ["root", "child"]
     assert result.sources == ["task_explicit", "project_target", "project_target_child"]
-    assert result.keyword_targets == {
-        "根公司 公告": {"target_id": "root", "target_name": "根公司"},
-        "根公司 招标": {"target_id": "root", "target_name": "根公司"},
-        "全资子公司 采购": {"target_id": "child", "target_name": "全资子公司"},
-    }
+    assert all(
+        result.keyword_targets[item]["target_id"] == "root"
+        for item in ["根公司 公告", "根公司", "根公司 公众号", "根公司 招标"]
+    )
+    assert all(
+        result.keyword_targets[item]["target_id"] == "child"
+        for item in ["全资子公司", "全资子公司 公众号", "全资子公司 采购"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_terms_upgrade_stored_wechat_terms_with_runtime_skill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+    from api.services.search_terms import resolve_project_target_terms
+
+    async def _root(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "target_id": "root",
+            "target_name": "传统单位",
+            "search_terms_by_channel": {
+                "weixin": ["传统单位 招标", "传统单位 采购"]
+            },
+        }
+
+    monkeypatch.setattr(targets_dao, "get_project_target", _root)
+    monkeypatch.setattr(
+        targets_dao,
+        "list_project_target_descendants",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "api.services.search_terms.get_keyword_templates",
+        lambda _channel: [
+            "{company}",
+            "{company} 公众号",
+            "{company} 官方",
+            "{company} 新闻",
+            "{company} 公告",
+            "{company} 招标",
+        ],
+    )
+
+    result = await resolve_project_target_terms(
+        object(),
+        project_id="project-1",
+        target_id="root",
+        target_name="传统单位",
+        channel="weixin",
+        include_direct_children=False,
+        max_keywords=6,
+    )
+
+    assert result.keywords == [
+        "传统单位",
+        "传统单位 公众号",
+        "传统单位 官方",
+        "传统单位 新闻",
+        "传统单位 公告",
+        "传统单位 招标",
+    ]
 
 
 @pytest.mark.asyncio
@@ -803,6 +895,10 @@ async def test_project_terms_include_grandchild_targets(
         targets_dao,
         "list_project_target_descendants",
         _descendants,
+    )
+    monkeypatch.setattr(
+        "api.services.search_terms.get_keyword_templates",
+        lambda _channel: [],
     )
     result = await resolve_project_target_terms(
         object(),
@@ -857,6 +953,10 @@ async def test_project_terms_round_robin_children_before_limit(
 
     monkeypatch.setattr(targets_dao, "get_project_target", _root)
     monkeypatch.setattr(targets_dao, "list_project_target_descendants", _children)
+    monkeypatch.setattr(
+        "api.services.search_terms.get_keyword_templates",
+        lambda _channel: [],
+    )
     result = await resolve_project_target_terms(
         object(),
         project_id="project-1",

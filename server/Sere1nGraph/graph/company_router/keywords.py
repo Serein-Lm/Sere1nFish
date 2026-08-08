@@ -110,12 +110,16 @@ class KeywordLibrary:
 
     WEIXIN_KEYWORDS = {
         industry: [
+            "{company}",
+            "{company} 公众号",
+            "{company} 官方",
+            "{company} 新闻",
+            "{company} 公告",
             "{company} 招标",
             "{company} 采购",
             "{company} 招商",
             "{company} 合作",
             "{company} 联系方式",
-            "{company} 公众号",
         ]
         for industry in IndustryType
     }
