@@ -66,6 +66,10 @@ MOBILE_COLLECT_TASKS_COLLECTION = "mobile_collect_tasks"
 MOBILE_COLLECT_RECORDS_COLLECTION = "mobile_collect_records"
 TASK_SCHEDULES_COLLECTION = "task_schedules"
 
+# 社交地点图片采集。Job 保存跨平台编排状态；Evidence 保存可审计的图片与上下文证据。
+SOCIAL_COLLECTION_JOBS_COLLECTION = "social_collection_jobs"
+SOCIAL_MEDIA_EVIDENCE_COLLECTION = "social_media_evidence"
+
 # 综合公司扫描
 COMPANY_SCAN_COLLECTION = "company_scan_results"
 PROFILE_COPYWRITINGS_COLLECTION = "profile_copywritings"

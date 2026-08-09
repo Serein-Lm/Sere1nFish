@@ -78,6 +78,58 @@ class CollectTaskDef(BaseModel):
         pattern=r"^[a-z][a-z0-9_]*$",
         description="详情页原文链接提取策略;none 表示仅使用视觉模型结果",
     )
+    search_navigation_strategy: str = Field(
+        default="",
+        max_length=64,
+        pattern=r"^$|^[a-z][a-z0-9_]*$",
+        description="搜索导航 adapter；为空时兼容复用 source_link_strategy",
+    )
+    candidate_policy: str = Field(
+        default="",
+        max_length=64,
+        pattern=r"^$|^[a-z][a-z0-9_]*$",
+        description="列表候选审核策略；为空时兼容复用 source_link_strategy",
+    )
+    detail_capture_strategy: str = Field(
+        default="default",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+        description="详情证据采集策略",
+    )
+    score_policy: str = Field(
+        default="contact_weighted",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+        description="持久化评分策略",
+    )
+    extract_contact_findings: bool = Field(
+        default=True,
+        description="是否抽取联系方式并生成 Finding",
+    )
+    resolve_target_context: bool = Field(
+        default=True,
+        description="是否解析并关联项目 Target；非公司采集可关闭以避免错误聚类",
+    )
+    require_persist_success: bool = Field(
+        default=False,
+        description="持久化阶段失败时是否让整个平台任务失败",
+    )
+    direct_launch_app: bool = Field(
+        default=False,
+        description="是否先通过 ADB 启动应用，再交给规划层定位搜索入口",
+    )
+    collection_subject: str = Field(default="", max_length=200)
+    collection_goal: str = Field(default="", max_length=500)
+    platform: str = Field(default="", max_length=64)
+    media_max_items: int = Field(default=0, ge=0, le=20)
+    media_navigation_hint: str = Field(default="", max_length=800)
+    record_source_type: str = Field(default="mobile", max_length=64)
+    progress_source: str = Field(default="", max_length=64)
+    progress_label: str = Field(default="", max_length=100)
+    social_collection_job_id: str = Field(default="", max_length=64)
+    parent_task_id: str = Field(default="", max_length=64)
     detail_max_items: int = Field(
         default=5, ge=0, le=20, description="每个列表页最多点进几条做详情深采"
     )
@@ -147,6 +199,42 @@ class CollectTaskUpdate(BaseModel):
         max_length=64,
         pattern=r"^[a-z][a-z0-9_]*$",
     )
+    search_navigation_strategy: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^$|^[a-z][a-z0-9_]*$",
+    )
+    candidate_policy: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^$|^[a-z][a-z0-9_]*$",
+    )
+    detail_capture_strategy: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    score_policy: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    extract_contact_findings: bool | None = None
+    resolve_target_context: bool | None = None
+    require_persist_success: bool | None = None
+    direct_launch_app: bool | None = None
+    collection_subject: str | None = Field(default=None, max_length=200)
+    collection_goal: str | None = Field(default=None, max_length=500)
+    platform: str | None = Field(default=None, max_length=64)
+    media_max_items: int | None = Field(default=None, ge=0, le=20)
+    media_navigation_hint: str | None = Field(default=None, max_length=800)
+    record_source_type: str | None = Field(default=None, max_length=64)
+    progress_source: str | None = Field(default=None, max_length=64)
+    progress_label: str | None = Field(default=None, max_length=100)
+    social_collection_job_id: str | None = Field(default=None, max_length=64)
+    parent_task_id: str | None = Field(default=None, max_length=64)
     detail_max_items: int | None = Field(default=None, ge=0, le=20)
     detail_max_total_items: int | None = Field(default=None, ge=0, le=200)
     detail_review_max_items: int | None = Field(default=None, ge=0, le=50)

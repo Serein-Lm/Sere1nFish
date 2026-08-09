@@ -211,6 +211,41 @@ async def _mobile_collect_tasks(db, project_id, limit, _access):
     return _list_result(items, limit)
 
 
+async def _social_collection_jobs(db, project_id, limit, _access):
+    from api.dao import social_collection
+
+    items, total = await social_collection.list_jobs(
+        db,
+        project_id=project_id,
+        limit=limit,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _social_media(db, project_id, limit, _access):
+    from api.dao import social_collection
+
+    items, total = await social_collection.list_media_evidence(
+        db,
+        project_id=project_id,
+        limit=limit,
+    )
+    return ProjectDatasetResult(items, total)
+
+
+async def _query_social_media(db, project_id, query, _access):
+    from api.dao import social_collection
+
+    items, total = await social_collection.list_media_evidence(
+        db,
+        project_id=project_id,
+        target_id=query.target_id,
+        skip=query.offset,
+        limit=query.limit,
+    )
+    return ProjectDatasetResult(items, total)
+
+
 async def _source_documents(db, project_id, limit, _access):
     from api.dao import source_documents
 
@@ -625,6 +660,20 @@ PROJECT_DATASETS: dict[str, ProjectDatasetAdapter] = {
             "手机采集定义",
             "公众号等手机采集任务配置与状态",
             _mobile_collect_tasks,
+        ),
+        ProjectDatasetAdapter(
+            "social_collection_jobs",
+            "社交图片采集任务",
+            "美团/抖音地点图片采集的排队状态、平台进度和结果统计",
+            _social_collection_jobs,
+        ),
+        ProjectDatasetAdapter(
+            "social_media",
+            "社交地点图片",
+            "地点公开图片、评价上下文、完整屏幕证据与私有 OSS 图片引用",
+            _social_media,
+            query_loader=_query_social_media,
+            filters=("target_id",),
         ),
         ProjectDatasetAdapter(
             "source_documents",

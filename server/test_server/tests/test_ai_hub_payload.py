@@ -1143,6 +1143,8 @@ def test_project_dataset_registry_covers_project_detail_data_surfaces() -> None:
         "douyin_profiles",
         "wechat_records",
         "mobile_collect_tasks",
+        "social_collection_jobs",
+        "social_media",
         "source_documents",
         "targets",
         "mobile_profiles",
@@ -1295,12 +1297,21 @@ def test_hub_prompts_are_repository_seeds() -> None:
         "persona",
         "content",
         "payload",
-            "osint",
-            "strategy",
-            "response_style",
+        "osint",
+        "strategy",
+        "collection",
+        "response_style",
     }
     assert expected == {path.stem for path in (PROMPTS_DIR / "hub").glob("*.md")}
-    for prompt_name in ("data", "persona", "content", "payload", "osint"):
+    for prompt_name in (
+        "data",
+        "persona",
+        "content",
+        "payload",
+        "osint",
+        "strategy",
+        "collection",
+    ):
         expanded = load_prompt(f"hub/{prompt_name}")
         assert "统一回答展示协议" in expanded
         assert "{{ include:" not in expanded

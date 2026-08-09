@@ -506,6 +506,29 @@ async def upsert_record(
     return {"record_id": record_id, "is_new": is_new, "is_changed": is_changed}
 
 
+async def attach_media_evidence(
+    db: AsyncIOMotorDatabase,
+    *,
+    record_id: str,
+    evidence_ids: list[str],
+    storage_object_ids: list[str],
+) -> None:
+    """Attach social media evidence without changing the record content identity."""
+    add_to_set: dict[str, Any] = {}
+    if evidence_ids:
+        add_to_set["media_evidence_ids"] = {"$each": list(dict.fromkeys(evidence_ids))}
+    if storage_object_ids:
+        add_to_set["media_storage_object_ids"] = {
+            "$each": list(dict.fromkeys(storage_object_ids))
+        }
+    if not add_to_set:
+        return
+    await db[MOBILE_COLLECT_RECORDS_COLLECTION].update_one(
+        {"record_id": record_id},
+        {"$addToSet": add_to_set, "$set": {"updated_at": _now()}},
+    )
+
+
 async def list_records(
     db: AsyncIOMotorDatabase,
     *,

@@ -41,6 +41,7 @@ from api.routers import (
     source_documents,
     deepfake,
     media_output,
+    social_collection,
 )
 from api.config import get_settings
 from api.auth import get_current_active_user, User
@@ -312,6 +313,8 @@ async def lifespan(app: FastAPI):
         from api.dao import mobile_collect as mobile_collect_dao
         from api.dao import schedules as schedules_dao
         await mobile_collect_dao.ensure_indexes(db)
+        from api.dao import social_collection as social_collection_dao
+        await social_collection_dao.ensure_indexes(db)
         await schedules_dao.ensure_indexes(db)
         logger.info("核心集合索引已确认")
     except Exception as e:
@@ -561,6 +564,11 @@ app.include_router(agent.router, prefix="/api/v1/agent", tags=["Agent"])
 app.include_router(mobile.router, prefix="/api/v1/mobile", tags=["手机"])
 app.include_router(mobile_transfers.router, prefix="/api/v1/mobile", tags=["手机文件传递"])
 app.include_router(mobile_collect.router, prefix="/api/v1/mobile-collect", tags=["手机采集任务"])
+app.include_router(
+    social_collection.router,
+    prefix="/api/v1/social-collection",
+    tags=["社交地点图片采集"],
+)
 app.include_router(persons.router, prefix="/api/v1/persons", tags=["人设库"])
 app.include_router(
     person_intelligence.router,

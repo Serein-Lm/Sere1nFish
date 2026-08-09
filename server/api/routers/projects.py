@@ -207,12 +207,15 @@ async def delete_project(project_id: str):
         TOKEN_USAGE_RECORDS_COLLECTION,
         AUTO_CHAT_SESSIONS_COLLECTION,
         MOBILE_PROFILE_OBSERVATIONS_COLLECTION,
+        MOBILE_COLLECT_TASKS_COLLECTION,
+        MOBILE_COLLECT_RECORDS_COLLECTION,
         SCHOLAR_ARTICLES_COLLECTION,
         SCHOLAR_CONTACTS_COLLECTION,
     )
     from api.dao import contact_profiles as contact_profiles_dao
     from api.dao import mobile_artifacts as mobile_artifacts_dao
     from api.dao import bidding as bidding_dao
+    from api.dao import social_collection as social_collection_dao
 
     collections_to_clean = [
         TASKS_COLLECTION,
@@ -235,6 +238,8 @@ async def delete_project(project_id: str):
         TOKEN_USAGE_RECORDS_COLLECTION,
         AUTO_CHAT_SESSIONS_COLLECTION,
         MOBILE_PROFILE_OBSERVATIONS_COLLECTION,
+        MOBILE_COLLECT_TASKS_COLLECTION,
+        MOBILE_COLLECT_RECORDS_COLLECTION,
         SCHOLAR_ARTICLES_COLLECTION,
         SCHOLAR_CONTACTS_COLLECTION,
         "task_logs",  # 观测层任务日志（按 project_id 级联清理）
@@ -249,15 +254,23 @@ async def delete_project(project_id: str):
         r.deleted_count for r in results if not isinstance(r, BaseException)
     )
 
-    mobile_cleanup, contact_cleanup, bidding_detached = await asyncio.gather(
+    (
+        mobile_cleanup,
+        contact_cleanup,
+        bidding_detached,
+        social_cleanup,
+    ) = await asyncio.gather(
         mobile_artifacts_dao.delete_project_artifacts(db, project_id),
         contact_profiles_dao.delete_project_references(db, project_id),
         bidding_dao.detach_project(db, project_id),
+        social_collection_dao.delete_project_data(db, project_id),
     )
     total_deleted += (
         int(mobile_cleanup.get("screenshots_deleted") or 0)
         + int(mobile_cleanup.get("operations_deleted") or 0)
         + int(contact_cleanup.get("profiles_deleted") or 0)
+        + int(social_cleanup.get("media_deleted") or 0)
+        + int(social_cleanup.get("jobs_deleted") or 0)
     )
 
     # 同步清理 TokenTracker 内存中该项目的记录
@@ -276,6 +289,7 @@ async def delete_project(project_id: str):
         "mobile_artifacts": mobile_cleanup,
         "contact_profiles": contact_cleanup,
         "bidding_records_detached": bidding_detached,
+        "social_collection": social_cleanup,
     }
 
 

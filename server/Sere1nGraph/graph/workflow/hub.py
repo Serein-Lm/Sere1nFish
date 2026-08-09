@@ -7,7 +7,7 @@ AI 中枢路由工作流（复用 router.py 的 LangGraph 路由架构）。
   「专家子 Agent」，每个子 Agent 只携带内聚的只读工具组并叠加 SummarizationMiddleware，
   使单个子 Agent 上下文有界；子 Agent 内部的工具选择/顺序仍由其自主决定（ReAct，无固定编排）。
 
-拓扑：START → classify → {data | persona | content | payload | osint | strategy}（Send 并行）→ synthesize → END
+拓扑：START → classify → {data | persona | content | payload | osint | strategy | collection}（Send 并行）→ synthesize → END
 
 事件复用 router 既有词汇（router_start/classify_*/agent_*/synthesis_*），
 因此 executor._convert_graph_event 无需改动即可渲染思维链。
@@ -29,7 +29,15 @@ from ..agents.factory import create_hub_specialist_agent
 from ..agents.runtime import REQUIRE_EVIDENCE_TOOL_MARKER, create_llm
 from ..prompts.loader import load_prompt
 
-HubTarget = Literal["data", "persona", "content", "payload", "osint", "strategy"]
+HubTarget = Literal[
+    "data",
+    "persona",
+    "content",
+    "payload",
+    "osint",
+    "strategy",
+    "collection",
+]
 _PUBLIC_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _OSINT_INTENT_RE = re.compile(
     r"(?:\bOSINT\b|开源情报|背景调查|深入了解|仔细了解|"
@@ -54,6 +62,14 @@ _STRATEGY_DELIVERY_RE = re.compile(
 _STRATEGY_CONTEXT_RE = re.compile(
     r"(?:Finding|业务|架构|网站|人物|人设|背景|信息|职责|上下游|高校|客户)",
     re.IGNORECASE,
+)
+_SOCIAL_PLATFORM_RE = re.compile(r"(?:美团|抖音)", re.IGNORECASE)
+_SOCIAL_MEDIA_RE = re.compile(r"(?:照片|图片|相册|图集)", re.IGNORECASE)
+_SOCIAL_COLLECTION_ACTION_RE = re.compile(
+    r"(?:收集|采集|搜集|保存|归档|获取|寻找|找)", re.IGNORECASE
+)
+_SOCIAL_DISCOVERY_RE = re.compile(
+    r"(?:搜索|搜一下|搜|评价|评论|地点|场所|店铺|景点|探店)", re.IGNORECASE
 )
 _CURRENT_REQUEST_MARKER = "【本轮用户请求】"
 _DIRECT_URL_AGENT_TIMEOUT_SECONDS = 90
@@ -171,6 +187,24 @@ def _has_strategy_intent(query: str) -> bool:
     return bool(len(delivery_signals) >= 2 and _STRATEGY_CONTEXT_RE.search(text))
 
 
+def _has_social_collection_intent(query: str) -> bool:
+    """Detect phone-backed place/review image collection in the current turn."""
+    text = str(query or "")
+    if _CURRENT_REQUEST_MARKER in text:
+        text = text.rpartition(_CURRENT_REQUEST_MARKER)[2]
+    if _STRATEGY_DELIVERY_RE.search(text):
+        return False
+    return all(
+        pattern.search(text)
+        for pattern in (
+            _SOCIAL_PLATFORM_RE,
+            _SOCIAL_MEDIA_RE,
+            _SOCIAL_COLLECTION_ACTION_RE,
+            _SOCIAL_DISCOVERY_RE,
+        )
+    )
+
+
 def _direct_url_classifications(query: str) -> list[Classification] | None:
     """Bypass one router-model call for the unambiguous exact-URL workflow."""
     if not _has_direct_public_url(query):
@@ -199,6 +233,14 @@ def _persona_collection_classifications(
     if not _has_persona_collection_intent(query):
         return None
     return [{"source": "persona", "query": query, "requires_tools": True}]
+
+
+def _social_collection_classifications(
+    query: str,
+) -> list[Classification] | None:
+    if not _has_social_collection_intent(query):
+        return None
+    return [{"source": "collection", "query": query, "requires_tools": True}]
 
 
 def _build_synthesis_prompt(query: str, response_style: str) -> str:
@@ -251,12 +293,20 @@ async def build_hub_graph(app_config: Any):
         tools=_specialist_tools("content"),
         output_mode="sse",
     )
+    collection_agent = await create_hub_specialist_agent(
+        app_config,
+        system_prompt=load_prompt("hub/collection"),
+        tools=_specialist_tools("collection"),
+        output_mode="sse",
+    )
 
     async def classify_query(state: HubState) -> dict:
         await emit_event({"type": "router_start", "timestamp": _ts()})
         await emit_event({"type": "classify_start", "timestamp": _ts()})
 
-        classifications = _strategy_classifications(state["query"])
+        classifications = _social_collection_classifications(state["query"])
+        if classifications is None:
+            classifications = _strategy_classifications(state["query"])
         if classifications is None:
             classifications = _direct_url_classifications(state["query"])
         if classifications is None:
@@ -324,6 +374,13 @@ async def build_hub_graph(app_config: Any):
         with observation_context(phase="hub_content", agent="hub_content"):
             text = await run_agent_with_sse("content", content_agent, state["query"])
         return {"results": [{"source": "content", "result": text}]}
+
+    async def query_collection(state: AgentInput) -> dict:
+        with observation_context(phase="hub_collection", agent="hub_collection"):
+            text = await run_agent_with_sse(
+                "collection", collection_agent, state["query"]
+            )
+        return {"results": [{"source": "collection", "result": text}]}
 
     async def _query_browser_specialist(
         *,
@@ -483,12 +540,21 @@ async def build_hub_graph(app_config: Any):
         .add_node("payload", query_payload)
         .add_node("osint", query_osint)
         .add_node("strategy", query_strategy)
+        .add_node("collection", query_collection)
         .add_node("synthesize", synthesize_results)
         .add_edge(START, "classify")
         .add_conditional_edges(
             "classify",
             route_to_agents,
-            ["data", "persona", "content", "payload", "osint", "strategy"],
+            [
+                "data",
+                "persona",
+                "content",
+                "payload",
+                "osint",
+                "strategy",
+                "collection",
+            ],
         )
         .add_edge("data", "synthesize")
         .add_edge("persona", "synthesize")
@@ -496,6 +562,7 @@ async def build_hub_graph(app_config: Any):
         .add_edge("payload", "synthesize")
         .add_edge("osint", "synthesize")
         .add_edge("strategy", "synthesize")
+        .add_edge("collection", "synthesize")
         .add_edge("synthesize", END)
     )
     return builder.compile()

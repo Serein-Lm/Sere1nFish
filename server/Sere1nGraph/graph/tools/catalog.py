@@ -36,6 +36,7 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
     from .project_data_tools import PROJECT_DATA_TOOLS
     from .read_tools import READ_TOOLS
     from .skill_tools import SKILL_TOOLS
+    from .social_collection_tools import SOCIAL_COLLECTION_TOOLS
     from .word_tools import PAYLOAD_WORD_TOOLS, WORD_TOOLS
 
     data = _unique_tools(
@@ -144,6 +145,24 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
             if _name(tool) in osint_context_names
         ],
     )
+    collection_read_names = {
+        "list_projects",
+        "list_mobile_devices",
+        "get_mobile_device_status",
+        "get_project",
+        "get_project_data_catalog",
+        "read_project_dataset",
+    }
+    collection = _unique_tools(
+        list(SOCIAL_COLLECTION_TOOLS),
+        list(PROJECT_DATA_TOOLS),
+        list(SKILL_TOOLS),
+        [
+            tool
+            for tool in READ_TOOLS
+            if _name(tool) in collection_read_names
+        ],
+    )
     return {
         "data": data,
         "persona": persona,
@@ -151,6 +170,7 @@ def get_hub_tool_groups() -> dict[str, list[Any]]:
         "payload": payload,
         "osint": osint,
         "strategy": strategy,
+        "collection": collection,
     }
 
 
@@ -236,6 +256,11 @@ def get_hub_tool_catalog(*, chrome_configured: bool = False) -> dict[str, Any]:
                 "prompt": "hub/strategy",
                 "tools": assignments["strategy"],
                 "mcp_servers": ["chrome-devtools"],
+            },
+            {
+                "name": "collection",
+                "prompt": "hub/collection",
+                "tools": assignments["collection"],
             },
         ],
         "tools": sorted(all_tools.values(), key=lambda item: item["name"]),

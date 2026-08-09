@@ -38,7 +38,6 @@ from core.mobile.collect.contacts import (
     extract_contacts,
     record_text_blob,
     build_contact_findings,
-    grade_with_contacts,
 )
 from core.mobile.collect.candidate_policy import (
     CandidatePolicyRegistry,
@@ -48,6 +47,11 @@ from core.mobile.collect.search_navigation import (
     SearchNavigationRegistry,
     SearchNavigationResult,
 )
+from core.mobile.collect.detail_capture import (
+    DetailCaptureContext,
+    DetailCaptureRegistry,
+)
+from core.mobile.collect.score_policy import ScorePolicyRegistry
 from api.services.source_documents import ingest_source_url
 
 logger = get_logger("mobile_collect")
@@ -225,18 +229,20 @@ async def _update_parent_terminal_progress(
     stopped = bool(state["stop_event"].is_set())
     partial = timed_out or stopped or completed < total
     status = "error" if all_failed else ("partial" if partial else "completed")
+    progress_source = str(state.get("progress_source") or "wechat")
+    progress_label = str(state.get("progress_label") or "公众号")
     if all_failed:
-        message = f"公众号采集失败，已完成 {completed}/{total} 个关键词"
+        message = f"{progress_label}采集失败，已完成 {completed}/{total} 个关键词"
     elif timed_out:
-        message = f"公众号达到运行时限，已完成 {completed}/{total} 个关键词"
+        message = f"{progress_label}达到运行时限，已完成 {completed}/{total} 个关键词"
     elif stopped:
-        message = f"公众号已停止，保留 {completed}/{total} 个关键词结果"
+        message = f"{progress_label}已停止，保留 {completed}/{total} 个关键词结果"
     else:
-        message = f"公众号关键词已完成 {completed}/{total}"
+        message = f"{progress_label}关键词已完成 {completed}/{total}"
     await update_source_progress(
         db,
         task_id=parent_task_id,
-        source="wechat",
+        source=progress_source,
         total=total,
         processed=completed,
         succeeded=completed,
@@ -276,7 +282,11 @@ class _CollectStage(Stage):
         if direct_launch:
             navigation_result = await _run_registered_search_navigation(
                 device_id,
-                strategy=str(st.get("source_link_strategy") or "none"),
+                strategy=str(
+                    st.get("search_navigation_strategy")
+                    or st.get("source_link_strategy")
+                    or "none"
+                ),
                 app_name=app_name,
                 app_instance=str(st.get("app_instance") or "primary"),
                 keyword=keyword,
@@ -427,18 +437,27 @@ class _CollectStage(Stage):
         fields = st["extract_fields"]
         if fields:
             target = st.get("target") or {}
+            subject_name = str(
+                target.get("canonical_name")
+                or st.get("collection_subject")
+                or keyword
+            )
             policy = CandidatePolicyRegistry.resolve(
-                str(st.get("source_link_strategy") or "none")
+                str(
+                    st.get("candidate_policy")
+                    or st.get("source_link_strategy")
+                    or "default"
+                )
             )
             return await triage_screenshot(
                 image_base64,
                 fields=fields,
                 app_name=st["app_name"],
                 keyword=keyword,
-                target_name=str(target.get("canonical_name") or ""),
+                target_name=subject_name,
                 target_aliases=list(target.get("aliases") or []),
                 policy_instructions=policy.analysis_instructions(
-                    target_name=str(target.get("canonical_name") or keyword),
+                    target_name=subject_name,
                     aliases=list(target.get("aliases") or []),
                 ),
                 project_id=st["project_id"],
@@ -486,6 +505,7 @@ class _CollectStage(Stage):
                 "preview_fields": candidate.get("fields"),
             },
         )
+        restored_to_results = False
         try:
             await asyncio.to_thread(_do_tap, device_id, tap_x, tap_y)
             await asyncio.sleep(1.5)
@@ -497,7 +517,9 @@ class _CollectStage(Stage):
             shot_urls: list[str] = []
             source_url: str | None = None
             source_link_strategy = str(st.get("source_link_strategy") or "none")
-            candidate_policy = CandidatePolicyRegistry.resolve(source_link_strategy)
+            candidate_policy = CandidatePolicyRegistry.resolve(
+                str(st.get("candidate_policy") or source_link_strategy or "default")
+            )
 
             async def _persist_pending_handoff(reason: str = "") -> None:
                 """Keep the extracted URL retryable without scrolling the phone."""
@@ -526,7 +548,11 @@ class _CollectStage(Stage):
                     },
                 )
             if candidate_policy.requires_detail_verification:
-                target_name = str((collect_target or {}).get("canonical_name") or "")
+                target_name = str(
+                    (collect_target or {}).get("canonical_name")
+                    or st.get("collection_subject")
+                    or keyword
+                )
                 target_aliases = list((collect_target or {}).get("aliases") or [])
                 verification_attempts: list[dict[str, Any]] = []
 
@@ -588,6 +614,80 @@ class _CollectStage(Stage):
                 )
                 if not detail_decision.accepted:
                     return False
+
+            detail_capture = DetailCaptureRegistry.resolve(
+                str(st.get("detail_capture_strategy") or "default")
+            )
+            if detail_capture is not None:
+                capture_result = await detail_capture.capture(
+                    DetailCaptureContext(
+                        device_id=device_id,
+                        app_name=st["app_name"],
+                        keyword=keyword,
+                        place_name=str(
+                            st.get("collection_subject")
+                            or (collect_target or {}).get("canonical_name")
+                            or keyword
+                        ),
+                        collection_goal=str(st.get("collection_goal") or ""),
+                        navigation_hint=str(st.get("media_navigation_hint") or ""),
+                        candidate_fields=dict(candidate.get("fields") or {}),
+                        project_id=str(st.get("project_id") or ""),
+                        task_id=run_task_id,
+                        owner=str(st.get("owner") or ""),
+                        stop_event=stop,
+                        max_items=max(1, int(st.get("media_max_items") or 1)),
+                        swipe_interval=float(st.get("swipe_interval") or 1.0),
+                    )
+                )
+                restored_to_results = capture_result.restored_to_results
+                obs_log(
+                    capture_result.reason or "详情证据采集完成",
+                    project_id=st["project_id"] or "",
+                    task_id=run_task_id,
+                    source=_OBS_SOURCE,
+                    level="notice" if capture_result.accepted else "info",
+                    event="collect_detail_capture",
+                    data={
+                        "keyword": keyword,
+                        "strategy": detail_capture.name,
+                        "accepted": capture_result.accepted,
+                        "frames": len(capture_result.frames),
+                        "restored_to_results": restored_to_results,
+                    },
+                )
+                if not capture_result.accepted:
+                    return False
+                await ctx.emit(
+                    "persist",
+                    {
+                        "fields": {
+                            **capture_result.fields,
+                            "platform": str(st.get("platform") or ""),
+                        },
+                        "score": candidate.get("score"),
+                        "subject_match": candidate.get("subject_match"),
+                        "score_reason": candidate.get("score_reason") or "",
+                        "source_type": str(
+                            st.get("record_source_type") or "social_place_media"
+                        ),
+                        "target_id": str((collect_target or {}).get("target_id") or ""),
+                        "target_name": str(
+                            (collect_target or {}).get("canonical_name")
+                            or st.get("collection_subject")
+                            or ""
+                        ),
+                        "keyword": keyword,
+                        "screenshot_id": "",
+                        "screenshot_url": "",
+                        "screenshot_ids": [],
+                        "screenshot_urls": [],
+                        "candidate_fields": candidate.get("fields") or {},
+                        "media_frames": capture_result.frames,
+                        "detail": True,
+                    },
+                )
+                return True
 
             b64, sid, url = await self._capture_save(
                 ctx, keyword, note=f"detail kw={keyword} score={candidate.get('score')}"
@@ -857,11 +957,12 @@ class _CollectStage(Stage):
                 data={"keyword": keyword, "error": str(exc)},
             )
         finally:
-            try:
-                await asyncio.to_thread(_do_back, device_id)
-                await asyncio.sleep(0.8)
-            except Exception:  # noqa: BLE001
-                pass
+            if not restored_to_results:
+                try:
+                    await asyncio.to_thread(_do_back, device_id)
+                    await asyncio.sleep(0.8)
+                except Exception:  # noqa: BLE001
+                    pass
         return False
 
     async def handle(self, item: Item, ctx) -> None:
@@ -892,7 +993,11 @@ class _CollectStage(Stage):
         task_def_id = st["task_def_id"]
         dedup_key_fields = st["dedup_key_fields"]
         candidate_policy = CandidatePolicyRegistry.resolve(
-            str(st.get("source_link_strategy") or "none")
+            str(
+                st.get("candidate_policy")
+                or st.get("source_link_strategy")
+                or "default"
+            )
         )
 
         navigated = await self._navigate_to_search_results(
@@ -985,7 +1090,9 @@ class _CollectStage(Stage):
                             min_score=min_score_to_detail,
                             min_subject_match=min_subject_match,
                             target_name=str(
-                                (collect_target or {}).get("canonical_name") or ""
+                                (collect_target or {}).get("canonical_name")
+                                or st.get("collection_subject")
+                                or keyword
                             ),
                             aliases=list((collect_target or {}).get("aliases") or []),
                         )
@@ -1122,11 +1229,14 @@ class _CollectStage(Stage):
                     await update_source_progress(
                         st["db"],
                         task_id=parent_task_id,
-                        source="wechat",
+                        source=str(st.get("progress_source") or "wechat"),
                         total=int(st.get("keyword_total") or 0),
                         processed=int(st.get("keywords_completed") or 0),
                         status="running",
-                        message=f"公众号正在处理关键词 {keyword or '-'}，第 {i + 1} 屏",
+                        message=(
+                            f"{str(st.get('progress_label') or '公众号')}正在处理关键词 "
+                            f"{keyword or '-'}，第 {i + 1} 屏"
+                        ),
                         extra={
                             "current_keyword": keyword,
                             "screen": i + 1,
@@ -1173,12 +1283,15 @@ class _CollectStage(Stage):
             await update_source_progress(
                 st["db"],
                 task_id=parent_task_id,
-                source="wechat",
+                source=str(st.get("progress_source") or "wechat"),
                 total=total_keywords,
                 processed=completed,
                 succeeded=completed,
                 status="completed" if completed >= total_keywords else "running",
-                message=f"公众号关键词已完成 {completed}/{total_keywords}",
+                message=(
+                    f"{str(st.get('progress_label') or '公众号')}关键词已完成 "
+                    f"{completed}/{total_keywords}"
+                ),
                 extra={
                     "current_keyword": keyword,
                     "details_attempted": int(st.get("details_attempted") or 0),
@@ -1211,9 +1324,15 @@ class _PersistStage(Stage):
         subject_match = payload.get("subject_match")
         source_url = payload.get("source_url")
 
-        # 分级规则: 有联系方式才能给高分, 没有的一定压到低分带
-        contacts = _resolve_payload_contacts(payload, source_url)
-        score = grade_with_contacts(raw_score, bool(contacts))
+        extract_contact_findings = bool(st.get("extract_contact_findings", True))
+        contacts = (
+            _resolve_payload_contacts(payload, source_url)
+            if extract_contact_findings
+            else []
+        )
+        score = ScorePolicyRegistry.resolve(
+            str(st.get("score_policy") or "contact_weighted")
+        ).score(raw_score, has_contacts=bool(contacts))
 
         min_persist = int(st.get("min_score_to_persist", 0) or 0)
         if min_persist > 0 and (score or 0) < min_persist:
@@ -1240,12 +1359,29 @@ class _PersistStage(Stage):
                         "target_id": payload.get("target_id") or "",
                         "target_name": payload.get("target_name") or "",
                         "browser_screenshot_urls": payload.get("browser_screenshot_urls") or [],
+                        "media_count": len(payload.get("media_frames") or []),
+                        "media": [
+                            dict(frame.get("analysis") or {})
+                            for frame in (payload.get("media_frames") or [])
+                        ],
                     }
                 )
             return
 
-        shot_ids = payload.get("screenshot_ids") or [payload["screenshot_id"]]
-        shot_urls = payload.get("screenshot_urls") or [payload["screenshot_url"]]
+        shot_ids = [
+            str(value)
+            for value in (
+                payload.get("screenshot_ids") or [payload.get("screenshot_id")]
+            )
+            if value
+        ]
+        shot_urls = [
+            str(value)
+            for value in (
+                payload.get("screenshot_urls") or [payload.get("screenshot_url")]
+            )
+            if value
+        ]
         result = await collect_dao.upsert_record(
             st["db"],
             task_def_id=st["task_def_id"],
@@ -1285,6 +1421,54 @@ class _PersistStage(Stage):
         elif result["is_changed"]:
             counters["changed"] += 1
 
+        media_frames = list(payload.get("media_frames") or [])
+        if media_frames:
+            from api.services.social_collection.media import (
+                archive_social_media_frames,
+            )
+
+            archive_result = await archive_social_media_frames(
+                st["db"],
+                frames=media_frames,
+                job_id=str(st.get("social_collection_job_id") or ""),
+                project_id=str(st.get("project_id") or ""),
+                target_id=str(payload.get("target_id") or ""),
+                platform=str(st.get("platform") or ""),
+                place_name=str(
+                    st.get("collection_subject")
+                    or payload.get("target_name")
+                    or payload.get("keyword")
+                    or ""
+                ),
+                keyword=str(payload.get("keyword") or ""),
+                device_id=str(st.get("device_id") or ""),
+                run_task_id=str(st.get("run_task_id") or ""),
+                task_def_id=str(st.get("task_def_id") or ""),
+                record_id=str(result.get("record_id") or ""),
+                candidate_fields=dict(payload.get("candidate_fields") or {}),
+            )
+            archived_media = archive_result.items
+            evidence_ids = [
+                str(media.get("evidence_id") or "")
+                for media in archived_media
+                if media.get("evidence_id")
+            ]
+            storage_object_ids = [
+                str(media.get("storage_object_id") or "")
+                for media in archived_media
+                if media.get("storage_object_id")
+            ]
+            await collect_dao.attach_media_evidence(
+                st["db"],
+                record_id=str(result.get("record_id") or ""),
+                evidence_ids=evidence_ids,
+                storage_object_ids=storage_object_ids,
+            )
+            counters["media"] = counters.get("media", 0) + len(archived_media)
+            counters["media_failed"] = (
+                counters.get("media_failed", 0) + archive_result.failed_count
+            )
+
         try:
             notification_score = max(int(raw_score or 0), int(score or 0))
         except (TypeError, ValueError):
@@ -1307,10 +1491,12 @@ class _PersistStage(Stage):
                 "source_url": source_url,
                 "record_id": result["record_id"],
                 "keyword": payload["keyword"],
-                "screenshot_url": payload["screenshot_url"],
+                "screenshot_url": payload.get("screenshot_url") or "",
                 "target_id": payload.get("target_id") or "",
                 "target_name": payload.get("target_name") or "",
-                "source_type": payload.get("source_type") or "mobile",
+                "source_type": payload.get("source_type")
+                or st.get("record_source_type")
+                or "mobile",
                 "source_document_id": payload.get("source_document_id") or "",
                 "source_document_version_id": payload.get("source_document_version_id") or "",
             }
@@ -1425,6 +1611,8 @@ async def run_collect_task(
         "changed": 0,
         "contacts": 0,
         "documents": 0,
+        "media": 0,
+        "media_failed": 0,
         "high_score_records": 0,
         "high_score_documents": 0,
         "max_score": 0,
@@ -1448,7 +1636,7 @@ async def run_collect_task(
                     "target_type": str(task_def.get("target_type") or "company"),
                     "canonical_name": target_name,
                 }
-        else:
+        elif bool(task_def.get("resolve_target_context", True)):
             from api.services.targets import resolve_collection_target
 
             target = await resolve_collection_target(
@@ -1532,6 +1720,23 @@ async def run_collect_task(
         "notify_on": task_def.get("notify_on", "new"),
         "deep_collect": bool(task_def.get("deep_collect", False)),
         "source_link_strategy": str(task_def.get("source_link_strategy") or "none"),
+        "search_navigation_strategy": str(
+            task_def.get("search_navigation_strategy") or ""
+        ),
+        "candidate_policy": str(task_def.get("candidate_policy") or ""),
+        "detail_capture_strategy": str(
+            task_def.get("detail_capture_strategy") or "default"
+        ),
+        "score_policy": str(task_def.get("score_policy") or "contact_weighted"),
+        "extract_contact_findings": bool(
+            task_def.get("extract_contact_findings", True)
+        ),
+        "resolve_target_context": bool(
+            task_def.get("resolve_target_context", True)
+        ),
+        "require_persist_success": bool(
+            task_def.get("require_persist_success", False)
+        ),
         "direct_launch_app": bool(task_def.get("direct_launch_app", False)),
         "direct_app_ready": False,
         "app_instance": str(task_def.get("app_instance") or "primary"),
@@ -1554,6 +1759,17 @@ async def run_collect_task(
         "min_subject_match": int(task_def.get("min_subject_match", 70) or 0),
         "min_score_to_persist": int(task_def.get("min_score_to_persist", 0) or 0),
         "no_new_stop_threshold": int(task_def.get("no_new_stop_threshold", 2) or 2),
+        "collection_subject": str(task_def.get("collection_subject") or ""),
+        "collection_goal": str(task_def.get("collection_goal") or ""),
+        "platform": str(task_def.get("platform") or ""),
+        "media_max_items": int(task_def.get("media_max_items") or 0),
+        "media_navigation_hint": str(task_def.get("media_navigation_hint") or ""),
+        "record_source_type": str(task_def.get("record_source_type") or "mobile"),
+        "progress_source": str(task_def.get("progress_source") or "wechat"),
+        "progress_label": str(task_def.get("progress_label") or "公众号"),
+        "social_collection_job_id": str(
+            task_def.get("social_collection_job_id") or ""
+        ),
         "run_task_id": run_task_id,
         "owner": owner,
         "stop_event": stop_event,
@@ -1633,17 +1849,23 @@ async def run_collect_task(
                 await update_source_progress(
                     db,
                     task_id=parent_task_id,
-                    source="wechat",
+                    source=str(state.get("progress_source") or "wechat"),
                     total=len(keywords),
                     processed=int(state.get("keywords_completed") or 0),
                     status="partial",
-                    message=f"公众号达到 {runtime_limit} 秒时限，已保留部分结果",
+                    message=(
+                        f"{str(state.get('progress_label') or '公众号')}达到 "
+                        f"{runtime_limit} 秒时限，已保留部分结果"
+                    ),
                 )
         collect_metrics = metrics.get("collect")
         collect_failed = int(getattr(collect_metrics, "failed", 0) or 0)
         collect_received = int(getattr(collect_metrics, "received", 0) or 0)
         collect_succeeded = int(getattr(collect_metrics, "succeeded", 0) or 0)
+        persist_metrics = metrics.get("persist")
+        persist_failed = int(getattr(persist_metrics, "failed", 0) or 0)
         counters["failed"] = collect_failed
+        counters["persist_failed"] = persist_failed
         all_failed = bool(collect_received and collect_succeeded == 0)
         await _update_parent_terminal_progress(
             db,
@@ -1655,6 +1877,10 @@ async def run_collect_task(
         if all_failed:
             raise RuntimeError(
                 f"手机采集全部失败: {collect_failed}/{collect_received} 个关键词进入失败队列"
+            )
+        if state.get("require_persist_success") and persist_failed:
+            raise RuntimeError(
+                f"手机采集持久化失败: {persist_failed} 条结果未能完整归档"
             )
     finally:
         _running.pop(run_task_id, None)

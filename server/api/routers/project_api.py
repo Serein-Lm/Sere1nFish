@@ -330,6 +330,16 @@ async def _dispatch_target_research(task_id: str, project_id: str, params: dict)
         requested_by=str(params.get("_requested_by") or ""),
     )
 
+
+async def _dispatch_social_media_collect(
+    task_id: str,
+    project_id: str,
+    params: dict,
+):
+    from api.services.social_collection import execute_social_collection_job
+
+    return await execute_social_collection_job(task_id, project_id, params)
+
 TASK_DISPATCHERS: dict[str, Any] = {
     "url_scan": _dispatch_url_scan,
     "xhs_search": _dispatch_xhs_search,
@@ -340,6 +350,7 @@ TASK_DISPATCHERS: dict[str, Any] = {
     "scholar_contact": _dispatch_scholar_contact,
     "mobile_collect": _dispatch_mobile_collect,
     "target_research": _dispatch_target_research,
+    "social_media_collect": _dispatch_social_media_collect,
 }
 register_task_dispatchers(TASK_DISPATCHERS)
 

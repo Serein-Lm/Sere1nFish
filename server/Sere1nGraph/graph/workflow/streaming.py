@@ -31,6 +31,8 @@ AGENT_DISPLAY_NAMES = {
     "content": "✍️ 话术与产物",
     "payload": "📦 载荷研究与交付",
     "osint": "公开信息研究",
+    "strategy": "方案编排",
+    "collection": "社交信息采集",
 }
 
 TOOL_DISPLAY_NAMES = {
@@ -50,6 +52,9 @@ TOOL_DISPLAY_NAMES = {
     "get_project_data_catalog": "检查项目数据源",
     "read_project_dataset": "读取项目数据",
     "list_my_artifacts": "查询历史产物",
+    "create_social_place_collection": "创建地点图片采集",
+    "get_social_collection_job": "查询采集进度",
+    "list_social_collection_media": "读取采集图片",
 }
 
 

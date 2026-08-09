@@ -50,14 +50,24 @@ _SCORE_KEYS = {
     "target_evidence",
 }
 _DETAIL_VERIFICATION_PROMPT_SLUG = "mobile_collect/detail_verification"
+_SOCIAL_MEDIA_FRAME_PROMPT_SLUG = "mobile_collect/social_media_frame"
 
 
 class DetailEntryVerification(BaseModel):
     """Visual contract used to prove that a list tap opened the intended item."""
 
-    page_kind: Literal["article", "list", "video", "account", "loading", "other"] = (
-        "other"
-    )
+    page_kind: Literal[
+        "article",
+        "list",
+        "video",
+        "account",
+        "place",
+        "review",
+        "gallery",
+        "image",
+        "loading",
+        "other",
+    ] = "other"
     visible_title: str = ""
     visible_account: str = ""
     candidate_match: int = Field(
@@ -72,6 +82,25 @@ class DetailEntryVerification(BaseModel):
         le=100,
         description="当前详情以目标主体为核心的对应分，必须使用 0-100 整数",
     )
+    evidence: str = ""
+    reason: str = ""
+
+
+class SocialMediaFrameAnalysis(BaseModel):
+    """Visual contract for one image opened from a public review/comment."""
+
+    is_media_viewer: bool = False
+    useful: bool = False
+    subject_match: int = Field(default=0, ge=0, le=100)
+    candidate_match: int = Field(default=0, ge=0, le=100)
+    image_left: int = Field(default=0, ge=0, le=1000)
+    image_top: int = Field(default=0, ge=0, le=1000)
+    image_right: int = Field(default=0, ge=0, le=1000)
+    image_bottom: int = Field(default=0, ge=0, le=1000)
+    photo_description: str = ""
+    visible_context: str = ""
+    author: str = ""
+    publish_time: str = ""
     evidence: str = ""
     reason: str = ""
 
@@ -117,7 +146,18 @@ def _build_item_model(
         ),
     )
     item_field_defs["content_kind"] = (
-        Literal["article", "account", "video", "live", "mini_program", "ad", "other"],
+        Literal[
+            "article",
+            "account",
+            "video",
+            "live",
+            "mini_program",
+            "place",
+            "review",
+            "image",
+            "ad",
+            "other",
+        ],
         Field(default="other", description="列表条目的真实内容类型"),
     )
     item_field_defs["is_article_result"] = (
@@ -346,6 +386,71 @@ async def verify_detail_entry(
     data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
     data["candidate_match"] = _clamp_score(data.get("candidate_match"))
     data["target_match"] = _clamp_score(data.get("target_match"))
+    return data
+
+
+async def analyze_social_media_frame(
+    image_base64: str,
+    *,
+    app_name: str,
+    place_name: str,
+    keyword: str,
+    candidate_fields: dict[str, Any],
+    collection_goal: str,
+    project_id: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate and locate one public user image without inferring hidden data."""
+    app_config = await get_runtime_app_config()
+    llm = _get_vision_llm(app_config)
+    structured = llm.with_structured_output(SocialMediaFrameAnalysis)
+    system = load_prompt(_SOCIAL_MEDIA_FRAME_PROMPT_SLUG)
+    replacements = {
+        "{{app_name}}": app_name or "未知应用",
+        "{{place_name}}": place_name or keyword or "未知地点",
+        "{{keyword}}": keyword or "无",
+        "{{candidate_fields}}": json.dumps(
+            candidate_fields or {}, ensure_ascii=False, default=str
+        ),
+        "{{collection_goal}}": collection_goal or "收集地点公开图片",
+    }
+    for placeholder, value in replacements.items():
+        system = system.replace(placeholder, value)
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": "审核当前公开图片并按 schema 输出。"},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+            },
+        ]
+    )
+    with observation_context(
+        project_id=project_id,
+        task_id=task_id,
+        phase="mobile_collect_social_media",
+        agent="collect",
+    ):
+        result = await structured.ainvoke([SystemMessage(content=system), message])
+    data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+    bounds = [
+        int(data.pop("image_left", 0) or 0),
+        int(data.pop("image_top", 0) or 0),
+        int(data.pop("image_right", 0) or 0),
+        int(data.pop("image_bottom", 0) or 0),
+    ]
+    left, top, right, bottom = bounds
+    valid_bounds = 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
+    data["image_bounds"] = bounds if valid_bounds else []
+    data["subject_match"] = _clamp_score(data.get("subject_match"))
+    data["candidate_match"] = _clamp_score(data.get("candidate_match"))
+    data["accepted"] = bool(
+        data.get("is_media_viewer")
+        and data.get("useful")
+        and valid_bounds
+        and data["subject_match"] >= 70
+        and data["candidate_match"] >= 60
+    )
     return data
 
 

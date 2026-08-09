@@ -270,6 +270,120 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class SocialPlaceMediaCandidatePolicy(DefaultCandidatePolicy):
+    """Fail-closed selection for public place/review media collection."""
+
+    name: str = "social_place_media"
+    persist_list_candidates: bool = False
+    allow_mobile_detail_fallback: bool = True
+    max_details_per_screen: int = 2
+    requires_detail_verification: bool = True
+    retry_detail_verification_at_top: bool = False
+
+    def analysis_instructions(self, *, target_name: str, aliases: list[str]) -> str:
+        del aliases
+        return (
+            "当前任务只收集地点相关的公开图片证据。候选必须在标题、地点标签、地址或"
+            f"画面说明中直接对应地点“{target_name}”。平台推荐的相似地点、附近商户、广告、"
+            "直播、账号主页和仅有模糊行业关联的内容不得点击。content_kind 应按真实类型填写为"
+            "place、review、image、video、article、ad 或 other；target_evidence 必须抄录画面中"
+            "可见的地点对应依据。只返回完整可见且有可靠点击区域的结果。"
+        )
+
+    def navigation_instructions(self) -> str:
+        return (
+            "搜索完成后停留在公开地点、评价、图文或视频结果列表；不得点赞、评论、收藏、"
+            "关注、私信、下单或发布任何内容"
+        )
+
+    def detail_verification_instructions(self) -> str:
+        return (
+            "点击后必须仍是候选地点对应的地点详情、评价、图片或公开视频详情。广告落地页、"
+            "其他地点、账号主页、搜索列表和加载空白不通过。依据可见地点名、地址、定位、"
+            "标题或画面文字判断，不要仅因推荐关系判定一致。"
+        )
+
+    def review_detail(
+        self,
+        candidate: dict,
+        *,
+        min_score: int,
+        min_subject_match: int,
+        target_name: str = "",
+        aliases: list[str] | None = None,
+    ) -> CandidateDecision:
+        base = DefaultCandidatePolicy.review_detail(
+            self,
+            candidate,
+            min_score=min_score,
+            min_subject_match=min_subject_match,
+            target_name=target_name,
+            aliases=aliases,
+        )
+        failures = [] if base.accepted else [base.reason]
+        if str(candidate.get("content_kind") or "") not in {
+            "place",
+            "review",
+            "image",
+            "video",
+            "article",
+        }:
+            failures.append("不是可采集的地点内容")
+        if not str(candidate.get("target_evidence") or "").strip():
+            failures.append("缺少可见地点证据")
+        fields = candidate.get("fields") or {}
+        if target_name and not _has_location_identity(fields, target_name):
+            failures.append("候选字段未直接对应目标地点")
+        bounds = candidate_tap_bounds(candidate)
+        if bounds is None:
+            failures.append("缺少完整可点击区域")
+        else:
+            _left, top, _right, bottom = bounds
+            if top < 100 or bottom > 880:
+                failures.append("条目位于屏幕边缘或未完整显示")
+        return CandidateDecision(
+            accepted=not failures,
+            reason="；".join(failures) if failures else "地点和媒体候选审核通过",
+        )
+
+    def review_opened_detail(
+        self,
+        verification: dict,
+        *,
+        candidate: dict,
+        target_name: str,
+        aliases: list[str],
+        min_subject_match: int,
+    ) -> CandidateDecision:
+        del aliases
+        failures: list[str] = []
+        if verification.get("page_kind") not in {
+            "place",
+            "review",
+            "gallery",
+            "image",
+            "video",
+            "article",
+        }:
+            failures.append("点击后不是地点或公开媒体详情")
+        if int(verification.get("candidate_match") or 0) < 65:
+            failures.append("详情与点击前候选不一致")
+        if int(verification.get("target_match") or 0) < max(70, min_subject_match):
+            failures.append("详情与目标地点对应度不足")
+        visible_identity = {
+            "content_title": verification.get("visible_title"),
+            "place_name": verification.get("visible_account"),
+            "target_evidence": verification.get("evidence"),
+        }
+        if target_name and not _has_location_identity(visible_identity, target_name):
+            failures.append("详情缺少目标地点的可见身份依据")
+        return CandidateDecision(
+            accepted=not failures,
+            reason="；".join(failures) if failures else "详情与目标地点一致",
+        )
+
+
 def _normalized_identity_text(value: object) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold())
 
@@ -307,11 +421,37 @@ def _has_direct_target_identity(
     )
 
 
+def _has_location_identity(fields: dict, target_name: str) -> bool:
+    target = _normalized_identity_text(target_name)
+    if not target:
+        return True
+    values = " ".join(
+        str(fields.get(key) or "")
+        for key in (
+            "place_name",
+            "content_title",
+            "title",
+            "location",
+            "target_evidence",
+        )
+    )
+    normalized = _normalized_identity_text(values)
+    return target in normalized or (len(normalized) >= 4 and normalized in target)
+
+
 class CandidatePolicyRegistry:
     _policies: dict[str, CandidatePolicy] = {
         "default": DefaultCandidatePolicy(),
         "wechat_copy_link": WechatArticleCandidatePolicy(),
+        "social_place_media": SocialPlaceMediaCandidatePolicy(),
     }
+
+    @classmethod
+    def register(cls, strategy: str, policy: CandidatePolicy) -> None:
+        normalized = str(strategy or "").strip()
+        if not normalized:
+            raise ValueError("候选审核策略名不能为空")
+        cls._policies[normalized] = policy
 
     @classmethod
     def resolve(cls, strategy: str) -> CandidatePolicy:
