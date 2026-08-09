@@ -43,7 +43,7 @@ _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
 _CONTEXT_ANALYSIS_SCHEMA_VERSION = 7
 _MEDIA_POLICY_VERSION = 3
-_CONTACT_POLICY_VERSION = 2
+_CONTACT_POLICY_VERSION = 3
 _SOURCE_FIELD_KEYS = {
     "title",
     "account",
