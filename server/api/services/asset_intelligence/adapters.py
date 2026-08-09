@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from crawler_tools import fofa_tools, hunter_tools
+from core.async_limiter import ResizableLimiter
 
 from .contracts import AssetCandidate, AssetIdentity, ProviderSearchResult
 
@@ -62,6 +63,21 @@ class _AsyncRequestGate:
 
 
 _FOFA_REQUEST_GATE = _AsyncRequestGate()
+_BROWSER_PROBE_LIMITER: ResizableLimiter | None = None
+_BROWSER_PROBE_LIMITER_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _get_browser_probe_limiter(concurrency: int) -> ResizableLimiter:
+    """Share one Chrome fallback budget across all concurrent company scans."""
+    global _BROWSER_PROBE_LIMITER, _BROWSER_PROBE_LIMITER_LOOP
+    loop = asyncio.get_running_loop()
+    safe_concurrency = max(1, min(int(concurrency), 32))
+    if _BROWSER_PROBE_LIMITER is None or _BROWSER_PROBE_LIMITER_LOOP is not loop:
+        _BROWSER_PROBE_LIMITER = ResizableLimiter(safe_concurrency)
+        _BROWSER_PROBE_LIMITER_LOOP = loop
+    elif _BROWSER_PROBE_LIMITER.limit != safe_concurrency:
+        _BROWSER_PROBE_LIMITER.resize(safe_concurrency)
+    return _BROWSER_PROBE_LIMITER
 
 
 async def _run_paced_queries(
@@ -408,12 +424,13 @@ class BrowserAssetProbe:
             return {}
         provider = self._provider or get_browser_provider()
         probe_func = self._probe_func or probe_cdp_page_access
-        semaphore = asyncio.Semaphore(max(1, min(int(concurrency), 32)))
+        limiter = _get_browser_probe_limiter(concurrency)
 
         async def _probe_one(url: str) -> tuple[str, dict[str, Any]]:
             digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
             task_id = f"asset_probe_{digest}"
-            async with semaphore:
+            await limiter.acquire()
+            try:
                 cdp_url = ""
                 try:
                     cdp_url = await provider.get_cdp_endpoint(
@@ -440,6 +457,8 @@ class BrowserAssetProbe:
                             await provider.release_cdp_endpoint(task_id=task_id)
                         except Exception:
                             pass
+            finally:
+                limiter.release()
 
         rows = await asyncio.gather(*(_probe_one(url) for url in selected))
         return {url: result for url, result in rows}

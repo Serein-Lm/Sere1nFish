@@ -307,6 +307,46 @@ async def test_browser_probe_releases_managed_container() -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_probe_shares_concurrency_across_company_scans() -> None:
+    class _Provider:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.released: list[str] = []
+
+        async def get_cdp_endpoint(self, *, task_id: str, purpose: str) -> str:
+            assert purpose == "url_scan"
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            return f"ws://chrome/{task_id}"
+
+        async def release_cdp_endpoint(self, *, task_id: str) -> None:
+            self.active -= 1
+            self.released.append(task_id)
+
+    async def probe_page(_cdp_url: str, url: str, **_kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(0.01)
+        return {"url": url, "is_alive": True}
+
+    provider = _Provider()
+    first = BrowserAssetProbe(provider=provider, probe_func=probe_page)
+    second = BrowserAssetProbe(provider=provider, probe_func=probe_page)
+    first_urls = [f"https://first-{index}.example" for index in range(3)]
+    second_urls = [f"https://second-{index}.example" for index in range(3)]
+
+    first_result, second_result = await asyncio.gather(
+        first.probe(first_urls, concurrency=2, timeout=20),
+        second.probe(second_urls, concurrency=2, timeout=20),
+    )
+
+    assert len(first_result) == 3
+    assert len(second_result) == 3
+    assert provider.max_active == 2
+    assert provider.active == 0
+    assert len(provider.released) == 6
+
+
+@pytest.mark.asyncio
 async def test_missing_provider_keys_are_reported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
