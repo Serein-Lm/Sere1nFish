@@ -36,6 +36,7 @@ async def test_all_mode_explicitly_selects_every_target() -> None:
             WechatTargetCandidate(
                 target_id="target-1",
                 target_name="年轻互联网公司",
+                context={"industry": "internet"},
             )
         ],
         project_id="project-1",
@@ -44,8 +45,36 @@ async def test_all_mode_explicitly_selects_every_target() -> None:
 
     assert result.selected_count == 1
     assert result.decisions[0].should_collect_wechat is True
-    assert result.decisions[0].collection_priority == "normal"
+    assert result.decisions[0].collection_priority == "low"
+    assert result.decisions[0].target_category == "internet_consumer_brand"
     assert result.decisions[0].source == "all"
+
+
+@pytest.mark.asyncio
+async def test_all_mode_prioritizes_public_institutions() -> None:
+    result = await WechatTargetSelectionService(
+        object(),
+        mode="all",
+    ).select(
+        [
+            WechatTargetCandidate(
+                target_id="target-ministry",
+                target_name="教育部教育管理信息中心",
+            ),
+            WechatTargetCandidate(
+                target_id="target-unknown",
+                target_name="普通目标",
+            ),
+        ],
+        project_id="project-1",
+        task_id="task-1",
+    )
+
+    assert [item.should_collect_wechat for item in result.decisions] == [True, True]
+    assert [item.collection_priority for item in result.decisions] == [
+        "high",
+        "normal",
+    ]
 
 
 @pytest.mark.asyncio

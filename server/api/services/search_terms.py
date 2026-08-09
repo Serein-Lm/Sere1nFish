@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -19,7 +20,11 @@ CHANNEL_SKILLS = {
 
 CHANNEL_TERM_POLICIES = {
     "xhs": {"generated_weight": 3},
-    "weixin": {"generated_weight": 5},
+    "weixin": {
+        "generated_weight": 10,
+        "max_names": 3,
+        "alias_template_count": 2,
+    },
 }
 
 FALLBACK_TEMPLATES = {
@@ -32,18 +37,49 @@ FALLBACK_TEMPLATES = {
     "weixin": [
         "{company}",
         "{company} 公众号",
-        "{company} 官方",
+        "{company} 联系方式",
+        "{company} 手机号码",
+        "{company} 座机",
+        "{company} 邮箱",
+        "{company} 联系人",
+        "{company} 办公室 电话",
+        "{company} 招标 联系人",
+        "{company} 采购 联系方式",
+        "{company} 招聘 邮箱",
+        "{company} 投稿 邮箱",
         "{company} 新闻",
         "{company} 公告",
-        "{company} 招标",
-        "{company} 采购",
-        "{company} 招商",
-        "{company} 合作",
-        "{company} 联系方式",
+        "{company} 合作 联系方式",
     ],
 }
 
 _CODE_TEMPLATE_RE = re.compile(r"`([^`]*\{company\}[^`]*)`")
+_QUERY_MARKERS = (
+    "公众号",
+    "官方",
+    "新闻",
+    "公告",
+    "招标",
+    "中标",
+    "采购",
+    "招商",
+    "合作",
+    "联系",
+    "电话",
+    "手机",
+    "邮箱",
+    "招聘",
+    "投稿",
+    "任命",
+    "负责人",
+    "通讯录",
+)
+_LEGAL_SUFFIXES = (
+    "股份有限公司",
+    "有限责任公司",
+    "集团有限公司",
+    "有限公司",
+)
 
 
 def _extract_table_templates(body: str) -> list[str]:
@@ -66,6 +102,54 @@ def _dedupe(values: list[str], *, limit: int | None = None) -> list[str]:
         )
     )
     return result[:limit] if limit else result
+
+
+def _name_core(value: str) -> str:
+    core = re.sub(r"\s+", "", value).strip().lower()
+    for suffix in _LEGAL_SUFFIXES:
+        if core.endswith(suffix):
+            return core[: -len(suffix)]
+    return core
+
+
+def _is_plausible_search_alias(canonical_name: str, candidate: str) -> bool:
+    """Conservatively reuse stored names without amplifying legacy query pollution."""
+    canonical = re.sub(r"\s+", " ", canonical_name).strip()
+    alias = re.sub(r"\s+", " ", candidate).strip()
+    if not canonical or not alias:
+        return False
+    if alias == canonical:
+        return True
+    if len(alias) > 48 or any(token in alias for token in ("://", "/", "@")):
+        return False
+    if any(marker in alias for marker in _QUERY_MARKERS):
+        return False
+    if alias.isascii():
+        return bool(
+            2 <= len(alias) <= 32
+            and "." not in alias
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9&._ -]*", alias)
+        )
+
+    canonical_core = _name_core(canonical)
+    alias_core = _name_core(alias)
+    if alias_core in canonical_core or canonical_core in alias_core:
+        return True
+    match = SequenceMatcher(None, canonical_core, alias_core).find_longest_match()
+    ratio = SequenceMatcher(None, canonical_core, alias_core).ratio()
+    return match.size >= 4 and ratio >= 0.65
+
+
+def _target_search_names(doc: dict[str, Any], canonical_name: str) -> list[str]:
+    candidates = [canonical_name, *list(doc.get("search_terms") or [])]
+    return _dedupe(
+        [
+            value
+            for value in candidates
+            if _is_plausible_search_alias(canonical_name, str(value or ""))
+        ],
+        limit=int(CHANNEL_TERM_POLICIES["weixin"]["max_names"]),
+    )
 
 
 def _merge_generated_and_routed(
@@ -144,20 +228,24 @@ def build_channel_terms(
     limit: int = 30,
 ) -> list[str]:
     """合并 Agent 路由结果与 DB 词库模板，并用真实目标别名展开。"""
-    clean_names = _dedupe(names, limit=4)
-    # 按模板轮询别名，避免较小 limit 被第一个法定名独占。
+    policy = CHANNEL_TERM_POLICIES.get(channel, {})
+    clean_names = _dedupe(names, limit=int(policy.get("max_names", 4)))
+    alias_template_count = int(policy.get("alias_template_count", 10_000))
+    # 微信仅在主体发现词中展开别名；联系方式词使用规范名，减少噪声。
     generated = [
         template.replace("{company}", name)
-        for template in get_keyword_templates(channel)
-        for name in clean_names
+        for template_index, template in enumerate(get_keyword_templates(channel))
+        for name in (
+            clean_names
+            if template_index < alias_template_count
+            else clean_names[:1]
+        )
     ]
     return _merge_generated_and_routed(
         _dedupe(generated),
         _dedupe(list(routed_terms or [])),
         limit=max(1, limit),
-        generated_weight=int(
-            CHANNEL_TERM_POLICIES.get(channel, {}).get("generated_weight", 3)
-        ),
+        generated_weight=int(policy.get("generated_weight", 3)),
     )
 
 
@@ -273,7 +361,11 @@ async def resolve_project_target_terms(
             # 合并，确保词库升级立即生效，同时保留原有场景化词。
             channel_terms = build_channel_terms(
                 channel=channel,
-                names=[doc_name],
+                names=(
+                    _target_search_names(doc, doc_name)
+                    if channel == "weixin"
+                    else [doc_name]
+                ),
                 routed_terms=channel_terms,
                 limit=max(keyword_limit, 30),
             )

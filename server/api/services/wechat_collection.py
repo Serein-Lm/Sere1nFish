@@ -42,14 +42,14 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
             "notify_on": "none",
             "include_direct_children": False,
-            "max_resolved_keywords": 6,
+            "max_resolved_keywords": 12,
             "swipe_times": 3,
             "detail_max_items": 2,
-            "detail_max_total_items": 2,
+            "detail_max_total_items": 8,
             "detail_review_max_items": 3,
-            "detail_review_max_total_items": 8,
+            "detail_review_max_total_items": 16,
             "detail_max_swipes": 6,
-            "max_runtime_seconds": 1800,
+            "max_runtime_seconds": 3600,
         }
     )
     return task

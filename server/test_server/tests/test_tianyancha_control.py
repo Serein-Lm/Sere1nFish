@@ -463,6 +463,61 @@ def test_channel_terms_interleave_aliases_before_applying_limit(
     ) == ["法定名 实习", "品牌名 实习", "法定名 招聘", "动态行业词"]
 
 
+def test_wechat_terms_expand_aliases_only_for_discovery_templates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import search_terms
+
+    monkeypatch.setattr(
+        search_terms,
+        "get_keyword_templates",
+        lambda _channel: [
+            "{company}",
+            "{company} 公众号",
+            "{company} 联系方式",
+            "{company} 手机号码",
+        ],
+    )
+
+    assert search_terms.build_channel_terms(
+        channel="weixin",
+        names=["港珠澳大桥管理局", "港珠澳大桥", "HZMB"],
+        routed_terms=["港珠澳大桥管理局 招标"],
+        limit=10,
+    ) == [
+        "港珠澳大桥管理局",
+        "港珠澳大桥",
+        "HZMB",
+        "港珠澳大桥管理局 公众号",
+        "港珠澳大桥 公众号",
+        "HZMB 公众号",
+        "港珠澳大桥管理局 联系方式",
+        "港珠澳大桥管理局 手机号码",
+        "港珠澳大桥管理局 招标",
+    ]
+
+
+def test_wechat_search_names_reject_query_and_unrelated_legacy_aliases() -> None:
+    from api.services.search_terms import _target_search_names
+
+    assert _target_search_names(
+        {
+            "search_terms": [
+                "北京北方车辆集团",
+                "北方车辆集团",
+                "甘肃银光聚银化工有限公司",
+                "北京北方车辆集团 官方",
+                "NORINCO Vehicles",
+            ]
+        },
+        "北京北方车辆集团有限公司",
+    ) == [
+        "北京北方车辆集团有限公司",
+        "北京北方车辆集团",
+        "北方车辆集团",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_provider_uses_outbound_investment_endpoint() -> None:
     from api.services.company_control.adapters import TianyanchaInvestmentProvider

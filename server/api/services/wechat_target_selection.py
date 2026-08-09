@@ -289,21 +289,28 @@ class AllWechatTargetSelectionStrategy:
         task_id: str,
     ) -> WechatTargetSelectionResult:
         del project_id, task_id
-        return _build_result(
-            mode="all",
-            decisions=[
+        decisions: list[WechatTargetDecision] = []
+        for candidate in candidates:
+            policy = _fallback_decision(candidate)
+            decisions.append(
                 WechatTargetDecision(
                     target_id=candidate.target_id,
                     target_name=candidate.target_name,
-                    target_category="all",
+                    target_category=policy.target_category,
                     should_collect_wechat=True,
-                    collection_priority="normal",
-                    reason="用户明确选择公众号全部目标模式",
+                    collection_priority=(
+                        policy.collection_priority
+                        if policy.collection_priority != "skip"
+                        else "normal"
+                    ),
+                    reason="用户选择全部目标；执行优先级按目标类型排序",
                     confidence=1,
                     source="all",
                 )
-                for candidate in candidates
-            ],
+            )
+        return _build_result(
+            mode="all",
+            decisions=decisions,
         )
 
 

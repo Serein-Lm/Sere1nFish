@@ -112,14 +112,19 @@ class KeywordLibrary:
         industry: [
             "{company}",
             "{company} 公众号",
-            "{company} 官方",
+            "{company} 联系方式",
+            "{company} 手机号码",
+            "{company} 座机",
+            "{company} 邮箱",
+            "{company} 联系人",
+            "{company} 办公室 电话",
+            "{company} 招标 联系人",
+            "{company} 采购 联系方式",
+            "{company} 招聘 邮箱",
+            "{company} 投稿 邮箱",
             "{company} 新闻",
             "{company} 公告",
-            "{company} 招标",
-            "{company} 采购",
-            "{company} 招商",
-            "{company} 合作",
-            "{company} 联系方式",
+            "{company} 合作 联系方式",
         ]
         for industry in IndustryType
     }
