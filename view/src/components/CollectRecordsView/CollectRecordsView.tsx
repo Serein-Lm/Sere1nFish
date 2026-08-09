@@ -84,28 +84,49 @@ function renderDetailValue(value: unknown): string {
 
 function CollectRecordDetail({ record }: { record: CollectRecord }) {
   const fields = (record.fields || {}) as Record<string, unknown>
-  const [sourceDetail, setSourceDetail] = useState<SourceDocumentDetail | null>(null)
-  const [sourceLoading, setSourceLoading] = useState(false)
-  const [sourceError, setSourceError] = useState('')
+  const sourceDocumentId = record.source_document_id || ''
+  const sourceProjectId = record.project_id || ''
+  const sourceVersionId = record.source_document_version_id || ''
+  const sourceRequestKey = [sourceProjectId, sourceDocumentId, sourceVersionId].join(':')
+  const [sourceResult, setSourceResult] = useState<{
+    requestKey: string
+    detail: SourceDocumentDetail | null
+    error: string
+  }>({ requestKey: '', detail: null, error: '' })
+  const [artifactError, setArtifactError] = useState<{
+    requestKey: string
+    error: string
+  }>({ requestKey: '', error: '' })
+  const hasCurrentSourceResult = sourceResult.requestKey === sourceRequestKey
+  const sourceDetail = hasCurrentSourceResult ? sourceResult.detail : null
+  const sourceError = (
+    (hasCurrentSourceResult ? sourceResult.error : '')
+    || (artifactError.requestKey === sourceRequestKey ? artifactError.error : '')
+  )
+  const sourceLoading = Boolean(sourceDocumentId) && !hasCurrentSourceResult
 
   useEffect(() => {
+    if (!sourceDocumentId) return undefined
     let alive = true
-    if (!record.source_document_id) {
-      setSourceDetail(null)
-      return () => { alive = false }
-    }
-    setSourceLoading(true)
-    setSourceError('')
     getSourceDocument(
-      record.source_document_id,
-      record.project_id || undefined,
-      record.source_document_version_id || undefined,
+      sourceDocumentId,
+      sourceProjectId || undefined,
+      sourceVersionId || undefined,
     )
-      .then((detail) => { if (alive) setSourceDetail(detail) })
-      .catch((error) => { if (alive) setSourceError((error as Error).message) })
-      .finally(() => { if (alive) setSourceLoading(false) })
+      .then((detail) => {
+        if (alive) setSourceResult({ requestKey: sourceRequestKey, detail, error: '' })
+      })
+      .catch((error) => {
+        if (alive) {
+          setSourceResult({
+            requestKey: sourceRequestKey,
+            detail: null,
+            error: (error as Error).message,
+          })
+        }
+      })
     return () => { alive = false }
-  }, [record.project_id, record.source_document_id, record.source_document_version_id])
+  }, [sourceDocumentId, sourceProjectId, sourceRequestKey, sourceVersionId])
 
   const version = sourceDetail?.version
   const sourceContacts = (version?.contacts || []) as SourceContact[]
@@ -138,8 +159,13 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
 
   const openArtifact = (path?: string) => {
     if (!path) return
-    setSourceError('')
-    openAuthenticatedArtifact(path).catch((error) => setSourceError((error as Error).message))
+    setArtifactError({ requestKey: sourceRequestKey, error: '' })
+    openAuthenticatedArtifact(path).catch((error) => {
+      setArtifactError({
+        requestKey: sourceRequestKey,
+        error: (error as Error).message,
+      })
+    })
   }
 
   return (
