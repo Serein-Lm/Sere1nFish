@@ -112,7 +112,18 @@ def _compact_contextual_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         for key, value in dict(analysis.get("fields") or {}).items()
         if key not in _SOURCE_FIELD_KEYS
     }
-    return {**analysis, "fields": fields}
+    target_contacts = list(analysis.get("target_contacts") or [])
+    return {
+        **analysis,
+        "fields": fields,
+        "target_contacts": target_contacts,
+        "target_contact_values": [
+            str(item.get("value") or "")
+            for item in target_contacts
+            if item.get("value")
+        ],
+        "contact_policy_version": _CONTACT_POLICY_VERSION,
+    }
 
 
 async def _complete_contextual_analysis(

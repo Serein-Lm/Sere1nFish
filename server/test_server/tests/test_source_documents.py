@@ -609,6 +609,32 @@ def test_target_review_gate_requires_accept_decision_and_threshold():
     assert not _passes_target_review({"subject_match": 100}, 70)
 
 
+def test_contextual_link_compaction_keeps_final_contact_context_and_policy():
+    from api.services.source_documents import service
+
+    compact = service._compact_contextual_analysis(
+        {
+            "fields": {
+                "summary": "目标单位招聘",
+                "content": "完整正文不应复制到关联层",
+                "contact": "座机: 010-63072558",
+            },
+            "target_contacts": [
+                {
+                    "channel": "telephone",
+                    "value": "010-63072558",
+                    "context": "受理电话，新华社人事局",
+                }
+            ],
+        }
+    )
+
+    assert compact["fields"] == {"summary": "目标单位招聘"}
+    assert compact["target_contact_values"] == ["010-63072558"]
+    assert compact["target_contacts"][0]["context"] == "受理电话，新华社人事局"
+    assert compact["contact_policy_version"] == service._CONTACT_POLICY_VERSION
+
+
 def test_rejected_relevance_review_stops_before_source_persistence(monkeypatch):
     import asyncio
 
