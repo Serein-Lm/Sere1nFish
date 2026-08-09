@@ -724,6 +724,86 @@ async def _store_structured_json(
     }
 
 
+async def _refresh_cached_source_contacts(
+    db: AsyncIOMotorDatabase,
+    *,
+    capture: CapturedDocument,
+    document_id: str,
+    version_id: str,
+    version: dict[str, Any],
+    contacts: list[dict[str, Any]],
+    image_analysis: list[dict[str, Any]],
+    target_id: str,
+    project_id: str,
+) -> dict[str, Any]:
+    """Refresh derived contacts and structured JSON without replacing evidence."""
+    source_analysis = _source_analysis(
+        capture,
+        contacts=contacts,
+        image_analysis=image_analysis,
+    )
+    artifacts = dict(version.get("artifacts") or {})
+    provenance_artifacts = {
+        key: value
+        for key, value in artifacts.items()
+        if not key.startswith("structured_")
+    }
+    structured = {
+        "schema_version": 2,
+        "contact_policy_version": _CONTACT_POLICY_VERSION,
+        "document_id": document_id,
+        "version_id": version_id,
+        "content_hash": version.get("content_hash") or "",
+        "source_type": version.get("source_type") or capture.source_type,
+        "source": {
+            "identity": dict(version.get("identity") or {}),
+            "content": dict(version.get("content") or {}),
+            "analysis": source_analysis,
+        },
+        "evidence": {
+            "contacts": contacts,
+            "media": {
+                "images": image_analysis,
+                "archived_images": list(version.get("images") or []),
+                "screenshots": list(version.get("screenshots") or []),
+                "image_analysis_error": str(
+                    version.get("image_analysis_error") or ""
+                ),
+            },
+        },
+        "provenance": {
+            "capture_metadata": dict(version.get("capture_metadata") or {}),
+            "artifacts": provenance_artifacts,
+        },
+    }
+    structured_artifact = await _store_structured_json(
+        structured,
+        capture=capture,
+        document_id=document_id,
+        version_id=version_id,
+        target_id=target_id,
+        project_id=project_id,
+    )
+    artifacts.update(structured_artifact)
+    storage_object_ids = list(version.get("storage_object_ids") or [])
+    structured_object_id = str(
+        structured_artifact.get("structured_object_id") or ""
+    )
+    if structured_object_id and structured_object_id not in storage_object_ids:
+        storage_object_ids.append(structured_object_id)
+    return await source_dao.mark_version_ready(
+        db,
+        version_id=version_id,
+        payload={
+            "contacts": contacts,
+            "analysis": source_analysis,
+            "contact_policy_version": _CONTACT_POLICY_VERSION,
+            "artifacts": artifacts,
+            "storage_object_ids": storage_object_ids,
+        },
+    )
+
+
 def _result_from_version(
     document: dict[str, Any],
     version: dict[str, Any],
@@ -830,18 +910,16 @@ async def ingest_source_url(
                     < _CONTACT_POLICY_VERSION
                     or source_contacts != list(existing.get("contacts") or [])
                 ):
-                    existing = await source_dao.mark_version_ready(
+                    existing = await _refresh_cached_source_contacts(
                         db,
+                        capture=capture,
+                        document_id=document_id,
                         version_id=version_id,
-                        payload={
-                            "contacts": source_contacts,
-                            "analysis": _source_analysis(
-                                capture,
-                                contacts=source_contacts,
-                                image_analysis=version_image_analysis,
-                            ),
-                            "contact_policy_version": _CONTACT_POLICY_VERSION,
-                        },
+                        version=existing,
+                        contacts=source_contacts,
+                        image_analysis=version_image_analysis,
+                        target_id=target_id,
+                        project_id=project_id,
                     )
                     await source_dao.upsert_document(
                         db,

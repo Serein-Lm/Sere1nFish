@@ -1133,6 +1133,82 @@ def test_artifact_object_id_is_content_addressed_for_safe_retry():
     assert first != retry
 
 
+def test_cached_contact_refresh_rewrites_only_structured_artifact(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    structured_payloads: list[dict] = []
+    version_payloads: list[dict] = []
+
+    async def store_structured(structured, **_kwargs):
+        structured_payloads.append(structured)
+        return {
+            "structured_object_id": "object-structured-new",
+            "structured_url": "/objects/object-structured-new",
+        }
+
+    async def mark_ready(_db, *, version_id, payload):
+        version_payloads.append(payload)
+        return {"version_id": version_id, **payload}
+
+    monkeypatch.setattr(service, "_store_structured_json", store_structured)
+    monkeypatch.setattr(service.source_dao, "mark_version_ready", mark_ready)
+    result = asyncio.run(
+        service._refresh_cached_source_contacts(
+            object(),
+            capture=_capture(raw_html=b"raw", rendered_html=b"dom"),
+            document_id="document-1",
+            version_id="version-1",
+            version={
+                "content_hash": "content-hash",
+                "source_type": "wechat_article",
+                "identity": {"title": "标题"},
+                "content": {"text": "正文"},
+                "artifacts": {
+                    "raw_html_object_id": "object-raw",
+                    "structured_object_id": "object-structured-old",
+                },
+                "storage_object_ids": [
+                    "object-raw",
+                    "object-structured-old",
+                ],
+                "images": [],
+                "screenshots": [],
+            },
+            contacts=[
+                {
+                    "channel": "email",
+                    "value": "hr@example.com",
+                    "label": "邮箱: hr@example.com",
+                    "context": "招聘邮箱 hr@example.com",
+                }
+            ],
+            image_analysis=[],
+            target_id="target-1",
+            project_id="project-1",
+        )
+    )
+
+    assert structured_payloads[0]["evidence"]["contacts"][0]["context"] == (
+        "招聘邮箱 hr@example.com"
+    )
+    assert structured_payloads[0]["provenance"]["artifacts"] == {
+        "raw_html_object_id": "object-raw"
+    }
+    assert version_payloads[0]["artifacts"]["raw_html_object_id"] == (
+        "object-raw"
+    )
+    assert version_payloads[0]["artifacts"]["structured_object_id"] == (
+        "object-structured-new"
+    )
+    assert result["storage_object_ids"] == [
+        "object-raw",
+        "object-structured-old",
+        "object-structured-new",
+    ]
+
+
 def test_image_archive_policy_keeps_only_contact_and_key_evidence():
     from api.services.source_documents.contracts import CapturedImage
     from api.services.source_documents.service import _select_archive_images
