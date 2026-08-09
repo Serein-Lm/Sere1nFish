@@ -20,8 +20,6 @@ from core.mobile.coordinates import resolve_swipe, resolve_tap
 from core.mobile.manager import MobileDeviceManager
 from core.mobile.screen_capture import capture_ready_screen
 from core.mobile.planner import run_planned_task
-from core.mobile.identity import resolve_device_key
-from core.mobile.pool import DevicePool, PoolError
 from core.mobile.collect.analysis import (
     analyze_screenshot,
     triage_screenshot,
@@ -991,6 +989,10 @@ class _CollectStage(Stage):
         min_subject_match = int(st.get("min_subject_match", 70))
         no_new_stop_threshold = int(st.get("no_new_stop_threshold", 2))
         task_def_id = st["task_def_id"]
+        checkpoint_key = str(seed.get("checkpoint_key") or "")
+        checkpoint_target_id = str(
+            (collect_target or {}).get("target_id") or seed.get("target_id") or ""
+        )
         dedup_key_fields = st["dedup_key_fields"]
         candidate_policy = CandidatePolicyRegistry.resolve(
             str(
@@ -1000,6 +1002,18 @@ class _CollectStage(Stage):
             )
         )
 
+        if checkpoint_key and not st.get("dry_run"):
+            await collect_dao.mark_keyword_checkpoint(
+                st["db"],
+                run_task_id=run_task_id,
+                task_def_id=task_def_id,
+                definition_fingerprint=st["definition_fingerprint"],
+                checkpoint_key=checkpoint_key,
+                keyword=keyword,
+                target_id=checkpoint_target_id,
+                status="running",
+            )
+
         navigated = await self._navigate_to_search_results(
             ctx,
             keyword=keyword,
@@ -1007,11 +1021,26 @@ class _CollectStage(Stage):
             candidate_policy=candidate_policy,
         )
         if not navigated:
-            return
+            error = f"手机搜索导航未完成: {app_name} {keyword}".strip()
+            if checkpoint_key and not st.get("dry_run"):
+                await collect_dao.mark_keyword_checkpoint(
+                    st["db"],
+                    run_task_id=run_task_id,
+                    task_def_id=task_def_id,
+                    definition_fingerprint=st["definition_fingerprint"],
+                    checkpoint_key=checkpoint_key,
+                    keyword=keyword,
+                    target_id=checkpoint_target_id,
+                    status="failed",
+                    error=error,
+                )
+            raise RuntimeError(error)
 
         swipe_times = int(st["swipe_times"])
         swipe_interval = float(st["swipe_interval"])
         shots = 0
+        successful_screens = 0
+        screen_errors = 0
         emitted = 0
         seen_keys: set[str] = set()
         detailed_keys: set[str] = st.setdefault("detailed_record_keys", set())
@@ -1027,6 +1056,7 @@ class _CollectStage(Stage):
                 )
                 shots += 1
                 records = await self._analyze_list(ctx, keyword, b64)
+                successful_screens += 1
                 # 普通来源保留列表候选；文章链接来源只持久化浏览器验证后的详情。
                 new_this_screen = 0
                 for rec in records:
@@ -1231,7 +1261,7 @@ class _CollectStage(Stage):
                         task_id=parent_task_id,
                         source=str(st.get("progress_source") or "wechat"),
                         total=int(st.get("keyword_total") or 0),
-                        processed=int(st.get("keywords_completed") or 0),
+                        processed=int(st.get("keywords_processed") or 0),
                         status="running",
                         message=(
                             f"{str(st.get('progress_label') or '公众号')}正在处理关键词 "
@@ -1245,6 +1275,7 @@ class _CollectStage(Stage):
                         },
                     )
             except Exception as exc:  # noqa: BLE001
+                screen_errors += 1
                 ctx.logger.warning(f"[collect] 处理失败 kw={keyword!r} idx={i}: {exc}")
                 obs_log(
                     f"采集处理失败: {exc}",
@@ -1261,6 +1292,27 @@ class _CollectStage(Stage):
                 except Exception as exc:  # noqa: BLE001
                     ctx.logger.warning(f"[collect] 滑动失败: {exc}")
                 await asyncio.sleep(swipe_interval)
+        if stop.is_set():
+            raise RuntimeError(f"采集已停止，关键词未完成: {keyword or '-'}")
+        if successful_screens == 0:
+            error = (
+                f"关键词 {keyword or '-'} 未产生有效采集屏幕"
+                f"（截图 {shots}，失败 {screen_errors}）"
+            )
+            if checkpoint_key and not st.get("dry_run"):
+                await collect_dao.mark_keyword_checkpoint(
+                    st["db"],
+                    run_task_id=run_task_id,
+                    task_def_id=task_def_id,
+                    definition_fingerprint=st["definition_fingerprint"],
+                    checkpoint_key=checkpoint_key,
+                    keyword=keyword,
+                    target_id=checkpoint_target_id,
+                    status="failed",
+                    error=error,
+                    stats={"shots": shots, "screen_errors": screen_errors},
+                )
+            raise RuntimeError(error)
         ctx.logger.info(
             f"[collect] kw={keyword or '-'} 截屏 {shots} 张, 产出 {emitted} 条候选"
         )
@@ -1273,24 +1325,48 @@ class _CollectStage(Stage):
             event="collect_captured",
             data={"keyword": keyword, "shots": shots, "emitted": emitted},
         )
-        st["keywords_completed"] = int(st.get("keywords_completed") or 0) + 1
+        checkpoint_stats = {
+            "shots": shots,
+            "successful_screens": successful_screens,
+            "screen_errors": screen_errors,
+            "emitted": emitted,
+        }
+        if checkpoint_key and not st.get("dry_run"):
+            await collect_dao.mark_keyword_checkpoint(
+                st["db"],
+                run_task_id=run_task_id,
+                task_def_id=task_def_id,
+                definition_fingerprint=st["definition_fingerprint"],
+                checkpoint_key=checkpoint_key,
+                keyword=keyword,
+                target_id=checkpoint_target_id,
+                status="captured",
+                stats=checkpoint_stats,
+            )
+            st.setdefault("checkpoint_candidates", {})[checkpoint_key] = {
+                "checkpoint_key": checkpoint_key,
+                "keyword": keyword,
+                "target_id": checkpoint_target_id,
+                "stats": checkpoint_stats,
+            }
+        st["keywords_processed"] = int(st.get("keywords_processed") or 0) + 1
         parent_task_id = str(st.get("parent_task_id") or "")
         if parent_task_id:
             from api.services.task_progress import update_source_progress
 
-            completed = int(st["keywords_completed"])
+            processed = int(st["keywords_processed"])
             total_keywords = int(st.get("keyword_total") or 0)
             await update_source_progress(
                 st["db"],
                 task_id=parent_task_id,
                 source=str(st.get("progress_source") or "wechat"),
                 total=total_keywords,
-                processed=completed,
-                succeeded=completed,
-                status="completed" if completed >= total_keywords else "running",
+                processed=processed,
+                succeeded=int(st.get("keywords_completed") or 0),
+                status="running",
                 message=(
-                    f"{str(st.get('progress_label') or '公众号')}关键词已完成 "
-                    f"{completed}/{total_keywords}"
+                    f"{str(st.get('progress_label') or '公众号')}关键词已采集 "
+                    f"{processed}/{total_keywords}，正在归档"
                 ),
                 extra={
                     "current_keyword": keyword,
@@ -1602,7 +1678,6 @@ async def run_collect_task(
         )
     owner = f"collect:{run_task_id}"
     stop_event = asyncio.Event()
-    _running[run_task_id] = stop_event
 
     explicit_keywords = list(task_def.get("keywords") or [])
     counters = {
@@ -1647,6 +1722,7 @@ async def run_collect_task(
             if target and str(task_def.get("target_id") or "") != str(
                 target.get("target_id") or ""
             ):
+                task_def["target_id"] = target.get("target_id")
                 await collect_dao.update_task_def(
                     db,
                     task_def_id,
@@ -1692,14 +1768,49 @@ async def run_collect_task(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[collect] 项目目标词解析失败，回退显式关键词: %s", exc)
     keywords = list(keyword_resolution.get("keywords") or explicit_keywords) or [""]
-
-    device_key = await asyncio.to_thread(resolve_device_key, device_id)
-    pool = DevicePool.get_instance()
-    try:
-        pool.acquire(device_key, owner, note="mobile_collect", device_id=device_id)
-    except PoolError as exc:
-        _running.pop(run_task_id, None)
-        raise RuntimeError(f"设备占用失败: {exc}") from exc
+    definition_fp = collect_dao.definition_fingerprint(task_def)
+    keyword_targets = keyword_resolution.get("keyword_targets") or {}
+    seed_specs: list[dict[str, Any]] = []
+    for keyword in keywords:
+        target_info = (
+            keyword_targets.get(keyword)
+            if isinstance(keyword_targets, dict)
+            else None
+        )
+        resolved_target = target
+        if isinstance(target_info, dict) and target_info.get("target_id"):
+            resolved_target = {
+                "target_id": str(target_info.get("target_id") or ""),
+                "target_type": "company",
+                "canonical_name": str(target_info.get("target_name") or ""),
+            }
+        target_id = str((resolved_target or {}).get("target_id") or "")
+        seed_specs.append(
+            {
+                "keyword": keyword,
+                "target": resolved_target,
+                "target_id": target_id,
+                "checkpoint_key": collect_dao.keyword_checkpoint_key(
+                    definition_fingerprint=definition_fp,
+                    keyword=keyword,
+                    target_id=target_id,
+                ),
+            }
+        )
+    completed_checkpoint_keys = (
+        set()
+        if dry_run
+        else await collect_dao.list_completed_checkpoint_keys(
+            db,
+            run_task_id=run_task_id,
+            definition_fingerprint=definition_fp,
+        )
+    )
+    pending_seed_specs = [
+        spec
+        for spec in seed_specs
+        if spec["checkpoint_key"] not in completed_checkpoint_keys
+    ]
 
     state: dict[str, Any] = {
         "db": db,
@@ -1783,9 +1894,12 @@ async def run_collect_task(
         "detail_entry_review_limit": max(20, min(int(preview_limit or 50) * 2, 200)),
         "keywords_used": keywords,
         "keyword_resolution": keyword_resolution,
+        "definition_fingerprint": definition_fp,
         "parent_task_id": str(task_def.get("parent_task_id") or ""),
-        "keyword_total": len(keywords),
-        "keywords_completed": 0,
+        "keyword_total": len(seed_specs),
+        "keywords_completed": len(seed_specs) - len(pending_seed_specs),
+        "keywords_processed": len(seed_specs) - len(pending_seed_specs),
+        "checkpoint_candidates": {},
         "details_attempted": 0,
         "details_accepted": 0,
         "detailed_record_keys": set(),
@@ -1796,37 +1910,30 @@ async def run_collect_task(
     pipe.add(_PersistStage(), downstream=["notify"])
     pipe.add(_NotifyStage())
 
-    obs_log(
-        "采集任务开始" + ("(试跑)" if dry_run else ""),
-        project_id=project_id or "",
-        task_id=run_task_id,
-        source=_OBS_SOURCE,
-        level="notice",
-        event="collect_start",
-        data={
-            "task_def_id": task_def_id,
-            "device_id": device_id,
-            "keywords": keywords,
-            "dry_run": dry_run,
-        },
-    )
     timed_out = False
+    _running[run_task_id] = stop_event
     try:
-        keyword_targets = keyword_resolution.get("keyword_targets") or {}
-        seeds = []
-        for keyword in keywords:
-            target_info = keyword_targets.get(keyword) if isinstance(keyword_targets, dict) else None
-            resolved_target = target
-            if isinstance(target_info, dict) and target_info.get("target_id"):
-                resolved_target = {
-                    "target_id": str(target_info.get("target_id") or ""),
-                    "target_type": "company",
-                    "canonical_name": str(target_info.get("target_name") or ""),
-                }
-            seeds.append(Item(payload={"keyword": keyword, "target": resolved_target}))
+        obs_log(
+            "采集任务开始" + ("(试跑)" if dry_run else ""),
+            project_id=project_id or "",
+            task_id=run_task_id,
+            source=_OBS_SOURCE,
+            level="notice",
+            event="collect_start",
+            data={
+                "task_def_id": task_def_id,
+                "device_id": device_id,
+                "keywords": keywords,
+                "resumed_keywords": len(seed_specs) - len(pending_seed_specs),
+                "dry_run": dry_run,
+            },
+        )
+        seeds = [Item(payload=spec) for spec in pending_seed_specs]
         runtime_limit = max(0, int(task_def.get("max_runtime_seconds") or 0))
         try:
-            if runtime_limit:
+            if not seeds:
+                metrics = {}
+            elif runtime_limit:
                 metrics = await asyncio.wait_for(
                     pipe.run(seeds=seeds, entry="collect"),
                     timeout=runtime_limit,
@@ -1866,6 +1973,26 @@ async def run_collect_task(
         persist_failed = int(getattr(persist_metrics, "failed", 0) or 0)
         counters["failed"] = collect_failed
         counters["persist_failed"] = persist_failed
+        if dry_run:
+            state["keywords_completed"] = int(
+                state.get("keywords_processed") or 0
+            )
+        elif not timed_out and persist_failed == 0:
+            for candidate in state.get("checkpoint_candidates", {}).values():
+                await collect_dao.mark_keyword_checkpoint(
+                    db,
+                    run_task_id=run_task_id,
+                    task_def_id=task_def_id,
+                    definition_fingerprint=definition_fp,
+                    checkpoint_key=str(candidate.get("checkpoint_key") or ""),
+                    keyword=str(candidate.get("keyword") or ""),
+                    target_id=str(candidate.get("target_id") or ""),
+                    status="completed",
+                    stats=dict(candidate.get("stats") or {}),
+                )
+                state["keywords_completed"] = int(
+                    state.get("keywords_completed") or 0
+                ) + 1
         all_failed = bool(collect_received and collect_succeeded == 0)
         await _update_parent_terminal_progress(
             db,
@@ -1884,10 +2011,6 @@ async def run_collect_task(
             )
     finally:
         _running.pop(run_task_id, None)
-        try:
-            pool.release(device_key, owner, force=True)
-        except Exception:  # noqa: BLE001
-            pass
 
     obs_log(
         "采集任务结束" + ("(试跑)" if dry_run else ""),
@@ -1904,6 +2027,8 @@ async def run_collect_task(
             "candidate_review_count": len(candidate_reviews),
             "detail_entry_review_count": len(detail_entry_reviews),
             "timed_out": timed_out,
+            "keywords_completed": int(state.get("keywords_completed") or 0),
+            "keyword_total": int(state.get("keyword_total") or 0),
             **counters,
         },
     )
@@ -1914,6 +2039,8 @@ async def run_collect_task(
         "candidate_reviews": candidate_reviews,
         "detail_entry_reviews": detail_entry_reviews,
         "keywords_used": keywords,
+        "keywords_completed": int(state.get("keywords_completed") or 0),
+        "keyword_total": int(state.get("keyword_total") or 0),
         "keyword_resolution": keyword_resolution,
         **counters,
     }

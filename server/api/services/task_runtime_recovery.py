@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from api.dao import device_reservations, mobile_collect, tasks
+from api.dao import mobile_collect, mobile_execution_leases, tasks
 from api.services.project_task_batch import ProjectTaskJob, run_project_task_batch
 from api.services.project_task_runtime import (
     build_task_runtime_params,
@@ -149,9 +149,18 @@ async def _schedule_recovered_tasks(recovered: list[dict[str, Any]]) -> int:
 
 
 async def recover_interrupted_runtime(db: Any) -> dict[str, int]:
-    """Release process-local leases and requeue unfinished persistent tasks."""
-    mobile_task_defs = await mobile_collect.reset_interrupted_task_defs(db)
-    mobile_leases = await device_reservations.delete_background_reservations(db)
+    """Recover only stale runtime state; active processes keep their work."""
+    mobile_leases = await mobile_execution_leases.cleanup_expired(db)
+    active_leases = await mobile_execution_leases.list_active(db)
+    active_run_task_ids = {
+        str(item.get("task_id") or "")
+        for item in active_leases
+        if str(item.get("kind") or "") == "mobile_collect"
+    }
+    mobile_task_defs = await mobile_collect.reset_interrupted_task_defs(
+        db,
+        active_run_task_ids=active_run_task_ids,
+    )
     recovered, exhausted = await tasks.prepare_interrupted_tasks(db)
 
     supported = supported_task_types()

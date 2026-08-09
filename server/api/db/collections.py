@@ -37,6 +37,7 @@ MOBILE_SCREENSHOTS_COLLECTION = "mobile_screenshots"
 MOBILE_OPERATION_LOGS_COLLECTION = "mobile_operation_logs"
 MOBILE_PROFILE_OBSERVATIONS_COLLECTION = "mobile_profile_observations"
 MOBILE_TRANSFERS_COLLECTION = "mobile_transfers"
+MOBILE_EXECUTION_LEASES_COLLECTION = "mobile_execution_leases"
 
 # URL 扫描（旧集合，保留兼容）
 URL_SCAN_TASKS_COLLECTION = "url_scan_tasks"
@@ -64,6 +65,7 @@ TASKS_COLLECTION = "tasks"
 # 手机采集任务框架 — 自定义任务定义 / 增量结果 / 定时调度
 MOBILE_COLLECT_TASKS_COLLECTION = "mobile_collect_tasks"
 MOBILE_COLLECT_RECORDS_COLLECTION = "mobile_collect_records"
+MOBILE_COLLECT_CHECKPOINTS_COLLECTION = "mobile_collect_checkpoints"
 TASK_SCHEDULES_COLLECTION = "task_schedules"
 
 # 社交地点图片采集。Job 保存跨平台编排状态；Evidence 保存可审计的图片与上下文证据。

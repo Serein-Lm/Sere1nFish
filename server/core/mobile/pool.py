@@ -816,39 +816,79 @@ class DevicePool:
         return ports
 
     def _try_reconnect(self, device_id: str, timeout: float = 1.0) -> bool:
-        """仅对无线端点(ip:port)重连;USB / easytier 占位项不处理。
+        """按稳定序列号或无线端点重连。
 
         端口可能因断线重连而变化:先探测候选端口是否开放,再逐个 connect,
         任一成功即视为重连成功。
         """
-        if not device_id or device_id.startswith("easytier:") or ":" not in device_id:
+        if not device_id:
             return False
-        ip, _, raw_port = device_id.rpartition(":")
-        if not ip:
-            return False
+
+        endpoints: list[str] = []
+        if device_id.startswith("easytier:"):
+            endpoints.append(
+                f"{device_id.split(':', 1)[1]}:"
+                f"{_int_config('adb_port', 'MOBILE_AGENT_ADB_PORT', 5555)}"
+            )
+        elif ":" in device_id:
+            endpoints.append(device_id)
         try:
-            base_port = int(raw_port or 5555)
-        except (TypeError, ValueError):
-            base_port = 5555
-        for port in self._reconnect_ports(base_port):
-            if not self._tcp_port_open(ip, port, timeout):
+            managed = self._dm().get_device_by_device_id(device_id)
+            if managed is None:
+                managed = self._dm().get_device_by_serial(device_id)
+            for connection in getattr(managed, "connections", []) or []:
+                endpoint = str(getattr(connection, "device_id", "") or "")
+                if ":" in endpoint and endpoint not in endpoints:
+                    endpoints.append(endpoint)
+        except Exception:  # noqa: BLE001
+            pass
+
+        attempted_ips: set[str] = set()
+        for endpoint in endpoints:
+            ip, _, raw_port = endpoint.rpartition(":")
+            if not ip:
                 continue
+            attempted_ips.add(ip)
             try:
-                res = self.connect_wifi_manual(ip, port)
-                if res.get("ok"):
-                    return True
-            except Exception:  # noqa: BLE001
-                continue
-        # 端口全变且无一开放:回退到整网段扫描重连(会重新发现新端口)
+                base_port = int(raw_port or 5555)
+            except (TypeError, ValueError):
+                base_port = 5555
+            for port in self._reconnect_ports(base_port):
+                if not self._tcp_port_open(ip, port, timeout):
+                    continue
+                try:
+                    res = self.connect_wifi_manual(ip, port)
+                    if res.get("ok"):
+                        self._mgr.refresh()
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+
+        # 端口全变或旧端点未知:回退到 EasyTier 网段扫描。
         try:
             scan = self._scan_easytier_adb()
             for entry in scan.get("connected", []):
                 addr = str(entry.get("address", ""))
-                if addr.startswith(f"{ip}:") and entry.get("ok"):
+                if entry.get("ok") and (
+                    not attempted_ips
+                    or self._endpoint_ipv4(addr) in attempted_ips
+                ):
+                    self._mgr.refresh()
                     return True
         except Exception:  # noqa: BLE001
             pass
         return False
+
+    def ensure_connected(self, device_id: str, *, timeout: int = 5) -> str | None:
+        """Return a live ADB endpoint, reconnecting a known wireless device once."""
+        endpoint = self._mgr.resolve_adb_device_id(device_id)
+        if self._adb_ping(endpoint, timeout=timeout):
+            return endpoint
+        if not self._try_reconnect(device_id):
+            return None
+        self._mgr.refresh()
+        endpoint = self._mgr.resolve_adb_device_id(device_id)
+        return endpoint if self._adb_ping(endpoint, timeout=timeout) else None
 
     def _apply_screen_on(self, adb_device_id: str) -> bool:
         """保持屏幕常亮:充电常亮 + 关闭自动熄屏 + 唤醒一次。"""
@@ -892,10 +932,10 @@ class DevicePool:
         reconnect: bool = True,
         probe_timeout: int = 5,
     ) -> dict[str, Any]:
-        """执行一轮保活:对空闲在线设备心跳探测,断线重连,并保持屏幕常亮。
+        """执行一轮保活:探测全部设备并尝试无界面重连。
 
-        跳过:离线/未在线设备、已被预约(reserved)的设备、正在被 AI 操控的设备,
-        以免干扰正在运行的任务和已预约的独占设备。
+        心跳和 ADB reconnect 不改变手机前台界面，因此租约期间也会执行；只有保持
+        屏幕常亮这类会改变设备状态的动作会跳过已预约或正在执行 AI 任务的设备。
         """
         ai_busy = self._active_ai_device_ids()
         checked = pinged = reconnected = screen_on = 0
@@ -905,28 +945,30 @@ class DevicePool:
             device_id = item.get("device_id") or ""
             if not device_id or device_id.startswith("easytier:"):
                 continue
-            if item.get("reserved"):
+            reserved = bool(item.get("reserved"))
+            ai_active = device_id in ai_busy
+            if reserved:
                 skipped_reserved += 1
-                continue
-            if device_id in ai_busy:
+            if ai_active:
                 skipped_ai += 1
-                continue
             if not item.get("online"):
-                # 记录在册但离线的无线设备:尝试重连(不影响忙碌设备)
+                # 心跳与 ADB reconnect 不改变前台界面，可在租约期间执行。
                 if reconnect and self._try_reconnect(device_id):
                     reconnected += 1
                     details.append({"device_id": device_id, "action": "reconnected"})
                 continue
             checked += 1
-            alive = self._adb_ping(device_id, timeout=probe_timeout)
+            adb_device_id = self._mgr.resolve_adb_device_id(device_id)
+            alive = self._adb_ping(adb_device_id, timeout=probe_timeout)
             if alive:
                 pinged += 1
             elif reconnect and self._try_reconnect(device_id):
                 reconnected += 1
                 alive = True
                 details.append({"device_id": device_id, "action": "reconnected"})
-            if alive and screen_always_on:
-                if self._apply_screen_on(device_id):
+            if alive and screen_always_on and not reserved and not ai_active:
+                adb_device_id = self._mgr.resolve_adb_device_id(device_id)
+                if self._apply_screen_on(adb_device_id):
                     screen_on += 1
         return {
             "checked": checked,

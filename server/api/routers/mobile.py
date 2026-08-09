@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import uuid
+from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -89,6 +90,56 @@ async def _ensure_device_access(device_id: str, current_user: User) -> None:
 
 # 供手机子路由复用同一设备权限语义，避免各能力各自实现预约校验。
 ensure_device_access = _ensure_device_access
+
+
+async def _acquire_device_execution(
+    device_id: str,
+    current_user: User,
+    *,
+    kind: str,
+    task_id: str | None = None,
+):
+    """Validate manual ownership and atomically acquire the execution plane."""
+    from api.db.mongodb import get_db
+    from api.services.mobile_execution import (
+        MobileExecutionBusyError,
+        acquire_mobile_execution,
+    )
+
+    await _ensure_device_access(device_id, current_user)
+    operation_id = task_id or f"mobile-{uuid.uuid4().hex[:12]}"
+    try:
+        return await acquire_mobile_execution(
+            get_db(),
+            device_id=device_id,
+            task_id=operation_id,
+            owner=f"{kind}:{current_user.username}",
+            requested_by=current_user.username,
+            kind=kind,
+        )
+    except MobileExecutionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@asynccontextmanager
+async def _device_execution_guard(
+    device_id: str,
+    current_user: User,
+    *,
+    kind: str,
+    task_id: str | None = None,
+):
+    lease = await _acquire_device_execution(
+        device_id,
+        current_user,
+        kind=kind,
+        task_id=task_id,
+    )
+    lease.bind_current_task()
+    try:
+        yield lease
+    finally:
+        await lease.close()
 
 
 def _refresh_and_list(mgr: MobileDeviceManager) -> list:
@@ -281,6 +332,7 @@ class ProfileAnalyzeRequest(BaseModel):
     task_id: str | None = None
     name: str | None = None
     platform: str | None = None
+    app_instance: str = "primary"
 
 
 class AutoChatStartRequest(BaseModel):
@@ -291,6 +343,7 @@ class AutoChatStartRequest(BaseModel):
     my_background: str = ""
     goal: str = ""  # 诱导目标(如: 引导对方点击我发送的伪装文件); 空则普通聊天
     platform: str | None = None
+    app_instance: str = "primary"
     interval: float = 8.0
     auto_send: bool = False
     ensure_chat: bool = False  # 不在对话界面时是否自动导航
@@ -305,6 +358,7 @@ class WatchStartRequest(BaseModel):
     device_id: str
     project_id: str | None = None
     platform: str = "微信"
+    app_instance: str = "primary"
     my_background: str = ""
     auto_accept: bool = True
     auto_send: bool = False
@@ -642,20 +696,22 @@ async def tap(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> dict:
     """点击指定坐标。"""
-    await _ensure_device_access(device_id, current_user)
-    mgr = _get_manager()
-    dev = mgr.get_device(device_id)
+    async with _device_execution_guard(
+        device_id, current_user, kind="manual_tap", task_id=req.task_id
+    ):
+        mgr = _get_manager()
+        dev = mgr.get_device(device_id)
 
-    def _do() -> None:
-        px, py = resolve_tap(
-            req.x,
-            req.y,
-            device_id=mgr.resolve_adb_device_id(device_id),
-            coord_space=req.coord_space,
-        )
-        dev.tap(px, py)
+        def _do() -> None:
+            px, py = resolve_tap(
+                req.x,
+                req.y,
+                device_id=mgr.resolve_adb_device_id(device_id),
+                coord_space=req.coord_space,
+            )
+            dev.tap(px, py)
 
-    await _device_op(_do, op="tap")
+        await _device_op(_do, op="tap")
     await _log_mobile_operation(
         operation_type="tap",
         device_id=device_id,
@@ -675,22 +731,24 @@ async def swipe(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> dict:
     """滑动 (拖拽 / 翻页)。"""
-    await _ensure_device_access(device_id, current_user)
-    mgr = _get_manager()
-    dev = mgr.get_device(device_id)
+    async with _device_execution_guard(
+        device_id, current_user, kind="manual_swipe", task_id=req.task_id
+    ):
+        mgr = _get_manager()
+        dev = mgr.get_device(device_id)
 
-    def _do() -> None:
-        sx, sy, ex, ey = resolve_swipe(
-            req.start_x,
-            req.start_y,
-            req.end_x,
-            req.end_y,
-            device_id=mgr.resolve_adb_device_id(device_id),
-            coord_space=req.coord_space,
-        )
-        dev.swipe(sx, sy, ex, ey, req.duration_ms)
+        def _do() -> None:
+            sx, sy, ex, ey = resolve_swipe(
+                req.start_x,
+                req.start_y,
+                req.end_x,
+                req.end_y,
+                device_id=mgr.resolve_adb_device_id(device_id),
+                coord_space=req.coord_space,
+            )
+            dev.swipe(sx, sy, ex, ey, req.duration_ms)
 
-    await _device_op(_do, op="swipe")
+        await _device_op(_do, op="swipe")
     await _log_mobile_operation(
         operation_type="swipe",
         device_id=device_id,
@@ -717,31 +775,33 @@ async def input_text(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> dict:
     """向当前聚焦输入框输入文本。"""
-    await _ensure_device_access(device_id, current_user)
-    mgr = _get_manager()
-    dev = mgr.get_device(device_id)
-    adb_device_id = mgr.resolve_adb_device_id(device_id)
-    keyboard = get_mobile_keyboard_service()
+    async with _device_execution_guard(
+        device_id, current_user, kind="manual_text", task_id=req.task_id
+    ):
+        mgr = _get_manager()
+        dev = mgr.get_device(device_id)
+        adb_device_id = mgr.resolve_adb_device_id(device_id)
+        keyboard = get_mobile_keyboard_service()
 
-    def _do() -> None:
-        original_ime = dev.detect_and_set_adb_keyboard()
-        keyboard.remember_manual_ime(device_id, original_ime)
-        try:
-            dev.type_text(req.text)
-        finally:
+        def _do() -> None:
+            original_ime = dev.detect_and_set_adb_keyboard()
+            keyboard.remember_manual_ime(device_id, original_ime)
             try:
-                keyboard.restore_system_keyboard(
-                    adb_device_id,
-                    device_key=device_id,
-                    preferred_ime=(
-                        original_ime if ADB_KEYBOARD_IME not in original_ime else ""
-                    ),
-                )
-            except Exception:
-                if original_ime and ADB_KEYBOARD_IME not in original_ime:
-                    dev.restore_keyboard(original_ime)
+                dev.type_text(req.text)
+            finally:
+                try:
+                    keyboard.restore_system_keyboard(
+                        adb_device_id,
+                        device_key=device_id,
+                        preferred_ime=(
+                            original_ime if ADB_KEYBOARD_IME not in original_ime else ""
+                        ),
+                    )
+                except Exception:
+                    if original_ime and ADB_KEYBOARD_IME not in original_ime:
+                        dev.restore_keyboard(original_ime)
 
-    await _device_op(_do, op="输入")
+        await _device_op(_do, op="输入")
     await _log_mobile_operation(
         operation_type="text",
         device_id=device_id,
@@ -760,23 +820,25 @@ async def restore_system_keyboard(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> dict:
     """切回设备上可供手动输入的系统输入法。"""
-    await _ensure_device_access(device_id, current_user)
-    mgr = _get_manager()
-    adb_device_id = mgr.resolve_ready_adb_device_id(device_id)
-    if not adb_device_id:
-        raise HTTPException(status_code=404, detail="设备当前未通过 ADB 在线")
+    async with _device_execution_guard(
+        device_id, current_user, kind="keyboard_restore"
+    ):
+        mgr = _get_manager()
+        adb_device_id = mgr.resolve_ready_adb_device_id(device_id)
+        if not adb_device_id:
+            raise HTTPException(status_code=404, detail="设备当前未通过 ADB 在线")
 
-    def _restore():
-        return get_mobile_keyboard_service().restore_system_keyboard(
-            adb_device_id,
-            device_key=device_id,
+        def _restore():
+            return get_mobile_keyboard_service().restore_system_keyboard(
+                adb_device_id,
+                device_key=device_id,
+            )
+
+        result = await _device_op(
+            _restore,
+            op="恢复系统输入法",
+            timeout=15,
         )
-
-    result = await _device_op(
-        _restore,
-        op="恢复系统输入法",
-        timeout=15,
-    )
     await _log_mobile_operation(
         operation_type="keyboard",
         device_id=device_id,
@@ -796,20 +858,22 @@ async def press_key(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> dict:
     """系统按键: back / home / enter / search / dpad_* 等。"""
-    await _ensure_device_access(device_id, current_user)
-    dev = _get_manager().get_device(device_id)
-    key = req.key.strip().lower()
-    if not key:
-        raise HTTPException(status_code=400, detail="按键不能为空")
-    ok = await _device_op(dev.press_key, key, op="按键")
-    if not ok:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"不支持的按键: {req.key} "
-                "(支持 back/home/enter/search/delete/tab/menu/escape/space/dpad_* 等)"
-            ),
-        )
+    async with _device_execution_guard(
+        device_id, current_user, kind="manual_key", task_id=req.task_id
+    ):
+        dev = _get_manager().get_device(device_id)
+        key = req.key.strip().lower()
+        if not key:
+            raise HTTPException(status_code=400, detail="按键不能为空")
+        ok = await _device_op(dev.press_key, key, op="按键")
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"不支持的按键: {req.key} "
+                    "(支持 back/home/enter/search/delete/tab/menu/escape/space/dpad_* 等)"
+                ),
+            )
     await _log_mobile_operation(
         operation_type="key",
         device_id=device_id,
@@ -828,9 +892,11 @@ async def launch_app(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> dict:
     """启动指定应用。"""
-    await _ensure_device_access(device_id, current_user)
-    dev = _get_manager().get_device(device_id)
-    ok = await _device_op(dev.launch_app, req.app_name, op="启动")
+    async with _device_execution_guard(
+        device_id, current_user, kind="manual_launch", task_id=req.task_id
+    ):
+        dev = _get_manager().get_device(device_id)
+        ok = await _device_op(dev.launch_app, req.app_name, op="启动")
     await _log_mobile_operation(
         operation_type="launch",
         device_id=device_id,
@@ -869,11 +935,17 @@ async def agent_task(
     """
     from core.mobile.executor import run_task_stream
 
-    await _ensure_device_access(req.device_id, current_user)
     task_id = req.task_id or uuid.uuid4().hex[:12]
+    lease = await _acquire_device_execution(
+        req.device_id,
+        current_user,
+        kind="mobile_agent",
+        task_id=task_id,
+    )
 
     async def gen():
         last_type = ""
+        lease.bind_current_task()
         try:
             with observation_context(
                 project_id=req.project_id,
@@ -929,6 +1001,8 @@ async def agent_task(
                 data={"device_id": req.device_id, "error": str(exc)},
             )
             yield _sse({"type": "error", "data": {"message": str(exc)}})
+        finally:
+            await lease.close()
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
@@ -939,12 +1013,23 @@ async def agent_cancel(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> dict:
     """取消正在运行的执行层任务。"""
+    from api.db.mongodb import get_db
+    from api.services.mobile_execution import request_mobile_execution_cancel
     from core.mobile.executor import cancel_task
 
-    ok = await cancel_task(
+    local_cancelled = await cancel_task(
         req.task_id, owner=current_user.username, is_admin=current_user.is_admin
     )
-    return {"ok": ok, "task_id": req.task_id}
+    distributed_cancelled = await request_mobile_execution_cancel(
+        get_db(),
+        task_id=req.task_id,
+        requested_by=current_user.username,
+        is_admin=current_user.is_admin,
+    )
+    return {
+        "ok": local_cancelled or distributed_cancelled,
+        "task_id": req.task_id,
+    }
 
 
 # ============ 辅助聊天 (读屏→话术→建议→发送) ============
@@ -960,7 +1045,6 @@ async def chat_assist_suggest(
     """
     from core.mobile.chat_assist import suggest_stream
 
-    await _ensure_device_access(req.device_id, current_user)
     task_id = req.task_id or uuid.uuid4().hex[:12]
 
     contact_profile = req.contact_profile
@@ -972,7 +1056,15 @@ async def chat_assist_suggest(
         doc = await cp_dao.get_profile(get_db(), req.contact_id)
         contact_profile = format_profile_for_prompt(doc)
 
+    lease = await _acquire_device_execution(
+        req.device_id,
+        current_user,
+        kind="chat_suggest",
+        task_id=task_id,
+    )
+
     async def gen():
+        lease.bind_current_task()
         try:
             with observation_context(
                 project_id=req.project_id,
@@ -1025,6 +1117,8 @@ async def chat_assist_suggest(
                 data={"device_id": req.device_id, "contact_id": req.contact_id, "error": str(exc)},
             )
             yield _sse({"stage": "error", "data": {"message": str(exc)}})
+        finally:
+            await lease.close()
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
@@ -1037,18 +1131,23 @@ async def chat_assist_send(
     """把选定话术输入聊天框;若传 send_button{x,y} 则点一下发送。"""
     from core.mobile.chat_assist import send_reply
 
-    await _ensure_device_access(req.device_id, current_user)
-    try:
-        return await send_reply(
-            req.device_id,
-            req.text,
-            send_button=req.send_button,
-            project_id=req.project_id,
-            task_id=req.task_id,
-            contact_id=req.contact_id,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"发送失败: {exc}") from exc
+    async with _device_execution_guard(
+        req.device_id,
+        current_user,
+        kind="chat_send",
+        task_id=req.task_id,
+    ):
+        try:
+            return await send_reply(
+                req.device_id,
+                req.text,
+                send_button=req.send_button,
+                project_id=req.project_id,
+                task_id=req.task_id,
+                contact_id=req.contact_id,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"发送失败: {exc}") from exc
 
 
 # ============ 概览 ============
@@ -1367,10 +1466,12 @@ async def pool_usb_to_wifi(
     """把已连 USB 的设备切到 WiFi(便于拔线远程)。"""
     from core.mobile.pool import DevicePool
 
-    await _ensure_device_access(req.device_id, current_user)
-    return await asyncio.to_thread(
-        DevicePool.get_instance().connect_wifi_from_usb, req.device_id, req.port
-    )
+    async with _device_execution_guard(
+        req.device_id, current_user, kind="usb_to_wifi"
+    ):
+        return await asyncio.to_thread(
+            DevicePool.get_instance().connect_wifi_from_usb, req.device_id, req.port
+        )
 
 
 @router.post("/pool/disconnect")
@@ -1380,8 +1481,12 @@ async def pool_disconnect(
 ) -> dict:
     from core.mobile.pool import DevicePool
 
-    await _ensure_device_access(req.device_id, current_user)
-    return await asyncio.to_thread(DevicePool.get_instance().disconnect, req.device_id)
+    async with _device_execution_guard(
+        req.device_id, current_user, kind="device_disconnect"
+    ):
+        return await asyncio.to_thread(
+            DevicePool.get_instance().disconnect, req.device_id
+        )
 
 
 @router.post("/pool/remote/discover")
@@ -1441,11 +1546,17 @@ async def agent_run_planned(
     """规划 + 执行(SSE):规划层拆任务,逐个交执行层完成。"""
     from core.mobile.planner import run_planned_task
 
-    await _ensure_device_access(req.device_id, current_user)
     task_id = req.task_id or uuid.uuid4().hex[:12]
+    lease = await _acquire_device_execution(
+        req.device_id,
+        current_user,
+        kind="mobile_planned",
+        task_id=task_id,
+    )
 
     async def gen():
         final_stage = ""
+        lease.bind_current_task()
         try:
             with observation_context(
                 project_id=req.project_id,
@@ -1502,6 +1613,8 @@ async def agent_run_planned(
                 data={"device_id": req.device_id, "error": str(exc)},
             )
             yield _sse({"stage": "error", "data": {"message": str(exc)}})
+        finally:
+            await lease.close()
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
@@ -1633,18 +1746,28 @@ async def analyze_profile(
     """从设备读屏 → 提取并沉淀画像(系统3:实时识别 + 沉淀)。"""
     from core.mobile.profiling import analyze_and_update
 
-    await _ensure_device_access(req.device_id, current_user)
-    try:
-        profile = await analyze_and_update(
-            req.device_id,
-            req.contact_id,
-            name=req.name,
-            platform=req.platform,
-            project_id=req.project_id,
-            task_id=req.task_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"画像分析失败: {exc}") from exc
+    async with _device_execution_guard(
+        req.device_id,
+        current_user,
+        kind="profile_analyze",
+        task_id=req.task_id,
+    ):
+        try:
+            from core.mobile.identity import resolve_device_key
+
+            device_key = await asyncio.to_thread(resolve_device_key, req.device_id)
+            profile = await analyze_and_update(
+                req.device_id,
+                req.contact_id,
+                name=req.name,
+                platform=req.platform,
+                device_key=device_key,
+                app_instance=req.app_instance,
+                project_id=req.project_id,
+                task_id=req.task_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"画像分析失败: {exc}") from exc
     return profile
 
 
@@ -1721,20 +1844,28 @@ async def auto_chat_start(
     from core.mobile.auto_chat import AutoChatManager
 
     await _ensure_device_access(req.device_id, current_user)
-    task_id = await AutoChatManager.get_instance().start(
-        req.device_id,
-        req.contact_id,
-        project_id=req.project_id,
-        contact_name=req.contact_name,
-        my_background=req.my_background,
-        goal=req.goal,
-        platform=req.platform,
-        owner=current_user.username,
-        interval=req.interval,
-        auto_send=req.auto_send,
-        ensure_chat=req.ensure_chat,
-        send_button=req.send_button,
-    )
+    try:
+        task_id = await AutoChatManager.get_instance().start(
+            req.device_id,
+            req.contact_id,
+            project_id=req.project_id,
+            contact_name=req.contact_name,
+            my_background=req.my_background,
+            goal=req.goal,
+            platform=req.platform,
+            app_instance=req.app_instance,
+            owner=current_user.username,
+            interval=req.interval,
+            auto_send=req.auto_send,
+            ensure_chat=req.ensure_chat,
+            send_button=req.send_button,
+        )
+    except Exception as exc:
+        from api.services.mobile_execution import MobileExecutionBusyError
+
+        if isinstance(exc, MobileExecutionBusyError):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
     return {"ok": True, "task_id": task_id}
 
 
@@ -1745,10 +1876,19 @@ async def auto_chat_stop(
 ) -> dict:
     from core.mobile.auto_chat import AutoChatManager
 
-    ok = AutoChatManager.get_instance().stop(
+    local_stopped = AutoChatManager.get_instance().stop(
         req.task_id, owner=current_user.username, is_admin=current_user.is_admin
     )
-    return {"ok": ok, "task_id": req.task_id}
+    from api.db.mongodb import get_db
+    from api.services.mobile_execution import request_mobile_execution_cancel
+
+    remote_stopped = await request_mobile_execution_cancel(
+        get_db(),
+        task_id=req.task_id,
+        requested_by=current_user.username,
+        is_admin=current_user.is_admin,
+    )
+    return {"ok": local_stopped or remote_stopped, "task_id": req.task_id}
 
 
 @router.get("/auto-chat/status")
@@ -1779,17 +1919,25 @@ async def auto_chat_watch_start(
     from core.mobile.auto_chat import AutoChatManager
 
     await _ensure_device_access(req.device_id, current_user)
-    watch_id = await AutoChatManager.get_instance().start_watch(
-        req.device_id,
-        project_id=req.project_id,
-        platform=req.platform,
-        my_background=req.my_background,
-        auto_accept=req.auto_accept,
-        auto_send=req.auto_send,
-        interval=req.interval,
-        send_button=req.send_button,
-        owner=current_user.username,
-    )
+    try:
+        watch_id = await AutoChatManager.get_instance().start_watch(
+            req.device_id,
+            project_id=req.project_id,
+            platform=req.platform,
+            app_instance=req.app_instance,
+            my_background=req.my_background,
+            auto_accept=req.auto_accept,
+            auto_send=req.auto_send,
+            interval=req.interval,
+            send_button=req.send_button,
+            owner=current_user.username,
+        )
+    except Exception as exc:
+        from api.services.mobile_execution import MobileExecutionBusyError
+
+        if isinstance(exc, MobileExecutionBusyError):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
     return {"ok": True, "watch_id": watch_id}
 
 
@@ -1800,10 +1948,19 @@ async def auto_chat_watch_stop(
 ) -> dict:
     from core.mobile.auto_chat import AutoChatManager
 
-    ok = AutoChatManager.get_instance().stop_watch(
+    local_stopped = AutoChatManager.get_instance().stop_watch(
         req.watch_id, owner=current_user.username, is_admin=current_user.is_admin
     )
-    return {"ok": ok, "watch_id": req.watch_id}
+    from api.db.mongodb import get_db
+    from api.services.mobile_execution import request_mobile_execution_cancel
+
+    remote_stopped = await request_mobile_execution_cancel(
+        get_db(),
+        task_id=req.watch_id,
+        requested_by=current_user.username,
+        is_admin=current_user.is_admin,
+    )
+    return {"ok": local_stopped or remote_stopped, "watch_id": req.watch_id}
 
 
 # ============ 系统1 增强:自动接入 / 唤醒 ============
@@ -1900,10 +2057,12 @@ async def pool_wake(
     """唤醒亮屏(KEYCODE_WAKEUP);stay_on=true 充电时常亮,便于远程操作。"""
     from core.mobile.pool import DevicePool
 
-    await _ensure_device_access(req.device_id, current_user)
-    return await asyncio.to_thread(
-        DevicePool.get_instance().wake, req.device_id, stay_on=req.stay_on
-    )
+    async with _device_execution_guard(
+        req.device_id, current_user, kind="wake"
+    ):
+        return await asyncio.to_thread(
+            DevicePool.get_instance().wake, req.device_id, stay_on=req.stay_on
+        )
 
 
 @router.post("/pool/wake-unlock")
@@ -1918,13 +2077,15 @@ async def pool_wake_unlock(
     """
     from core.mobile.pool import DevicePool
 
-    await _ensure_device_access(req.device_id, current_user)
-    return await asyncio.to_thread(
-        DevicePool.get_instance().wake_and_unlock,
-        req.device_id,
-        pin=req.pin,
-        stay_on=req.stay_on,
-    )
+    async with _device_execution_guard(
+        req.device_id, current_user, kind="wake_unlock"
+    ):
+        return await asyncio.to_thread(
+            DevicePool.get_instance().wake_and_unlock,
+            req.device_id,
+            pin=req.pin,
+            stay_on=req.stay_on,
+        )
 
 
 @router.post("/pool/stay-awake")
@@ -1935,10 +2096,12 @@ async def pool_stay_awake(
     """设置充电时是否常亮(svc power stayon)。"""
     from core.mobile.pool import DevicePool
 
-    await _ensure_device_access(req.device_id, current_user)
-    return await asyncio.to_thread(
-        DevicePool.get_instance().set_stay_awake, req.device_id, req.on
-    )
+    async with _device_execution_guard(
+        req.device_id, current_user, kind="stay_awake"
+    ):
+        return await asyncio.to_thread(
+            DevicePool.get_instance().set_stay_awake, req.device_id, req.on
+        )
 
 
 @router.get("/pool/keepalive/status")

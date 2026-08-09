@@ -20,16 +20,17 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 
 from AutoGLM_GUI.agents import create_agent
 from AutoGLM_GUI.config import AgentConfig, ModelConfig
-from AutoGLM_GUI.devices.adb_device import ADBDevice
 from core.mobile.command_executor import (
     compile_mobile_actions,
     run_compiled_actions_stream,
 )
-from core.mobile.manager import MobileDeviceManager
+from core.mobile.recovering_device import RecoveringADBDevice
+from core.mobile.prompt_runtime import load_mobile_prompt
 from core.mobile.screen_capture import wake_device
 from core.llm_params import disable_thinking_extra_body
 from core.mobile.llm_usage import instrument_agent
@@ -39,10 +40,25 @@ _running: dict[str, Any] = {}
 _running_owners: dict[str, str | None] = {}
 
 
+def _reject_sensitive_action(message: str) -> bool:
+    """Never fall back to a blocking CLI prompt inside the API container."""
+    from core.logger import get_logger
+
+    get_logger("mobile_executor").warning(
+        "手机 Agent 拒绝未确认的敏感操作: %s",
+        message,
+    )
+    return False
+
+
+def _reject_takeover(message: str) -> None:
+    raise RuntimeError(f"手机 Agent 请求人工接管，当前任务已停止: {message}")
+
+
 def _log_data(data: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(data)
     if "screenshot" in cleaned:
-        cleaned["screenshot"] = "<stored-on-disk>"
+        cleaned["screenshot"] = "<stored-in-object-storage>"
     return cleaned
 
 
@@ -176,22 +192,28 @@ def build_executor_agent(
 ) -> Any:
     """构造一个 AutoGLM 执行层 agent(配置来自本项目)。"""
     model_config = _build_model_config(app_config)
-    adb_device_id = MobileDeviceManager().resolve_adb_device_id(device_id)
+    if system_prompt is None and agent_type == "general-vision":
+        system_prompt = load_mobile_prompt(
+            "mobile_agent/executor_general",
+            {"current_date": datetime.now().astimezone().strftime("%Y-%m-%d")},
+        )
 
-    kwargs: dict[str, Any] = {"device_id": adb_device_id}
+    kwargs: dict[str, Any] = {"device_id": device_id}
     if max_steps is not None:
         kwargs["max_steps"] = max_steps
     if system_prompt is not None:
         kwargs["system_prompt"] = system_prompt
     agent_config = AgentConfig(**kwargs)
 
-    device = ADBDevice(adb_device_id)
+    device = RecoveringADBDevice(device_id)
     agent = create_agent(
         agent_type=agent_type,
         model_config=model_config,
         agent_config=agent_config,
         agent_specific_config={},
         device=device,
+        confirmation_callback=_reject_sensitive_action,
+        takeover_callback=_reject_takeover,
     )
     return instrument_agent(
         agent,
@@ -215,8 +237,8 @@ async def run_task_stream(
     """
     让执行层 agent 自助完成一个手机任务,流式产出事件。
 
-    首个事件为 {"type": "task_start", "data": {task_id, device_id, task}},
-    之后透传 agent.stream 的全部事件。task_id 可用于 /agent/cancel 取消。
+    首个事件为 ``device_ready``，随后发送 ``task_start`` 并透传 Agent 事件。
+    ``task_id`` 可用于 /agent/cancel 取消。
     """
     task_id = task_id or uuid.uuid4().hex[:12]
     wake_result = await wake_device(device_id, stay_on=True)

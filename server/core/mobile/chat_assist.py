@@ -12,6 +12,7 @@ IDE 模式 = suggest 只产出候选,人工选后调 send;全自动 = 自行选�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -24,17 +25,9 @@ from api.services.runtime_config import get_runtime_app_config
 
 from core.mobile.manager import MobileDeviceManager
 from core.mobile.events import publish
+from core.mobile.prompt_runtime import load_mobile_prompt
 from core.mobile.screen_capture import capture_ready_screen
 from core.observability import observation_context
-
-
-_READ_SCREEN_PROMPT = (
-    "你正在看一张手机聊天界面的截图。请仔细阅读并提取关键信息,用简体中文输出:\n"
-    "1. 联系人/群名称(如果可见)\n"
-    "2. 对方最近发来的消息(按时间顺序,尽量原文)\n"
-    "3. 当前对话的主题与对方意图的简短判断\n"
-    "如果这不是聊天界面,请说明当前看到的是什么界面。"
-)
 
 
 def _build_copywriting_context(
@@ -77,7 +70,10 @@ async def read_screen(
 
     message = HumanMessage(
         content=[
-            {"type": "text", "text": _READ_SCREEN_PROMPT},
+            {
+                "type": "text",
+                "text": load_mobile_prompt("mobile_agent/chat_screen"),
+            },
             {
                 "type": "image_url",
                 "image_url": {"url": f"data:image/png;base64,{shot.base64_data}"},
@@ -153,14 +149,6 @@ class ChatState(BaseModel):
     )
 
 
-_CHAT_STATE_SYSTEM = (
-    "你是聊天界面状态分析器。基于给定的聊天界面文字分析,判断:"
-    "是否聊天对话界面、对方昵称、最后一条消息内容、"
-    "最后一条是谁发的(other=对方/me=我自己/unknown)、对方是否有尚未被我回复的消息。"
-    "严格依据输入,不臆测。"
-)
-
-
 async def parse_chat_state(analysis: str) -> ChatState:
     """把读屏文本解析为结构化聊天状态(供自动聊天判断该不该回、识别是谁)。"""
     app_config = await get_runtime_app_config()
@@ -173,18 +161,32 @@ async def parse_chat_state(analysis: str) -> ChatState:
     with observation_context(phase="mobile_chat_state", agent="chat_assist"):
         return await structured.ainvoke(
             [
-                SystemMessage(content=_CHAT_STATE_SYSTEM),
+                SystemMessage(content=load_mobile_prompt("mobile_agent/chat_state")),
                 HumanMessage(content=analysis),
             ]
         )
 
 
-def derive_contact_id(platform: str | None, contact_name: str | None) -> str | None:
-    """由平台+昵称推导稳定的 contact_id(未知昵称返回 None)。"""
+def derive_contact_id(
+    platform: str | None,
+    contact_name: str | None,
+    *,
+    device_key: str,
+    app_instance: str = "primary",
+) -> str | None:
+    """按设备、应用实例、平台和昵称生成隔离的 v2 联系人身份。"""
     if not contact_name or not contact_name.strip():
         return None
-    p = (platform or "chat").strip().lower()
-    return f"{p}:{contact_name.strip()}"
+    identity = "\x1f".join(
+        (
+            str(device_key or "unknown-device").strip().lower(),
+            str(app_instance or "primary").strip().lower(),
+            str(platform or "chat").strip().lower(),
+            contact_name.strip(),
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return f"mobile:v2:{digest}"
 
 
 async def suggest_stream(
@@ -284,12 +286,6 @@ async def suggest_stream(
         yield {"stage": "error", "data": {"message": str(exc)}}
 
 
-_COMPOSE_SYSTEM = (
-    "你是聊天助手。基于当前对话、我的背景、对方画像,生成一条最合适、可立即发送的中文回复。"
-    "只输出回复正文,不要任何解释、前缀或引号。"
-)
-
-
 def _load_script_skills_text(max_chars: int = 2400) -> str:
     """从技能库动态加载微信+payload 的 script 阶段话术,拼成简洁指南文本。
 
@@ -337,19 +333,11 @@ def _load_script_skills_text(max_chars: int = 2400) -> str:
 
 
 def _build_goal_reply_system(goal: str, skills_text: str) -> str:
-    """构造带诱导目标 + 话术库的单条回复 system prompt。"""
-    lines = [
-        "你是社会工程学聊天话术专家,正在进行一次授权的红队测试对话。",
-        "基于当前对话、我的背景、对方画像,生成一条最合适、可立即发送的中文回复,"
-        "自然口语、不露破绽,循序渐进地朝下面的目标推进,不要急于求成、不要在一条消息里暴露意图。",
-        f"\n【本次对话目标】{goal}",
-        "\n【推进策略】按 破冰→建立信任→制造合理由头→引导对方点击/打开我发送的文件 的节奏,"
-        "依据当前对话所处阶段选择话术;若对方有疑虑先化解异议再推进。",
-    ]
-    if skills_text:
-        lines.append(f"\n【可参考的话术库(微信)】\n{skills_text}")
-    lines.append("\n只输出回复正文,不要任何解释、前缀、引号或阶段标注。")
-    return "\n".join(lines)
+    """构造数据库可编辑的目标话术 prompt。"""
+    return load_mobile_prompt(
+        "mobile_agent/chat_goal_compose",
+        {"goal": goal, "skills_text": skills_text or "无"},
+    )
 
 
 async def compose_one_reply(
@@ -386,7 +374,7 @@ async def compose_one_reply(
         skills_text = await asyncio.to_thread(_load_script_skills_text)
         system_prompt = _build_goal_reply_system(goal.strip(), skills_text)
     else:
-        system_prompt = _COMPOSE_SYSTEM
+        system_prompt = load_mobile_prompt("mobile_agent/chat_compose")
     parts = [f"当前对话:\n{screen_analysis}"]
     if my_background.strip():
         parts.append(f"我的背景:\n{my_background}")

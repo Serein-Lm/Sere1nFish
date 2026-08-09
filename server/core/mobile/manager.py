@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import subprocess
 from typing import Any
 
 from AutoGLM_GUI.device_manager import DeviceManager, ManagedDevice
@@ -127,11 +128,33 @@ class MobileDeviceManager:
             pass
 
         online = screenshot_ready or current_app_ready
+        input_ready = False
+        if online:
+            try:
+                endpoint = self.resolve_adb_device_id(device_id)
+            except Exception:  # noqa: BLE001
+                endpoint = device_id
+            if endpoint.startswith("remote:"):
+                input_ready = True
+            else:
+                try:
+                    probe = subprocess.run(
+                        ["adb", "-s", endpoint, "shell", "echo", "input-ready"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    input_ready = (
+                        probe.returncode == 0
+                        and "input-ready" in (probe.stdout or "")
+                    )
+                except Exception:
+                    input_ready = False
         return DeviceHealth(
             device_id=device_id,
             online=online,
             screenshot_ready=screenshot_ready,
-            input_ready=True,
+            input_ready=input_ready,
             current_app_ready=current_app_ready,
             capture_failed=capture_failed,
             error=screenshot_error,

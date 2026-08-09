@@ -80,7 +80,13 @@ export default function MobileProfiles({ embedded = false }: MobileProfilesProps
   const [saving, setSaving] = useState(false)
 
   const [analyzeOpen, setAnalyzeOpen] = useState(false)
-  const [az, setAz] = useState({ device_id: '', contact_id: '', name: '', platform: '微信' })
+  const [az, setAz] = useState({
+    device_id: '',
+    contact_id: '',
+    name: '',
+    platform: '微信',
+    app_instance: 'primary',
+  })
   const [analyzing, setAnalyzing] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -300,6 +306,9 @@ export default function MobileProfiles({ embedded = false }: MobileProfilesProps
 
       <div className="device-toolbar slide-up stagger-1">
         <Input
+          id="profile-search"
+          name="profile_search"
+          aria-label="搜索联系人画像"
           allowClear
           prefix={<SearchOutlined />}
           placeholder="搜索姓名 / contact_id / 摘要"
@@ -308,6 +317,8 @@ export default function MobileProfiles({ embedded = false }: MobileProfilesProps
           className="device-search"
         />
         <Select
+          id="profile-device-filter"
+          aria-label="按设备筛选联系人画像"
           allowClear
           placeholder="按设备筛选"
           style={{ minWidth: 180 }}
@@ -344,7 +355,7 @@ export default function MobileProfiles({ embedded = false }: MobileProfilesProps
         }
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        width={460}
+        size={460}
         extra={
           editing ? (
             <div className="drawer-extra">
@@ -473,20 +484,32 @@ export default function MobileProfiles({ embedded = false }: MobileProfilesProps
         cancelText="取消"
       >
         <div className="analyze-form">
-          <label className="field-label">设备</label>
+          <label className="field-label" htmlFor="profile-analyze-device">设备</label>
           <Select
+            id="profile-analyze-device"
             placeholder="选择在线设备"
             style={{ width: '100%' }}
             options={devices}
             value={az.device_id || undefined}
             onChange={(v) => setAz((a) => ({ ...a, device_id: v }))}
           />
-          <label className="field-label">contact_id（唯一键，建议 平台:对方标识）</label>
-          <Input value={az.contact_id} onChange={(e) => setAz((a) => ({ ...a, contact_id: e.target.value }))} placeholder="如 wechat:张三" />
-          <label className="field-label">姓名（可选）</label>
-          <Input value={az.name} onChange={(e) => setAz((a) => ({ ...a, name: e.target.value }))} placeholder="张三" />
-          <label className="field-label">平台（可选）</label>
-          <Input value={az.platform} onChange={(e) => setAz((a) => ({ ...a, platform: e.target.value }))} placeholder="微信" />
+          <label className="field-label" htmlFor="profile-analyze-contact-id">contact_id（唯一键，建议 平台:对方标识）</label>
+          <Input id="profile-analyze-contact-id" name="profile_analyze_contact_id" value={az.contact_id} onChange={(e) => setAz((a) => ({ ...a, contact_id: e.target.value }))} placeholder="如 wechat:张三" />
+          <label className="field-label" htmlFor="profile-analyze-name">姓名（可选）</label>
+          <Input id="profile-analyze-name" name="profile_analyze_name" value={az.name} onChange={(e) => setAz((a) => ({ ...a, name: e.target.value }))} placeholder="张三" />
+          <label className="field-label" htmlFor="profile-analyze-platform">平台（可选）</label>
+          <Input id="profile-analyze-platform" name="profile_analyze_platform" value={az.platform} onChange={(e) => setAz((a) => ({ ...a, platform: e.target.value }))} placeholder="微信" />
+          <label className="field-label" htmlFor="profile-analyze-app-instance">应用实例</label>
+          <Select
+            id="profile-analyze-app-instance"
+            style={{ width: '100%' }}
+            value={az.app_instance}
+            options={[
+              { label: '主应用', value: 'primary' },
+              { label: '应用分身', value: 'secondary' },
+            ]}
+            onChange={(value) => setAz((a) => ({ ...a, app_instance: value }))}
+          />
         </div>
         <div className="modal-hint">
           <ThunderboltOutlined /> 将读取设备当前聊天界面，由视觉模型结构化提取并合并入库。

@@ -59,6 +59,8 @@ class AutoChatState:
     my_background: str = ""
     goal: str = ""
     platform: str | None = None
+    device_key: str = ""
+    app_instance: str = "primary"
     owner: str | None = None
     interval: float = 8.0
     auto_send: bool = False
@@ -87,6 +89,7 @@ class AutoChatManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._watchers: dict[str, asyncio.Task[None]] = {}
         self._watch_owners: dict[str, str | None] = {}
+        self._leases: dict[str, Any] = {}
 
     @classmethod
     def get_instance(cls) -> "AutoChatManager":
@@ -104,6 +107,7 @@ class AutoChatManager:
         my_background: str = "",
         goal: str = "",
         platform: str | None = None,
+        app_instance: str = "primary",
         owner: str | None = None,
         interval: float = 8.0,
         auto_send: bool = False,
@@ -111,24 +115,48 @@ class AutoChatManager:
         send_button: dict[str, int] | None = None,
     ) -> str:
         task_id = uuid.uuid4().hex[:12]
-        state = AutoChatState(
-            task_id=task_id,
+        from api.db.mongodb import get_db
+        from api.services.mobile_execution import acquire_mobile_execution
+
+        lease = await acquire_mobile_execution(
+            get_db(),
             device_id=device_id,
-            contact_id=contact_id,
-            project_id=project_id,
-            contact_name=contact_name,
-            my_background=my_background,
-            goal=goal,
-            platform=platform,
-            owner=owner,
-            interval=max(2.0, float(interval)),
-            auto_send=auto_send,
-            ensure_chat=ensure_chat,
-            send_button=send_button,
+            task_id=task_id,
+            owner=f"auto_chat:{owner or 'system'}",
+            requested_by=owner or "",
+            kind="auto_chat",
         )
-        self._sessions[task_id] = state
-        self._tasks[task_id] = asyncio.create_task(self._loop(state))
-        return task_id
+        try:
+            from core.mobile.identity import resolve_device_key
+
+            device_key = await asyncio.to_thread(resolve_device_key, device_id)
+            state = AutoChatState(
+                task_id=task_id,
+                device_id=device_id,
+                contact_id=contact_id,
+                project_id=project_id,
+                contact_name=contact_name,
+                my_background=my_background,
+                goal=goal,
+                platform=platform,
+                device_key=device_key,
+                app_instance=app_instance or "primary",
+                owner=owner,
+                interval=max(2.0, float(interval)),
+                auto_send=auto_send,
+                ensure_chat=ensure_chat,
+                send_button=send_button,
+            )
+            self._sessions[task_id] = state
+            self._leases[task_id] = lease
+            self._tasks[task_id] = asyncio.create_task(self._loop(state))
+            return task_id
+        except BaseException:
+            self._tasks.pop(task_id, None)
+            self._sessions.pop(task_id, None)
+            self._leases.pop(task_id, None)
+            await lease.close()
+            raise
 
     def stop(
         self,
@@ -167,6 +195,8 @@ class AutoChatManager:
             "contact_id": s.contact_id,
             "project_id": s.project_id,
             "contact_name": s.contact_name,
+            "device_key": s.device_key,
+            "app_instance": s.app_instance,
             "goal": s.goal,
             "owner": s.owner,
             "running": s.running,
@@ -239,6 +269,9 @@ class AutoChatManager:
             pass
 
     async def _loop(self, state: AutoChatState) -> None:
+        lease = self._leases.get(state.task_id)
+        if lease is not None:
+            lease.bind_current_task()
         _publish_ac(state, "started")
         await self._persist(state)
         try:
@@ -260,7 +293,12 @@ class AutoChatManager:
                     if chstate.contact_name:
                         state.contact_name = chstate.contact_name
                     if not state.contact_id:
-                        derived = derive_contact_id(state.platform, chstate.contact_name)
+                        derived = derive_contact_id(
+                            state.platform,
+                            chstate.contact_name,
+                            device_key=state.device_key,
+                            app_instance=state.app_instance,
+                        )
                         if derived:
                             state.contact_id = derived
                     state.last_state = {
@@ -312,6 +350,8 @@ class AutoChatManager:
                             project_id=state.project_id,
                             task_id=state.task_id,
                             source="auto_chat",
+                            device_key=state.device_key,
+                            app_instance=state.app_instance,
                             evidence={
                                 key: screen.get(key)
                                 for key in (
@@ -379,6 +419,10 @@ class AutoChatManager:
             state.running = False
             _publish_ac(state, "stopped")
             await self._persist(state)
+            lease = self._leases.pop(state.task_id, None)
+            if lease is not None:
+                await lease.close()
+            self._tasks.pop(state.task_id, None)
 
     # ============ 新好友 watcher(加人后自动聊) ============
 
@@ -388,6 +432,7 @@ class AutoChatManager:
         *,
         project_id: str | None = None,
         platform: str = "微信",
+        app_instance: str = "primary",
         my_background: str = "",
         auto_accept: bool = True,
         auto_send: bool = False,
@@ -396,22 +441,42 @@ class AutoChatManager:
         owner: str | None = None,
     ) -> str:
         watch_id = "watch-" + uuid.uuid4().hex[:8]
-        self._watch_owners[watch_id] = owner
-        self._watchers[watch_id] = asyncio.create_task(
-            self._watch_loop(
-                watch_id,
-                device_id,
-                project_id=project_id,
-                platform=platform,
-                my_background=my_background,
-                auto_accept=auto_accept,
-                auto_send=auto_send,
-                interval=max(8.0, float(interval)),
-                send_button=send_button,
-                owner=owner,
-            )
+        from api.db.mongodb import get_db
+        from api.services.mobile_execution import acquire_mobile_execution
+
+        lease = await acquire_mobile_execution(
+            get_db(),
+            device_id=device_id,
+            task_id=watch_id,
+            owner=f"auto_chat_watch:{owner or 'system'}",
+            requested_by=owner or "",
+            kind="auto_chat_watch",
         )
-        return watch_id
+        try:
+            self._watch_owners[watch_id] = owner
+            self._leases[watch_id] = lease
+            self._watchers[watch_id] = asyncio.create_task(
+                self._watch_loop(
+                    watch_id,
+                    device_id,
+                    project_id=project_id,
+                    platform=platform,
+                    app_instance=app_instance,
+                    my_background=my_background,
+                    auto_accept=auto_accept,
+                    auto_send=auto_send,
+                    interval=max(8.0, float(interval)),
+                    send_button=send_button,
+                    owner=owner,
+                )
+            )
+            return watch_id
+        except BaseException:
+            self._watchers.pop(watch_id, None)
+            self._watch_owners.pop(watch_id, None)
+            self._leases.pop(watch_id, None)
+            await lease.close()
+            raise
 
     def stop_watch(
         self,
@@ -436,6 +501,7 @@ class AutoChatManager:
         *,
         project_id: str | None,
         platform: str,
+        app_instance: str,
         my_background: str,
         auto_accept: bool,
         auto_send: bool,
@@ -445,6 +511,9 @@ class AutoChatManager:
     ) -> None:
         from core.mobile.executor import run_task_stream
 
+        lease = self._leases.get(watch_id)
+        if lease is not None:
+            lease.bind_current_task()
         started_contacts: set[str] = set()
         publish(
             {
@@ -489,19 +558,53 @@ class AutoChatManager:
                         and chstate.contact_name not in started_contacts
                     ):
                         started_contacts.add(chstate.contact_name)
-                        cid = derive_contact_id(platform, chstate.contact_name)
-                        task_id = await self.start(
-                            device_id,
-                            cid,
-                            project_id=project_id,
-                            contact_name=chstate.contact_name,
-                            platform=platform,
-                            my_background=my_background,
-                            auto_send=auto_send,
-                            ensure_chat=True,
-                            send_button=send_button,
-                            owner=owner,
+                        from core.mobile.identity import resolve_device_key
+
+                        device_key = await asyncio.to_thread(
+                            resolve_device_key, device_id
                         )
+                        cid = derive_contact_id(
+                            platform,
+                            chstate.contact_name,
+                            device_key=device_key,
+                            app_instance=app_instance,
+                        )
+                        # Watcher and auto-chat cannot control one phone concurrently.
+                        # Hand the device back, start the chat session, then finish this
+                        # watcher. A new watcher can be started after that session ends.
+                        active_lease = self._leases.pop(watch_id, None)
+                        if active_lease is not None:
+                            await active_lease.close()
+                        try:
+                            task_id = await self.start(
+                                device_id,
+                                cid,
+                                project_id=project_id,
+                                contact_name=chstate.contact_name,
+                                platform=platform,
+                                app_instance=app_instance,
+                                my_background=my_background,
+                                auto_send=auto_send,
+                                ensure_chat=True,
+                                send_button=send_button,
+                                owner=owner,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            publish(
+                                {
+                                    "type": "auto_chat_watch",
+                                    "device_id": device_id,
+                                    "contact_id": cid,
+                                    "project_id": project_id,
+                                    "data": {
+                                        "watch_id": watch_id,
+                                        "event": "handoff_failed",
+                                        "contact_name": chstate.contact_name,
+                                        "message": str(exc),
+                                    },
+                                }
+                            )
+                            return
                         publish(
                             {
                                 "type": "auto_chat_watch",
@@ -516,6 +619,7 @@ class AutoChatManager:
                                 },
                             }
                         )
+                        return
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -535,6 +639,9 @@ class AutoChatManager:
         except asyncio.CancelledError:
             pass
         finally:
+            lease = self._leases.pop(watch_id, None)
+            if lease is not None:
+                await lease.close()
             self._watchers.pop(watch_id, None)
             self._watch_owners.pop(watch_id, None)
             publish(

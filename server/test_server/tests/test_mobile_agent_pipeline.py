@@ -13,19 +13,34 @@ PNG_1X1 = (
 )
 
 
+def _use_local_object_storage(monkeypatch, root: Path) -> None:
+    import api.storage.service as storage_service
+
+    async def local_config(_category: str) -> dict[str, object]:
+        return {
+            "provider": "local",
+            "enabled": True,
+            "local_root": str(root),
+        }
+
+    monkeypatch.setattr(storage_service, "get_runtime_config_section", local_config)
+
+
 async def _cleanup_mobile_project(db, project_id: str, *extra_projects: str) -> None:
     from api.db.collections import (
         AUTO_CHAT_SESSIONS_COLLECTION,
         CONTACT_PROFILES_COLLECTION,
+        FINDINGS_COLLECTION,
         MOBILE_OPERATION_LOGS_COLLECTION,
+        MOBILE_PROFILE_OBSERVATIONS_COLLECTION,
         MOBILE_SCREENSHOTS_COLLECTION,
+        PROFILES_COLLECTION,
     )
     from api.dao import mobile_artifacts
 
     projects = [project_id, *extra_projects]
-    screenshots = []
     for pid in projects:
-        screenshots.extend(await mobile_artifacts.list_screenshots(db, project_id=pid, limit=500))
+        await mobile_artifacts.delete_project_artifacts(db, pid)
     await db[MOBILE_SCREENSHOTS_COLLECTION].delete_many({"project_id": {"$in": projects}})
     await db[MOBILE_OPERATION_LOGS_COLLECTION].delete_many({"project_id": {"$in": projects}})
     await db[AUTO_CHAT_SESSIONS_COLLECTION].delete_many({"project_id": {"$in": projects}})
@@ -37,10 +52,11 @@ async def _cleanup_mobile_project(db, project_id: str, *extra_projects: str) -> 
             ]
         }
     )
-    for doc in screenshots:
-        Path(doc.get("file_path") or "").unlink(missing_ok=True)
-
-
+    await db[MOBILE_PROFILE_OBSERVATIONS_COLLECTION].delete_many(
+        {"project_id": {"$in": projects}}
+    )
+    await db[FINDINGS_COLLECTION].delete_many({"project_id": {"$in": projects}})
+    await db[PROFILES_COLLECTION].delete_many({"project_id": {"$in": projects}})
 def test_executor_stream_persists_step_screenshot_and_operation_log(tmp_path: Path, monkeypatch) -> None:
     async def run() -> None:
         from api.dao import mobile_artifacts
@@ -52,6 +68,7 @@ def test_executor_stream_persists_step_screenshot_and_operation_log(tmp_path: Pa
         task_id = "task-exec-1"
         contact_id = "wechat:alice"
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
+        _use_local_object_storage(monkeypatch, tmp_path / "objects")
 
         init_mongo()
         db = get_db()
@@ -92,8 +109,13 @@ def test_executor_stream_persists_step_screenshot_and_operation_log(tmp_path: Pa
                 )
             ]
 
-            assert [event["type"] for event in events] == ["task_start", "step", "done"]
-            step = events[1]["data"]
+            assert [event["type"] for event in events] == [
+                "device_ready",
+                "task_start",
+                "step",
+                "done",
+            ]
+            step = events[2]["data"]
             assert step["screenshot_id"].startswith("ms_")
             assert step["screenshot_url"].endswith(f"{step['screenshot_id']}/image")
 
@@ -102,7 +124,12 @@ def test_executor_stream_persists_step_screenshot_and_operation_log(tmp_path: Pa
             )
             assert len(screenshots) == 1
             assert screenshots[0]["source"] == "agent_step"
-            assert Path(screenshots[0]["file_path"]).exists()
+            from api.storage import get_object_storage
+
+            stored = await (await get_object_storage()).get_bytes(
+                screenshots[0]["storage_object_id"]
+            )
+            assert stored
 
             logs = await mobile_artifacts.list_operations(
                 db, project_id=project_id, task_id=task_id, contact_id=contact_id, limit=20
@@ -110,7 +137,10 @@ def test_executor_stream_persists_step_screenshot_and_operation_log(tmp_path: Pa
             by_type = {item["operation_type"]: item for item in logs}
             assert {"agent_task", "agent_step", "agent_done"} <= set(by_type)
             assert by_type["agent_step"]["screenshot_id"] == screenshots[0]["screenshot_id"]
-            assert by_type["agent_step"]["data"]["screenshot"] == "<stored-on-disk>"
+            assert (
+                by_type["agent_step"]["data"]["screenshot"]
+                == "<stored-in-object-storage>"
+            )
             assert by_type["agent_done"]["status"] == "ok"
         finally:
             await _cleanup_mobile_project(db, project_id)
@@ -127,6 +157,7 @@ def test_read_screen_saves_project_screenshot(tmp_path: Path, monkeypatch) -> No
 
         project_id = "__pytest_mobile_read_screen__"
         monkeypatch.setenv("MOBILE_SCREENSHOT_DIR", str(tmp_path))
+        _use_local_object_storage(monkeypatch, tmp_path / "objects")
 
         init_mongo()
         db = get_db()
@@ -134,7 +165,7 @@ def test_read_screen_saves_project_screenshot(tmp_path: Path, monkeypatch) -> No
         await _cleanup_mobile_project(db, project_id)
 
         class FakeManager:
-            def capture(self, device_id: str):
+            def capture(self, device_id: str, _timeout: int = 10):
                 assert device_id == "device-read"
                 return SimpleNamespace(base64_data=PNG_1X1, width=1, height=1)
 

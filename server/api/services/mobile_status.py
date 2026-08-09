@@ -19,17 +19,34 @@ async def list_mobile_device_statuses(
 ) -> list[dict[str, Any]]:
     """Return the current device pool enriched with persisted metadata."""
     from api.dao import device_metadata as metadata_dao
+    from api.dao import mobile_execution_leases as execution_leases_dao
     from core.mobile.pool import DevicePool
 
     items = await asyncio.to_thread(DevicePool.get_instance().list_pool)
     keys = [str(item.get("device_key") or item.get("device_id") or "") for item in items]
-    metadata = await metadata_dao.get_metadata_map(db, {key for key in keys if key})
+    metadata, active_leases = await asyncio.gather(
+        metadata_dao.get_metadata_map(db, {key for key in keys if key}),
+        execution_leases_dao.list_active(db),
+    )
+    leases_by_device = {
+        str(lease.get("device_key") or ""): lease for lease in active_leases
+    }
 
     enriched: list[dict[str, Any]] = []
     for raw, key in zip(items, keys):
         item = dict(raw)
         meta = metadata.get(key) or {}
         item.setdefault("device_key", key)
+        execution = leases_by_device.get(key)
+        item["executing"] = execution is not None
+        item["execution"] = (
+            {
+                field: execution.get(field)
+                for field in ("task_id", "owner", "kind", "expires_at")
+            }
+            if execution
+            else None
+        )
         item["meta"] = {
             "display_name": meta.get("display_name"),
             "note": meta.get("note", ""),

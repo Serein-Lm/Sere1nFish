@@ -38,26 +38,10 @@ from core.mobile.executor import (
     unregister_agent,
 )
 from core.mobile.manager import MobileDeviceManager
+from core.mobile.prompt_runtime import load_mobile_prompt
 from core.mobile.screen_capture import capture_ready_screen, wake_device
 from core.observability import observation_context
 
-
-_PLANNER_SYSTEM = (
-    "你是手机自动化的规划层。把用户的高层目标拆成一组**有序、原子、可在手机上逐步执行**的子任务。\n"
-    "要求:\n"
-    "- 每个子任务是一句明确的操作意图,必须能交给执行层直接看屏执行。\n"
-    "- 不要假设必须先读屏;目标已明确时可直接规划 Home、打开应用、搜索、输入等动作。\n"
-    "- 不要输出'观察屏幕'、'分析页面'、'判断是否成功'这类元步骤。\n"
-    "- 不要输出'唤醒屏幕'、'亮屏'这类设备前置步骤;系统会在规划/执行前自动处理。\n"
-    "- 如果目标明确要求'回到桌面/主屏幕'后打开应用,合并成一个子任务,如'回到主屏幕并打开应用商店'。\n"
-    "- 涉及应用时,第一步通常是'打开X'或'回到主屏幕并打开X';已在当前屏幕上下文明确处于目标应用时可省略。\n"
-    "- 涉及搜索/输入时,优先合并为一个可验证意图,如'在应用商店搜索微信';只有后续目标依赖搜索结果时再单独列'点击搜索结果中的微信'。\n"
-    "- 不要把'点击搜索框'、'输入关键词'、'点击搜索按钮'机械拆成三步;执行层可以在同一屏内批量点击、输入并提交。\n"
-    "- 涉及点击时,子任务应说明可见目标,如'点击底部购物车'或'点击搜索结果中的第一个商品'。\n"
-    "- 不要太碎(避免一步一次无语义点击),也不要太大(一步只含一个意图)。\n"
-    "- 简单目标保留 1 步,常规任务 2-6 步,复杂任务最多 8 步。\n"
-    "- 只输出 JSON object,字段为 subtasks,不要解释。"
-)
 
 _FRESH_START_RE = re.compile(
     r"(回到桌面|返回桌面|主屏幕|回首页|回到主页|打开|启动|进入|运行|拉起)"
@@ -93,16 +77,11 @@ async def plan_task(goal: str, *, screen_analysis: str | None = None) -> list[st
     with observation_context(phase="mobile_plan", agent="mobile_planner"):
         plan: TaskPlan = await structured.ainvoke(
             [
-                SystemMessage(content=_PLANNER_SYSTEM),
+                SystemMessage(content=load_mobile_prompt("mobile_agent/planner")),
                 HumanMessage(content=human),
             ]
         )
     return plan.subtasks
-
-
-_VISION_DESCRIBE = (
-    "简要描述这张手机截图当前所在的界面、关键可见元素与可执行操作,中文,3-5 句。"
-)
 
 
 async def describe_screen(
@@ -126,7 +105,10 @@ async def describe_screen(
             [
                 HumanMessage(
                     content=[
-                        {"type": "text", "text": _VISION_DESCRIBE},
+                        {
+                            "type": "text",
+                            "text": load_mobile_prompt("mobile_agent/screen_describe"),
+                        },
                         {
                             "type": "image_url",
                             "image_url": {
@@ -161,14 +143,6 @@ async def describe_screen(
     return resp.content if isinstance(resp.content, str) else str(resp.content)
 
 
-_REPLAN_SYSTEM = (
-    "你是手机自动化的规划层,正在「重规划」。前面某个子任务失败了。"
-    "请基于:原始目标、已完成的子任务、失败的子任务、以及当前手机界面,"
-    "给出**接下来要做的新子任务序列**(只含剩余步骤,不要重复已完成)。"
-    "如判断目标已无法继续,返回空列表。只输出 JSON object,字段为 subtasks。"
-)
-
-
 async def replan_remaining(
     goal: str,
     completed: list[str],
@@ -191,7 +165,10 @@ async def replan_remaining(
     )
     with observation_context(phase="mobile_replan", agent="mobile_planner"):
         plan: TaskPlan = await structured.ainvoke(
-            [SystemMessage(content=_REPLAN_SYSTEM), HumanMessage(content=human)]
+            [
+                SystemMessage(content=load_mobile_prompt("mobile_agent/replanner")),
+                HumanMessage(content=human),
+            ]
         )
     return plan.subtasks
 

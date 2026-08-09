@@ -53,23 +53,6 @@ class _FakeDB:
         return self._c.setdefault(name, _RecordsColl())
 
 
-class _FakePool:
-    _inst = None
-    events: list = []
-
-    @classmethod
-    def get_instance(cls):
-        if cls._inst is None:
-            cls._inst = cls()
-        return cls._inst
-
-    def acquire(self, device_key, owner, note=None, device_id=None):
-        type(self).events.append(("acquire", device_key))
-
-    def release(self, device_key, owner, force=False):
-        type(self).events.append(("release", device_key))
-
-
 async def _accepted_detail_entry(*_args, **_kwargs):
     target_name = str(_kwargs.get("target_name") or "")
     candidate_title = str(
@@ -120,11 +103,22 @@ def _patch_pipeline(monkeypatch, *, analyze_returns):
             for record in analyze_returns
         ]
 
-    _FakePool.events = []
-    _FakePool._inst = None
+    async def _completed_checkpoints(*_args, **_kwargs):
+        return set()
 
-    monkeypatch.setattr(pl, "resolve_device_key", lambda device_id: f"dk-{device_id}")
-    monkeypatch.setattr(pl, "DevicePool", _FakePool)
+    async def _mark_checkpoint(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        pl.collect_dao,
+        "list_completed_checkpoint_keys",
+        _completed_checkpoints,
+    )
+    monkeypatch.setattr(
+        pl.collect_dao,
+        "mark_keyword_checkpoint",
+        _mark_checkpoint,
+    )
     monkeypatch.setattr(pl, "run_planned_task", _fake_run_planned)
     monkeypatch.setattr(pl, "capture_ready_screen", _fake_capture)
     monkeypatch.setattr(pl, "_do_swipe", lambda device_id: None)
@@ -189,8 +183,6 @@ def test_pipeline_full_chain_persists_and_notifies(monkeypatch):
     assert notifies[0]["event"] == "mobile_collect_incremental"
     assert result["high_score_records"] == 1
     assert result["max_score"] == 80
-    assert ("acquire", "dk-devA") in _FakePool.events
-    assert ("release", "dk-devA") in _FakePool.events
     assert pl.request_stop("run-1") is False
     assert pl.is_running("run-1") is False
 
@@ -207,7 +199,6 @@ def test_pipeline_no_notify_when_notify_on_none(monkeypatch):
     result = asyncio.new_event_loop().run_until_complete(scenario())
     assert result["new"] == 1
     assert notifies == []
-    assert ("release", "dk-devA") in _FakePool.events
 
 
 def test_pipeline_suppresses_low_score_incremental_notification(monkeypatch):
@@ -262,8 +253,101 @@ def test_pipeline_raises_when_every_keyword_enters_dlq(monkeypatch):
 
     with pytest.raises(RuntimeError, match="手机采集全部失败"):
         asyncio.new_event_loop().run_until_complete(scenario())
-    assert ("release", "dk-devA") in _FakePool.events
     assert pl.is_running("run-failed") is False
+
+
+def test_pipeline_accepts_a_valid_empty_screen(monkeypatch):
+    pl, _notifies = _patch_pipeline(monkeypatch, analyze_returns=[])
+    statuses: list[str] = []
+
+    async def mark_checkpoint(*_args, **kwargs):
+        statuses.append(str(kwargs.get("status") or ""))
+
+    monkeypatch.setattr(pl.collect_dao, "mark_keyword_checkpoint", mark_checkpoint)
+    result = asyncio.run(
+        pl.run_collect_task(
+            _FakeDB(),
+            run_task_id="run-empty",
+            project_id="p1",
+            task_def=_task_def(),
+        )
+    )
+
+    assert result["keywords_completed"] == 1
+    assert result["total"] == 0
+    assert result["failed"] == 0
+    assert statuses == ["running", "captured", "completed"]
+
+
+def test_pipeline_does_not_complete_checkpoint_when_persist_fails(monkeypatch):
+    pl, _notifies = _patch_pipeline(
+        monkeypatch,
+        analyze_returns=[{"title": "A", "author": "x"}],
+    )
+    statuses: list[str] = []
+
+    async def mark_checkpoint(*_args, **kwargs):
+        statuses.append(str(kwargs.get("status") or ""))
+
+    async def fail_persist(*_args, **_kwargs):
+        raise RuntimeError("mongo unavailable")
+
+    monkeypatch.setattr(pl.collect_dao, "mark_keyword_checkpoint", mark_checkpoint)
+    monkeypatch.setattr(pl._PersistStage, "handle", fail_persist)
+    result = asyncio.run(
+        pl.run_collect_task(
+            _FakeDB(),
+            run_task_id="run-persist-failed",
+            project_id="p1",
+            task_def=_task_def(),
+        )
+    )
+
+    assert result["persist_failed"] == 1
+    assert result["keywords_completed"] == 0
+    assert statuses == ["running", "captured"]
+
+
+def test_pipeline_rejects_keyword_when_every_screen_capture_fails(monkeypatch):
+    pl, _notifies = _patch_pipeline(monkeypatch, analyze_returns=[])
+
+    async def fail_capture(*_args, **_kwargs):
+        raise RuntimeError("adb disconnected")
+
+    monkeypatch.setattr(pl, "capture_ready_screen", fail_capture)
+    with pytest.raises(RuntimeError, match="手机采集全部失败"):
+        asyncio.run(
+            pl.run_collect_task(
+                _FakeDB(),
+                run_task_id="run-screen-failed",
+                project_id="p1",
+                task_def=_task_def(swipe_times=1),
+            )
+        )
+
+
+def test_pipeline_initialization_failure_does_not_leave_running_marker(monkeypatch):
+    pl, _notifies = _patch_pipeline(monkeypatch, analyze_returns=[])
+
+    async def fail_checkpoint_load(*_args, **_kwargs):
+        raise RuntimeError("checkpoint store unavailable")
+
+    monkeypatch.setattr(
+        pl.collect_dao,
+        "list_completed_checkpoint_keys",
+        fail_checkpoint_load,
+    )
+    with pytest.raises(RuntimeError, match="checkpoint store unavailable"):
+        asyncio.run(
+            pl.run_collect_task(
+                _FakeDB(),
+                run_task_id="run-init-failed",
+                project_id="p1",
+                task_def=_task_def(),
+            )
+        )
+
+    assert pl.is_running("run-init-failed") is False
 
 
 def test_request_stop_unknown_is_idempotent():

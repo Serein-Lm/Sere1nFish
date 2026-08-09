@@ -121,7 +121,7 @@ def test_shared_llm_factory_preserves_vision_parameters(monkeypatch) -> None:
         def __init__(self, **kwargs) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr(agent_runtime, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr(agent_runtime, "GuardedChatOpenAI", FakeChatOpenAI)
     monkeypatch.setattr(
         observability,
         "get_global_tracker",

@@ -69,6 +69,7 @@ interface WatcherItem {
   watch_id: string
   device_id: string
   platform: string
+  app_instance: string
   auto_send: boolean
 }
 
@@ -93,6 +94,7 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
   const [w, setW] = useState({
     device_id: '',
     platform: '微信',
+    app_instance: 'primary',
     my_background: localStorage.getItem(BG_KEY) ?? '',
     auto_accept: true,
     auto_send: false,
@@ -109,6 +111,7 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
     goal: '',
     my_background: localStorage.getItem(BG_KEY) ?? '',
     platform: '微信',
+    app_instance: 'primary',
     interval: 8,
     auto_send: false,
     ensure_chat: true,
@@ -229,13 +232,20 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
       const res = await startWatch({
         device_id: w.device_id,
         platform: w.platform,
+        app_instance: w.app_instance,
         my_background: w.my_background,
         auto_accept: w.auto_accept,
         auto_send: w.auto_send,
         interval: w.interval,
       })
       message.success('新好友 watcher 已启动')
-      setWatchers((prev) => [...prev, { watch_id: res.watch_id, device_id: w.device_id, platform: w.platform, auto_send: w.auto_send }])
+      setWatchers((prev) => [...prev, {
+        watch_id: res.watch_id,
+        device_id: w.device_id,
+        platform: w.platform,
+        app_instance: w.app_instance,
+        auto_send: w.auto_send,
+      }])
     } catch (e) {
       message.error(e instanceof Error ? e.message : '启动失败')
     } finally {
@@ -268,6 +278,7 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
         goal: s.goal || undefined,
         my_background: s.my_background,
         platform: s.platform,
+        app_instance: s.app_instance,
         interval: s.interval,
         auto_send: s.auto_send,
         ensure_chat: s.ensure_chat,
@@ -379,6 +390,7 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
           </div>
           <div className="ac-watcher-form">
             <Select
+              id="watch-device"
               placeholder="选择设备"
               style={{ minWidth: 160, flex: 1 }}
               options={devices}
@@ -386,20 +398,38 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
               onChange={(v) => setW((p) => ({ ...p, device_id: v }))}
             />
             <Input
+              id="watch-platform"
+              name="watch_platform"
               style={{ maxWidth: 120 }}
               value={w.platform}
               onChange={(e) => setW((p) => ({ ...p, platform: e.target.value }))}
               placeholder="平台"
             />
-            <InputNumber
-              min={8}
-              value={w.interval}
-              onChange={(v) => setW((p) => ({ ...p, interval: v ?? 20 }))}
-              addonAfter="秒"
-              style={{ width: 110 }}
+            <Select
+              id="watch-app-instance"
+              style={{ minWidth: 110 }}
+              value={w.app_instance}
+              onChange={(value) => setW((p) => ({ ...p, app_instance: value }))}
+              options={[
+                { value: 'primary', label: '主应用' },
+                { value: 'secondary', label: '应用分身' },
+              ]}
             />
+            <div className="ac-number-with-unit">
+              <InputNumber
+                id="watch-interval"
+                name="watch_interval"
+                min={8}
+                value={w.interval}
+                onChange={(v) => setW((p) => ({ ...p, interval: v ?? 20 }))}
+                style={{ width: 78 }}
+              />
+              <Text type="secondary">秒</Text>
+            </div>
           </div>
           <Input.TextArea
+            id="watch-background"
+            name="watch_background"
             value={w.my_background}
             onChange={(e) => setW((p) => ({ ...p, my_background: e.target.value }))}
             placeholder="我的背景（注入到后续 auto-chat）"
@@ -428,7 +458,7 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
                   <span className="ac-live-dot" />
                   <span className="ac-watcher-id">{wt.watch_id}</span>
                   <Text type="secondary" className="ac-mono">
-                    {wt.device_id} · {wt.platform}
+                    {wt.device_id} · {wt.platform} · {wt.app_instance === 'secondary' ? '应用分身' : '主应用'}
                   </Text>
                   <div className="toolbar-spacer" />
                   <Button size="small" danger icon={<StopOutlined />} onClick={() => handleStopWatch(wt.watch_id)}>
@@ -564,8 +594,11 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
         width={520}
       >
         <div className="ac-session-form" ref={sbRef}>
-          <label className="field-label">设备</label>
+          <label className="field-label" htmlFor="session-device">
+            设备
+          </label>
           <Select
+            id="session-device"
             placeholder="选择设备"
             style={{ width: '100%' }}
             options={devices}
@@ -574,23 +607,27 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
           />
           <div className="ac-form-row">
             <div className="ac-form-col">
-              <label className="field-label">contact_id（可选，留空自动推导）</label>
-              <Input value={s.contact_id} onChange={(e) => setS((p) => ({ ...p, contact_id: e.target.value }))} placeholder="wechat:张三" />
+              <label className="field-label" htmlFor="session-contact-id">contact_id（可选，留空自动推导）</label>
+              <Input id="session-contact-id" name="session_contact_id" value={s.contact_id} onChange={(e) => setS((p) => ({ ...p, contact_id: e.target.value }))} placeholder="wechat:张三" />
             </div>
             <div className="ac-form-col">
-              <label className="field-label">联系人名（可选）</label>
-              <Input value={s.contact_name} onChange={(e) => setS((p) => ({ ...p, contact_name: e.target.value }))} placeholder="张三" />
+              <label className="field-label" htmlFor="session-contact-name">联系人名（可选）</label>
+              <Input id="session-contact-name" name="session_contact_name" value={s.contact_name} onChange={(e) => setS((p) => ({ ...p, contact_name: e.target.value }))} placeholder="张三" />
             </div>
           </div>
-          <label className="field-label">我的背景</label>
+          <label className="field-label" htmlFor="session-background">我的背景</label>
           <Input.TextArea
+            id="session-background"
+            name="session_background"
             value={s.my_background}
             onChange={(e) => setS((p) => ({ ...p, my_background: e.target.value }))}
             autoSize={{ minRows: 2, maxRows: 3 }}
             placeholder="我是 XX 公司商务…"
           />
-          <label className="field-label">目标 goal（可选，留空为普通聊天）</label>
+          <label className="field-label" htmlFor="session-goal">目标 goal（可选，留空为普通聊天）</label>
           <Input.TextArea
+            id="session-goal"
+            name="session_goal"
             value={s.goal}
             onChange={(e) => setS((p) => ({ ...p, goal: e.target.value }))}
             autoSize={{ minRows: 2, maxRows: 3 }}
@@ -598,12 +635,35 @@ export default function MobileAutoChat({ embedded = false }: MobileAutoChatProps
           />
           <div className="ac-form-row">
             <div className="ac-form-col">
-              <label className="field-label">平台</label>
-              <Input value={s.platform} onChange={(e) => setS((p) => ({ ...p, platform: e.target.value }))} />
+              <label className="field-label" htmlFor="session-platform">平台</label>
+              <Input id="session-platform" name="session_platform" value={s.platform} onChange={(e) => setS((p) => ({ ...p, platform: e.target.value }))} />
             </div>
             <div className="ac-form-col">
-              <label className="field-label">轮询间隔</label>
-              <InputNumber min={2} value={s.interval} onChange={(v) => setS((p) => ({ ...p, interval: v ?? 8 }))} addonAfter="秒" style={{ width: '100%' }} />
+              <label className="field-label" htmlFor="session-app-instance">应用实例</label>
+              <Select
+                id="session-app-instance"
+                value={s.app_instance}
+                onChange={(value) => setS((p) => ({ ...p, app_instance: value }))}
+                options={[
+                  { value: 'primary', label: '主应用' },
+                  { value: 'secondary', label: '应用分身' },
+                ]}
+                style={{ width: '100%' }}
+              />
+            </div>
+            <div className="ac-form-col">
+              <label className="field-label" htmlFor="session-interval">轮询间隔</label>
+              <div className="ac-number-with-unit ac-number-with-unit-block">
+                <InputNumber
+                  id="session-interval"
+                  name="session_interval"
+                  min={2}
+                  value={s.interval}
+                  onChange={(v) => setS((p) => ({ ...p, interval: v ?? 8 }))}
+                  style={{ flex: 1, minWidth: 0 }}
+                />
+                <Text type="secondary">秒</Text>
+              </div>
             </div>
           </div>
           <div className="ac-switches">

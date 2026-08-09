@@ -19,8 +19,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, create_model
 
 from Sere1nGraph.graph.agents.runtime import create_llm
-from Sere1nGraph.graph.prompts.loader import load_prompt
 from api.services.runtime_config import get_runtime_app_config
+from core.mobile.prompt_runtime import load_mobile_prompt
 from core.observability import observation_context
 
 from api.models.mobile_collect import ExtractField
@@ -289,28 +289,16 @@ async def triage_screenshot(
     records_model = _build_records_model(fields, with_coords=True)
     structured = llm.with_structured_output(records_model)
 
-    system = (
-        f"你是手机列表页信息分诊助手。当前应用: {app_name}, 搜索词: {keyword or '无'}。\n"
-        f"【目标主体】正式名称为「{target_name or keyword or '无'}」，搜索词为「{keyword or '无'}」，"
-        f"可靠别名为「{'、'.join(target_aliases or []) or '无'}」。逐条判断每个条目的主体"
-        "是否就是该目标主体,并用 subject_match 打出主体对应程度。只对真正属于/围绕目标主体的"
-        "条目给高分;其他主体(其他公司/机构/无关话题)给低 subject_match,不要混入。\n"
-        f"请识别当前列表页中所有可见条目,并为每个条目提取字段: {_fields_desc(fields)}。\n"
-        "同时给出:\n"
-        "- subject_match: 0-100 主体对应程度。90-100=完全就是目标主体本身;70-89=直接相关"
-        "(目标主体的项目/公告/子事项);40-69=间接相关(同行业/关联方/仅提及);0-39=不同主体或无关;\n"
-        "- relevance_score: 0-100 的相关性/价值分,依据与目标主体的相关度与内容价值判断,越相关越高;"
-        "与目标主体强相关、且含招标/中标/公告/联系方式等高价值信息的条目应给更高分;\n"
-        "- score_reason: 简短打分理由,说明主体是谁、为何这样评级;\n"
-        "- source_url: 若画面能看到该条目的原文链接/URL(http/https)则填入,看不到就留空,不要臆造;\n"
-        "- content_kind / is_article_result / target_evidence: 识别条目真实类型，并写出主体对应的"
-        "画面证据；没有可见证据时 target_evidence 留空;\n"
-        "- tap_x / tap_y: 该条目在屏幕上可点击中心点的坐标,使用 0-1000 归一化坐标系"
-        "(左上角为 0,0,右下角为 1000,1000);\n"
-        "- tap_left / tap_top / tap_right / tap_bottom: 条目整行可点击区域的矩形边界，"
-        "同样使用 0-1000 坐标。边界必须贴合该条目，不能包含相邻条目、顶部标签或底部导航。\n"
-        f"{policy_instructions}\n"
-        "严格依据画面内容,不臆测;无法确定的字段留空。若画面无有效条目, items 返回空数组。"
+    system = load_mobile_prompt(
+        "mobile_collect/list_triage",
+        {
+            "app_name": app_name,
+            "keyword": keyword or "无",
+            "target_name": target_name or keyword or "无",
+            "target_aliases": "、".join(target_aliases or []) or "无",
+            "fields_desc": _fields_desc(fields),
+            "policy_instructions": policy_instructions or "无额外策略",
+        },
     )
     message = HumanMessage(
         content=[
@@ -357,16 +345,17 @@ async def verify_detail_entry(
     structured = llm.with_structured_output(DetailEntryVerification)
     expected = json.dumps(candidate_fields or {}, ensure_ascii=False, default=str)
     aliases = "、".join(target_aliases or []) or "无"
-    system = load_prompt(_DETAIL_VERIFICATION_PROMPT_SLUG)
-    for placeholder, value in {
-        "{{app_name}}": app_name or "未知应用",
-        "{{keyword}}": keyword or "无",
-        "{{candidate_fields}}": expected,
-        "{{target_name}}": target_name or keyword or "无",
-        "{{target_aliases}}": aliases,
-        "{{policy_instructions}}": policy_instructions or "无额外策略",
-    }.items():
-        system = system.replace(placeholder, value)
+    system = load_mobile_prompt(
+        _DETAIL_VERIFICATION_PROMPT_SLUG,
+        {
+            "app_name": app_name or "未知应用",
+            "keyword": keyword or "无",
+            "candidate_fields": expected,
+            "target_name": target_name or keyword or "无",
+            "target_aliases": aliases,
+            "policy_instructions": policy_instructions or "无额外策略",
+        },
+    )
     message = HumanMessage(
         content=[
             {"type": "text", "text": "校验点击后页面并按 schema 输出。"},
@@ -404,18 +393,18 @@ async def analyze_social_media_frame(
     app_config = await get_runtime_app_config()
     llm = _get_vision_llm(app_config)
     structured = llm.with_structured_output(SocialMediaFrameAnalysis)
-    system = load_prompt(_SOCIAL_MEDIA_FRAME_PROMPT_SLUG)
-    replacements = {
-        "{{app_name}}": app_name or "未知应用",
-        "{{place_name}}": place_name or keyword or "未知地点",
-        "{{keyword}}": keyword or "无",
-        "{{candidate_fields}}": json.dumps(
+    system = load_mobile_prompt(
+        _SOCIAL_MEDIA_FRAME_PROMPT_SLUG,
+        {
+            "app_name": app_name or "未知应用",
+            "place_name": place_name or keyword or "未知地点",
+            "keyword": keyword or "无",
+            "candidate_fields": json.dumps(
             candidate_fields or {}, ensure_ascii=False, default=str
-        ),
-        "{{collection_goal}}": collection_goal or "收集地点公开图片",
-    }
-    for placeholder, value in replacements.items():
-        system = system.replace(placeholder, value)
+            ),
+            "collection_goal": collection_goal or "收集地点公开图片",
+        },
+    )
     message = HumanMessage(
         content=[
             {"type": "text", "text": "审核当前公开图片并按 schema 输出。"},
@@ -471,15 +460,13 @@ async def analyze_detail(
     item_model = _build_item_model(fields, with_coords=False)
     structured = llm.with_structured_output(item_model)
 
-    system = (
-        f"你是手机详情页信息提取助手。当前应用: {app_name}, 搜索词: {keyword or '无'}。\n"
-        f"【目标主体】以搜索词「{keyword or '无'}」为目标主体, 只围绕该主体提取信息, 不要混入无关主体内容。\n"
-        f"以下是同一条内容详情页的一张或多张截图。请综合所有截图,提取字段: {_fields_desc(fields)}。\n"
-        "务必尽力捕捉画面中出现的联系方式(手机号/座机/邮箱/微信号/QQ)与项目背景信息,"
-        "把它们填入对应字段(如 contact / background),便于后续联系与背景分析。\n"
-        "并给出 relevance_score(0-100 相关性/价值分)与 score_reason(简短理由);"
-        "若画面可见原文链接/URL 则填 source_url,看不到留空。\n"
-        "严格依据画面内容,不臆测;无法确定的字段留空。"
+    system = load_mobile_prompt(
+        "mobile_collect/detail_extract",
+        {
+            "app_name": app_name,
+            "keyword": keyword or "无",
+            "fields_desc": _fields_desc(fields),
+        },
     )
     content: list[dict[str, Any]] = [
         {"type": "text", "text": "请综合以下详情页截图提取单条结构化记录并按 schema 输出。"}
@@ -518,9 +505,9 @@ async def analyze_screenshot(
     llm = _get_vision_llm(app_config)
 
     if not fields:
-        prompt = (
-            f"你正在看应用「{app_name}」的截图(搜索词: {keyword or '无'})。"
-            "请用简体中文简要描述当前画面的关键信息(50-150字)。"
+        prompt = load_mobile_prompt(
+            "mobile_collect/screen_summary",
+            {"app_name": app_name, "keyword": keyword or "无"},
         )
         message = HumanMessage(
             content=[
@@ -556,11 +543,13 @@ async def analyze_screenshot(
 
     records_model = _build_records_model(fields, with_coords=False)
     structured = llm.with_structured_output(records_model)
-    system = (
-        f"你是手机截图信息提取助手。当前应用: {app_name}, 搜索词: {keyword or '无'}。\n"
-        f"请从截图中识别所有可见条目,并为每个条目提取字段: {_fields_desc(fields)}。\n"
-        "同时给出 relevance_score(0-100 相关性分)与 score_reason(简短理由)。\n"
-        "严格依据画面内容,不臆测;无法确定的字段留空。若画面无有效条目, items 返回空数组。"
+    system = load_mobile_prompt(
+        "mobile_collect/screen_extract",
+        {
+            "app_name": app_name,
+            "keyword": keyword or "无",
+            "fields_desc": _fields_desc(fields),
+        },
     )
     message = HumanMessage(
         content=[

@@ -50,7 +50,10 @@ async def pause_project_task(
     if status == "pausing":
         cancelled = await cancel_running_project_task(task_id)
         if not cancelled:
-            await tasks_dao.mark_task_paused(db, task_id=task_id)
+            logger.info(
+                "暂停请求已持久化，等待任务所属进程释放资源 | task=%s",
+                task_id,
+            )
         document = await tasks_dao.get_task(
             db,
             project_id=project_id,

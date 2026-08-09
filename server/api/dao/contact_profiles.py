@@ -39,6 +39,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     except Exception:
         pass
     await coll.create_index("device_id")
+    await coll.create_index(
+        [("device_key", 1), ("app_instance", 1), ("platform", 1), ("name", 1)]
+    )
     await coll.create_index("project_id")
     await coll.create_index("project_ids")
     await coll.create_index("project_links.project_id")
@@ -80,6 +83,9 @@ async def merge_persona(
     name: str | None = None,
     platform: str | None = None,
     device_id: str | None = None,
+    device_key: str | None = None,
+    app_instance: str | None = None,
+    identity_version: int | None = None,
     project_id: str | None = None,
 ) -> dict[str, Any] | None:
     """把画像字段合并进 persona.* (不覆盖整个 persona)。"""
@@ -92,6 +98,12 @@ async def merge_persona(
         set_fields["platform"] = platform
     if device_id:
         set_fields["device_id"] = device_id
+    if device_key:
+        set_fields["device_key"] = device_key
+    if app_instance:
+        set_fields["app_instance"] = app_instance
+    if identity_version is not None:
+        set_fields["identity_version"] = identity_version
     if project_id:
         set_fields["project_id"] = project_id
     update: dict[str, Any] = {

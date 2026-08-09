@@ -83,6 +83,7 @@ class AsyncGeminiAgent(AsyncAgentBase):
                 "step.build_message",
                 attrs={"step": self._step_count, "agent_type": self.__class__.__name__},
             ):
+                self._compact_context()
                 self._context.append(
                     MessageBuilder.create_user_message(
                         text=f"Current app: {current_app}",

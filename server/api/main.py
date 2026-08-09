@@ -230,6 +230,7 @@ async def lifespan(app: FastAPI):
         from api.dao import device_reservations as device_reservations_dao
         from api.dao import device_metadata as device_metadata_dao
         from api.dao import mobile_transfers as mobile_transfers_dao
+        from api.dao import mobile_execution_leases as mobile_execution_leases_dao
         await chat_suggestions_dao.ensure_indexes(db)
         await auto_chat_sessions_dao.ensure_indexes(db)
         await mobile_artifacts_dao.ensure_indexes(db)
@@ -237,6 +238,7 @@ async def lifespan(app: FastAPI):
         await device_reservations_dao.ensure_indexes(db)
         await device_metadata_dao.ensure_indexes(db)
         await mobile_transfers_dao.ensure_indexes(db)
+        await mobile_execution_leases_dao.ensure_indexes(db)
         # Skills / Prompts 技能库与提示词库索引
         from api.dao import skills as skills_dao
         from api.dao import prompts as prompts_dao
@@ -320,7 +322,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"索引创建失败（不影响运行）: {e}")
     
-    # 启动时:释放上一进程租约，并重新认领持久化的未完成任务。
+    # 启动时仅回收过期租约，并重新认领心跳已失效的持久化任务。
     try:
         from api.services.task_runtime_recovery import (
             TaskRuntimeMonitor,

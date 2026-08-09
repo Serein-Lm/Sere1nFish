@@ -23,6 +23,7 @@ from api.dao import findings as findings_dao
 from api.dao import mobile_profile_observations as mpo_dao
 from core.mobile.chat_assist import read_screen
 from core.mobile.events import publish
+from core.mobile.prompt_runtime import load_mobile_prompt
 
 
 def _now() -> str:
@@ -48,13 +49,6 @@ class PersonaExtract(BaseModel):
     confidence: float | None = Field(default=None, ge=0, le=1, description="本次提取置信度")
 
 
-_EXTRACT_SYSTEM = (
-    "你是人物画像分析师。基于聊天内容,提炼对方的画像,用于后续针对性沟通。"
-    "重点识别身份背景、兴趣、沟通风格、常用说法、回复节奏、风险/敏感点。"
-    "只输出有依据的信息;没有依据的字段请留空,不要编造。"
-)
-
-
 async def _extract_persona(
     chat_content: str, existing_persona: dict[str, Any] | None
 ) -> PersonaExtract:
@@ -72,7 +66,7 @@ async def _extract_persona(
     )
     return await structured.ainvoke(
         [
-            SystemMessage(content=_EXTRACT_SYSTEM),
+            SystemMessage(content=load_mobile_prompt("mobile_agent/profile_extract")),
             HumanMessage(
                 content=(
                     f"已知画像:\n{existing_str}\n\n"
@@ -123,6 +117,8 @@ async def analyze_and_update(
     task_id: str | None = None,
     source: str = "profile_analyze",
     evidence: dict[str, Any] | None = None,
+    device_key: str = "",
+    app_instance: str = "primary",
 ) -> dict[str, Any]:
     """读屏(或用传入的分析) → 提取画像 → 合并 → 存库,返回最新画像。"""
     evidence = dict(evidence or {})
@@ -154,6 +150,9 @@ async def analyze_and_update(
         name=name or extract.name,
         platform=platform,
         device_id=device_id,
+        device_key=device_key,
+        app_instance=app_instance,
+        identity_version=2 if contact_id.startswith("mobile:v2:") else None,
         project_id=project_id,
     )
 
@@ -231,6 +230,7 @@ async def analyze_and_update(
             "risk_signals_count": len(merged_persona.get("risk_signals") or []),
         },
     )
+    profile = await cp_dao.get_profile(db, contact_id) or profile
 
     # 画像更新推送(系统3:前端实时查看)
     publish(

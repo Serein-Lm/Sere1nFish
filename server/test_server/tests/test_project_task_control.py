@@ -90,6 +90,51 @@ class _Db:
 
 
 @pytest.mark.asyncio
+async def test_remote_pause_stays_pausing_until_owner_process_acknowledges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import project_task_control
+
+    document = {
+        "project_id": "project-remote",
+        "task_id": "task-remote",
+        "task_type": "company_scan",
+        "status": "pausing",
+        "runtime_id": "other-runtime",
+    }
+    marked = False
+
+    async def request_pause(*_args: Any, **_kwargs: Any):
+        return deepcopy(document)
+
+    async def cancel_local(*_args: Any, **_kwargs: Any):
+        return False
+
+    async def get_task(*_args: Any, **_kwargs: Any):
+        return deepcopy(document)
+
+    async def mark_paused(*_args: Any, **_kwargs: Any):
+        nonlocal marked
+        marked = True
+        return True
+
+    monkeypatch.setattr(project_task_control.tasks_dao, "request_task_pause", request_pause)
+    monkeypatch.setattr(project_task_control, "cancel_running_project_task", cancel_local)
+    monkeypatch.setattr(project_task_control.tasks_dao, "get_task", get_task)
+    monkeypatch.setattr(project_task_control.tasks_dao, "mark_task_paused", mark_paused)
+    monkeypatch.setattr(project_task_control, "obs_log", lambda *_a, **_k: None)
+
+    result = await project_task_control.pause_project_task(
+        object(),
+        project_id="project-remote",
+        task_id="task-remote",
+    )
+
+    assert result["status"] == "pausing"
+    assert marked is False
+
+
+@pytest.mark.asyncio
 async def test_task_pause_and_resume_preserve_checkpoint() -> None:
     from api.dao import tasks
 

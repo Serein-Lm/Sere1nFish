@@ -90,6 +90,7 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
             "step.build_message",
             attrs={"step": self._step_count, "agent_type": self.__class__.__name__},
         ):
+            self._compact_context()
             screen_info = MessageBuilder.build_screen_info(current_app)
             text_content = f"** Screen Info **\n\n{screen_info}"
             self._context.append(

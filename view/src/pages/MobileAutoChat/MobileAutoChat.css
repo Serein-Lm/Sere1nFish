@@ -108,6 +108,17 @@
   flex-wrap: wrap;
 }
 
+.ac-number-with-unit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.ac-number-with-unit-block {
+  width: 100%;
+}
+
 .ac-switches {
   display: flex;
   align-items: center;
@@ -338,11 +349,14 @@
   }
 
   .ac-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
   }
 
   .ac-stat {
-    flex: 1;
+    min-width: 0;
+    padding-inline: 10px;
   }
 
   .ac-watcher-form,
@@ -355,6 +369,15 @@
   .ac-watcher-form .ant-input-number {
     max-width: none !important;
     width: 100% !important;
+  }
+
+  .ac-watcher-form .ac-number-with-unit {
+    width: 100%;
+  }
+
+  .ac-watcher-form .ac-number-with-unit .ant-input-number {
+    flex: 1;
+    min-width: 0;
   }
 }
 

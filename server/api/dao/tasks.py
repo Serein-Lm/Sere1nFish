@@ -20,6 +20,16 @@ _NON_COUNTING_RECOVERY_STAGES = {
     "waiting_model",
     "recovering",
 }
+_RUNTIME_HEARTBEAT_STALE_SECONDS = 2 * 60
+
+
+def _heartbeat_is_stale(item: dict[str, Any], *, before: datetime) -> bool:
+    heartbeat = item.get("heartbeat_at")
+    if not isinstance(heartbeat, datetime):
+        return True
+    if heartbeat.tzinfo is None:
+        heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+    return heartbeat <= before
 
 
 async def insert_tasks(
@@ -77,6 +87,7 @@ async def prepare_interrupted_tasks(
 ) -> tuple[list[dict[str, Any]], int]:
     """Return unfinished tasks to the persistent queue after a process restart."""
     now = datetime.now(timezone.utc)
+    stale_before = now - timedelta(seconds=_RUNTIME_HEARTBEAT_STALE_SECONDS)
     unfinished = await db[TASKS_COLLECTION].find(
         {"status": {"$in": ["pending", "running", "pausing"]}},
         {"_id": 0},
@@ -85,11 +96,20 @@ async def prepare_interrupted_tasks(
         item
         for item in unfinished
         if str(item.get("status") or "") == "pausing"
+        and _heartbeat_is_stale(item, before=stale_before)
     ]
     pausing_ids = [str(item.get("task_id") or "") for item in pausing]
     if pausing_ids:
         await db[TASKS_COLLECTION].update_many(
-            {"task_id": {"$in": pausing_ids}, "status": "pausing"},
+            {
+                "task_id": {"$in": pausing_ids},
+                "status": "pausing",
+                "$or": [
+                    {"heartbeat_at": {"$lte": stale_before}},
+                    {"heartbeat_at": {"$exists": False}},
+                    {"heartbeat_at": None},
+                ],
+            },
             {
                 "$set": {
                     "status": "paused",
@@ -111,6 +131,7 @@ async def prepare_interrupted_tasks(
         item
         for item in unfinished
         if str(item.get("status") or "") == "running"
+        and _heartbeat_is_stale(item, before=stale_before)
     ]
     waiting_running = [
         item
@@ -156,7 +177,15 @@ async def prepare_interrupted_tasks(
     waiting_ids = [str(item.get("task_id") or "") for item in waiting_running]
     if waiting_ids:
         await db[TASKS_COLLECTION].update_many(
-            {"task_id": {"$in": waiting_ids}, "status": "running"},
+            {
+                "task_id": {"$in": waiting_ids},
+                "status": "running",
+                "$or": [
+                    {"heartbeat_at": {"$lte": stale_before}},
+                    {"heartbeat_at": {"$exists": False}},
+                    {"heartbeat_at": None},
+                ],
+            },
             {
                 "$set": {
                     "status": "pending",
@@ -182,7 +211,15 @@ async def prepare_interrupted_tasks(
     ]
     if active_ids:
         await db[TASKS_COLLECTION].update_many(
-            {"task_id": {"$in": active_ids}, "status": "running"},
+            {
+                "task_id": {"$in": active_ids},
+                "status": "running",
+                "$or": [
+                    {"heartbeat_at": {"$lte": stale_before}},
+                    {"heartbeat_at": {"$exists": False}},
+                    {"heartbeat_at": None},
+                ],
+            },
             {
                 "$set": {
                     "status": "pending",
@@ -210,7 +247,15 @@ async def prepare_interrupted_tasks(
     if exhausted_ids:
         reason = f"任务连续恢复 {MAX_AUTOMATIC_RECOVERIES} 次仍未完成，已停止自动重试"
         exhausted_result = await db[TASKS_COLLECTION].update_many(
-            {"task_id": {"$in": exhausted_ids}, "status": "running"},
+            {
+                "task_id": {"$in": exhausted_ids},
+                "status": "running",
+                "$or": [
+                    {"heartbeat_at": {"$lte": stale_before}},
+                    {"heartbeat_at": {"$exists": False}},
+                    {"heartbeat_at": None},
+                ],
+            },
             {
                 "$set": {
                     "status": "error",

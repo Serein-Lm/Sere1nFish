@@ -20,6 +20,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 
 from api.db.collections import (
+    MOBILE_COLLECT_CHECKPOINTS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
     MOBILE_COLLECT_TASKS_COLLECTION,
 )
@@ -44,6 +45,15 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await records.create_index("source_document_id", sparse=True)
     await records.create_index(
         [("project_id", 1), ("target_id", 1), ("source_document_id", 1)]
+    )
+
+    checkpoints = db[MOBILE_COLLECT_CHECKPOINTS_COLLECTION]
+    await checkpoints.create_index(
+        [("run_task_id", 1), ("checkpoint_key", 1)],
+        unique=True,
+    )
+    await checkpoints.create_index(
+        [("task_def_id", 1), ("definition_fingerprint", 1), ("status", 1)]
     )
 
 
@@ -137,13 +147,133 @@ async def claim_task_run(
     )
 
 
-async def reset_interrupted_task_defs(db: AsyncIOMotorDatabase) -> int:
-    """释放因服务重启而遗留为 running 的任务定义。"""
+async def reset_interrupted_task_defs(
+    db: AsyncIOMotorDatabase,
+    *,
+    active_run_task_ids: set[str] | None = None,
+) -> int:
+    """释放无活跃分布式执行租约的遗留任务定义。"""
+    query: dict[str, Any] = {"status": "running"}
+    if active_run_task_ids:
+        query["last_run_task_id"] = {"$nin": sorted(active_run_task_ids)}
     result = await db[MOBILE_COLLECT_TASKS_COLLECTION].update_many(
-        {"status": "running"},
+        query,
         {"$set": {"status": "idle", "updated_at": _now()}},
     )
     return int(result.modified_count)
+
+
+# ── 关键词级持久化检查点 ───────────────────────────────
+
+_CHECKPOINT_VOLATILE_FIELDS = {
+    "status",
+    "last_run_task_id",
+    "last_run_at",
+    "created_at",
+    "updated_at",
+    "parent_task_id",
+}
+
+
+def definition_fingerprint(task_def: dict[str, Any]) -> str:
+    stable = {
+        key: value
+        for key, value in task_def.items()
+        if key not in _CHECKPOINT_VOLATILE_FIELDS and not key.startswith("_")
+    }
+    raw = json.dumps(stable, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def keyword_checkpoint_key(
+    *,
+    definition_fingerprint: str,
+    keyword: str,
+    target_id: str = "",
+) -> str:
+    raw = json.dumps(
+        [definition_fingerprint, str(target_id or ""), str(keyword or "")],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def list_completed_checkpoint_keys(
+    db: AsyncIOMotorDatabase,
+    *,
+    run_task_id: str,
+    definition_fingerprint: str,
+) -> set[str]:
+    cursor = db[MOBILE_COLLECT_CHECKPOINTS_COLLECTION].find(
+        {
+            "run_task_id": run_task_id,
+            "definition_fingerprint": definition_fingerprint,
+            "status": "completed",
+        },
+        {"_id": 0, "checkpoint_key": 1},
+    )
+    return {
+        str(item.get("checkpoint_key") or "")
+        async for item in cursor
+        if item.get("checkpoint_key")
+    }
+
+
+async def mark_keyword_checkpoint(
+    db: AsyncIOMotorDatabase,
+    *,
+    run_task_id: str,
+    task_def_id: str,
+    definition_fingerprint: str,
+    checkpoint_key: str,
+    keyword: str,
+    target_id: str,
+    status: str,
+    error: str = "",
+    stats: dict[str, Any] | None = None,
+) -> None:
+    now = _now()
+    fields: dict[str, Any] = {
+        "run_task_id": run_task_id,
+        "task_def_id": task_def_id,
+        "definition_fingerprint": definition_fingerprint,
+        "checkpoint_key": checkpoint_key,
+        "keyword": keyword,
+        "target_id": target_id,
+        "status": status,
+        "updated_at": now,
+    }
+    if status == "running":
+        fields["started_at"] = now
+    elif status == "captured":
+        fields["captured_at"] = now
+    elif status == "completed":
+        fields["completed_at"] = now
+    elif status == "failed":
+        fields["failed_at"] = now
+    if error:
+        fields["error"] = error[:1000]
+    if stats is not None:
+        fields["stats"] = stats
+    update: dict[str, Any] = {
+        "$set": fields,
+        "$setOnInsert": {"created_at": now},
+    }
+    unset_fields: dict[str, str] = {}
+    if not error:
+        unset_fields.update({"error": "", "failed_at": ""})
+    if status != "completed":
+        unset_fields["completed_at"] = ""
+    if status not in {"captured", "completed"}:
+        unset_fields["captured_at"] = ""
+    if unset_fields:
+        update["$unset"] = unset_fields
+    await db[MOBILE_COLLECT_CHECKPOINTS_COLLECTION].update_one(
+        {"run_task_id": run_task_id, "checkpoint_key": checkpoint_key},
+        update,
+        upsert=True,
+    )
 
 
 async def delete_task_def(db: AsyncIOMotorDatabase, task_def_id: str) -> int:

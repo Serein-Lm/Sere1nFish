@@ -20,6 +20,8 @@ _RUNTIME_ID = uuid.uuid4().hex
 _TASK_DISPATCHERS: dict[str, TaskDispatcher] = {}
 _RUNNING_TASKS: dict[str, asyncio.Task[Any]] = {}
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
+_HEARTBEAT_FAILURE_TIMEOUT_SECONDS = 60.0
+_CONTROL_POLL_INTERVAL_SECONDS = 1.0
 _NOTIFIED_LLM_CAPACITY_INCIDENTS: set[int] = set()
 
 
@@ -64,17 +66,63 @@ async def cancel_running_project_task(
     return True
 
 
-async def _heartbeat(task_id: str) -> None:
+async def _heartbeat(task_id: str, owner_task: asyncio.Task[Any]) -> None:
     db = get_db()
-    while True:
+    last_confirmed = time.monotonic()
+    failures = 0
+    while not owner_task.done():
         await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
-        updated = await tasks_dao.heartbeat_task(
-            db,
-            task_id=task_id,
-            runtime_id=_RUNTIME_ID,
-        )
+        try:
+            updated = await tasks_dao.heartbeat_task(
+                db,
+                task_id=task_id,
+                runtime_id=_RUNTIME_ID,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            failures += 1
+            logger.warning(
+                "任务心跳暂时失败 | task=%s failures=%s error=%s",
+                task_id,
+                failures,
+                exc,
+            )
+            if (
+                time.monotonic() - last_confirmed
+                >= _HEARTBEAT_FAILURE_TIMEOUT_SECONDS
+            ):
+                logger.error("任务心跳持续失败，停止执行 | task=%s", task_id)
+                owner_task.cancel()
+                return
+            continue
         if not updated:
+            owner_task.cancel()
             return
+        failures = 0
+        last_confirmed = time.monotonic()
+
+
+async def _watch_persistent_control(
+    task_id: str,
+    owner_task: asyncio.Task[Any],
+) -> None:
+    """Deliver pause intent to the process that actually owns the task."""
+    db = get_db()
+    while not owner_task.done():
+        await asyncio.sleep(_CONTROL_POLL_INTERVAL_SECONDS)
+        try:
+            if await tasks_dao.is_pause_requested(
+                db,
+                task_id=task_id,
+                runtime_id=_RUNTIME_ID,
+            ):
+                owner_task.cancel()
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("任务控制状态读取失败 | task=%s error=%s", task_id, exc)
 
 
 async def execute_project_task(
@@ -143,9 +191,15 @@ async def _execute_project_task(
         turn_id=task_id,
         task_type=task_type,
     )
+    owner_task = asyncio.current_task()
+    assert owner_task is not None
     heartbeat_task = asyncio.create_task(
-        _heartbeat(task_id),
+        _heartbeat(task_id, owner_task),
         name=f"task-heartbeat:{task_id}",
+    )
+    control_task = asyncio.create_task(
+        _watch_persistent_control(task_id, owner_task),
+        name=f"task-control:{task_id}",
     )
     started = time.monotonic()
     logger.notice(
@@ -241,6 +295,19 @@ async def _execute_project_task(
             )
             logger.info("任务在完成提交前收到暂停请求 | task=%s", task_id)
             return None
+        if not completed:
+            current = await tasks_dao.get_task(
+                db,
+                project_id=project_id,
+                task_id=task_id,
+            )
+            logger.warning(
+                "任务完成提交已被较新状态取代 | task=%s status=%s runtime=%s",
+                task_id,
+                (current or {}).get("status"),
+                (current or {}).get("runtime_id"),
+            )
+            return result
         obs_log(
             f"任务完成 ({elapsed_ms / 1000:.1f}s)",
             task_id=task_id,
@@ -320,5 +387,10 @@ async def _execute_project_task(
         return None
     finally:
         heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        control_task.cancel()
+        await asyncio.gather(
+            heartbeat_task,
+            control_task,
+            return_exceptions=True,
+        )
         tracker.pop_context()

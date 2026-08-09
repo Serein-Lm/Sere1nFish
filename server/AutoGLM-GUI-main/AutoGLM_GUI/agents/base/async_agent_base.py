@@ -28,6 +28,7 @@ from AutoGLM_GUI.trace import summarize_text, trace_span
 WATCHDOG_MAX_RUNTIME_SECONDS = 60 * 60
 WATCHDOG_REPEATED_ACTION_LIMIT = 12
 WATCHDOG_NO_PROGRESS_LIMIT = 20
+MAX_CONTEXT_MESSAGES = 64
 
 
 class AsyncAgentBase(ABC):
@@ -105,11 +106,30 @@ class AsyncAgentBase(ABC):
 
     # ==================== 共享逻辑 ====================
 
+    def _compact_context(self) -> None:
+        """Keep bounded text history and at most the next current screenshot.
+
+        The planner intentionally reuses one executor across subtasks. Historical
+        screenshots must therefore be removed from every message, not only the
+        most recent one, otherwise image payloads grow for the whole run.
+        """
+        stripped = [
+            MessageBuilder.remove_images_from_message(message)
+            for message in self._context
+        ]
+        history = stripped[1:]
+        if len(history) > MAX_CONTEXT_MESSAGES:
+            history = history[-MAX_CONTEXT_MESSAGES:]
+            while history and history[0].get("role") == "tool":
+                history.pop(0)
+        self._context = [copy.deepcopy(self._initial_system_message), *history]
+
     async def stream(self, task: str) -> AsyncIterator[dict[str, Any]]:
         """流式执行任务，支持取消。"""
         self._is_running = True
         self._step_count = 0
         self._cancel_event.clear()
+        self._compact_context()
 
         with trace_span(
             "agent.stream",

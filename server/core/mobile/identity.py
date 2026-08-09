@@ -30,6 +30,7 @@ def resolve_device_key(device_id: str, *, timeout: int = 5) -> str:
         return cached
 
     key = device_id
+    resolved = False
     try:
         r = subprocess.run(
             ["adb", "-s", device_id, "shell", "getprop", "ro.serialno"],
@@ -38,13 +39,16 @@ def resolve_device_key(device_id: str, *, timeout: int = 5) -> str:
             timeout=timeout,
         )
         out = (r.stdout or "").strip()
-        if out:
+        if r.returncode == 0 and out:
             key = out
+            resolved = True
     except Exception:
         pass  # 离线/无 adb：回退 device_id
 
-    with _lock:
-        _key_cache[device_id] = key
+    # A transient offline fallback is not an identity and must not be cached.
+    if resolved:
+        with _lock:
+            _key_cache[device_id] = key
     return key
 
 

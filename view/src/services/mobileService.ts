@@ -911,6 +911,9 @@ export interface ContactProfile {
   name?: string
   platform?: string
   device_id?: string
+  device_key?: string
+  app_instance?: string
+  identity_version?: number
   project_id?: string
   project_ids?: string[]
   latest_finding_id?: string
@@ -939,6 +942,7 @@ export interface AnalyzeProfileBody {
   contact_id: string
   name?: string
   platform?: string
+  app_instance?: string
   project_id?: string
   task_id?: string
 }
@@ -995,6 +999,7 @@ export interface StartAutoChatBody {
   goal?: string
   my_background?: string
   platform?: string
+  app_instance?: string
   interval?: number
   auto_send?: boolean
   ensure_chat?: boolean
@@ -1020,6 +1025,8 @@ export interface AutoChatSession {
   project_id?: string
   contact_id?: string
   contact_name?: string
+  device_key?: string
+  app_instance?: string
   owner?: string
   running: boolean
   auto_send: boolean
@@ -1223,6 +1230,7 @@ export async function fetchMobileScreenshotBlob(pathOrUrl: string, signal?: Abor
 export interface StartWatchBody {
   device_id: string
   platform?: string
+  app_instance?: string
   my_background?: string
   auto_accept?: boolean
   auto_send?: boolean
