@@ -50,8 +50,11 @@ export function scoreColor(n: number): string {
 }
 
 function fieldsToText(fields: Record<string, unknown>): string {
+  const values = Object.prototype.hasOwnProperty.call(fields, 'contact')
+    ? [fields.contact]
+    : Object.values(fields || {})
   const parts: string[] = []
-  for (const v of Object.values(fields || {})) {
+  for (const v of values) {
     if (Array.isArray(v)) parts.push(v.map((x) => String(x)).join(' '))
     else if (v != null && v !== '') parts.push(String(v))
   }
