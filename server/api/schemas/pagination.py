@@ -54,7 +54,8 @@ class PageResponse(BaseModel):
 
 class ProjectListRequest(PageRequest):
     """项目列表"""
-    pass
+    group_id: str | None = Field(default=None, description="项目分组 ID")
+    search: str = Field(default="", max_length=200, description="名称或描述关键词")
 
 
 class TaskListRequest(PageRequest):

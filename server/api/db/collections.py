@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 PROJECTS_COLLECTION = "projects"
+PROJECT_GROUPS_COLLECTION = "project_groups"
 WEB_TAGS_COLLECTION = "web_tagging_results"
 
 # ── 统一 Findings 集合 ──

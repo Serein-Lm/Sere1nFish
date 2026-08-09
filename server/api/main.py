@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from api.routers import (
     auth,
     projects,
+    project_groups,
     xhs,
     douyin,
     config,
@@ -258,9 +259,13 @@ async def lifespan(app: FastAPI):
         await company_meta_dao.ensure_indexes(db)
         await bidding_dao.ensure_indexes(db)
         from api.dao import targets as targets_dao
+        from api.dao import projects as projects_dao
+        from api.dao import project_groups as project_groups_dao
         from api.dao import target_research as target_research_dao
         from api.dao import source_documents as source_documents_dao
         await targets_dao.ensure_indexes(db)
+        await projects_dao.ensure_indexes(db)
+        await project_groups_dao.ensure_indexes(db)
         rebuilt_target_aliases = await targets_dao.rebuild_identity_aliases(db)
         if rebuilt_target_aliases:
             logger.info(
@@ -539,6 +544,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # 注册路由
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["认证"])
 app.include_router(projects.router, prefix="/api/v1/projects", tags=["项目"])
+app.include_router(
+    project_groups.router,
+    prefix="/api/v1/project-groups",
+    tags=["项目分组"],
+)
 app.include_router(xhs.router, prefix="/api/v1/xhs", tags=["小红书"])
 app.include_router(douyin.router, prefix="/api/v1/douyin", tags=["抖音"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["配置管理"])

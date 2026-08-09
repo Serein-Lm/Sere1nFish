@@ -21,6 +21,7 @@ from api.models.projects import (
 from api.utils.json_extract import extract_json_object
 from api.services.company_url import guess_url_from_company_name
 from api.dao import projects as projects_dao
+from api.dao import project_groups as project_groups_dao
 from api.dao import web_tagging as web_dao
 from api.schemas.pagination import PageResponse, ProjectListRequest, WebTaggingListRequest
 
@@ -30,11 +31,13 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 init_mongo()
 
 
-def _project_out(doc: dict) -> ProjectOut:
+def _project_out(doc: dict, *, group_name: str | None = None) -> ProjectOut:
     return ProjectOut(
         id=str(doc.get("_id")),
         name=doc.get("name"),
         description=doc.get("description"),
+        group_id=doc.get("group_id"),
+        group_name=group_name,
         target=doc.get("target"),
         contents=doc.get("contents") or [],
         created_at=doc.get("created_at"),
@@ -60,8 +63,22 @@ def _tag_out(doc: dict) -> WebTaggingResultOut:
 @router.post("", response_model=ProjectOut)
 async def create_project(body: ProjectCreate):
     db = get_db()
-    doc = await projects_dao.create_project(db, name=body.name, description=body.description)
-    return _project_out(doc)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="项目名称不能为空")
+    group_id = str(body.group_id or "").strip() or None
+    group = None
+    if group_id:
+        group = await project_groups_dao.get_group(db, group_id)
+        if not group:
+            raise HTTPException(status_code=422, detail="项目分组不存在")
+    doc = await projects_dao.create_project(
+        db,
+        name=name,
+        description=body.description,
+        group_id=group_id,
+    )
+    return _project_out(doc, group_name=(group or {}).get("name"))
 
 
 @router.post("/list")
@@ -70,9 +87,25 @@ async def list_projects(body: ProjectListRequest | None = None):
     if body is None:
         body = ProjectListRequest()
     db = get_db()
-    docs, total = await projects_dao.list_projects(db, limit=body.limit, skip=body.skip)
+    docs, total = await projects_dao.list_projects(
+        db,
+        limit=body.limit,
+        skip=body.skip,
+        group_id=body.group_id,
+        search=body.search,
+    )
+    group_names = await project_groups_dao.get_group_names(
+        db,
+        [str(doc.get("group_id") or "") for doc in docs],
+    )
     return PageResponse.build(
-        items=[_project_out(d) for d in docs],
+        items=[
+            _project_out(
+                doc,
+                group_name=group_names.get(str(doc.get("group_id") or "")),
+            )
+            for doc in docs
+        ],
         total=total,
         page=body.page,
         page_size=body.page_size,
@@ -85,7 +118,12 @@ async def get_project(project_id: str):
     doc = await projects_dao.get_project(db, project_id)
     if not doc:
         raise HTTPException(status_code=404, detail="项目不存在")
-    return _project_out(doc)
+    group = (
+        await project_groups_dao.get_group(db, str(doc.get("group_id") or ""))
+        if doc.get("group_id")
+        else None
+    )
+    return _project_out(doc, group_name=(group or {}).get("name"))
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
@@ -93,21 +131,40 @@ async def update_project(project_id: str, body: ProjectUpdate):
     db = get_db()
 
     patch: dict = {}
-    if body.name is not None:
-        patch["name"] = body.name
-    if body.description is not None:
+    if "name" in body.model_fields_set and body.name is not None:
+        patch["name"] = body.name.strip()
+        if not patch["name"]:
+            raise HTTPException(status_code=422, detail="项目名称不能为空")
+    if "description" in body.model_fields_set:
         patch["description"] = body.description
+    if "group_id" in body.model_fields_set:
+        group_id = str(body.group_id or "").strip() or None
+        if group_id and not await project_groups_dao.get_group(db, group_id):
+            raise HTTPException(status_code=422, detail="项目分组不存在")
+        patch["group_id"] = group_id
 
     if not patch:
         doc = await projects_dao.get_project(db, project_id)
         if not doc:
             raise HTTPException(status_code=404, detail="项目不存在")
-        return _project_out(doc)
+        group = (
+            await project_groups_dao.get_group(
+                db, str(doc.get("group_id") or "")
+            )
+            if doc.get("group_id")
+            else None
+        )
+        return _project_out(doc, group_name=(group or {}).get("name"))
 
     doc = await projects_dao.update_project(db, project_id, patch=patch)
     if not doc:
         raise HTTPException(status_code=404, detail="项目不存在")
-    return _project_out(doc)
+    group = (
+        await project_groups_dao.get_group(db, str(doc.get("group_id") or ""))
+        if doc.get("group_id")
+        else None
+    )
+    return _project_out(doc, group_name=(group or {}).get("name"))
 
 
 @router.delete("/{project_id}")
@@ -217,7 +274,12 @@ async def append_project_content(project_id: str, body: ProjectAppendRequest):
     if not doc:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    return _project_out(doc)
+    group = (
+        await project_groups_dao.get_group(db, str(doc.get("group_id") or ""))
+        if doc.get("group_id")
+        else None
+    )
+    return _project_out(doc, group_name=(group or {}).get("name"))
 
 
 @router.post("/web-tagging", response_model=WebTaggingResultOut)

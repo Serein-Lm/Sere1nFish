@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,7 +19,18 @@ def _oid_str(oid: ObjectId) -> str:
     return str(oid)
 
 
-async def create_project(db: AsyncIOMotorDatabase, name: str, description: str | None = None) -> dict[str, Any]:
+async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
+    collection = db[PROJECTS_COLLECTION]
+    await collection.create_index([("group_id", 1), ("updated_at", -1)])
+    await collection.create_index([("name", 1), ("updated_at", -1)])
+
+
+async def create_project(
+    db: AsyncIOMotorDatabase,
+    name: str,
+    description: str | None = None,
+    group_id: str | None = None,
+) -> dict[str, Any]:
     now = _now()
     doc = {
         "name": name,
@@ -28,6 +40,8 @@ async def create_project(db: AsyncIOMotorDatabase, name: str, description: str |
         "created_at": now,
         "updated_at": now,
     }
+    if group_id:
+        doc["group_id"] = group_id
     result = await db[PROJECTS_COLLECTION].insert_one(doc)
     doc["_id"] = result.inserted_id
     return doc
@@ -68,9 +82,25 @@ async def upsert_get_project_by_name(
     return doc
 
 
-async def list_projects(db: AsyncIOMotorDatabase, limit: int = 50, skip: int = 0) -> tuple[list[dict[str, Any]], int]:
+async def list_projects(
+    db: AsyncIOMotorDatabase,
+    limit: int = 50,
+    skip: int = 0,
+    *,
+    group_id: str | None = None,
+    search: str = "",
+) -> tuple[list[dict[str, Any]], int]:
     """列出项目，返回 (items, total)"""
     query: dict[str, Any] = {}
+    if group_id:
+        query["group_id"] = group_id
+    normalized_search = str(search or "").strip()
+    if normalized_search:
+        pattern = re.escape(normalized_search)
+        query["$or"] = [
+            {"name": {"$regex": pattern, "$options": "i"}},
+            {"description": {"$regex": pattern, "$options": "i"}},
+        ]
     total = await db[PROJECTS_COLLECTION].count_documents(query)
     cursor = db[PROJECTS_COLLECTION].find(query).sort("created_at", -1).skip(skip).limit(limit)
     items = [doc async for doc in cursor]
@@ -104,11 +134,19 @@ async def update_project(
         return None
 
     update_set = dict(patch or {})
+    unset: dict[str, str] = {}
+    if "group_id" in update_set and not update_set["group_id"]:
+        update_set.pop("group_id")
+        unset["group_id"] = ""
     update_set["updated_at"] = _now()
+
+    update: dict[str, Any] = {"$set": update_set}
+    if unset:
+        update["$unset"] = unset
 
     result = await db[PROJECTS_COLLECTION].find_one_and_update(
         {"_id": oid},
-        {"$set": update_set},
+        update,
         return_document=ReturnDocument.AFTER,
     )
     return result

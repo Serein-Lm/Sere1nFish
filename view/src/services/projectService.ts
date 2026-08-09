@@ -20,18 +20,49 @@ export interface Project {
   id: string
   name: string
   description: string | null
+  group_id: string | null
+  group_name: string | null
   created_at: string
   updated_at: string
+}
+
+export interface ProjectGroup {
+  group_id: string
+  name: string
+  description: string
+  sort_order: number
+  project_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectListRequest extends PaginatedRequest {
+  group_id?: string
+  search?: string
 }
 
 export interface CreateProjectRequest {
   name: string
   description?: string
+  group_id?: string
 }
 
 export interface UpdateProjectRequest {
   name?: string
+  description?: string | null
+  group_id?: string | null
+}
+
+export interface CreateProjectGroupRequest {
+  name: string
   description?: string
+  sort_order?: number
+}
+
+export interface UpdateProjectGroupRequest {
+  name?: string
+  description?: string
+  sort_order?: number
 }
 
 // ============ Web Tagging ============
@@ -239,11 +270,48 @@ export interface CopywritingCoverage {
 
 // ============ 项目 CRUD ============
 
-export async function listProjects(params?: PaginatedRequest): Promise<PaginatedResponse<Project>> {
+export async function listProjects(params?: ProjectListRequest): Promise<PaginatedResponse<Project>> {
   return apiFetch<PaginatedResponse<Project>>('/v1/projects/list', {
     method: 'POST',
-    body: JSON.stringify({ page: params?.page ?? 1, page_size: params?.page_size ?? 50 }),
+    body: JSON.stringify({
+      page: params?.page ?? 1,
+      page_size: params?.page_size ?? 50,
+      group_id: params?.group_id,
+      search: params?.search ?? '',
+    }),
   })
+}
+
+export async function listProjectGroups(): Promise<ProjectGroup[]> {
+  return apiFetch<ProjectGroup[]>('/v1/project-groups', { method: 'GET' })
+}
+
+export async function createProjectGroup(
+  body: CreateProjectGroupRequest,
+): Promise<ProjectGroup> {
+  return apiFetch<ProjectGroup>('/v1/project-groups', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function updateProjectGroup(
+  groupId: string,
+  body: UpdateProjectGroupRequest,
+): Promise<ProjectGroup> {
+  return apiFetch<ProjectGroup>(`/v1/project-groups/${encodeURIComponent(groupId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteProjectGroup(
+  groupId: string,
+): Promise<{ ok: boolean; ungrouped_count: number }> {
+  return apiFetch<{ ok: boolean; ungrouped_count: number }>(
+    `/v1/project-groups/${encodeURIComponent(groupId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export async function getProject(projectId: string): Promise<Project> {
