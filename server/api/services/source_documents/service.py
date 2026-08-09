@@ -43,6 +43,7 @@ _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
 _CONTEXT_ANALYSIS_SCHEMA_VERSION = 7
 _MEDIA_POLICY_VERSION = 3
+_CONTACT_POLICY_VERSION = 2
 _SOURCE_FIELD_KEYS = {
     "title",
     "account",
@@ -92,6 +93,7 @@ def _analysis_fingerprint(
 ) -> str:
     payload = {
         "schema_version": _CONTEXT_ANALYSIS_SCHEMA_VERSION,
+        "contact_policy_version": _CONTACT_POLICY_VERSION,
         "prompt_hash": article_analysis_prompt_fingerprint(),
         "version_id": version_id,
         "target_id": target_id,
@@ -819,6 +821,35 @@ async def ingest_source_url(
                     0, min(100, int(min_subject_match or 0))
                 )
                 version_image_analysis = _version_image_analysis(existing)
+                source_contacts = _merge_contacts(
+                    extract_contacts(capture.text),
+                    version_image_analysis,
+                )
+                if (
+                    int(existing.get("contact_policy_version") or 0)
+                    < _CONTACT_POLICY_VERSION
+                    or source_contacts != list(existing.get("contacts") or [])
+                ):
+                    existing = await source_dao.mark_version_ready(
+                        db,
+                        version_id=version_id,
+                        payload={
+                            "contacts": source_contacts,
+                            "analysis": _source_analysis(
+                                capture,
+                                contacts=source_contacts,
+                                image_analysis=version_image_analysis,
+                            ),
+                            "contact_policy_version": _CONTACT_POLICY_VERSION,
+                        },
+                    )
+                    await source_dao.upsert_document(
+                        db,
+                        document_id=document_id,
+                        canonical_url=canonical_url,
+                        source_type=capture.source_type,
+                        version=existing,
+                    )
                 contextual_analysis: dict[str, Any] | None = None
                 existing_link = await source_dao.get_document_link(
                     db,
@@ -867,7 +898,7 @@ async def ingest_source_url(
                 contextual_analysis = await _complete_contextual_analysis(
                     contextual_analysis,
                     capture=capture,
-                    contacts=list(existing.get("contacts") or []),
+                    contacts=source_contacts,
                     image_analysis=version_image_analysis,
                     target_name=target_name,
                     target_aliases=target_aliases,
@@ -1080,6 +1111,7 @@ async def ingest_source_url(
             )
             structured = {
                 "schema_version": 2,
+                "contact_policy_version": _CONTACT_POLICY_VERSION,
                 "document_id": document_id,
                 "version_id": version_id,
                 "content_hash": content_hash,
@@ -1156,6 +1188,7 @@ async def ingest_source_url(
                 "identity": identity,
                 "content": content,
                 "contacts": contacts,
+                "contact_policy_version": _CONTACT_POLICY_VERSION,
                 "analysis": source_analysis,
                 "images": images,
                 "image_analysis": image_analysis,

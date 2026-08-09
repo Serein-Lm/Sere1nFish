@@ -285,18 +285,38 @@ async def test_wechat_capture_timeout_recovers_and_releases_browser(
 
 @pytest.mark.asyncio
 async def test_wechat_screenshot_timeout_preserves_partial_archive() -> None:
+    import base64
+
     from api.services.source_documents import wechat as module
+
+    class _Session:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.detached = False
+
+        async def send(self, _method: str, _params: dict) -> dict[str, str]:
+            self.calls += 1
+            if self.calls == 2:
+                raise module.PlaywrightTimeoutError("screenshot timeout")
+            return {
+                "data": base64.b64encode(b"screen-one").decode("ascii")
+            }
+
+        async def detach(self) -> None:
+            self.detached = True
+
+    class _Context:
+        def __init__(self, session: _Session) -> None:
+            self.session = session
+
+        async def new_cdp_session(self, _page: Any) -> _Session:
+            return self.session
 
     class _Page:
         def __init__(self) -> None:
-            self.screenshot_calls = 0
+            self.session = _Session()
+            self.context = _Context(self.session)
             self.scroll_reads = 0
-
-        async def screenshot(self, **_kwargs: Any) -> bytes:
-            self.screenshot_calls += 1
-            if self.screenshot_calls == 2:
-                raise module.PlaywrightTimeoutError("screenshot timeout")
-            return b"screen-one"
 
         async def evaluate(self, script: str):
             if script == "window.scrollY":
@@ -309,13 +329,13 @@ async def test_wechat_screenshot_timeout_preserves_partial_archive() -> None:
         async def wait_for_timeout(self, _timeout: int) -> None:
             return None
 
-    screenshots, error = await module.WechatArticleProvider._capture_screenshots(
-        _Page()
-    )
+    page = _Page()
+    screenshots, error = await module.WechatArticleProvider._capture_screenshots(page)
 
     assert len(screenshots) == 1
     assert screenshots[0].data == b"screen-one"
     assert "已保留前 1 张" in error
+    assert page.session.detached is True
 
 
 def test_dingtalk_webhook_url_can_be_saved_without_stream_credentials() -> None:

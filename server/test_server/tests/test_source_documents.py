@@ -113,6 +113,24 @@ def test_contact_extraction_preserves_local_evidence_context():
     assert phone["contexts"] == [phone["context"]]
 
 
+def test_contact_extraction_reconstructs_tabular_row_context():
+    from core.mobile.collect.contacts import extract_contacts
+
+    text = (
+        "院系代码\n院系简称\n联系人\n联系方式\n邮箱\n\n"
+        "001\n中心总部\n田老师\n010-58900576\ntianyy@chinacdc.cn\n\n"
+        "002\n传染病所\n崔老师\n010-58900713\ncuiyao@icdc.cn"
+    )
+    contacts = extract_contacts(text)
+
+    email = next(item for item in contacts if item["value"] == "tianyy@chinacdc.cn")
+    phone = next(item for item in contacts if item["value"] == "010-58900576")
+    assert "中心总部" in email["context"]
+    assert "田老师" in email["context"]
+    assert "中心总部" in phone["context"]
+    assert "田老师" in phone["context"]
+
+
 def test_contact_extraction_normalizes_full_width_email_and_service_phone():
     from core.mobile.collect.contacts import extract_contacts
 
@@ -818,6 +836,7 @@ def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
 
     capture = _capture(raw_html=b"raw", rendered_html=b"dom")
     capture.images = []
+    capture.text = "正文主体不是目标单位"
     linked: list[dict] = []
 
     class _Provider:
@@ -829,6 +848,7 @@ def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
             "version_id": "version-existing",
             "status": "ready",
             "media_policy_version": service._MEDIA_POLICY_VERSION,
+            "contact_policy_version": service._CONTACT_POLICY_VERSION,
             "capture_metadata": {"analyzed_image_urls": []},
             "contacts": [],
             "image_analysis": [],
@@ -1015,6 +1035,66 @@ def test_article_image_preflight_isolates_unsupported_svg():
     assert [image.index for image, _media_type, _encoded in prepared] == [1]
     assert len(errors) == 1
     assert "index=0" in errors[0]
+
+
+def test_wechat_screenshots_use_bounded_cdp_viewport_capture():
+    import asyncio
+    import base64
+
+    from api.services.source_documents.wechat import WechatArticleProvider
+
+    class _Session:
+        def __init__(self):
+            self.calls = 0
+            self.detached = False
+
+        async def send(self, method, params):
+            assert method == "Page.captureScreenshot"
+            assert params["captureBeyondViewport"] is False
+            self.calls += 1
+            return {"data": base64.b64encode(b"jpeg-frame").decode("ascii")}
+
+        async def detach(self):
+            self.detached = True
+
+    class _Context:
+        def __init__(self, session):
+            self.session = session
+
+        async def new_cdp_session(self, _page):
+            return self.session
+
+    class _Page:
+        def __init__(self):
+            self.session = _Session()
+            self.context = _Context(self.session)
+            self.y = 0
+
+        async def evaluate(self, script):
+            if "scrollTo" in script:
+                self.y = 0
+                return None
+            if "const before" in script:
+                before = self.y
+                self.y = min(100, self.y + 82)
+                return {"before": before, "maxY": 100}
+            if script == "window.scrollY":
+                return self.y
+            raise AssertionError(script)
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+    page = _Page()
+    screenshots, error = asyncio.run(
+        WechatArticleProvider._capture_screenshots(page)
+    )
+
+    assert error == ""
+    assert len(screenshots) == 3
+    assert all(item.data == b"jpeg-frame" for item in screenshots)
+    assert page.session.calls == 3
+    assert page.session.detached is True
 
 
 def test_source_document_lock_serializes_waiters_and_cleans_registry():

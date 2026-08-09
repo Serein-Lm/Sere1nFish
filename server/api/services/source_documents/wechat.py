@@ -7,6 +7,7 @@ UA、stealth 初始化脚本、中文 locale 和上海时区。Provider 只负�
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 from pathlib import Path
@@ -170,11 +171,11 @@ class WechatArticleProvider:
             raw_html = await response.body() if response else b""
             rendered_html = (await page.content()).encode("utf-8")
             metadata = await self._extract_metadata(page)
-            screenshots, screenshot_error = await self._capture_screenshots(page)
             image_urls = metadata.pop("image_urls")
             images, image_errors = await self._download_images(
                 context, image_urls
             )
+            screenshots, screenshot_error = await self._capture_screenshots(page)
             return CapturedDocument(
                 source_type=self.source_type,
                 canonical_url=canonical_url,
@@ -277,42 +278,74 @@ class WechatArticleProvider:
         page: Page,
     ) -> tuple[list[CapturedScreenshot], str]:
         screenshots: list[CapturedScreenshot] = []
-        await page.evaluate("window.scrollTo(0, 0)")
-        previous_y = -1
-        for index in range(_MAX_SCREENSHOTS):
-            try:
-                data = await page.screenshot(type="jpeg", quality=72)
-            except PlaywrightTimeoutError as exc:
-                error = f"截图超时，已保留前 {len(screenshots)} 张: {exc}"
-                logger.warning("微信公众号文章截图部分失败: %s", error)
-                return screenshots, error[:500]
-            screenshots.append(CapturedScreenshot(index=index, data=data))
-            state = await page.evaluate(
-                """() => {
-                    const before = window.scrollY;
-                    const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-                    window.scrollBy(0, Math.floor(window.innerHeight * 0.82));
-                    return {before, maxY};
-                }"""
+        session = await page.context.new_cdp_session(page)
+
+        async def _capture_viewport() -> bytes:
+            result = await asyncio.wait_for(
+                session.send(
+                    "Page.captureScreenshot",
+                    {
+                        "format": "jpeg",
+                        "quality": 72,
+                        "fromSurface": True,
+                        "captureBeyondViewport": False,
+                    },
+                ),
+                timeout=12,
             )
-            await page.wait_for_timeout(180)
-            current_y = await page.evaluate("window.scrollY")
-            if current_y >= state["maxY"]:
-                if current_y != state["before"]:
-                    try:
-                        data = await page.screenshot(type="jpeg", quality=72)
-                    except PlaywrightTimeoutError as exc:
-                        error = f"末屏截图超时，已保留前 {len(screenshots)} 张: {exc}"
-                        logger.warning("微信公众号文章截图部分失败: %s", error)
-                        return screenshots, error[:500]
-                    screenshots.append(
-                        CapturedScreenshot(index=len(screenshots), data=data)
-                    )
-                break
-            if current_y == previous_y or current_y == state["before"]:
-                break
-            previous_y = current_y
-        return screenshots, ""
+            return base64.b64decode(str(result.get("data") or ""), validate=True)
+
+        try:
+            await page.evaluate("window.scrollTo(0, 0)")
+            previous_y = -1
+            for index in range(_MAX_SCREENSHOTS):
+                try:
+                    data = await _capture_viewport()
+                except (PlaywrightTimeoutError, TimeoutError) as exc:
+                    error = f"截图超时，已保留前 {len(screenshots)} 张: {exc}"
+                    logger.warning("微信公众号文章截图部分失败: %s", error)
+                    return screenshots, error[:500]
+                screenshots.append(CapturedScreenshot(index=index, data=data))
+                state = await page.evaluate(
+                    """() => {
+                        const before = window.scrollY;
+                        const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+                        window.scrollBy(0, Math.floor(window.innerHeight * 0.82));
+                        return {before, maxY};
+                    }"""
+                )
+                await page.wait_for_timeout(180)
+                current_y = await page.evaluate("window.scrollY")
+                if current_y >= state["maxY"]:
+                    if current_y != state["before"]:
+                        try:
+                            data = await _capture_viewport()
+                        except (PlaywrightTimeoutError, TimeoutError) as exc:
+                            error = (
+                                "末屏截图超时，已保留前 "
+                                f"{len(screenshots)} 张: {exc}"
+                            )
+                            logger.warning(
+                                "微信公众号文章截图部分失败: %s",
+                                error,
+                            )
+                            return screenshots, error[:500]
+                        screenshots.append(
+                            CapturedScreenshot(
+                                index=len(screenshots),
+                                data=data,
+                            )
+                        )
+                    break
+                if current_y == previous_y or current_y == state["before"]:
+                    break
+                previous_y = current_y
+            return screenshots, ""
+        finally:
+            try:
+                await asyncio.wait_for(session.detach(), timeout=2)
+            except Exception:
+                pass
 
     @staticmethod
     async def _download_images(

@@ -75,7 +75,38 @@ def _context_excerpt(text: str, start: int, end: int, radius: int = 140) -> str:
     ]
     if candidates:
         right = min(candidates) + 1
-    return re.sub(r"\s+", " ", text[left:right]).strip()
+    context = re.sub(r"\s+", " ", text[left:right]).strip()
+    matched_value = re.sub(r"\s+", "", text[start:end]).strip()
+    compact_context = re.sub(r"[\s:：,，;；]", "", context)
+    compact_value = re.sub(r"[\s:：,，;；]", "", matched_value)
+    weak_context = (
+        len(context) <= len(matched_value) + 16
+        or compact_context == compact_value
+    )
+    if not weak_context:
+        return context
+
+    before = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in text[:start].splitlines()
+        if re.sub(r"\s+", " ", line).strip()
+    ]
+    current_and_after = text[start:].splitlines()
+    current = (
+        re.sub(r"\s+", " ", current_and_after[0]).strip()
+        if current_and_after
+        else matched_value
+    )
+    after = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in current_and_after[1:]
+        if re.sub(r"\s+", " ", line).strip()
+    ]
+    neighboring_lines = [*before[-4:], current, *after[:2]]
+    expanded = " | ".join(
+        dict.fromkeys(line for line in neighboring_lines if line)
+    )[:700]
+    return expanded if matched_value in expanded and len(expanded) > len(context) else context
 
 
 def extract_contacts(text_blob: str) -> list[dict[str, Any]]:
