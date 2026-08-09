@@ -55,3 +55,7 @@ class SourceDocumentError(RuntimeError):
 
 class SourceDocumentBlocked(SourceDocumentError):
     """目标站点要求人工验证，调用侧可回退到原采集方式。"""
+
+
+class SourceDocumentAnalysisError(SourceDocumentError):
+    """正文已读取，但结构化或独立审核暂时不可用。"""

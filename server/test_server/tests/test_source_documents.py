@@ -1,5 +1,7 @@
 """来源文档版本、Target 聚类与联系方式证据的纯逻辑回归测试。"""
 
+import pytest
+
 
 def _capture(*, raw_html: bytes, rendered_html: bytes):
     from api.services.source_documents.contracts import (
@@ -635,6 +637,67 @@ def test_rejected_relevance_review_stops_before_source_persistence(monkeypatch):
     assert result["rejected"] is True
     assert result["review_decision"] == "reject"
     assert result["article_scope"] == "multi_entity_roundup"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"analysis_error": "结构化模型超时"},
+        {"relevance_review": {"review_error": "审核模型限流"}},
+    ],
+)
+def test_analysis_failure_is_retryable_instead_of_semantic_rejection(
+    monkeypatch,
+    failure,
+):
+    import asyncio
+
+    from api.services.source_documents import service
+    from api.services.source_documents.contracts import SourceDocumentAnalysisError
+
+    capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+
+    class _Provider:
+        async def capture(self, *_args, **_kwargs):
+            return capture
+
+    async def get_version(*_args, **_kwargs):
+        return None
+
+    async def failed_analysis(*_args, **_kwargs):
+        return {
+            "fields": {"summary": ""},
+            "score": 0,
+            "subject_match": 0,
+            "review_decision": "reject",
+            **failure,
+        }
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("技术失败不得写入来源版本或相关性拒绝关联")
+
+    monkeypatch.setattr(service, "get_source_document_provider", lambda _url: _Provider())
+    monkeypatch.setattr(service.source_dao, "get_version", get_version)
+    monkeypatch.setattr(service, "analyze_and_review_article", failed_analysis)
+    monkeypatch.setattr(service.source_dao, "begin_version", forbidden)
+    monkeypatch.setattr(service.source_dao, "upsert_document", forbidden)
+    monkeypatch.setattr(service.source_dao, "link_document", forbidden)
+
+    with pytest.raises(SourceDocumentAnalysisError):
+        asyncio.run(
+            service.ingest_source_url(
+                object(),
+                url=capture.canonical_url,
+                project_id="project-1",
+                target={
+                    "target_id": "target-1",
+                    "canonical_name": "目标单位",
+                },
+                run_task_id="run-1",
+                keyword="目标单位 招聘",
+                min_subject_match=70,
+            )
+        )
 
 
 def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):

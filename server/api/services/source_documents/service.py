@@ -28,7 +28,12 @@ from .analysis import (
     filter_target_contacts,
     stable_content_hash,
 )
-from .contracts import CapturedDocument, CapturedImage, CapturedScreenshot
+from .contracts import (
+    CapturedDocument,
+    CapturedImage,
+    CapturedScreenshot,
+    SourceDocumentAnalysisError,
+)
 from .factory import get_source_document_provider
 from .urls import canonicalize_source_url
 
@@ -350,6 +355,18 @@ def _passes_target_review(analysis: dict[str, Any], min_subject_match: int) -> b
         analysis.get("review_decision") == "accept"
         and _subject_match(analysis, None) >= min_subject_match
     )
+
+
+def _raise_on_analysis_failure(analysis: dict[str, Any]) -> None:
+    """Keep infrastructure/model failures out of semantic rejection handling."""
+    structure_error = str(analysis.get("analysis_error") or "").strip()
+    review_error = str(
+        (analysis.get("relevance_review") or {}).get("review_error") or ""
+    ).strip()
+    if structure_error:
+        raise SourceDocumentAnalysisError(f"来源结构化分析失败: {structure_error}")
+    if review_error:
+        raise SourceDocumentAnalysisError(f"来源相关性审核失败: {review_error}")
 
 
 def _rejected_source_result(
@@ -693,6 +710,7 @@ async def ingest_source_url(
                         project_id=project_id,
                         task_id=run_task_id,
                     )
+                _raise_on_analysis_failure(contextual_analysis)
                 contextual_analysis = await _complete_contextual_analysis(
                     contextual_analysis,
                     capture=capture,
@@ -783,6 +801,7 @@ async def ingest_source_url(
                 project_id=project_id,
                 task_id=run_task_id,
             )
+            _raise_on_analysis_failure(analysis)
             if not _passes_target_review(analysis, required_subject_match):
                 if persist:
                     await _persist_existing_link_review(
