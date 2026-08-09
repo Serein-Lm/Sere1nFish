@@ -413,6 +413,112 @@ async def upsert_contact_finding(
     return await get_finding(db, finding_id) or set_fields
 
 
+async def reconcile_contact_findings_for_record(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    record_id: str,
+    keep_finding_ids: list[str],
+) -> dict[str, int]:
+    """Withdraw stale contact evidence after one record is re-analysed.
+
+    A Finding may aggregate evidence from several records. Only this record's
+    evidence is removed; the Finding itself is deleted when no evidence remains.
+    """
+    if not project_id or not record_id:
+        return {"evidence_removed": 0, "findings_deleted": 0}
+    keep = {str(value) for value in keep_finding_ids if str(value)}
+    collection = db[FINDINGS_COLLECTION]
+    cursor = collection.find(
+        {
+            "project_id": project_id,
+            "type": "contact",
+            "$or": [
+                {"evidence_refs.record_id": record_id},
+                {"latest_evidence_ref.record_id": record_id},
+                {"evidence.record_id": record_id},
+            ],
+        },
+        {
+            "_id": 0,
+            "finding_id": 1,
+            "evidence_refs": 1,
+            "latest_evidence_ref": 1,
+            "evidence": 1,
+        },
+    )
+    findings = await cursor.to_list(length=None)
+    removed = 0
+    deleted = 0
+    for finding in findings:
+        finding_id = str(finding.get("finding_id") or "")
+        if not finding_id or finding_id in keep:
+            continue
+        result = await collection.update_one(
+            {"finding_id": finding_id},
+            {"$pull": {"evidence_refs": {"record_id": record_id}}},
+        )
+        removed += int(result.modified_count or 0)
+        current = await collection.find_one(
+            {"finding_id": finding_id},
+            {
+                "_id": 0,
+                "evidence_refs": 1,
+                "latest_evidence_ref": 1,
+                "evidence": 1,
+            },
+        )
+        if not current:
+            continue
+        remaining = [dict(item) for item in current.get("evidence_refs") or []]
+        if remaining:
+            latest = remaining[-1]
+            if str((current.get("latest_evidence_ref") or {}).get("record_id") or "") == record_id:
+                set_fields: dict[str, Any] = {
+                    "latest_evidence_ref": latest,
+                    "updated_at": _now(),
+                }
+                for source_key, target_key in (
+                    ("source_document_id", "source_document_id"),
+                    ("source_document_version_id", "source_document_version_id"),
+                    ("source_url", "url"),
+                    ("context", "context"),
+                ):
+                    value = latest.get(source_key)
+                    if value:
+                        set_fields[target_key] = value
+                await collection.update_one(
+                    {
+                        "finding_id": finding_id,
+                        "latest_evidence_ref.record_id": record_id,
+                    },
+                    {"$set": set_fields},
+                )
+            continue
+        latest_record_id = str(
+            (current.get("latest_evidence_ref") or {}).get("record_id") or ""
+        )
+        legacy_record_id = str(
+            (current.get("evidence") or {}).get("record_id") or ""
+        )
+        if (
+            latest_record_id not in {"", record_id}
+            or legacy_record_id not in {"", record_id}
+        ):
+            continue
+        result = await collection.delete_one(
+            {
+                "finding_id": finding_id,
+                "$or": [
+                    {"evidence_refs": {"$exists": False}},
+                    {"evidence_refs": {"$size": 0}},
+                ],
+            }
+        )
+        deleted += int(result.deleted_count or 0)
+    return {"evidence_removed": removed, "findings_deleted": deleted}
+
+
 async def get_findings_summary(db: AsyncIOMotorDatabase, project_id: str) -> dict[str, Any]:
     """项目 findings 总览统计"""
     pipeline = [

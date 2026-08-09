@@ -385,7 +385,7 @@ def test_contextual_completion_uses_contact_attribution_for_image_evidence(
     assert result["fields"]["contact"] == "座机: 010-68377160"
 
 
-def test_contextual_completion_audits_unresolved_contacts_after_review_match(
+def test_contextual_completion_contact_auditor_is_authoritative(
     monkeypatch,
 ):
     import asyncio
@@ -410,8 +410,11 @@ def test_contextual_completion_audits_unresolved_contacts_after_review_match(
     ]
 
     async def attribute(**kwargs):
-        assert [item["value"] for item in kwargs["contacts"]] == ["hr@example.com"]
-        return [{**kwargs["contacts"][0], "attribution": "contact_review_agent"}], ""
+        assert [item["value"] for item in kwargs["contacts"]] == [
+            "010-68377160",
+            "hr@example.com",
+        ]
+        return [{**kwargs["contacts"][1], "attribution": "contact_review_agent"}], ""
 
     monkeypatch.setattr(service, "attribute_target_contacts", attribute)
     result = asyncio.run(
@@ -433,9 +436,47 @@ def test_contextual_completion_audits_unresolved_contacts_after_review_match(
     )
 
     assert [item["value"] for item in result["target_contacts"]] == [
-        "010-68377160",
-        "hr@example.com",
+        "hr@example.com"
     ]
+
+
+def test_contextual_completion_falls_back_to_review_on_auditor_error(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    candidate = {
+        "channel": "telephone",
+        "value": "010-68377160",
+        "label": "座机: 010-68377160",
+        "context": "招聘电话：010-68377160",
+        "source": "text",
+    }
+
+    async def attribute(**_kwargs):
+        return [], "模型暂不可用"
+
+    monkeypatch.setattr(service, "attribute_target_contacts", attribute)
+    result = asyncio.run(
+        service._complete_contextual_analysis(
+            {
+                "fields": {"summary": "目标招聘"},
+                "relevance_review": {
+                    "target_contact_values": ["联系电话：010-68377160"]
+                },
+            },
+            capture=_capture(raw_html=b"raw", rendered_html=b"dom"),
+            contacts=[candidate],
+            image_analysis=[],
+            target_name="目标研究院",
+            target_aliases=[],
+            project_id="project-1",
+            task_id="task-1",
+        )
+    )
+
+    assert result["target_contacts"][0]["value"] == "010-68377160"
+    assert result["contact_attribution_error"] == "模型暂不可用"
 
 
 def test_relevance_review_conservatively_merges_two_agents():
@@ -845,3 +886,122 @@ def test_image_archive_policy_rejects_invalid_model_contact():
     )
 
     assert selected == []
+
+
+def test_contact_finding_reconciliation_removes_only_stale_record_evidence():
+    import asyncio
+    from types import SimpleNamespace
+
+    from api.dao import findings as findings_dao
+    from api.db.collections import FINDINGS_COLLECTION
+
+    class _Cursor:
+        def __init__(self, values):
+            self.values = values
+
+        async def to_list(self, length=None):
+            del length
+            return [dict(value) for value in self.values]
+
+    class _Collection:
+        def __init__(self):
+            self.docs = {
+                "delete-me": {
+                    "finding_id": "delete-me",
+                    "project_id": "project-1",
+                    "type": "contact",
+                    "evidence_refs": [{"record_id": "record-1"}],
+                    "latest_evidence_ref": {"record_id": "record-1"},
+                },
+                "keep-shared": {
+                    "finding_id": "keep-shared",
+                    "project_id": "project-1",
+                    "type": "contact",
+                    "evidence_refs": [
+                        {"record_id": "record-2", "context": "旧证据"},
+                        {"record_id": "record-1", "context": "待撤销"},
+                    ],
+                    "latest_evidence_ref": {
+                        "record_id": "record-1",
+                        "context": "待撤销",
+                    },
+                },
+                "still-valid": {
+                    "finding_id": "still-valid",
+                    "project_id": "project-1",
+                    "type": "contact",
+                    "evidence_refs": [{"record_id": "record-1"}],
+                    "latest_evidence_ref": {"record_id": "record-1"},
+                },
+                "legacy-shared": {
+                    "finding_id": "legacy-shared",
+                    "project_id": "project-1",
+                    "type": "contact",
+                    "evidence_refs": [{"record_id": "record-1"}],
+                    "latest_evidence_ref": {"record_id": "record-1"},
+                    "evidence": {"record_id": "record-2"},
+                },
+            }
+
+        def find(self, *_args, **_kwargs):
+            return _Cursor(self.docs.values())
+
+        async def find_one(self, query, _projection=None):
+            value = self.docs.get(query.get("finding_id"))
+            return dict(value) if value else None
+
+        async def update_one(self, query, update):
+            value = self.docs.get(query.get("finding_id"))
+            if not value:
+                return SimpleNamespace(modified_count=0)
+            before = repr(value)
+            record_id = (
+                (update.get("$pull") or {}).get("evidence_refs") or {}
+            ).get("record_id")
+            if record_id:
+                value["evidence_refs"] = [
+                    item
+                    for item in value.get("evidence_refs") or []
+                    if item.get("record_id") != record_id
+                ]
+            value.update(update.get("$set") or {})
+            return SimpleNamespace(modified_count=int(before != repr(value)))
+
+        async def delete_one(self, query):
+            value = self.docs.get(query.get("finding_id"))
+            if value and not value.get("evidence_refs"):
+                self.docs.pop(query["finding_id"])
+                return SimpleNamespace(deleted_count=1)
+            return SimpleNamespace(deleted_count=0)
+
+    class _DB:
+        def __init__(self):
+            self.collection = _Collection()
+
+        def __getitem__(self, name):
+            assert name == FINDINGS_COLLECTION
+            return self.collection
+
+    db = _DB()
+    result = asyncio.run(
+        findings_dao.reconcile_contact_findings_for_record(
+            db,
+            project_id="project-1",
+            record_id="record-1",
+            keep_finding_ids=["still-valid"],
+        )
+    )
+
+    assert result == {"evidence_removed": 3, "findings_deleted": 1}
+    assert "delete-me" not in db.collection.docs
+    assert db.collection.docs["keep-shared"]["evidence_refs"] == [
+        {"record_id": "record-2", "context": "旧证据"}
+    ]
+    assert db.collection.docs["keep-shared"]["latest_evidence_ref"] == {
+        "record_id": "record-2",
+        "context": "旧证据",
+    }
+    assert db.collection.docs["still-valid"]["evidence_refs"] == [
+        {"record_id": "record-1"}
+    ]
+    assert "legacy-shared" in db.collection.docs

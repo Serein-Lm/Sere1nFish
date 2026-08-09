@@ -173,6 +173,15 @@ def _patch_pipeline(monkeypatch, *, analyze_returns):
     monkeypatch.setattr(pl, "triage_screenshot", _fake_triage)
     monkeypatch.setattr(pl, "obs_log", lambda *a, **k: "")
 
+    async def _fake_reconcile(*_args, **_kwargs):
+        return {"evidence_removed": 0, "findings_deleted": 0}
+
+    monkeypatch.setattr(
+        pl.findings_dao,
+        "reconcile_contact_findings_for_record",
+        _fake_reconcile,
+    )
+
     notifies: list = []
     import api.services.notifications as notif
 

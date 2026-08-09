@@ -1560,6 +1560,7 @@ class _PersistStage(Stage):
 
         # 数据分类: 抽取联系方式并接入统一 findings(需归属项目)
         project_id = st["project_id"]
+        finding_ids: list[str] = []
         if project_id and contacts:
             record = {
                 "fields": payload["fields"],
@@ -1584,6 +1585,7 @@ class _PersistStage(Stage):
             )
             for f in findings:
                 await findings_dao.upsert_contact_finding(st["db"], f)
+            finding_ids = [str(f["finding_id"]) for f in findings]
             counters["contacts"] = counters.get("contacts", 0) + len(findings)
             obs_log(
                 f"发现联系方式 {len(findings)} 条 kw={payload['keyword'] or '-'}",
@@ -1597,6 +1599,13 @@ class _PersistStage(Stage):
                     "record_id": result["record_id"],
                     "contacts": [c["label"] for c in contacts],
                 },
+            )
+        if project_id and extract_contact_findings:
+            await findings_dao.reconcile_contact_findings_for_record(
+                st["db"],
+                project_id=project_id,
+                record_id=str(result["record_id"]),
+                keep_finding_ids=finding_ids,
             )
 
         notify_on = st["notify_on"]

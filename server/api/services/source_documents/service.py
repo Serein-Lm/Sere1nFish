@@ -140,42 +140,27 @@ async def _complete_contextual_analysis(
         (analysis.get("relevance_review") or {}).get("target_contact_values") or []
     )
     declared_values = review_values or list(analysis.get("target_contact_values") or [])
-    target_contacts = filter_target_contacts(
+    reviewed_contacts = filter_target_contacts(
         contacts,
         declared_values,
         text=capture.text,
     )
-    selected_keys = {
-        (str(item.get("channel") or ""), str(item.get("value") or "").casefold())
-        for item in target_contacts
-    }
-    unresolved = [
-        item
-        for item in contacts
-        if (str(item.get("channel") or ""), str(item.get("value") or "").casefold())
-        not in selected_keys
-    ]
     attribution_error = ""
-    if unresolved:
+    target_contacts = reviewed_contacts
+    if contacts:
         attributed, attribution_error = await attribute_target_contacts(
             target_name=target_name,
             target_aliases=target_aliases,
             title=capture.title,
             account=capture.account,
             summary=str(fields.get("summary") or ""),
-            contacts=unresolved,
+            contacts=contacts,
             image_analysis=image_analysis,
             project_id=project_id,
             task_id=task_id,
         )
-        for item in attributed:
-            key = (
-                str(item.get("channel") or ""),
-                str(item.get("value") or "").casefold(),
-            )
-            if key not in selected_keys:
-                target_contacts.append(item)
-                selected_keys.add(key)
+        if not attribution_error:
+            target_contacts = attributed
     fields.update(
         {
             "title": capture.title,
