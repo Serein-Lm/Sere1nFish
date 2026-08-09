@@ -583,6 +583,7 @@ def test_rejected_relevance_review_stops_before_source_persistence(monkeypatch):
     from api.services.source_documents import service
 
     capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+    capture.images = []
 
     class _Provider:
         async def capture(self, *_args, **_kwargs):
@@ -700,12 +701,123 @@ def test_analysis_failure_is_retryable_instead_of_semantic_rejection(
         )
 
 
+def test_image_evidence_rechecks_a_text_only_rejection(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+    calls: list[str] = []
+
+    class _Provider:
+        async def capture(self, *_args, **_kwargs):
+            return capture
+
+    async def analyze(document, **_kwargs):
+        if "【文章图片 OCR 与视觉证据】" not in document.text:
+            calls.append("text")
+            return {
+                "fields": {"summary": "网页正文缺少主体"},
+                "score": 20,
+                "subject_match": 10,
+                "review_decision": "reject",
+                "article_scope": "uncertain",
+                "relevance_review": {"decision": "reject"},
+            }
+        calls.append("image")
+        assert "中国航天空气动力技术研究院" in document.text
+        return {
+            "fields": {"summary": "招聘海报明确属于目标研究院"},
+            "score": 96,
+            "subject_match": 98,
+            "review_decision": "accept",
+            "article_scope": "target_focused",
+            "relevance_review": {"decision": "accept"},
+        }
+
+    async def analyze_images(*_args, **_kwargs):
+        return (
+            [
+                {
+                    "index": 0,
+                    "description": "目标研究院校园招聘海报",
+                    "visible_text": "中国航天空气动力技术研究院 2026届校园招聘",
+                    "contacts": [
+                        {
+                            "channel": "email",
+                            "value": "hr@example.com",
+                            "context": "简历投递 hr@example.com",
+                        }
+                    ],
+                    "is_key_evidence": True,
+                    "importance_score": 98,
+                }
+            ],
+            "",
+        )
+
+    async def complete(analysis, **_kwargs):
+        return analysis
+
+    monkeypatch.setattr(service, "get_source_document_provider", lambda _url: _Provider())
+    monkeypatch.setattr(service, "analyze_and_review_article", analyze)
+    monkeypatch.setattr(service, "analyze_article_images", analyze_images)
+    monkeypatch.setattr(service, "_complete_contextual_analysis", complete)
+
+    result = asyncio.run(
+        service.ingest_source_url(
+            object(),
+            url=capture.canonical_url,
+            target={"target_id": "target-1", "canonical_name": "目标研究院"},
+            extract_fields=[],
+            persist=False,
+            min_subject_match=70,
+        )
+    )
+
+    assert calls == ["text", "image"]
+    assert result["ok"] is True
+    assert result["review_decision"] == "accept"
+    assert result["image_evidence_used"] is True
+    assert result["image_evidence_indices"] == [0]
+
+
+def test_incomplete_capture_does_not_replace_better_existing_images():
+    from dataclasses import replace
+
+    from api.services.source_documents import service
+
+    capture = replace(
+        _capture(raw_html=b"raw", rendered_html=b"dom"),
+        images=[],
+        metadata={
+            "image_urls": ["https://mmbiz.qpic.cn/evidence.jpg"],
+            "image_download_errors": ["connection closed"],
+        },
+    )
+    existing = {
+        "media_policy_version": service._MEDIA_POLICY_VERSION - 1,
+        "images": [
+            {
+                "source_url": "https://mmbiz.qpic.cn/evidence.jpg",
+                "analysis": {"visible_text": "目标单位招聘"},
+            }
+        ],
+        "capture_metadata": {
+            "analyzed_image_urls": ["https://mmbiz.qpic.cn/evidence.jpg"]
+        },
+    }
+
+    assert service._capture_has_more_complete_images(existing, capture) is False
+
+
 def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
     import asyncio
 
     from api.services.source_documents import service
 
     capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+    capture.images = []
     linked: list[dict] = []
 
     class _Provider:

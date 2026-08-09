@@ -10,6 +10,7 @@ import hashlib
 import json
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -40,7 +41,7 @@ from .urls import canonicalize_source_url
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
-_CONTEXT_ANALYSIS_SCHEMA_VERSION = 6
+_CONTEXT_ANALYSIS_SCHEMA_VERSION = 7
 _MEDIA_POLICY_VERSION = 3
 _SOURCE_FIELD_KEYS = {
     "title",
@@ -200,21 +201,105 @@ def _version_image_analysis(version: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _usable_image_analysis(
+    image_analysis: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in image_analysis
+        if str(item.get("visible_text") or "").strip()
+        or list(item.get("contacts") or [])
+        or (
+            item.get("is_key_evidence")
+            and str(item.get("description") or "").strip()
+        )
+    ]
+
+
+def _capture_with_image_evidence(
+    capture: CapturedDocument,
+    image_analysis: list[dict[str, Any]],
+) -> CapturedDocument | None:
+    """Expose OCR/key-image evidence to the same two-agent relevance review."""
+    useful = sorted(
+        _usable_image_analysis(image_analysis),
+        key=lambda item: (
+            not bool(item.get("contacts")),
+            not bool(item.get("is_key_evidence")),
+            -int(item.get("importance_score") or 0),
+            int(item.get("index") or 0),
+        ),
+    )[:12]
+    if not useful:
+        return None
+    evidence = [
+        {
+            "index": item.get("index"),
+            "description": str(item.get("description") or "")[:1200],
+            "visible_text": str(item.get("visible_text") or "")[:5000],
+            "contacts": list(item.get("contacts") or [])[:20],
+            "is_key_evidence": bool(item.get("is_key_evidence")),
+            "importance_score": int(item.get("importance_score") or 0),
+        }
+        for item in useful
+    ]
+    evidence_text = json.dumps(evidence, ensure_ascii=False)[:20000]
+    return replace(
+        capture,
+        text=(
+            "【文章图片 OCR 与视觉证据】\n"
+            f"{evidence_text}\n\n"
+            "【网页正文】\n"
+            f"{capture.text}"
+        ),
+    )
+
+
 def _capture_has_more_complete_images(
     version: dict[str, Any],
     capture: CapturedDocument,
 ) -> bool:
-    if int(version.get("media_policy_version") or 0) < _MEDIA_POLICY_VERSION:
-        return True
+    existing_metadata = dict(version.get("capture_metadata") or {})
+    current_metadata = dict(capture.metadata or {})
     existing_urls = set(
-        (version.get("capture_metadata") or {}).get("analyzed_image_urls") or []
+        existing_metadata.get("analyzed_image_urls") or []
     ) or {
         str(image.get("source_url") or "")
         for image in version.get("images") or []
         if image.get("source_url")
     }
-    captured_urls = {image.source_url for image in capture.images if image.source_url}
-    return bool(existing_urls < captured_urls)
+    captured_urls = {
+        image.source_url for image in capture.images if image.source_url
+    }
+    if (
+        current_metadata.get("image_download_errors")
+        and existing_urls
+        and not existing_urls.issubset(captured_urls)
+    ):
+        return False
+    if int(version.get("media_policy_version") or 0) < _MEDIA_POLICY_VERSION:
+        return True
+    if existing_urls < captured_urls:
+        return True
+    if capture.images and not _usable_image_analysis(
+        _version_image_analysis(version)
+    ):
+        return True
+    if (
+        existing_metadata.get("image_download_errors")
+        and not current_metadata.get("image_download_errors")
+        and capture.images
+    ):
+        return True
+    if len(capture.screenshots) > len(version.get("screenshots") or []):
+        return True
+    if (
+        existing_metadata.get("screenshot_capture_error")
+        and not current_metadata.get("screenshot_capture_error")
+        and len(capture.screenshots) >= len(version.get("screenshots") or [])
+    ):
+        return True
+    return False
 
 
 def _source_analysis(
@@ -369,6 +454,46 @@ def _raise_on_analysis_failure(analysis: dict[str, Any]) -> None:
         raise SourceDocumentAnalysisError(f"来源相关性审核失败: {review_error}")
 
 
+async def _reanalyze_with_image_evidence(
+    capture: CapturedDocument,
+    analysis: dict[str, Any],
+    image_analysis: list[dict[str, Any]],
+    *,
+    image_analysis_error: str,
+    fields: list[ExtractField],
+    target_name: str,
+    keyword: str,
+    required_subject_match: int,
+    project_id: str,
+    task_id: str,
+) -> dict[str, Any]:
+    enriched_capture = _capture_with_image_evidence(capture, image_analysis)
+    if enriched_capture is None:
+        if image_analysis_error:
+            raise SourceDocumentAnalysisError(
+                f"来源图片证据识别失败: {image_analysis_error}"
+            )
+        return analysis
+    reviewed = await analyze_and_review_article(
+        enriched_capture,
+        fields=fields,
+        target_name=target_name,
+        keyword=keyword,
+        required_subject_match=required_subject_match,
+        project_id=project_id,
+        task_id=task_id,
+    )
+    _raise_on_analysis_failure(reviewed)
+    return {
+        **reviewed,
+        "image_evidence_used": True,
+        "image_evidence_indices": [
+            int(item.get("index") or 0)
+            for item in _usable_image_analysis(image_analysis)
+        ],
+    }
+
+
 def _rejected_source_result(
     capture: CapturedDocument,
     analysis: dict[str, Any],
@@ -397,6 +522,10 @@ def _rejected_source_result(
         "score_reason": analysis.get("score_reason") or "",
         "review_decision": analysis.get("review_decision") or "reject",
         "article_scope": analysis.get("article_scope") or "uncertain",
+        "image_evidence_used": bool(analysis.get("image_evidence_used")),
+        "image_evidence_indices": list(
+            analysis.get("image_evidence_indices") or []
+        ),
         "contacts": [],
         "browser_screenshot_ids": [],
         "browser_screenshot_urls": [],
@@ -619,6 +748,10 @@ def _result_from_version(
         "score_reason": analysis.get("score_reason") or "",
         "review_decision": analysis.get("review_decision") or "",
         "article_scope": analysis.get("article_scope") or "uncertain",
+        "image_evidence_used": bool(analysis.get("image_evidence_used")),
+        "image_evidence_indices": list(
+            analysis.get("image_evidence_indices") or []
+        ),
         "contacts": list(analysis.get("target_contacts") or []),
         "browser_screenshot_ids": [
             item.get("storage_object_id") for item in screenshots if item.get("storage_object_id")
@@ -682,6 +815,10 @@ async def ingest_source_url(
                 and existing.get("status") == "ready"
                 and not _capture_has_more_complete_images(existing, capture)
             ):
+                required_subject_match = max(
+                    0, min(100, int(min_subject_match or 0))
+                )
+                version_image_analysis = _version_image_analysis(existing)
                 contextual_analysis: dict[str, Any] | None = None
                 existing_link = await source_dao.get_document_link(
                     db,
@@ -704,25 +841,38 @@ async def ingest_source_url(
                         fields=task_fields,
                         target_name=target_analysis_name,
                         keyword=keyword,
-                        required_subject_match=max(
-                            0, min(100, int(min_subject_match or 0))
-                        ),
+                        required_subject_match=required_subject_match,
                         project_id=project_id,
                         task_id=run_task_id,
                     )
                 _raise_on_analysis_failure(contextual_analysis)
+                if not _passes_target_review(
+                    contextual_analysis,
+                    required_subject_match,
+                ):
+                    contextual_analysis = await _reanalyze_with_image_evidence(
+                        capture,
+                        contextual_analysis,
+                        version_image_analysis,
+                        image_analysis_error=str(
+                            existing.get("image_analysis_error") or ""
+                        ),
+                        fields=task_fields,
+                        target_name=target_analysis_name,
+                        keyword=keyword,
+                        required_subject_match=required_subject_match,
+                        project_id=project_id,
+                        task_id=run_task_id,
+                    )
                 contextual_analysis = await _complete_contextual_analysis(
                     contextual_analysis,
                     capture=capture,
                     contacts=list(existing.get("contacts") or []),
-                    image_analysis=_version_image_analysis(existing),
+                    image_analysis=version_image_analysis,
                     target_name=target_name,
                     target_aliases=target_aliases,
                     project_id=project_id,
                     task_id=run_task_id,
-                )
-                required_subject_match = max(
-                    0, min(100, int(min_subject_match or 0))
                 )
                 if not _passes_target_review(
                     contextual_analysis,
@@ -792,6 +942,9 @@ async def ingest_source_url(
         version_started = False
         try:
             required_subject_match = max(0, min(100, int(min_subject_match or 0)))
+            image_analysis: list[dict[str, Any]] = []
+            image_analysis_error = ""
+            images_analyzed = False
             analysis = await analyze_and_review_article(
                 capture,
                 fields=task_fields,
@@ -802,6 +955,35 @@ async def ingest_source_url(
                 task_id=run_task_id,
             )
             _raise_on_analysis_failure(analysis)
+            if not _passes_target_review(analysis, required_subject_match):
+                if capture.images:
+                    image_analysis, image_analysis_error = (
+                        await analyze_article_images(
+                            capture.images,
+                            project_id=project_id,
+                            task_id=run_task_id,
+                        )
+                    )
+                    images_analyzed = True
+                    analysis = await _reanalyze_with_image_evidence(
+                        capture,
+                        analysis,
+                        image_analysis,
+                        image_analysis_error=image_analysis_error,
+                        fields=task_fields,
+                        target_name=target_analysis_name,
+                        keyword=keyword,
+                        required_subject_match=required_subject_match,
+                        project_id=project_id,
+                        task_id=run_task_id,
+                    )
+                elif (
+                    (capture.metadata or {}).get("image_urls")
+                    and (capture.metadata or {}).get("image_download_errors")
+                ):
+                    raise SourceDocumentAnalysisError(
+                        "来源原图下载失败，无法完成图片证据相关性审核"
+                    )
             if not _passes_target_review(analysis, required_subject_match):
                 if persist:
                     await _persist_existing_link_review(
@@ -837,12 +1019,14 @@ async def ingest_source_url(
                     source_type=capture.source_type,
                 )
                 version_started = True
-            image_result = await analyze_article_images(
-                capture.images,
-                project_id=project_id,
-                task_id=run_task_id,
-            )
-            image_analysis, image_analysis_error = image_result
+            if not images_analyzed:
+                image_analysis, image_analysis_error = (
+                    await analyze_article_images(
+                        capture.images,
+                        project_id=project_id,
+                        task_id=run_task_id,
+                    )
+                )
             images_to_archive = _select_archive_images(
                 capture.images,
                 image_analysis,
