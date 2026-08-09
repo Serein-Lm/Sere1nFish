@@ -1180,6 +1180,17 @@ def test_deep_dive_observes_rejected_source_without_persisting(monkeypatch):
     async def _no_sleep(_seconds):
         return None
 
+    archived: list[dict] = []
+    reconciled: list[dict] = []
+
+    async def _archive_rejected(*_args, **kwargs):
+        archived.append(kwargs)
+        return ["stale-record"]
+
+    async def _reconcile(*_args, **kwargs):
+        reconciled.append(kwargs)
+        return {"evidence_removed": 1, "findings_deleted": 1}
+
     def _observe(message, **kwargs):
         observed.append({"message": message, **kwargs})
         return ""
@@ -1193,6 +1204,16 @@ def test_deep_dive_observes_rejected_source_without_persisting(monkeypatch):
     monkeypatch.setattr(pl, "verify_detail_entry", _accepted_detail_entry)
     monkeypatch.setattr(pl, "obs_log", _observe)
     monkeypatch.setattr(pl.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(
+        pl.collect_dao,
+        "archive_rejected_source_records",
+        _archive_rejected,
+    )
+    monkeypatch.setattr(
+        pl.findings_dao,
+        "reconcile_contact_findings_for_record",
+        _reconcile,
+    )
     monkeypatch.setattr(
         pl,
         "extract_source_link",
@@ -1226,6 +1247,10 @@ def test_deep_dive_observes_rejected_source_without_persisting(monkeypatch):
     assert rejected["data"]["subject_match"] == 25
     assert rejected["data"]["required_subject_match"] == 80
     assert rejected["data"]["reason"] == "正文仅偶然提及目标单位"
+    assert rejected["data"]["archived_record_ids"] == ["stale-record"]
+    assert archived[0]["source_document_id"] == "source-doc-rejected"
+    assert reconciled[0]["record_id"] == "stale-record"
+    assert reconciled[0]["keep_finding_ids"] == []
 
 
 def test_wechat_detail_mismatch_stops_before_link_extraction(monkeypatch):

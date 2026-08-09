@@ -12,6 +12,28 @@ from datetime import datetime, timezone
 import pytest
 
 
+def _matches(doc: dict, query: dict) -> bool:
+    for key, expected in query.items():
+        if key == "$or":
+            if not any(_matches(doc, branch) for branch in expected):
+                return False
+        elif isinstance(expected, dict) and "$exists" in expected:
+            if (key in doc) != bool(expected["$exists"]):
+                return False
+        elif doc.get(key) != expected:
+            return False
+    return True
+
+
+class _FakeCursor:
+    def __init__(self, values: list[dict]) -> None:
+        self.values = values
+
+    async def to_list(self, length=None):
+        del length
+        return [dict(value) for value in self.values]
+
+
 # ── 最小异步集合桩(仅支持本测试所需的 find_one / update_one upsert) ──
 class _FakeCollection:
     def __init__(self) -> None:
@@ -25,16 +47,7 @@ class _FakeCollection:
         else:
             candidates = list(self.docs.values())
         for doc in candidates:
-            matched = True
-            for key, expected in query.items():
-                if isinstance(expected, dict) and "$exists" in expected:
-                    if (key in doc) != bool(expected["$exists"]):
-                        matched = False
-                        break
-                elif doc.get(key) != expected:
-                    matched = False
-                    break
-            if matched:
+            if _matches(doc, query):
                 return dict(doc)
         return None
 
@@ -50,6 +63,8 @@ class _FakeCollection:
             existing = {}
             existing.update(update.get("$setOnInsert", {}))
         existing.update(update.get("$set", {}))
+        for key in update.get("$unset", {}):
+            existing.pop(key, None)
         add = update.get("$addToSet", {})
         for key, val in add.items():
             arr = existing.setdefault(key, [])
@@ -59,12 +74,27 @@ class _FakeCollection:
                     arr.append(value)
         self.docs[rid] = existing
 
+    def find(self, query: dict, projection: dict | None = None):
+        del projection
+        values = []
+        for doc in self.docs.values():
+            if _matches(doc, query):
+                values.append(doc)
+        return _FakeCursor(values)
+
     async def update_many(self, query: dict, update: dict):
+        record_ids = set((query.get("record_id") or {}).get("$in") or [])
         task_def_id = query.get("task_def_id")
         project_id = query.get("project_id")
         keywords = set((query.get("keyword") or {}).get("$in") or [])
         modified = 0
-        for doc in self.docs.values():
+        for record_id, doc in self.docs.items():
+            if record_ids:
+                if record_id not in record_ids:
+                    continue
+                doc.update(update.get("$set", {}))
+                modified += 1
+                continue
             if task_def_id and doc.get("task_def_id") != task_def_id:
                 continue
             if project_id and doc.get("project_id") != project_id:
@@ -214,6 +244,72 @@ def test_upsert_record_incremental_semantics():
     assert r3["is_new"] is False and r3["is_changed"] is True
     # 三次操作命中同一稳定 record_id
     assert r1["record_id"] == r2["record_id"] == r3["record_id"]
+
+
+def test_rejected_source_record_is_hidden_and_can_be_revived():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+    fields = {"title": "目标单位招聘"}
+    record_id = dao.stable_record_id(
+        "task-1",
+        fields,
+        ["title"],
+        source_document_id="doc-1",
+    )
+    collection = db[dao.MOBILE_COLLECT_RECORDS_COLLECTION]
+    collection.docs[record_id] = {
+        "record_id": record_id,
+        "task_def_id": "task-1",
+        "project_id": "project-1",
+        "source_document_id": "doc-1",
+        "target_id": "target-1",
+        "fields": fields,
+        "content_hash": "old",
+    }
+    collection.docs["merged-record"] = {
+        "record_id": "merged-record",
+        "task_def_id": "task-1",
+        "project_id": "project-1",
+        "source_document_id": "doc-1",
+        "target_id": "target-1",
+        "superseded_by_record_id": record_id,
+        "superseded_reason": "source_document_match",
+    }
+
+    archived = _run(
+        dao.archive_rejected_source_records(
+            db,
+            task_def_id="task-1",
+            project_id="project-1",
+            source_document_id="doc-1",
+            target_id="target-1",
+        )
+    )
+
+    assert archived == [record_id]
+    assert collection.docs[record_id]["superseded_reason"] == (
+        "source_relevance_rejected"
+    )
+    assert collection.docs["merged-record"]["superseded_reason"] == (
+        "source_document_match"
+    )
+
+    revived = _run(
+        dao.upsert_record(
+            db,
+            task_def_id="task-1",
+            project_id="project-1",
+            fields=fields,
+            dedup_key_fields=["title"],
+            source_document_id="doc-1",
+            target_id="target-1",
+        )
+    )
+
+    assert revived["is_new"] is False
+    assert "superseded_by_record_id" not in collection.docs[record_id]
+    assert "superseded_reason" not in collection.docs[record_id]
 
 
 def test_upsert_record_first_seen_preserved_on_update():

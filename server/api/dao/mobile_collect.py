@@ -452,6 +452,15 @@ async def _resolve_record_identity(
         },
         projection,
     )
+    if source_existing is None:
+        source_existing = await collection.find_one(
+            {
+                "task_def_id": task_def_id,
+                "source_document_id": source_document_id,
+                "superseded_reason": "source_relevance_rejected",
+            },
+            projection,
+        )
     list_record_id = _stable_record_id(
         task_def_id,
         fields,
@@ -618,6 +627,12 @@ async def upsert_record(
                 add_to_set[field] = {"$each": values}
     if add_to_set:
         update["$addToSet"] = add_to_set
+    if source_document_id:
+        update["$unset"] = {
+            "superseded_by_record_id": "",
+            "superseded_reason": "",
+            "superseded_at": "",
+        }
 
     await coll.update_one({"record_id": record_id}, update, upsert=True)
     if legacy_duplicate:
@@ -634,6 +649,55 @@ async def upsert_record(
                 },
             )
     return {"record_id": record_id, "is_new": is_new, "is_changed": is_changed}
+
+
+async def archive_rejected_source_records(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_def_id: str,
+    project_id: str,
+    source_document_id: str,
+    target_id: str = "",
+    reason: str = "source_relevance_rejected",
+) -> list[str]:
+    """Hide prior records when an immutable source fails a later relevance review."""
+    if not task_def_id or not project_id or not source_document_id:
+        return []
+    query: dict[str, Any] = {
+        "task_def_id": task_def_id,
+        "project_id": project_id,
+        "source_document_id": source_document_id,
+        "$or": [
+            {"superseded_by_record_id": {"$exists": False}},
+            {"superseded_reason": reason},
+        ],
+    }
+    if target_id:
+        query["target_id"] = target_id
+    collection = db[MOBILE_COLLECT_RECORDS_COLLECTION]
+    records = await collection.find(query, {"_id": 0, "record_id": 1}).to_list(
+        length=None
+    )
+    record_ids = [
+        str(record.get("record_id") or "")
+        for record in records
+        if record.get("record_id")
+    ]
+    if not record_ids:
+        return []
+    now = _now()
+    await collection.update_many(
+        {"record_id": {"$in": record_ids}},
+        {
+            "$set": {
+                "superseded_by_record_id": f"rejected:{source_document_id}",
+                "superseded_reason": reason,
+                "superseded_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    return record_ids
 
 
 async def attach_media_evidence(

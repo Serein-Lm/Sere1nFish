@@ -825,6 +825,37 @@ class _CollectStage(Stage):
                         return True
                     if not candidate_policy.allow_mobile_detail_fallback:
                         if source_result.get("rejected"):
+                            rejected_record_ids: list[str] = []
+                            if not st.get("dry_run") and st.get("project_id"):
+                                rejected_record_ids = (
+                                    await collect_dao.archive_rejected_source_records(
+                                        st["db"],
+                                        task_def_id=str(
+                                            st.get("task_def_id") or ""
+                                        ),
+                                        project_id=str(st.get("project_id") or ""),
+                                        source_document_id=str(
+                                            source_result.get("document_id") or ""
+                                        ),
+                                        target_id=str(
+                                            source_result.get("target_id")
+                                            or (collect_target or {}).get("target_id")
+                                            or ""
+                                        ),
+                                    )
+                                )
+                                reconcile_findings = (
+                                    findings_dao.reconcile_contact_findings_for_record
+                                )
+                                for record_id in rejected_record_ids:
+                                    await reconcile_findings(
+                                        st["db"],
+                                        project_id=str(
+                                            st.get("project_id") or ""
+                                        ),
+                                        record_id=record_id,
+                                        keep_finding_ids=[],
+                                    )
                             obs_log(
                                 "公众号原文未通过独立相关性审核，已丢弃本次关联",
                                 project_id=st["project_id"] or "",
@@ -847,6 +878,7 @@ class _CollectStage(Stage):
                                     ),
                                     "reason": source_result.get("score_reason")
                                     or source_result.get("reason"),
+                                    "archived_record_ids": rejected_record_ids,
                                 },
                             )
                         else:
