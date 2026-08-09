@@ -155,6 +155,16 @@ def test_contact_extraction_normalizes_grouped_mobile_number():
     assert "邵部长" in contacts[0]["context"]
 
 
+def test_contact_extraction_does_not_treat_numeric_email_as_mobile():
+    from core.mobile.collect.contacts import extract_contacts
+
+    contacts = extract_contacts("简历投递邮箱：15904896909@163.com")
+
+    assert [(item["channel"], item["value"]) for item in contacts] == [
+        ("email", "15904896909@163.com")
+    ]
+
+
 def test_contact_extraction_normalizes_parenthesized_area_code():
     from core.mobile.collect.contacts import extract_contacts
 

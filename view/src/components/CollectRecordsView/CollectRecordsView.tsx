@@ -29,7 +29,7 @@ import './CollectRecordsView.css'
 
 const { Text } = Typography
 
-const MOBILE_RE = /(?<!\d)(1[3-9]\d{9})(?!\d)/g
+const MOBILE_RE = /(?<![A-Za-z0-9._%+\-])(1[3-9]\d{9})(?![\d@])/g
 const TEL_KW_RE = /(?:联系电话|电话|联系方式|座机|Tel|TEL|tel)\s*[:：]?\s*(1[3-9]\d{9}|(?:0\d{2,3}[-\s]|\(0\d{2,3}\)[-\s]?)\d{7,8})(?!\d)/g
 const LANDLINE_RE = /(?<!\d)((?:0\d{2,3}[-\s]|\(0\d{2,3}\)[-\s]?)\d{7,8})(?!\d)/g
 const SERVICE_TEL_RE = /(?<!\d)((?:400|800)[-\s]?\d{3}[-\s]?\d{4})(?!\d)/g
