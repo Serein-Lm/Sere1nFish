@@ -829,6 +829,43 @@ def test_incomplete_capture_does_not_replace_better_existing_images():
     assert service._capture_has_more_complete_images(existing, capture) is False
 
 
+def test_archive_completeness_treats_unsupported_svg_as_warning():
+    from api.services.source_documents import service
+
+    error, warning = service._split_image_analysis_diagnostics(
+        "image index=0 content_type=image/svg+xml "
+        "prepare_failed=UnidentifiedImageError"
+    )
+    status, messages = service._archive_completeness(
+        capture_metadata={},
+        image_analysis_error=error,
+        image_analysis_warning=warning,
+    )
+
+    assert error == ""
+    assert "image/svg+xml" in warning
+    assert status == "complete_with_warnings"
+    assert messages and "SVG" in messages[0]
+
+
+def test_archive_completeness_reports_missing_evidence_as_partial():
+    from api.services.source_documents import service
+
+    status, messages = service._archive_completeness(
+        capture_metadata={
+            "image_download_errors": ["image-1 timeout", "image-2 timeout"],
+            "screenshot_capture_error": "Page.captureScreenshot timeout",
+        },
+        image_analysis_error="image index=2 analyze_failed=TimeoutError",
+        image_analysis_warning="",
+    )
+
+    assert status == "partial"
+    assert any("原图下载失败 2 张" in message for message in messages)
+    assert any("页面截图不完整" in message for message in messages)
+    assert any("图片识别失败" in message for message in messages)
+
+
 def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
     import asyncio
 
@@ -849,6 +886,7 @@ def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
             "status": "ready",
             "media_policy_version": service._MEDIA_POLICY_VERSION,
             "contact_policy_version": service._CONTACT_POLICY_VERSION,
+            "archive_status": "complete",
             "capture_metadata": {"analyzed_image_urls": []},
             "contacts": [],
             "image_analysis": [],
@@ -1175,6 +1213,10 @@ def test_cached_contact_refresh_rewrites_only_structured_artifact(monkeypatch):
                 ],
                 "images": [],
                 "screenshots": [],
+                "image_analysis_error": (
+                    "image index=0 content_type=image/svg+xml "
+                    "prepare_failed=UnidentifiedImageError"
+                ),
             },
             contacts=[
                 {
@@ -1207,6 +1249,13 @@ def test_cached_contact_refresh_rewrites_only_structured_artifact(monkeypatch):
         "object-structured-old",
         "object-structured-new",
     ]
+    assert version_payloads[0]["image_analysis_error"] == ""
+    assert "image/svg+xml" in version_payloads[0]["image_analysis_warning"]
+    assert version_payloads[0]["archive_status"] == "complete_with_warnings"
+    assert (
+        structured_payloads[0]["evidence"]["media"]["archive_status"]
+        == "complete_with_warnings"
+    )
 
 
 def test_image_archive_policy_keeps_only_contact_and_key_evidence():

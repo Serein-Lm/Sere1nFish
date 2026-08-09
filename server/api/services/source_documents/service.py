@@ -218,6 +218,56 @@ def _usable_image_analysis(
     ]
 
 
+def _split_image_analysis_diagnostics(value: Any) -> tuple[str, str]:
+    parts = [
+        part.strip()
+        for part in str(value or "").split("; ")
+        if part.strip()
+    ]
+    warnings = [
+        part
+        for part in parts
+        if "content_type=image/svg+xml" in part
+        and "prepare_failed=UnidentifiedImageError" in part
+    ]
+    errors = [part for part in parts if part not in warnings]
+    return "; ".join(errors)[:2000], "; ".join(warnings)[:2000]
+
+
+def _archive_completeness(
+    *,
+    capture_metadata: dict[str, Any],
+    image_analysis_error: str,
+    image_analysis_warning: str,
+) -> tuple[str, list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    image_download_errors = list(
+        capture_metadata.get("image_download_errors") or []
+    )
+    if image_download_errors:
+        errors.append(f"原图下载失败 {len(image_download_errors)} 张")
+    screenshot_error = str(
+        capture_metadata.get("screenshot_capture_error") or ""
+    ).strip()
+    if screenshot_error:
+        errors.append(f"页面截图不完整: {screenshot_error[:300]}")
+    if image_analysis_error:
+        errors.append(f"图片识别失败: {image_analysis_error[:500]}")
+    if image_analysis_warning:
+        warnings.append(
+            "已跳过视觉模型不支持的 SVG 图片: "
+            f"{image_analysis_warning[:500]}"
+        )
+    if errors:
+        status = "partial"
+    elif warnings:
+        status = "complete_with_warnings"
+    else:
+        status = "complete"
+    return status, [*errors, *warnings]
+
+
 def _capture_with_image_evidence(
     capture: CapturedDocument,
     image_analysis: list[dict[str, Any]],
@@ -737,6 +787,22 @@ async def _refresh_cached_source_contacts(
     project_id: str,
 ) -> dict[str, Any]:
     """Refresh derived contacts and structured JSON without replacing evidence."""
+    image_analysis_error, migrated_warning = _split_image_analysis_diagnostics(
+        version.get("image_analysis_error")
+    )
+    image_analysis_warning = "; ".join(
+        value
+        for value in [
+            str(version.get("image_analysis_warning") or "").strip(),
+            migrated_warning,
+        ]
+        if value
+    )[:2000]
+    archive_status, archive_warnings = _archive_completeness(
+        capture_metadata=dict(version.get("capture_metadata") or {}),
+        image_analysis_error=image_analysis_error,
+        image_analysis_warning=image_analysis_warning,
+    )
     source_analysis = _source_analysis(
         capture,
         contacts=contacts,
@@ -766,9 +832,10 @@ async def _refresh_cached_source_contacts(
                 "images": image_analysis,
                 "archived_images": list(version.get("images") or []),
                 "screenshots": list(version.get("screenshots") or []),
-                "image_analysis_error": str(
-                    version.get("image_analysis_error") or ""
-                ),
+                "image_analysis_error": image_analysis_error,
+                "image_analysis_warning": image_analysis_warning,
+                "archive_status": archive_status,
+                "archive_warnings": archive_warnings,
             },
         },
         "provenance": {
@@ -798,6 +865,10 @@ async def _refresh_cached_source_contacts(
             "contacts": contacts,
             "analysis": source_analysis,
             "contact_policy_version": _CONTACT_POLICY_VERSION,
+            "image_analysis_error": image_analysis_error,
+            "image_analysis_warning": image_analysis_warning,
+            "archive_status": archive_status,
+            "archive_warnings": archive_warnings,
             "artifacts": artifacts,
             "storage_object_ids": storage_object_ids,
         },
@@ -841,6 +912,8 @@ def _result_from_version(
         "browser_screenshot_urls": [item.get("url") for item in screenshots if item.get("url")],
         "image_count": len(version.get("images") or []),
         "screenshot_count": len(screenshots),
+        "archive_status": version.get("archive_status") or "unknown",
+        "archive_warnings": list(version.get("archive_warnings") or []),
     }
 
 
@@ -901,6 +974,11 @@ async def ingest_source_url(
                     0, min(100, int(min_subject_match or 0))
                 )
                 version_image_analysis = _version_image_analysis(existing)
+                existing_image_error, migrated_image_warning = (
+                    _split_image_analysis_diagnostics(
+                        existing.get("image_analysis_error")
+                    )
+                )
                 source_contacts = _merge_contacts(
                     extract_contacts(capture.text),
                     version_image_analysis,
@@ -909,6 +987,8 @@ async def ingest_source_url(
                     int(existing.get("contact_policy_version") or 0)
                     < _CONTACT_POLICY_VERSION
                     or source_contacts != list(existing.get("contacts") or [])
+                    or not existing.get("archive_status")
+                    or bool(migrated_image_warning)
                 ):
                     existing = await _refresh_cached_source_contacts(
                         db,
@@ -963,9 +1043,7 @@ async def ingest_source_url(
                         capture,
                         contextual_analysis,
                         version_image_analysis,
-                        image_analysis_error=str(
-                            existing.get("image_analysis_error") or ""
-                        ),
+                        image_analysis_error=existing_image_error,
                         fields=task_fields,
                         target_name=target_analysis_name,
                         keyword=keyword,
@@ -1053,6 +1131,7 @@ async def ingest_source_url(
             required_subject_match = max(0, min(100, int(min_subject_match or 0)))
             image_analysis: list[dict[str, Any]] = []
             image_analysis_error = ""
+            image_analysis_warning = ""
             images_analyzed = False
             analysis = await analyze_and_review_article(
                 capture,
@@ -1066,12 +1145,18 @@ async def ingest_source_url(
             _raise_on_analysis_failure(analysis)
             if not _passes_target_review(analysis, required_subject_match):
                 if capture.images:
-                    image_analysis, image_analysis_error = (
+                    image_analysis, raw_image_analysis_error = (
                         await analyze_article_images(
                             capture.images,
                             project_id=project_id,
                             task_id=run_task_id,
                         )
+                    )
+                    (
+                        image_analysis_error,
+                        image_analysis_warning,
+                    ) = _split_image_analysis_diagnostics(
+                        raw_image_analysis_error
                     )
                     images_analyzed = True
                     analysis = await _reanalyze_with_image_evidence(
@@ -1129,12 +1214,18 @@ async def ingest_source_url(
                 )
                 version_started = True
             if not images_analyzed:
-                image_analysis, image_analysis_error = (
+                image_analysis, raw_image_analysis_error = (
                     await analyze_article_images(
                         capture.images,
                         project_id=project_id,
                         task_id=run_task_id,
                     )
+                )
+                (
+                    image_analysis_error,
+                    image_analysis_warning,
+                ) = _split_image_analysis_diagnostics(
+                    raw_image_analysis_error
                 )
             images_to_archive = _select_archive_images(
                 capture.images,
@@ -1187,6 +1278,11 @@ async def ingest_source_url(
                 contacts=contacts,
                 image_analysis=image_analysis,
             )
+            archive_status, archive_warnings = _archive_completeness(
+                capture_metadata=dict(capture.metadata or {}),
+                image_analysis_error=image_analysis_error,
+                image_analysis_warning=image_analysis_warning,
+            )
             structured = {
                 "schema_version": 2,
                 "contact_policy_version": _CONTACT_POLICY_VERSION,
@@ -1206,6 +1302,9 @@ async def ingest_source_url(
                         "archived_images": images,
                         "screenshots": screenshots,
                         "image_analysis_error": image_analysis_error,
+                        "image_analysis_warning": image_analysis_warning,
+                        "archive_status": archive_status,
+                        "archive_warnings": archive_warnings,
                     },
                 },
                 "provenance": {
@@ -1232,8 +1331,11 @@ async def ingest_source_url(
                     "status": "ready",
                     "analysis": analysis,
                     "contacts": contacts,
+                    "contact_policy_version": _CONTACT_POLICY_VERSION,
                     "images": image_analysis,
                     "screenshots": [],
+                    "archive_status": archive_status,
+                    "archive_warnings": archive_warnings,
                 }
                 return _result_from_version(
                     document, version, cached=False, target=target
@@ -1281,6 +1383,9 @@ async def ingest_source_url(
                     ],
                 },
                 "image_analysis_error": image_analysis_error,
+                "image_analysis_warning": image_analysis_warning,
+                "archive_status": archive_status,
+                "archive_warnings": archive_warnings,
             }
             version = await source_dao.mark_version_ready(
                 db, version_id=version_id, payload=version_payload

@@ -230,6 +230,7 @@ async def upsert_document(
         "contact_count": len(version.get("contacts") or []),
         "image_count": len(version.get("images") or []),
         "screenshot_count": len(version.get("screenshots") or []),
+        "archive_status": str(version.get("archive_status") or "unknown"),
         "last_seen_at": now,
         "updated_at": now,
     }
