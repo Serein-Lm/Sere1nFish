@@ -115,3 +115,56 @@ def test_project_group_models_enforce_stable_limits() -> None:
         ProjectGroupCreate(name="x" * 101)
     with pytest.raises(ValidationError):
         ProjectGroupCreate(name="批次", sort_order=10001)
+
+
+def test_batch_partition_selects_tagged_roots_and_all_descendants() -> None:
+    from api.services.project_partition import select_batch_relations
+
+    relations = [
+        {
+            "target_id": "root-a",
+            "target_name": "甲单位",
+            "batch_tags": ["第一批"],
+        },
+        {
+            "target_id": "child-a",
+            "target_name": "甲子单位",
+            "root_target_id": "root-a",
+            "parent_target_id": "root-a",
+            "relation_depth": 1,
+        },
+        {
+            "target_id": "grandchild-a",
+            "target_name": "甲孙单位",
+            "root_target_id": "root-a",
+            "parent_target_id": "child-a",
+            "relation_depth": 2,
+        },
+        {
+            "target_id": "root-b",
+            "target_name": "乙单位",
+            "batch_tags": ["第二批"],
+        },
+    ]
+
+    selected = select_batch_relations(relations, "第一批")
+    assert [item["target_id"] for item in selected] == [
+        "root-a",
+        "child-a",
+        "grandchild-a",
+    ]
+
+
+def test_partition_link_ids_are_project_scoped_and_stable() -> None:
+    from api.dao.bidding import bidding_record_link_id
+    from api.dao.source_documents import document_link_id
+
+    assert bidding_record_link_id("project-a", "target-a", "record-a") == (
+        bidding_record_link_id("project-a", "target-a", "record-a")
+    )
+    assert bidding_record_link_id("project-a", "target-a", "record-a") != (
+        bidding_record_link_id("project-b", "target-a", "record-a")
+    )
+    assert document_link_id("project-a", "target-a", "document-a") != (
+        document_link_id("project-b", "target-a", "document-a")
+    )

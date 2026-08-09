@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import UpdateOne
 
 from api.db.collections import (
     SOURCE_DOCUMENT_LINKS_COLLECTION,
@@ -33,6 +34,50 @@ def version_id_for_content(document_id: str, content_hash: str) -> str:
 def document_link_id(project_id: str, target_id: str, document_id: str) -> str:
     raw = f"source-link:{project_id}:{target_id}:{document_id}".encode("utf-8")
     return "dlnk_" + hashlib.sha256(raw).hexdigest()[:24]
+
+
+async def clone_project_links(
+    db: AsyncIOMotorDatabase,
+    *,
+    source_project_id: str,
+    destination_project_id: str,
+    target_ids: list[str],
+) -> int:
+    """Copy immutable document associations without duplicating source content."""
+    normalized_target_ids = list(dict.fromkeys(value for value in target_ids if value))
+    if not source_project_id or not destination_project_id or not normalized_target_ids:
+        return 0
+    cursor = db[SOURCE_DOCUMENT_LINKS_COLLECTION].find(
+        {
+            "project_id": source_project_id,
+            "target_id": {"$in": normalized_target_ids},
+        },
+        {"_id": 0},
+    )
+    operations: list[UpdateOne] = []
+    async for source in cursor:
+        clone = dict(source)
+        clone["link_id"] = document_link_id(
+            destination_project_id,
+            str(source.get("target_id") or ""),
+            str(source.get("document_id") or ""),
+        )
+        clone["project_id"] = destination_project_id
+        clone["migrated_from_project_id"] = source_project_id
+        operations.append(
+            UpdateOne(
+                {"link_id": clone["link_id"]},
+                {"$setOnInsert": clone},
+                upsert=True,
+            )
+        )
+    if not operations:
+        return 0
+    result = await db[SOURCE_DOCUMENT_LINKS_COLLECTION].bulk_write(
+        operations,
+        ordered=False,
+    )
+    return int(result.upserted_count or 0)
 
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:

@@ -39,6 +39,17 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def bidding_record_link_id(
+    project_id: str,
+    target_id: str,
+    record_id: str,
+) -> str:
+    digest = hashlib.sha256(
+        f"{project_id}:{target_id}:{record_id}".encode("utf-8")
+    ).hexdigest()
+    return "bidlink_" + digest[:24]
+
+
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     collection = db[BIDDING_RECORDS_COLLECTION]
     await collection.create_index("record_id", unique=True)
@@ -267,10 +278,7 @@ async def upsert_records_batch(
             if key in {"publish_start", "publish_end", "lookback_days", "bid_types"}
         }
         for record_id, fields in prepared.items():
-            link_digest = hashlib.sha256(
-                f"{project_id}:{target_id}:{record_id}".encode("utf-8")
-            ).hexdigest()
-            link_id = "bidlink_" + link_digest[:24]
+            link_id = bidding_record_link_id(project_id, target_id, record_id)
             additions: dict[str, Any] = {}
             if query_name:
                 additions["query_names"] = query_name
@@ -320,6 +328,60 @@ async def upsert_records_batch(
         "total": len(prepared),
         "links_total": len(link_operations),
     }
+
+
+async def clone_project_links(
+    db: AsyncIOMotorDatabase,
+    *,
+    source_project_id: str,
+    destination_project_id: str,
+    target_ids: list[str],
+) -> int:
+    """Copy project/Target announcement links and retain global archive records."""
+    normalized_target_ids = list(dict.fromkeys(value for value in target_ids if value))
+    if not source_project_id or not destination_project_id or not normalized_target_ids:
+        return 0
+    cursor = db[BIDDING_RECORD_LINKS_COLLECTION].find(
+        {
+            "project_id": source_project_id,
+            "target_id": {"$in": normalized_target_ids},
+        },
+        {"_id": 0},
+    )
+    operations: list[UpdateOne] = []
+    record_ids: list[str] = []
+    async for source in cursor:
+        record_id = str(source.get("record_id") or "")
+        target_id = str(source.get("target_id") or "")
+        if not record_id or not target_id:
+            continue
+        clone = dict(source)
+        clone["link_id"] = bidding_record_link_id(
+            destination_project_id,
+            target_id,
+            record_id,
+        )
+        clone["project_id"] = destination_project_id
+        clone["migrated_from_project_id"] = source_project_id
+        operations.append(
+            UpdateOne(
+                {"link_id": clone["link_id"]},
+                {"$setOnInsert": clone},
+                upsert=True,
+            )
+        )
+        record_ids.append(record_id)
+    if not operations:
+        return 0
+    result = await db[BIDDING_RECORD_LINKS_COLLECTION].bulk_write(
+        operations,
+        ordered=False,
+    )
+    await db[BIDDING_RECORDS_COLLECTION].update_many(
+        {"record_id": {"$in": list(dict.fromkeys(record_ids))}},
+        {"$addToSet": {"project_ids": destination_project_id}},
+    )
+    return int(result.upserted_count or 0)
 
 
 async def query_record_links(

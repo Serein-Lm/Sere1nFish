@@ -17,6 +17,7 @@ from api.models.projects import (
     WebTaggingCreateRequest,
     WebTaggingResultOut,
     CompanyTaggingRequest,
+    ProjectPartitionRequest,
 )
 from api.utils.json_extract import extract_json_object
 from api.services.company_url import guess_url_from_company_name
@@ -110,6 +111,23 @@ async def list_projects(body: ProjectListRequest | None = None):
         page=body.page,
         page_size=body.page_size,
     )
+
+
+@router.post("/{project_id}/partition-batches")
+async def partition_project_batches(
+    project_id: str,
+    body: ProjectPartitionRequest,
+):
+    from api.services.project_partition import partition_project_by_batch_tags
+
+    try:
+        return await partition_project_by_batch_tags(
+            get_db(),
+            source_project_id=project_id,
+            request=body,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/{project_id}", response_model=ProjectOut)

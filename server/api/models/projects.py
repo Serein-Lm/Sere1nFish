@@ -40,6 +40,22 @@ class ProjectGroupOut(BaseModel):
     updated_at: datetime
 
 
+class ProjectBatchPartitionSpec(BaseModel):
+    batch_tag: str = Field(..., min_length=1, max_length=100)
+    project_name: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(default="", max_length=500)
+
+
+class ProjectPartitionRequest(BaseModel):
+    group_name: str = Field(..., min_length=1, max_length=100)
+    group_description: str = Field(default="", max_length=500)
+    batches: list[ProjectBatchPartitionSpec] = Field(min_length=1, max_length=50)
+    copy_source_links: bool = True
+    copy_bidding_links: bool = True
+    keep_source_project_in_group: bool = True
+    dry_run: bool = True
+
+
 class ProjectAppendRequest(BaseModel):
     target: str | None = Field(default=None, description="项目目标（后续流程使用）")
     content: str = Field(..., description="追加内容（增量写入）")
