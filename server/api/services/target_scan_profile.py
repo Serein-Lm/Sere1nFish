@@ -489,9 +489,14 @@ def coverage_status_from_result(
 ) -> str:
     """把各 runtime 的返回状态收敛成稳定的渠道覆盖状态。"""
     if channel == "website":
+        url_scan = dict(outcome.get("url_scan") or {})
+        if int(url_scan.get("failed_urls") or 0) > 0 or int(
+            url_scan.get("remaining_urls") or 0
+        ) > 0:
+            return "partial"
         nested = [
             dict(outcome.get("assets") or {}),
-            dict(outcome.get("url_scan") or {}),
+            url_scan,
         ]
         statuses = {
             str(item.get("status") or "").strip().lower()

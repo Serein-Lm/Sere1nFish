@@ -18,7 +18,7 @@ import re
 from typing import Annotated, Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, BeforeValidator, Field, create_model
+from pydantic import BaseModel, BeforeValidator, Field, create_model, model_validator
 
 from Sere1nGraph.graph.agents.runtime import create_llm
 from api.services.runtime_config import get_runtime_app_config
@@ -320,11 +320,23 @@ def _build_records_model(
     item_model = _build_item_model(fields, with_coords=with_coords)
     return create_model(
         "CollectRecords",
+        __base__=_CollectRecordsEnvelope,
         items=(
             list[item_model],  # type: ignore[valid-type]
             Field(default_factory=list, description="从当前截图识别到的结构化条目列表"),
         ),
     )
+
+
+class _CollectRecordsEnvelope(BaseModel):
+    """Normalize provider output without coupling callers to one LLM shape."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _wrap_direct_item_list(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return {"items": value}
+        return value
 
 
 def _clamp_score(value: Any) -> int:

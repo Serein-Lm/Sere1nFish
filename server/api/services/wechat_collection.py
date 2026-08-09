@@ -52,7 +52,7 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "detail_review_max_items": 3,
             "detail_review_max_total_items": 24,
             "detail_max_swipes": 6,
-            "max_runtime_seconds": 3600,
+            "max_runtime_seconds": 14400,
         }
     )
     return task

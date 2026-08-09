@@ -2705,6 +2705,11 @@ class CompanyScanPipeline:
         return {
             "findings_count": scan_result.get("total_findings", 0),
             "copywritings_count": scan_result.get("total_copywritings", 0),
+            "total_urls": scan_result.get("total_urls", 0),
+            "eligible_urls": scan_result.get("eligible_urls", 0),
+            "scanned_urls": scan_result.get("scanned_urls", 0),
+            "failed_urls": scan_result.get("failed_urls", 0),
+            "remaining_urls": scan_result.get("remaining_urls", 0),
             "status": scan_result.get("status"),
             "error": scan_result.get("error"),
         }

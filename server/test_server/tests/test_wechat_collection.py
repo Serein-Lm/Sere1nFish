@@ -50,7 +50,7 @@ def test_company_wechat_definition_enforces_phone_work_limits() -> None:
     assert patch["detail_review_max_items"] == 3
     assert patch["detail_review_max_total_items"] == 24
     assert patch["swipe_times"] == 4
-    assert patch["max_runtime_seconds"] == 3600
+    assert patch["max_runtime_seconds"] == 14400
     assert patch["notify_on"] == "none"
 
 
@@ -385,7 +385,7 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["detail_max_total_items"] == 12
     assert overrides["detail_review_max_items"] == 3
     assert overrides["detail_review_max_total_items"] == 24
-    assert overrides["max_runtime_seconds"] == 3600
+    assert overrides["max_runtime_seconds"] == 14400
     assert overrides["parent_task_id"] == "scan-1"
     assert overrides["target_id"] == "target-1"
     assert captured["queue_priority"] == "low"

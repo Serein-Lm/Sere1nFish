@@ -117,6 +117,23 @@ def test_website_coverage_is_partial_when_one_runtime_stops() -> None:
     assert status == "partial"
 
 
+def test_website_coverage_is_partial_when_any_url_failed() -> None:
+    status = coverage_status_from_result(
+        "website",
+        {
+            "assets": {"status": "completed"},
+            "url_scan": {
+                "status": "completed",
+                "scanned_urls": 9,
+                "failed_urls": 1,
+                "remaining_urls": 0,
+            },
+        },
+    )
+
+    assert status == "partial"
+
+
 @pytest.mark.asyncio
 async def test_loads_persisted_descendants_as_scan_entities(
     monkeypatch: pytest.MonkeyPatch,
