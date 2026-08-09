@@ -917,6 +917,29 @@ def _result_from_version(
     }
 
 
+async def _record_version_failure(
+    db: AsyncIOMotorDatabase,
+    *,
+    version_id: str,
+    error: Exception,
+    previous_ready_version: dict[str, Any] | None,
+) -> None:
+    """Keep the last readable evidence snapshot when an in-place upgrade fails."""
+    if previous_ready_version:
+        restore_payload = {
+            key: value
+            for key, value in previous_ready_version.items()
+            if key not in {"_id", "status", "error", "updated_at"}
+        }
+        await source_dao.mark_version_ready(
+            db,
+            version_id=version_id,
+            payload=restore_payload,
+        )
+        return
+    await source_dao.mark_version_error(db, version_id, str(error))
+
+
 async def ingest_source_url(
     db: AsyncIOMotorDatabase,
     *,
@@ -963,8 +986,11 @@ async def ingest_source_url(
             keyword=keyword,
             fields=task_fields,
         )
+        previous_ready_version: dict[str, Any] | None = None
         if persist:
             existing = await source_dao.get_version(db, version_id)
+            if existing and existing.get("status") == "ready":
+                previous_ready_version = dict(existing)
             if (
                 existing
                 and existing.get("status") == "ready"
@@ -1426,7 +1452,12 @@ async def ingest_source_url(
             )
         except Exception as exc:
             if persist and version_started:
-                await source_dao.mark_version_error(db, version_id, str(exc))
+                await _record_version_failure(
+                    db,
+                    version_id=version_id,
+                    error=exc,
+                    previous_ready_version=previous_ready_version,
+                )
             raise
 
 

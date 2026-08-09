@@ -1185,6 +1185,72 @@ def test_artifact_object_id_is_content_addressed_for_safe_retry():
     assert first != retry
 
 
+def test_failed_evidence_upgrade_restores_previous_ready_version(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    restored: list[dict] = []
+    errors: list[str] = []
+
+    async def mark_ready(_db, *, version_id, payload):
+        restored.append({"version_id": version_id, **payload})
+
+    async def mark_error(_db, version_id, error):
+        errors.append(f"{version_id}:{error}")
+
+    monkeypatch.setattr(service.source_dao, "mark_version_ready", mark_ready)
+    monkeypatch.setattr(service.source_dao, "mark_version_error", mark_error)
+
+    asyncio.run(
+        service._record_version_failure(
+            object(),
+            version_id="version-1",
+            error=RuntimeError("new image upload failed"),
+            previous_ready_version={
+                "_id": "mongo-id",
+                "version_id": "version-1",
+                "status": "ready",
+                "error": "",
+                "updated_at": "old-time",
+                "artifacts": {"raw_html_object_id": "object-raw"},
+            },
+        )
+    )
+
+    assert errors == []
+    assert restored == [
+        {
+            "version_id": "version-1",
+            "artifacts": {"raw_html_object_id": "object-raw"},
+        }
+    ]
+
+
+def test_failed_new_version_is_marked_error(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    errors: list[str] = []
+
+    async def mark_error(_db, version_id, error):
+        errors.append(f"{version_id}:{error}")
+
+    monkeypatch.setattr(service.source_dao, "mark_version_error", mark_error)
+
+    asyncio.run(
+        service._record_version_failure(
+            object(),
+            version_id="version-new",
+            error=RuntimeError("capture persistence failed"),
+            previous_ready_version=None,
+        )
+    )
+
+    assert errors == ["version-new:capture persistence failed"]
+
+
 def test_cached_contact_refresh_rewrites_only_structured_artifact(monkeypatch):
     import asyncio
 
