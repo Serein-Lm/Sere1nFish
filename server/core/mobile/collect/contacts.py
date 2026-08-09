@@ -16,8 +16,11 @@ from typing import Any
 
 # 手机号:11 位,允许公众号正文/OCR 常见的空格或连字符分组；两侧非数字边界
 _RE_MOBILE = re.compile(r"(?<!\d)(1[3-9]\d(?:[-\s]?\d){8})(?!\d)")
-# 座机:区号(3-4位,可选 0 前缀)+ 分隔 + 7-8 位;要求带分隔符降低误报
-_RE_TEL = re.compile(r"(?<!\d)(0\d{2,3}[-\s]\d{7,8})(?!\d)")
+# 座机:区号 + 分隔 + 7-8 位，兼容「(010)63072558」等公示常见写法。
+# 裸区号仍要求空格/连字符，避免把普通长数字误识别为电话。
+_RE_TEL = re.compile(
+    r"(?<!\d)((?:0\d{2,3}[-\s]|\(0\d{2,3}\)[-\s]?)\d{7,8})(?!\d)"
+)
 _RE_SERVICE_TEL = re.compile(
     r"(?<!\d)((?:400|800)[-\s]?\d{3}[-\s]?\d{4})(?!\d)"
 )
@@ -52,7 +55,11 @@ _CHANNEL_LABEL = {
 
 
 def _clean_tel(value: str) -> str:
-    return re.sub(r"\s+", "", value)
+    compact = re.sub(r"\s+", "", value)
+    parenthesized = re.fullmatch(r"\((0\d{2,3})\)(\d{7,8})", compact)
+    if parenthesized:
+        return f"{parenthesized.group(1)}-{parenthesized.group(2)}"
+    return compact
 
 
 def _normalize_contact_text(value: Any) -> str:

@@ -155,6 +155,20 @@ def test_contact_extraction_normalizes_grouped_mobile_number():
     assert "邵部长" in contacts[0]["context"]
 
 
+def test_contact_extraction_normalizes_parenthesized_area_code():
+    from core.mobile.collect.contacts import extract_contacts
+
+    contacts = extract_contacts(
+        "公示时间为5月8日至13日，受理电话：（010）63072558，"
+        "来信地址为新华社人事局。"
+    )
+
+    assert [(item["channel"], item["value"]) for item in contacts] == [
+        ("telephone", "010-63072558")
+    ]
+    assert "新华社人事局" in contacts[0]["context"]
+
+
 def test_visual_contact_validation_rejects_domain_mislabeled_as_email():
     from core.mobile.collect.contacts import normalize_contact_candidate
 
