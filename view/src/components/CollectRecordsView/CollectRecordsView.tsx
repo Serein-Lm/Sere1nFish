@@ -30,8 +30,17 @@ import './CollectRecordsView.css'
 const { Text } = Typography
 
 const MOBILE_RE = /(?<!\d)(1[3-9]\d{9})(?!\d)/g
-const TEL_KW_RE = /(?:联系电话|电话|联系方式|Tel|TEL|tel)\s*[:：]?\s*(\d{11}|(?:0\d{2,3}[-\s]?)?\d{7,8})(?!\d)/g
+const TEL_KW_RE = /(?:联系电话|电话|联系方式|座机|Tel|TEL|tel)\s*[:：]?\s*(1[3-9]\d{9}|(?:0\d{2,3}[-\s]|\(0\d{2,3}\)[-\s]?)\d{7,8})(?!\d)/g
+const LANDLINE_RE = /(?<!\d)((?:0\d{2,3}[-\s]|\(0\d{2,3}\)[-\s]?)\d{7,8})(?!\d)/g
+const SERVICE_TEL_RE = /(?<!\d)((?:400|800)[-\s]?\d{3}[-\s]?\d{4})(?!\d)/g
 const EMAIL_RE = /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g
+
+function normalizeTelephone(value: string): string {
+  const compact = value.replace(/\s+/g, '')
+  const parenthesized = compact.match(/^\((0\d{2,3})\)(\d{7,8})$/)
+  if (parenthesized) return `${parenthesized[1]}-${parenthesized[2]}`
+  return compact
+}
 
 export function scoreColor(n: number): string {
   if (n >= 80) return 'green'
@@ -46,7 +55,7 @@ function fieldsToText(fields: Record<string, unknown>): string {
     if (Array.isArray(v)) parts.push(v.map((x) => String(x)).join(' '))
     else if (v != null && v !== '') parts.push(String(v))
   }
-  return parts.join('\n')
+  return parts.join('\n').normalize('NFKC')
 }
 
 export function extractContactsFromFields(fields: Record<string, unknown>): { channel: string; value: string }[] {
@@ -63,7 +72,12 @@ export function extractContactsFromFields(fields: Record<string, unknown>): { ch
   }
   for (const m of text.matchAll(EMAIL_RE)) add('email', m[1])
   for (const m of text.matchAll(MOBILE_RE)) add('phone', m[1])
-  for (const m of text.matchAll(TEL_KW_RE)) add('phone', m[1].replace(/[\s-]/g, ''))
+  for (const m of text.matchAll(TEL_KW_RE)) {
+    const value = normalizeTelephone(m[1])
+    add(/^1[3-9]\d{9}$/.test(value) ? 'phone' : 'telephone', value)
+  }
+  for (const m of text.matchAll(LANDLINE_RE)) add('telephone', normalizeTelephone(m[1]))
+  for (const m of text.matchAll(SERVICE_TEL_RE)) add('telephone', normalizeTelephone(m[1]))
   return out
 }
 
@@ -147,7 +161,13 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
   const version = sourceDetail?.version
   const sourceContacts = (version?.contacts || []) as SourceContact[]
   const fallbackContacts = extractContactsFromFields(fields).map((item) => ({ ...item } as SourceContact))
-  const contacts = sourceContacts.length ? sourceContacts : fallbackContacts
+  const targetLink = sourceDetail?.links?.find((link) => (
+    link.project_id === record.project_id
+    && (!record.target_id || link.target_id === record.target_id)
+  ))
+  const contacts = targetLink
+    ? (targetLink.latest_analysis?.target_contacts || [])
+    : (sourceContacts.length ? sourceContacts : fallbackContacts)
   const browserShots = version?.screenshots?.map((item) => item.url).filter(Boolean)
     || record.browser_screenshot_urls
     || []

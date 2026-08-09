@@ -89,6 +89,14 @@ export interface SourceDocumentDetail {
     project_id: string
     target_id?: string
     target_name?: string
+    latest_analysis?: {
+      target_contacts?: SourceContact[]
+      target_contact_values?: string[]
+      contact_policy_version?: number
+      review_decision?: string
+      subject_match?: number
+      score_reason?: string
+    }
     keywords?: string[]
     first_seen_at?: string
     last_seen_at?: string
