@@ -364,12 +364,46 @@ class _PipelineCollection:
         self.updates.append(update)
         return _PipelineUpdateResult()
 
+    async def find_one_and_update(
+        self,
+        query: dict[str, Any],
+        update: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        self.updates.append(update)
+        return {**query, **dict(update.get("$set") or {})}
+
+    def find(
+        self,
+        _query: dict[str, Any],
+        _projection: dict[str, Any] | None = None,
+    ) -> "_PipelineCursor":
+        return _PipelineCursor([])
+
     async def distinct(
         self,
         _field: str,
         _query: dict[str, Any],
     ) -> list[str]:
         return []
+
+
+class _PipelineCursor:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def __aiter__(self):
+        self.iterator = iter(self.rows)
+        return self
+
+    def sort(self, *_args: Any, **_kwargs: Any):
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        try:
+            return next(self.iterator)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 class _PipelineDb:

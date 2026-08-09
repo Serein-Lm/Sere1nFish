@@ -34,19 +34,22 @@ def test_company_wechat_definition_enforces_phone_work_limits() -> None:
             "search_hint": "微信公众号搜索",
             "source_link_strategy": "wechat_copy_link",
             "deep_collect": True,
-            "include_direct_children": True,
-            "max_resolved_keywords": 60,
+            "include_direct_children": False,
+            "max_resolved_keywords": 12,
             "detail_max_items": 5,
         }
     )
 
-    assert patch["include_direct_children"] is False
-    assert patch["max_resolved_keywords"] == 12
+    assert patch["include_direct_children"] is True
+    assert patch["max_relation_depth"] == 2
+    assert patch["max_related_targets"] == 6
+    assert patch["skip_completed_related_targets"] is True
+    assert patch["max_resolved_keywords"] == 36
     assert patch["detail_max_items"] == 2
-    assert patch["detail_max_total_items"] == 8
+    assert patch["detail_max_total_items"] == 12
     assert patch["detail_review_max_items"] == 3
-    assert patch["detail_review_max_total_items"] == 16
-    assert patch["swipe_times"] == 3
+    assert patch["detail_review_max_total_items"] == 24
+    assert patch["swipe_times"] == 4
     assert patch["max_runtime_seconds"] == 3600
     assert patch["notify_on"] == "none"
 
@@ -87,9 +90,12 @@ async def test_ensure_wechat_configuration_creates_unbound_project_definition(
     assert captured["target_id"] is None
     assert captured["source_link_strategy"] == WECHAT_SOURCE_LINK_STRATEGY
     assert captured["use_target_keyword_library"] is True
-    assert captured["include_direct_children"] is False
-    assert captured["max_resolved_keywords"] == 12
-    assert captured["detail_max_total_items"] == 8
+    assert captured["include_direct_children"] is True
+    assert captured["max_relation_depth"] == 2
+    assert captured["max_related_targets"] == 6
+    assert captured["skip_completed_related_targets"] is True
+    assert captured["max_resolved_keywords"] == 36
+    assert captured["detail_max_total_items"] == 12
     assert captured["extract_fields"]
     assert captured["dedup_key_fields"] == ["title", "account"]
     assert captured["notify_on"] == "none"
@@ -370,12 +376,15 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["source_link_strategy"] == "wechat_copy_link"
     assert overrides["extract_fields"]
     assert overrides["dedup_key_fields"] == ["title", "account"]
-    assert overrides["include_direct_children"] is False
-    assert overrides["max_resolved_keywords"] == 12
+    assert overrides["include_direct_children"] is True
+    assert overrides["max_relation_depth"] == 2
+    assert overrides["max_related_targets"] == 6
+    assert overrides["skip_completed_related_targets"] is True
+    assert overrides["max_resolved_keywords"] == 36
     assert overrides["detail_max_items"] == 2
-    assert overrides["detail_max_total_items"] == 8
+    assert overrides["detail_max_total_items"] == 12
     assert overrides["detail_review_max_items"] == 3
-    assert overrides["detail_review_max_total_items"] == 16
+    assert overrides["detail_review_max_total_items"] == 24
     assert overrides["max_runtime_seconds"] == 3600
     assert overrides["parent_task_id"] == "scan-1"
     assert overrides["target_id"] == "target-1"

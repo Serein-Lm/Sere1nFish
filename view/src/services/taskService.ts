@@ -342,11 +342,67 @@ export interface CompanyScanBatchResponse {
   status: string
 }
 
+export type CompanyScanCoverageChannel = 'website' | 'wechat' | 'xhs' | 'bidding' | 'scholar' | 'control'
+
+export interface CompanyScanCoverageItem {
+  target_id: string
+  target_name: string
+  display_name: string
+  sector: string
+  missing_channels?: CompanyScanCoverageChannel[]
+  completed_channels?: CompanyScanCoverageChannel[]
+  reason?: string
+  task_id?: string
+  params?: Record<string, unknown>
+}
+
+export interface CompanyScanCoveragePlan {
+  project_id: string
+  batch_tag: string
+  required_channels: CompanyScanCoverageChannel[]
+  excluded_sectors: string[]
+  planned_count: number
+  completed_count: number
+  excluded_count: number
+  inflight_count: number
+  items: CompanyScanCoverageItem[]
+  completed: CompanyScanCoverageItem[]
+  excluded: CompanyScanCoverageItem[]
+  inflight: CompanyScanCoverageItem[]
+}
+
+export interface CompanyScanCoverageResponse {
+  dry_run: boolean
+  plan: CompanyScanCoveragePlan
+  batch: CompanyScanBatchResponse | null
+}
+
 export async function createCompanyScanBatch(
   projectId: string,
   body: { company_names: string[]; params: Record<string, unknown> },
 ): Promise<CompanyScanBatchResponse> {
   return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/tasks/company-scan-batch`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function createCompanyScanCoverageBatch(
+  projectId: string,
+  body: {
+    batch_tag?: string
+    required_channels?: CompanyScanCoverageChannel[]
+    excluded_sectors?: string[]
+    target_ids?: string[]
+    wechat_device_id?: string
+    subsidiary_scan_limit?: number
+    bidding_max_records?: number
+    enable_copywriting?: boolean
+    company_scan_concurrency?: number
+    dry_run?: boolean
+  },
+): Promise<CompanyScanCoverageResponse> {
+  return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/tasks/company-scan-coverage`, {
     method: 'POST',
     body: JSON.stringify(body),
   })

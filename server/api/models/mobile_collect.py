@@ -47,7 +47,23 @@ class CollectTaskDef(BaseModel):
     )
     include_direct_children: bool = Field(
         default=True,
-        description="从项目 Target 词库解析关键词时是否包含第一层全资子公司",
+        description="从项目 Target 词库解析关键词时是否包含关联子单位",
+    )
+    max_relation_depth: int = Field(
+        default=2,
+        ge=1,
+        le=2,
+        description="关联子单位的最大关系深度",
+    )
+    max_related_targets: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        description="单次手机任务最多补扫的关联 Target 数",
+    )
+    skip_completed_related_targets: bool = Field(
+        default=True,
+        description="是否跳过当前渠道已有完成覆盖的关联 Target",
     )
     max_resolved_keywords: int = Field(
         default=60,
@@ -185,6 +201,9 @@ class CollectTaskUpdate(BaseModel):
     keywords: list[str] | None = None
     use_target_keyword_library: bool | None = None
     include_direct_children: bool | None = None
+    max_relation_depth: int | None = Field(default=None, ge=1, le=2)
+    max_related_targets: int | None = Field(default=None, ge=1, le=50)
+    skip_completed_related_targets: bool | None = None
     max_resolved_keywords: int | None = Field(default=None, ge=1, le=200)
     swipe_times: int | None = Field(default=None, ge=0, le=50)
     swipe_interval: float | None = Field(default=None, ge=0.2, le=10)

@@ -483,6 +483,10 @@
   min-width: 0;
 }
 
+.target-company-cell .ant-typography {
+  overflow-wrap: anywhere;
+}
+
 .bidding-contact-list {
   display: grid;
   gap: 10px;

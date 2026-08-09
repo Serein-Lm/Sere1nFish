@@ -99,6 +99,7 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
     from api.auth import User
     from api.routers import project_api
     from api.services.info_collection import tuning as tuning_service
+    from core import background as background_service
 
     captured_documents: list[dict] = []
     captured_coroutines = []
@@ -127,7 +128,7 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
     monkeypatch.setattr(project_api, "get_db", lambda: object())
     monkeypatch.setattr(project_api.projects_dao, "get_project", get_project)
     monkeypatch.setattr(project_api.tasks_dao, "insert_tasks", insert_tasks)
-    monkeypatch.setattr(project_api, "spawn_background", spawn)
+    monkeypatch.setattr(background_service, "spawn_background", spawn)
     monkeypatch.setattr(tuning_service, "get_collection_runtime_tuning", get_tuning)
 
     response = asyncio.run(

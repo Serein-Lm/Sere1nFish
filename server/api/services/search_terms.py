@@ -141,12 +141,22 @@ def _is_plausible_search_alias(canonical_name: str, candidate: str) -> bool:
 
 
 def _target_search_names(doc: dict[str, Any], canonical_name: str) -> list[str]:
-    candidates = [canonical_name, *list(doc.get("search_terms") or [])]
+    from api.services.target_scan_profile import target_scan_names
+
+    candidates = target_scan_names(
+        project_target=doc,
+        fallback_name=canonical_name,
+    )
+    profile = dict(doc.get("scan_profile") or {})
+    has_authoritative_profile = bool(
+        doc.get("scan_aliases") or profile.get("search_aliases")
+    )
     return _dedupe(
         [
             value
             for value in candidates
-            if _is_plausible_search_alias(canonical_name, str(value or ""))
+            if has_authoritative_profile
+            or _is_plausible_search_alias(canonical_name, str(value or ""))
         ],
         limit=int(CHANNEL_TERM_POLICIES["weixin"]["max_names"]),
     )
@@ -303,10 +313,13 @@ async def resolve_project_target_terms(
     explicit_keywords: list[str] | None = None,
     include_direct_children: bool = True,
     max_relation_depth: int = 2,
+    max_related_targets: int = 8,
+    skip_completed_descendants: bool = True,
     max_keywords: int = 60,
 ) -> ResolvedSearchTerms:
     """解析根 Target 及其全资关联单位渠道词，供手机/浏览器任务复用。"""
     from api.dao import targets as targets_dao
+    from api.services.target_scan_profile import is_scan_coverage_current
 
     channel = str(channel or "").strip().lower()
     keyword_limit = max(1, min(int(max_keywords or 60), 200))
@@ -331,14 +344,32 @@ async def resolve_project_target_terms(
 
     documents = [root] if root else []
     if include_direct_children and target_id:
-        documents.extend(
-            await targets_dao.list_project_target_descendants(
-                db,
-                project_id=project_id,
-                root_target_id=target_id,
-                max_depth=max_relation_depth,
-            )
+        descendants = await targets_dao.list_project_target_descendants(
+            db,
+            project_id=project_id,
+            root_target_id=target_id,
+            max_depth=max_relation_depth,
         )
+        coverage_channel = "wechat" if channel == "weixin" else channel
+
+        def descendant_rank(item: dict[str, Any]) -> tuple[Any, ...]:
+            completed = is_scan_coverage_current(item, coverage_channel)
+            return (
+                int(skip_completed_descendants and completed),
+                -int(bool(item.get("root_domain") or item.get("root_domains"))),
+                int(item.get("relation_depth") or 1),
+                str(item.get("target_name") or "").casefold(),
+            )
+
+        descendants.sort(key=descendant_rank)
+        if skip_completed_descendants:
+            descendants = [
+                item
+                for item in descendants
+                if not is_scan_coverage_current(item, coverage_channel)
+            ]
+        safe_related_limit = max(0, min(int(max_related_targets or 0), 50))
+        documents.extend(descendants[:safe_related_limit])
 
     root_target = {
         "target_id": str((root or {}).get("target_id") or target_id or ""),
@@ -361,11 +392,7 @@ async def resolve_project_target_terms(
             # 合并，确保词库升级立即生效，同时保留原有场景化词。
             channel_terms = build_channel_terms(
                 channel=channel,
-                names=(
-                    _target_search_names(doc, doc_name)
-                    if channel == "weixin"
-                    else [doc_name]
-                ),
+                names=_target_search_names(doc, doc_name),
                 routed_terms=channel_terms,
                 limit=max(keyword_limit, 30),
             )

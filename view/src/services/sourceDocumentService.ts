@@ -109,6 +109,19 @@ export interface ProjectTargetSummary {
   target_id: string
   target_type: string
   target_name: string
+  display_name?: string
+  short_names?: string[]
+  scan_aliases?: string[]
+  scan_profile_version?: number
+  scan_profile_fingerprint?: string
+  scan_profile_updated_at?: string
+  scan_coverage?: Record<string, {
+    status?: 'running' | 'completed' | 'partial' | 'error' | 'skipped'
+    task_id?: string
+    profile_fingerprint?: string
+    updated_at?: string
+    completed_at?: string
+  }>
   root_domain?: string
   search_terms?: string[]
   search_terms_by_channel?: Record<string, string[]>
@@ -143,6 +156,10 @@ export interface ProjectTargetSummary {
   scholar_contact_count: number
   latest_task_status?: string
   collection_complete?: boolean
+  coverage_completed_count?: number
+  coverage_required_count?: number
+  coverage_completed_channels?: string[]
+  coverage_missing_channels?: string[]
   linked_project_count: number
   last_document_at?: string
   search_match?: boolean

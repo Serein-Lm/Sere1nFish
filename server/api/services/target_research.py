@@ -17,6 +17,10 @@ from api.dao import tasks as tasks_dao
 from api.models.target_research import TargetResearchPayload
 from api.services.company_normalize import NORMALIZATION_VERSION, normalize_root_domain
 from api.services.source_documents.urls import canonicalize_source_url
+from api.services.target_scan_profile import (
+    build_target_scan_profile,
+    persist_target_scan_profile,
+)
 from api.services.task_progress import update_task_stage
 from core.background import spawn_background
 from core.logger import get_logger
@@ -957,33 +961,79 @@ async def run_target_research(
         db, task_id=task_id, stage="target_expand", message="正在校验证据并扩展 Target 关系..."
     )
     root_domains = list(data.get("root_domains") or [])
+    known_identity_keys = {
+        targets_dao.normalize_target_name(value)
+        for value in [
+            target.get("canonical_name"),
+            *(target.get("identity_aliases") or []),
+        ]
+        if targets_dao.normalize_target_name(str(value or ""))
+    }
+    research_identity_key = targets_dao.normalize_target_name(
+        str(data.get("canonical_name") or "")
+    )
+    known_domains = {
+        normalize_root_domain(value)
+        for value in [
+            target.get("root_domain"),
+            *(target.get("root_domains") or []),
+        ]
+        if normalize_root_domain(value)
+    }
+    research_identity_verified = bool(
+        research_identity_key in known_identity_keys
+        or known_domains.intersection(root_domains)
+    )
+    if not research_identity_verified:
+        logger.warning(
+            "机构深研身份与 Target 不一致，忽略本轮身份别名和域名扩展 | "
+            "target=%s candidate=%s",
+            target_id,
+            data.get("canonical_name"),
+        )
     enriched_target = await targets_dao.merge_target_research_identity(
         db,
         target_id=target_id,
-        root_domains=root_domains,
+        root_domains=root_domains if research_identity_verified else [],
         aliases=[
             *(target.get("aliases") or []),
-            str(data.get("canonical_name") or ""),
-            *(data.get("aliases") or []),
+            *(
+                [
+                    str(data.get("canonical_name") or ""),
+                    *(data.get("aliases") or []),
+                ]
+                if research_identity_verified
+                else []
+            ),
         ],
     ) or target
+    scan_profile = build_target_scan_profile(
+        canonical_name=str(enriched_target.get("canonical_name") or ""),
+        identity_aliases=list(enriched_target.get("identity_aliases") or []),
+        verified_aliases=(
+            list(data.get("aliases") or []) if research_identity_verified else []
+        ),
+        ai_aliases=list(data.get("aliases") or []),
+        fallback_aliases=list(enriched_target.get("aliases") or []),
+        existing_profile=dict(enriched_target.get("scan_profile") or {}),
+        ai_identity_verified=research_identity_verified,
+        source="target_research",
+    )
+    enriched_target = await persist_target_scan_profile(
+        db,
+        project_id=project_id,
+        target=enriched_target,
+        profile=scan_profile,
+        routed_terms_by_channel=dict(data.get("search_terms_by_channel") or {}),
+        additional_search_terms=list(data.get("business_keywords") or []),
+    )
     await targets_dao.link_project_target(
         db,
         project_id=project_id,
         target=enriched_target,
-        search_terms=_clean_strings(
-            [
-                str(enriched_target.get("canonical_name") or ""),
-                *(enriched_target.get("identity_aliases") or []),
-                *(data.get("business_keywords") or []),
-            ],
-            limit=100,
-        ),
-        search_terms_by_channel=dict(data.get("search_terms_by_channel") or {}),
         objectives=["机构公开情报深研与高置信关联 Target 扩展"],
         task_def_id=task_id,
         relation=_preserved_relation(relation),
-        replace_search_terms=True,
     )
 
     current_depth = max(0, int(relation.get("relation_depth") or 0))
@@ -1093,6 +1143,22 @@ async def run_target_research(
             objectives=["机构深研发现的高置信关联单位"],
             task_def_id=task_id,
             relation=relation_doc,
+        )
+        related_profile = build_target_scan_profile(
+            canonical_name=str(related.get("canonical_name") or candidate_name),
+            identity_aliases=list(related.get("identity_aliases") or [candidate_name]),
+            verified_aliases=list(candidate.get("aliases") or []),
+            ai_aliases=list(candidate.get("aliases") or []),
+            fallback_aliases=list(related.get("aliases") or []),
+            existing_profile=dict(related.get("scan_profile") or {}),
+            ai_identity_verified=True,
+            source="target_research_related",
+        )
+        related = await persist_target_scan_profile(
+            db,
+            project_id=project_id,
+            target=related,
+            profile=related_profile,
         )
         expanded.append({**related, "research_relation": candidate})
 

@@ -7,10 +7,38 @@ from api.dao import targets as targets_dao
 from api.services.targets import (
     _select_target_relation_page,
     _summarize_finding_counts,
+    _target_scan_coverage_summary,
     _target_summary_sort_key,
     assign_project_target_batches,
     list_project_target_summary_page,
 )
+
+
+def test_target_collection_complete_requires_current_core_channel_coverage() -> None:
+    relation = {
+        "last_collected_at": "legacy-value",
+        "scan_profile_fingerprint": "current",
+        "scan_coverage": {
+            channel: {
+                "status": "completed",
+                "profile_fingerprint": "current",
+            }
+            for channel in ("website", "wechat", "scholar")
+        },
+    }
+
+    partial = _target_scan_coverage_summary(relation)
+    assert partial["collection_complete"] is False
+    assert partial["coverage_completed_count"] == 3
+    assert partial["coverage_missing_channels"] == ["bidding"]
+
+    relation["scan_coverage"]["bidding"] = {
+        "status": "completed",
+        "profile_fingerprint": "current",
+    }
+    complete = _target_scan_coverage_summary(relation)
+    assert complete["collection_complete"] is True
+    assert complete["coverage_completed_count"] == 4
 
 
 def test_target_relation_view_calculates_effective_root_ownership() -> None:
@@ -464,7 +492,7 @@ def test_target_search_uses_aliases_and_returns_matching_hierarchy() -> None:
         "child": {
             "target_id": "child",
             "canonical_name": "教育管理信息中心",
-            "aliases": ["教管中心"],
+            "scan_aliases": ["教管中心"],
         }
     }
 

@@ -88,7 +88,14 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
             params.get("target_batch_tags")
         )
 
-    if params.get("enable_control_structure", False):
+    if params.get("enable_control_structure", False) or any(
+        key in params
+        for key in (
+            "control_max_depth",
+            "subsidiary_scan_limit",
+            "skip_completed_subsidiaries",
+        )
+    ):
         try:
             control_max_depth = int(params.get("control_max_depth") or 1)
         except (TypeError, ValueError) as exc:
@@ -96,6 +103,18 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
         if control_max_depth not in {1, 2}:
             raise ValueError("全资单位层级必须为 1 或 2")
         params["control_max_depth"] = control_max_depth
+        try:
+            subsidiary_scan_limit = int(
+                params.get("subsidiary_scan_limit") or 12
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("关联单位补扫数量必须为 1 到 100") from exc
+        if not 1 <= subsidiary_scan_limit <= 100:
+            raise ValueError("关联单位补扫数量必须为 1 到 100")
+        params["subsidiary_scan_limit"] = subsidiary_scan_limit
+        params["skip_completed_subsidiaries"] = bool(
+            params.get("skip_completed_subsidiaries", True)
+        )
 
     if params.get("enable_wechat", False):
         from api.services.wechat_target_selection import (
@@ -222,6 +241,9 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         xhs_target_selection_mode=params.get("xhs_target_selection_mode", "auto"),
         xhs_manual_targets=params.get("xhs_manual_targets", []),
         enable_bidding=params.get("enable_bidding", False),
+        enable_bidding_visual_analysis=params.get(
+            "enable_bidding_visual_analysis"
+        ),
         bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
         bidding_max_records=max(
             1,
@@ -255,6 +277,12 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         control_lookup_concurrency=max(1, min(int(params.get("control_lookup_concurrency") or 4), 12)),
         control_icp_concurrency=max(1, min(int(params.get("control_icp_concurrency") or 6), 20)),
         control_scan_concurrency=max(1, min(int(params.get("control_scan_concurrency") or 1), 12)),
+        subsidiary_scan_limit=max(
+            1, min(int(params.get("subsidiary_scan_limit") or 12), 100)
+        ),
+        skip_completed_subsidiaries=params.get(
+            "skip_completed_subsidiaries", True
+        ),
         company_core_concurrency=tuning.company_scan_concurrency,
         requested_by=str(params.get("_requested_by") or ""),
     )
@@ -367,6 +395,26 @@ class TaskCreateRequest(BaseModel):
 class CompanyScanBatchCreateRequest(BaseModel):
     company_names: list[str] = Field(min_length=1, max_length=200)
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompanyScanCoverageRequest(BaseModel):
+    batch_tag: str = Field(default="", max_length=100)
+    required_channels: list[str] = Field(
+        default_factory=lambda: ["website", "wechat", "scholar", "bidding"],
+        min_length=1,
+        max_length=6,
+    )
+    excluded_sectors: list[str] = Field(
+        default_factory=lambda: ["financial"],
+        max_length=10,
+    )
+    target_ids: list[str] = Field(default_factory=list, max_length=200)
+    wechat_device_id: str = Field(default="", max_length=128)
+    subsidiary_scan_limit: int = Field(default=12, ge=1, le=100)
+    bidding_max_records: int = Field(default=10, ge=1, le=20)
+    enable_copywriting: bool = True
+    company_scan_concurrency: int | None = Field(default=None, ge=1, le=12)
+    dry_run: bool = True
 
 
 @router.get("/projects/{project_id}/assets")
@@ -502,12 +550,14 @@ async def create_company_scan_batch(
     current_user: User = Depends(get_current_active_user),
 ):
     """Create one independently traceable company-scan task per company."""
+    from api.services.company_scan_batch import (
+        CompanyScanJobSpec,
+        enqueue_company_scan_jobs,
+    )
     from api.services.info_collection.tuning import get_collection_runtime_tuning
     from api.services.project_task_batch import (
         MAX_COMPANY_SCAN_BATCH_SIZE,
-        ProjectTaskJob,
         parse_company_names,
-        run_project_task_batch,
     )
 
     db = get_db()
@@ -547,72 +597,101 @@ async def create_company_scan_batch(
     tuning = (await get_collection_runtime_tuning()).with_overrides(
         company_scan_concurrency=requested_concurrency,
     )
-    concurrency = tuning.company_scan_concurrency
+    return await enqueue_company_scan_jobs(
+        db,
+        project_id=project_id,
+        specs=[
+            CompanyScanJobSpec(
+                target_id="",
+                company_name=company_name,
+                params=dict(shared_params),
+            )
+            for company_name in company_names
+        ],
+        requested_by=current_user.username,
+        concurrency=tuning.company_scan_concurrency,
+        aggregate_notification=True,
+    )
 
-    batch_id = uuid.uuid4().hex[:12]
-    now = datetime.now()
-    total = len(company_names)
-    documents: list[dict[str, Any]] = []
-    jobs: list[ProjectTaskJob] = []
-    for index, company_name in enumerate(company_names, start=1):
-        task_id = uuid.uuid4().hex[:12]
-        task_params = {**shared_params, "company_name": company_name}
-        documents.append(
-            {
-                "task_id": task_id,
-                "project_id": project_id,
-                "task_type": "company_scan",
-                "params": task_params,
-                "requested_by": current_user.username,
-                "batch_id": batch_id,
-                "batch_index": index,
-                "batch_total": total,
-                "batch_concurrency": concurrency,
-                "status": "pending",
-                "progress": {},
-                "created_at": now,
-                "updated_at": now,
-            }
+
+@router.post("/projects/{project_id}/tasks/company-scan-coverage")
+async def create_company_scan_coverage_batch(
+    project_id: str,
+    req: CompanyScanCoverageRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    """预览或下发按 Target/渠道指纹去重的完整性补扫。"""
+    from api.services.company_scan_batch import (
+        CompanyScanJobSpec,
+        enqueue_company_scan_jobs,
+        plan_company_scan_coverage,
+    )
+    from api.services.info_collection.tuning import get_collection_runtime_tuning
+
+    db = get_db()
+    if not await projects_dao.get_project(db, project_id):
+        raise HTTPException(404, "项目不存在")
+    try:
+        plan = await plan_company_scan_coverage(
+            db,
+            project_id=project_id,
+            batch_tag=req.batch_tag.strip(),
+            required_channels=req.required_channels,
+            excluded_sectors=req.excluded_sectors,
+            target_ids=req.target_ids,
+            wechat_device_id=req.wechat_device_id,
+            subsidiary_scan_limit=req.subsidiary_scan_limit,
+            bidding_max_records=req.bidding_max_records,
+            enable_copywriting=req.enable_copywriting,
         )
-        jobs.append(
-            ProjectTaskJob(
-                task_id=task_id,
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if req.dry_run or not plan["items"]:
+        return {"dry_run": req.dry_run, "plan": plan, "batch": None}
+
+    if any(
+        bool((item.get("params") or {}).get("enable_wechat"))
+        for item in plan["items"]
+    ):
+        from api.services.wechat_collection import ensure_wechat_task_definition
+
+        try:
+            await ensure_wechat_task_definition(
+                db,
                 project_id=project_id,
-                task_type="company_scan",
-                params={
-                    **task_params,
-                    "_requested_by": current_user.username,
-                    **(
-                        {"_batch_id": batch_id, "_batch_total": total}
-                        if total > 1
-                        else {}
-                    ),
-                },
+                device_id=req.wechat_device_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    specs: list[CompanyScanJobSpec] = []
+    for item in plan["items"]:
+        params = dict(item.get("params") or {})
+        try:
+            _validate_company_scan_params(params)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        specs.append(
+            CompanyScanJobSpec(
+                target_id=str(item.get("target_id") or ""),
+                company_name=str(item.get("target_name") or ""),
+                params=params,
             )
         )
 
-    await tasks_dao.insert_tasks(db, documents)
-    spawn_background(
-        run_project_task_batch(
-            batch_id=batch_id,
-            project_id=project_id,
-            jobs=jobs,
-            executor=execute_project_task,
-            concurrency=concurrency,
-            dispatch_concurrency=total,
-            aggregate_notification=total > 1,
-        ),
-        name=f"task-batch:{batch_id}",
+    tuning = (await get_collection_runtime_tuning()).with_overrides(
+        company_scan_concurrency=req.company_scan_concurrency,
     )
-
-    return {
-        "batch_id": batch_id,
-        "task_type": "company_scan",
-        "task_count": total,
-        "task_ids": [job.task_id for job in jobs],
-        "concurrency": concurrency,
-        "status": "pending",
-    }
+    batch = await enqueue_company_scan_jobs(
+        db,
+        project_id=project_id,
+        specs=specs,
+        requested_by=current_user.username,
+        concurrency=tuning.company_scan_concurrency,
+        aggregate_notification=True,
+    )
+    return {"dry_run": False, "plan": plan, "batch": batch}
 
 
 @router.post("/projects/{project_id}/tasks/upload")

@@ -271,6 +271,7 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
     provider = Provider()
     agent_creations = 0
     linked_targets: list[dict] = []
+    persisted_profile: dict = {}
 
     async def create_agent(*_args, **_kwargs):
         nonlocal agent_creations
@@ -339,6 +340,13 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
     async def enrich(*_args, **_kwargs):
         return dict(target)
 
+    async def persist_scan_profile(_db, **kwargs):
+        persisted_profile.update(kwargs)
+        return {
+            **kwargs["target"],
+            "scan_profile": kwargs["profile"],
+        }
+
     monkeypatch.setattr(browser_provider, "get_browser_provider", lambda: provider)
     monkeypatch.setattr(agent_factory, "create_target_research_agent", create_agent)
     monkeypatch.setattr(agent_runtime, "extract_with_retry", extract)
@@ -348,6 +356,11 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
     monkeypatch.setattr(targets_dao, "merge_target_research_identity", merge)
     monkeypatch.setattr(targets_dao, "link_project_target", link_target)
     monkeypatch.setattr(targets_dao, "enrich_target_from_research", enrich)
+    monkeypatch.setattr(
+        target_research,
+        "persist_target_scan_profile",
+        persist_scan_profile,
+    )
     monkeypatch.setattr(research_dao, "save_research", save)
     monkeypatch.setattr(target_research, "update_task_stage", noop)
     monkeypatch.setattr(target_research, "observation_context", lambda **_kwargs: nullcontext())
@@ -370,8 +383,9 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
     assert provider.hot_swaps == 1
     assert provider.releases == 1
     assert agent_creations == 2
-    assert linked_targets[0]["replace_search_terms"] is True
-    assert linked_targets[0]["search_terms"] == ["教育机构 A"]
+    assert persisted_profile["profile"]["search_aliases"] == ["教育机构 A"]
+    assert persisted_profile["additional_search_terms"] == []
+    assert linked_targets[0]["objectives"] == ["机构公开情报深研与高置信关联 Target 扩展"]
 
 
 def test_target_research_rejects_unconfirmed_navigation_tool_call() -> None:

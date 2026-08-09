@@ -120,6 +120,7 @@ class CompanyControlService:
         from api.dao import company_meta as company_meta_dao
         from api.dao import targets as targets_dao
         from api.services.search_terms import build_target_channel_terms
+        from api.services.target_scan_profile import build_target_scan_profile
 
         icp_semaphore = asyncio.Semaphore(max(1, int(icp_concurrency or 6)))
 
@@ -182,6 +183,20 @@ class CompanyControlService:
                     target_id,
                 )
                 return None
+            scan_profile = build_target_scan_profile(
+                canonical_name=entity.name,
+                identity_aliases=[entity.name],
+                verified_aliases=list(entity.aliases or []),
+                fallback_aliases=aliases,
+                existing_profile=dict(target.get("scan_profile") or {}),
+                source=provider_name,
+            )
+            target = await targets_dao.update_target_scan_profile(
+                self.db,
+                target_id=target_id,
+                profile=scan_profile,
+            ) or target
+            aliases = list(scan_profile.get("search_aliases") or [entity.name])
             lineage_target_ids = [*parent.lineage_target_ids, target_id]
             lineage_target_names = [*parent.lineage_target_names, entity.name]
             relation = {
@@ -244,6 +259,9 @@ class CompanyControlService:
                 "project_target_id": project_target.get("project_target_id") or "",
                 "name": entity.name,
                 "aliases": aliases,
+                "display_name": scan_profile.get("display_name") or entity.name,
+                "short_names": list(scan_profile.get("short_names") or []),
+                "scan_profile": scan_profile,
                 "root_domain": entity.root_domain,
                 "icp_domains": entity.icp_domains,
                 "icp_records": entity.icp_records,

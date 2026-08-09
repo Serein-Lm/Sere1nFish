@@ -48,10 +48,51 @@ _PROJECT_TARGET_RELATION_PROJECTION = {
     "lineage_target_ids": 1,
     "lineage_target_names": 1,
     "batch_tags": 1,
+    "display_name": 1,
+    "short_names": 1,
+    "scan_aliases": 1,
+    "scan_profile": 1,
+    "scan_profile_version": 1,
+    "scan_profile_fingerprint": 1,
+    "scan_profile_updated_at": 1,
+    "scan_coverage": 1,
 }
 
 MAX_TARGET_BATCH_TAGS = 12
 MAX_TARGET_BATCH_TAG_LENGTH = 40
+_IDENTITY_ORGANIZATION_SUFFIXES = (
+    "有限责任公司",
+    "股份有限公司",
+    "集团有限公司",
+    "有限公司",
+    "集团",
+    "控股",
+    "研究院",
+    "委员会",
+    "管理局",
+    "事业单位",
+    "大学",
+    "学院",
+    "银行",
+    "电视台",
+    "报社",
+    "厂",
+    "分公司",
+    "子公司",
+    "事业部",
+    "服务部",
+    "办公室",
+    "部门",
+    "部",
+    "处",
+    "科",
+)
+_IDENTITY_LEGAL_SUFFIXES = (
+    "有限责任公司",
+    "股份有限公司",
+    "集团有限公司",
+    "有限公司",
+)
 
 
 def _now() -> datetime:
@@ -62,6 +103,45 @@ def normalize_target_name(value: str) -> str:
     """生成用于实体匹配的稳定名称键，不改变展示名称。"""
     text = str(value or "").strip().casefold()
     return re.sub(r"[\s\-_·•,，。.;；:：()（）\[\]【】]+", "", text)
+
+
+def is_safe_identity_alias(canonical_name: str, alias: str) -> bool:
+    """只允许同主体结构名或非组织型品牌名参与 Target 身份匹配。"""
+    canonical = normalize_target_name(canonical_name)
+    candidate = normalize_target_name(alias)
+    if not canonical or not candidate:
+        return False
+    if candidate == canonical or candidate in canonical:
+        return True
+    if canonical in candidate:
+        return candidate.endswith(canonical)
+
+    def core(value: str) -> str:
+        for suffix in _IDENTITY_LEGAL_SUFFIXES:
+            normalized_suffix = normalize_target_name(suffix)
+            if value.endswith(normalized_suffix):
+                return value[: -len(normalized_suffix)]
+        return value
+
+    canonical_core = core(canonical)
+    candidate_core = core(candidate)
+    if (
+        candidate_core
+        and canonical_core
+        and (
+            candidate_core in canonical_core
+            or (
+                canonical_core in candidate_core
+                and candidate_core.endswith(canonical_core)
+            )
+        )
+    ):
+        return True
+    compact_alias = re.sub(r"\s+", "", str(alias or "")).strip()
+    return not any(
+        compact_alias.endswith(suffix)
+        for suffix in _IDENTITY_ORGANIZATION_SUFFIXES
+    )
 
 
 def normalize_batch_tags(values: list[str] | tuple[str, ...] | str | None) -> list[str]:
@@ -326,8 +406,11 @@ def trusted_identity_aliases(target: dict[str, Any]) -> list[str]:
         value
         for value in candidates
         if value == canonical_name
-        or target_id_for_name(value, str(target.get("target_type") or "company"))
-        == target_id
+        or (
+            target_id_for_name(value, str(target.get("target_type") or "company"))
+            == target_id
+            and is_safe_identity_alias(canonical_name, value)
+        )
     ]
 
 
@@ -382,6 +465,362 @@ async def get_target(
         return None
     return await db[TARGETS_COLLECTION].find_one(
         {"target_id": target_id}, {"_id": 0}
+    )
+
+
+async def update_target_scan_profile(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    """保存全局 Target 的权威扫描名称画像。"""
+    now = _now()
+    normalized = dict(profile or {})
+    normalized["updated_at"] = now
+    return await db[TARGETS_COLLECTION].find_one_and_update(
+        {"target_id": target_id},
+        {
+            "$set": {
+                "scan_profile": normalized,
+                "display_name": str(normalized.get("display_name") or ""),
+                "short_names": list(normalized.get("short_names") or []),
+                "scan_aliases": list(normalized.get("search_aliases") or []),
+                "scan_profile_version": int(normalized.get("version") or 0),
+                "scan_profile_fingerprint": str(
+                    normalized.get("fingerprint") or ""
+                ),
+                "scan_profile_updated_at": now,
+                "updated_at": now,
+            }
+        },
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def update_project_target_scan_profile(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+    profile: dict[str, Any],
+    search_terms: list[str] | None = None,
+    search_terms_by_channel: dict[str, list[str]] | None = None,
+) -> dict[str, Any] | None:
+    """保存前端快速读取所需的项目画像快照与渠道词。"""
+    now = _now()
+    fields: dict[str, Any] = {
+        "scan_profile": dict(profile or {}),
+        "display_name": str(profile.get("display_name") or ""),
+        "short_names": list(profile.get("short_names") or []),
+        "scan_aliases": list(profile.get("search_aliases") or []),
+        "search_terms": list(
+            search_terms
+            if search_terms is not None
+            else profile.get("search_aliases") or []
+        ),
+        "scan_profile_version": int(profile.get("version") or 0),
+        "scan_profile_fingerprint": str(profile.get("fingerprint") or ""),
+        "scan_profile_updated_at": now,
+        "updated_at": now,
+    }
+    if search_terms_by_channel is not None:
+        for channel, values in search_terms_by_channel.items():
+            normalized_channel = re.sub(
+                r"[^a-z0-9_]", "", str(channel or "").strip().lower()
+            )
+            if normalized_channel:
+                fields[f"search_terms_by_channel.{normalized_channel}"] = list(
+                    values or []
+                )
+    return await db[PROJECT_TARGETS_COLLECTION].find_one_and_update(
+        {"project_id": project_id, "target_id": target_id},
+        {"$set": fields},
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def get_project_targets_by_ids(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_ids: list[str],
+) -> list[dict[str, Any]]:
+    normalized_ids = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in target_ids
+            if str(value or "").strip()
+        )
+    )
+    if not project_id or not normalized_ids:
+        return []
+    cursor = db[PROJECT_TARGETS_COLLECTION].find(
+        {
+            "project_id": project_id,
+            "target_id": {"$in": normalized_ids},
+            "active": {"$ne": False},
+        },
+        {"_id": 0},
+    )
+    return [item async for item in cursor]
+
+
+async def list_project_target_scan_state(
+    db: AsyncIOMotorDatabase,
+) -> list[dict[str, Any]]:
+    return await db[PROJECT_TARGETS_COLLECTION].find(
+        {"active": {"$ne": False}},
+        {
+            "_id": 0,
+            "project_id": 1,
+            "target_id": 1,
+            "target_name": 1,
+            "scan_profile": 1,
+            "scan_profile_fingerprint": 1,
+            "scan_coverage": 1,
+        },
+    ).to_list(None)
+
+
+async def apply_scan_coverage_backfill(
+    db: AsyncIOMotorDatabase,
+    *,
+    items: list[dict[str, Any]],
+) -> dict[str, int]:
+    """按 Target 聚合写入历史逐渠道覆盖，较新运行结果不会被覆盖。"""
+    operations: list[UpdateOne] = []
+    for item in items:
+        project_id = str(item.get("project_id") or "")
+        target_id = str(item.get("target_id") or "")
+        channels = dict(item.get("channels") or {})
+        if not project_id or not target_id or not channels:
+            continue
+        fields: dict[str, Any] = {"updated_at": _now()}
+        for channel, coverage in channels.items():
+            normalized_channel = re.sub(
+                r"[^a-z0-9_]", "", str(channel or "").strip().lower()
+            )
+            if normalized_channel and isinstance(coverage, dict):
+                fields[f"scan_coverage.{normalized_channel}"] = dict(coverage)
+        if len(fields) == 1:
+            continue
+        operations.append(
+            UpdateOne(
+                {"project_id": project_id, "target_id": target_id},
+                {"$set": fields},
+            )
+        )
+    result = (
+        await db[PROJECT_TARGETS_COLLECTION].bulk_write(operations, ordered=False)
+        if operations
+        else None
+    )
+    return {
+        "matched": int(getattr(result, "matched_count", 0) or 0),
+        "modified": int(getattr(result, "modified_count", 0) or 0),
+    }
+
+
+async def get_scan_profile_backfill_candidates(
+    db: AsyncIOMotorDatabase,
+    *,
+    version: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """返回缺少当前画像版本的全局 Target 和项目关系。"""
+    project_targets = await db[PROJECT_TARGETS_COLLECTION].find(
+        {
+            "active": {"$ne": False},
+            "$or": [
+                {"scan_profile_version": {"$ne": int(version)}},
+                {"scan_profile_fingerprint": {"$in": [None, ""]}},
+                {"scan_profile_fingerprint": {"$exists": False}},
+            ],
+        },
+        {
+            "_id": 0,
+            "project_id": 1,
+            "target_id": 1,
+            "target_name": 1,
+        },
+    ).to_list(None)
+    relation_target_ids = list(
+        dict.fromkeys(
+            str(item.get("target_id") or "")
+            for item in project_targets
+            if str(item.get("target_id") or "")
+        )
+    )
+    target_filter: dict[str, Any] = {
+        "$or": [
+            {"scan_profile_version": {"$ne": int(version)}},
+            {"scan_profile_fingerprint": {"$in": [None, ""]}},
+            {"scan_profile_fingerprint": {"$exists": False}},
+        ]
+    }
+    if relation_target_ids:
+        target_filter = {
+            "$or": [
+                target_filter,
+                {"target_id": {"$in": relation_target_ids}},
+            ]
+        }
+    targets = await db[TARGETS_COLLECTION].find(
+        target_filter,
+        {
+            "_id": 0,
+            "target_id": 1,
+            "canonical_name": 1,
+            "identity_aliases": 1,
+            "aliases": 1,
+            "scan_profile": 1,
+            "scan_profile_version": 1,
+        },
+    ).to_list(None)
+    return targets, project_targets
+
+
+async def apply_scan_profile_backfill(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_profiles: list[dict[str, Any]],
+    project_profiles: list[dict[str, Any]],
+) -> dict[str, int]:
+    """批量写入已规范化的扫描画像，不在 service 暴露 Mongo 更新语义。"""
+    now = _now()
+    target_operations: list[UpdateOne] = []
+    for item in target_profiles:
+        target_id = str(item.get("target_id") or "")
+        profile = dict(item.get("profile") or {})
+        if not target_id or not profile:
+            continue
+        profile["updated_at"] = now
+        target_operations.append(
+            UpdateOne(
+                {"target_id": target_id},
+                {
+                    "$set": {
+                        "scan_profile": profile,
+                        "display_name": str(profile.get("display_name") or ""),
+                        "short_names": list(profile.get("short_names") or []),
+                        "scan_aliases": list(profile.get("search_aliases") or []),
+                        "scan_profile_version": int(profile.get("version") or 0),
+                        "scan_profile_fingerprint": str(
+                            profile.get("fingerprint") or ""
+                        ),
+                        "scan_profile_updated_at": now,
+                        "updated_at": now,
+                    }
+                },
+            )
+        )
+
+    project_operations: list[UpdateOne] = []
+    for item in project_profiles:
+        project_id = str(item.get("project_id") or "")
+        target_id = str(item.get("target_id") or "")
+        profile = dict(item.get("profile") or {})
+        if not project_id or not target_id or not profile:
+            continue
+        fields: dict[str, Any] = {
+            "scan_profile": profile,
+            "display_name": str(profile.get("display_name") or ""),
+            "short_names": list(profile.get("short_names") or []),
+            "scan_aliases": list(profile.get("search_aliases") or []),
+            "search_terms": list(profile.get("search_aliases") or []),
+            "scan_profile_version": int(profile.get("version") or 0),
+            "scan_profile_fingerprint": str(profile.get("fingerprint") or ""),
+            "scan_profile_updated_at": now,
+            "updated_at": now,
+        }
+        for channel, values in dict(
+            item.get("search_terms_by_channel") or {}
+        ).items():
+            normalized_channel = re.sub(
+                r"[^a-z0-9_]", "", str(channel or "").strip().lower()
+            )
+            if normalized_channel:
+                fields[f"search_terms_by_channel.{normalized_channel}"] = list(
+                    values or []
+                )
+        project_operations.append(
+            UpdateOne(
+                {"project_id": project_id, "target_id": target_id},
+                {"$set": fields},
+            )
+        )
+
+    target_result = (
+        await db[TARGETS_COLLECTION].bulk_write(target_operations, ordered=False)
+        if target_operations
+        else None
+    )
+    project_result = (
+        await db[PROJECT_TARGETS_COLLECTION].bulk_write(
+            project_operations, ordered=False
+        )
+        if project_operations
+        else None
+    )
+    return {
+        "targets_matched": int(getattr(target_result, "matched_count", 0) or 0),
+        "targets_modified": int(getattr(target_result, "modified_count", 0) or 0),
+        "project_targets_matched": int(
+            getattr(project_result, "matched_count", 0) or 0
+        ),
+        "project_targets_modified": int(
+            getattr(project_result, "modified_count", 0) or 0
+        ),
+    }
+
+
+async def record_project_target_scan_coverage(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+    channel: str,
+    status: str,
+    task_id: str,
+    summary: dict[str, Any] | None = None,
+    profile_fingerprint: str = "",
+) -> None:
+    """记录一个渠道的最新覆盖与有界历史，供补扫调度幂等判断。"""
+    normalized_channel = re.sub(r"[^a-z0-9_]", "", str(channel).lower())
+    normalized_status = str(status or "").strip().lower()
+    allowed_statuses = {"running", "completed", "partial", "error", "skipped"}
+    if not project_id or not target_id or not normalized_channel:
+        return
+    if normalized_status not in allowed_statuses:
+        raise ValueError(f"不支持的扫描覆盖状态: {status}")
+    now = _now()
+    event = {
+        "channel": normalized_channel,
+        "status": normalized_status,
+        "task_id": str(task_id or ""),
+        "summary": dict(summary or {}),
+        "profile_fingerprint": str(profile_fingerprint or ""),
+        "recorded_at": now,
+    }
+    coverage = {
+        "status": normalized_status,
+        "task_id": str(task_id or ""),
+        "summary": dict(summary or {}),
+        "profile_fingerprint": str(profile_fingerprint or ""),
+        "updated_at": now,
+    }
+    if normalized_status == "completed":
+        coverage["completed_at"] = now
+    path = f"scan_coverage.{normalized_channel}"
+    update: dict[str, Any] = {
+        "$set": {path: coverage, "updated_at": now},
+        "$push": {"scan_history": {"$each": [event], "$slice": -100}},
+    }
+    await db[PROJECT_TARGETS_COLLECTION].update_one(
+        {"project_id": project_id, "target_id": target_id},
+        update,
     )
 
 
@@ -689,6 +1128,21 @@ async def link_project_target(
         },
         "$setOnInsert": {"created_at": now, "first_seen_at": now},
     }
+    scan_profile = dict(target.get("scan_profile") or {})
+    if scan_profile:
+        update["$set"].update(
+            {
+                "scan_profile": scan_profile,
+                "display_name": str(scan_profile.get("display_name") or ""),
+                "short_names": list(scan_profile.get("short_names") or []),
+                "scan_aliases": list(scan_profile.get("search_aliases") or []),
+                "scan_profile_version": int(scan_profile.get("version") or 0),
+                "scan_profile_fingerprint": str(
+                    scan_profile.get("fingerprint") or ""
+                ),
+                "scan_profile_updated_at": target.get("scan_profile_updated_at") or now,
+            }
+        )
     additions: dict[str, Any] = {}
     terms = [str(term).strip() for term in (search_terms or []) if str(term).strip()]
     goals = [str(goal).strip() for goal in (objectives or []) if str(goal).strip()]
@@ -883,6 +1337,14 @@ async def list_project_targets(
                 "run_task_ids": 1,
                 "task_def_ids": 1,
                 "last_collected_at": 1,
+                "display_name": 1,
+                "short_names": 1,
+                "scan_aliases": 1,
+                "scan_profile": 1,
+                "scan_profile_version": 1,
+                "scan_profile_fingerprint": 1,
+                "scan_profile_updated_at": 1,
+                "scan_coverage": 1,
             }
         )
     cursor = db[PROJECT_TARGETS_COLLECTION].find(

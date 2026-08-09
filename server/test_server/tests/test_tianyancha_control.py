@@ -628,12 +628,29 @@ async def test_subsidiary_service_persists_outbound_investment_provenance(
         captured["relation"] = kwargs["relation"]
         return {"project_target_id": "project-child"}
 
+    async def _update_scan_profile(
+        *_args: Any,
+        target_id: str,
+        profile: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "target_id": target_id,
+            "canonical_name": profile["canonical_name"],
+            "scan_profile": profile,
+        }
+
     async def _upsert_meta(*_args: Any, **kwargs: Any) -> dict[str, Any]:
         captured["provenance"] = kwargs["provenance"]
         return {}
 
     monkeypatch.setattr(CompanyControlProviderFactory, "create", _create)
     monkeypatch.setattr(targets_dao, "upsert_target", _upsert_target)
+    monkeypatch.setattr(
+        targets_dao,
+        "update_target_scan_profile",
+        _update_scan_profile,
+    )
     monkeypatch.setattr(targets_dao, "link_project_target", _link_target)
     monkeypatch.setattr(company_meta_dao, "upsert_company_meta", _upsert_meta)
 
@@ -712,11 +729,28 @@ async def test_subsidiary_service_persists_child_and_grandchild_lineage(
         relations[target_id] = dict(kwargs["relation"])
         return {"project_target_id": f"project-{target_id}"}
 
+    async def _update_scan_profile(
+        *_args: Any,
+        target_id: str,
+        profile: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "target_id": target_id,
+            "canonical_name": profile["canonical_name"],
+            "scan_profile": profile,
+        }
+
     async def _upsert_meta(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {}
 
     monkeypatch.setattr(CompanyControlProviderFactory, "create", _create)
     monkeypatch.setattr(targets_dao, "upsert_target", _upsert_target)
+    monkeypatch.setattr(
+        targets_dao,
+        "update_target_scan_profile",
+        _update_scan_profile,
+    )
     monkeypatch.setattr(targets_dao, "link_project_target", _link_target)
     monkeypatch.setattr(company_meta_dao, "upsert_company_meta", _upsert_meta)
 
@@ -910,6 +944,53 @@ async def test_project_terms_upgrade_stored_wechat_terms_with_runtime_skill(
         "传统单位 新闻",
         "传统单位 公告",
         "传统单位 招标",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_project_terms_keep_authoritative_brand_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+    from api.services.search_terms import resolve_project_target_terms
+
+    async def _root(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "target_id": "root",
+            "target_name": "上海宽娱数码科技有限公司",
+            "scan_aliases": [
+                "上海宽娱数码科技有限公司",
+                "B站",
+                "哔哩哔哩",
+            ],
+            "search_terms_by_channel": {},
+        }
+
+    monkeypatch.setattr(targets_dao, "get_project_target", _root)
+    monkeypatch.setattr(
+        targets_dao,
+        "list_project_target_descendants",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "api.services.search_terms.get_keyword_templates",
+        lambda _channel: ["{company}"],
+    )
+
+    result = await resolve_project_target_terms(
+        object(),
+        project_id="project-1",
+        target_id="root",
+        target_name="上海宽娱数码科技有限公司",
+        channel="weixin",
+        include_direct_children=False,
+        max_keywords=10,
+    )
+
+    assert result.keywords == [
+        "上海宽娱数码科技有限公司",
+        "B站",
+        "哔哩哔哩",
     ]
 
 

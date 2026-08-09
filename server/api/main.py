@@ -275,6 +275,28 @@ async def lifespan(app: FastAPI):
                 "Target 身份别名已收敛: updated=%s",
                 rebuilt_target_aliases,
             )
+        from api.services.target_scan_profile import (
+            backfill_target_scan_coverage,
+            backfill_target_scan_profiles,
+        )
+
+        scan_profile_backfill = await backfill_target_scan_profiles(db)
+        if scan_profile_backfill["targets_modified"] or scan_profile_backfill[
+            "project_targets_modified"
+        ]:
+            logger.info(
+                "Target 扫描画像已迁移: targets=%s project_targets=%s",
+                scan_profile_backfill["targets_modified"],
+                scan_profile_backfill["project_targets_modified"],
+            )
+        scan_coverage_backfill = await backfill_target_scan_coverage(db)
+        if scan_coverage_backfill["modified"]:
+            logger.info(
+                "Target 历史渠道覆盖已恢复: targets=%s channels=%s stale_tasks=%s",
+                scan_coverage_backfill["modified"],
+                scan_coverage_backfill["target_channels"],
+                scan_coverage_backfill["stale_tasks"],
+            )
         await target_research_dao.ensure_indexes(db)
         await source_documents_dao.ensure_indexes(db)
         # 学者学术联系发现索引

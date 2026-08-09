@@ -41,13 +41,16 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "deep_collect": True,
             "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
             "notify_on": "none",
-            "include_direct_children": False,
-            "max_resolved_keywords": 12,
-            "swipe_times": 3,
+            "include_direct_children": True,
+            "max_relation_depth": 2,
+            "max_related_targets": 6,
+            "skip_completed_related_targets": True,
+            "max_resolved_keywords": 36,
+            "swipe_times": 4,
             "detail_max_items": 2,
-            "detail_max_total_items": 8,
+            "detail_max_total_items": 12,
             "detail_review_max_items": 3,
-            "detail_review_max_total_items": 16,
+            "detail_review_max_total_items": 24,
             "detail_max_swipes": 6,
             "max_runtime_seconds": 3600,
         }
@@ -81,9 +84,19 @@ def _wechat_definition_patch(task_def: dict[str, Any]) -> dict[str, Any]:
     ]:
         patch["notify_on"] = defaults["notify_on"]
     if "include_direct_children" not in task_def or (
-        is_auto_definition and task_def.get("include_direct_children") is not False
+        is_auto_definition
+        and task_def.get("include_direct_children") != defaults["include_direct_children"]
     ):
         patch["include_direct_children"] = defaults["include_direct_children"]
+    for field in (
+        "max_relation_depth",
+        "max_related_targets",
+        "skip_completed_related_targets",
+    ):
+        if field not in task_def or (
+            is_auto_definition and task_def.get(field) != defaults[field]
+        ):
+            patch[field] = defaults[field]
     if not task_def.get("max_resolved_keywords") or (
         is_auto_definition
         and int(task_def.get("max_resolved_keywords") or 0)
@@ -318,6 +331,7 @@ async def run_company_wechat_collection(
         queue_priority=collection_priority,
         on_started=on_started,
     )
+    keyword_resolution = dict(result.get("keyword_resolution") or {})
     return {
         "kind": "wechat",
         "status": (
@@ -336,6 +350,10 @@ async def run_company_wechat_collection(
         "high_score_documents": int(result.get("high_score_documents") or 0),
         "max_score": int(result.get("max_score") or 0),
         "keywords_used": list(result.get("keywords_used") or []),
+        "target_ids": list(keyword_resolution.get("target_ids") or []),
+        "keyword_resolution": keyword_resolution,
+        "keywords_completed": int(result.get("keywords_completed") or 0),
+        "keyword_total": int(result.get("keyword_total") or 0),
         "stopped": bool(result.get("stopped")),
         "timed_out": bool(result.get("timed_out")),
     }

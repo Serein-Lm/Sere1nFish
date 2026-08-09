@@ -102,6 +102,31 @@ def _target_summary_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _target_scan_coverage_summary(
+    relation: dict[str, Any],
+) -> dict[str, Any]:
+    """按当前扫描画像汇总核心渠道，替代仅看 last_collected_at 的旧语义。"""
+    from api.services.target_scan_profile import is_scan_coverage_current
+
+    required_channels = ("website", "wechat", "scholar", "bidding")
+    completed_channels = [
+        channel
+        for channel in required_channels
+        if is_scan_coverage_current(relation, channel)
+    ]
+    return {
+        "collection_complete": len(completed_channels) == len(required_channels),
+        "coverage_completed_count": len(completed_channels),
+        "coverage_required_count": len(required_channels),
+        "coverage_completed_channels": completed_channels,
+        "coverage_missing_channels": [
+            channel
+            for channel in required_channels
+            if channel not in completed_channels
+        ],
+    }
+
+
 def _normalized_search_values(values: list[Any]) -> list[str]:
     return list(
         dict.fromkeys(
@@ -131,10 +156,18 @@ def _target_search_rank(
     ]
     names = _normalized_search_values([
         relation.get("target_name"),
+        relation.get("display_name"),
         target.get("canonical_name"),
+        target.get("display_name"),
     ])
+    authoritative_aliases = [
+        *(relation.get("short_names") or []),
+        *(relation.get("scan_aliases") or []),
+        *(target.get("short_names") or []),
+        *(target.get("scan_aliases") or []),
+    ]
     aliases = _normalized_search_values(
-        target.get("identity_aliases") or target.get("aliases") or []
+        authoritative_aliases or list(target.get("identity_aliases") or [])
     )
     domains = _normalized_search_values([
         relation.get("root_domain"),
@@ -849,6 +882,13 @@ async def list_project_target_summaries(
                 "lineage_target_ids",
                 "lineage_target_names",
                 "batch_tags",
+                "display_name",
+                "short_names",
+                "scan_aliases",
+                "scan_profile_version",
+                "scan_profile_fingerprint",
+                "scan_profile_updated_at",
+                "scan_coverage",
             )
             if key in relation
         }
@@ -927,7 +967,7 @@ async def list_project_target_summaries(
                 ),
                 "",
             ),
-            "collection_complete": bool(relation.get("last_collected_at")),
+            **_target_scan_coverage_summary(relation),
         }
         for relation in relations
     ]
@@ -956,6 +996,13 @@ async def list_project_target_options(
         "parent_target_name",
         "relation_depth",
         "batch_tags",
+        "display_name",
+        "short_names",
+        "scan_aliases",
+        "scan_profile_version",
+        "scan_profile_fingerprint",
+        "scan_profile_updated_at",
+        "scan_coverage",
     )
     items = [
         {key: relation.get(key) for key in fields if key in relation}
@@ -1211,6 +1258,9 @@ async def list_project_target_summary_page(
             "canonical_name": 1,
             "identity_aliases": 1,
             "aliases": 1,
+            "display_name": 1,
+            "short_names": 1,
+            "scan_aliases": 1,
             "root_domain": 1,
             "root_domains": 1,
         },

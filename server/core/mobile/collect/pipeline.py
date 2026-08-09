@@ -1803,6 +1803,15 @@ async def run_collect_task(
                     include_direct_children=bool(
                         task_def.get("include_direct_children", True)
                     ),
+                    max_relation_depth=int(
+                        task_def.get("max_relation_depth") or 2
+                    ),
+                    max_related_targets=int(
+                        task_def.get("max_related_targets") or 8
+                    ),
+                    skip_completed_descendants=bool(
+                        task_def.get("skip_completed_related_targets", True)
+                    ),
                     max_keywords=int(task_def.get("max_resolved_keywords") or 60),
                 )
                 keyword_resolution = resolved.as_dict()

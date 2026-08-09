@@ -82,6 +82,59 @@ async def find_latest_matching_task(
     )
 
 
+async def list_completed_company_scans_for_coverage(
+    db: AsyncIOMotorDatabase,
+) -> list[dict[str, Any]]:
+    """返回可用于逐渠道覆盖迁移的已完成公司扫描检查点。"""
+    return await db[TASKS_COLLECTION].find(
+        {
+            "task_type": "company_scan",
+            "status": "completed",
+            "result.identity.target_id": {"$exists": True, "$nin": ["", None]},
+        },
+        {
+            "_id": 0,
+            "task_id": 1,
+            "project_id": 1,
+            "completed_at": 1,
+            "updated_at": 1,
+            "checkpoint.modules": 1,
+            "result.identity": 1,
+            "result.assets": 1,
+            "result.url_scan": 1,
+            "result.xhs": 1,
+            "result.bidding": 1,
+            "result.wechat": 1,
+            "result.scholar": 1,
+            "result.control_structure": 1,
+        },
+    ).sort("completed_at", 1).to_list(None)
+
+
+async def list_inflight_company_scans(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """读取会与新补扫冲突的公司任务；历史暂停任务不阻塞新计划。"""
+    if not project_id:
+        return []
+    return await db[TASKS_COLLECTION].find(
+        {
+            "project_id": project_id,
+            "task_type": "company_scan",
+            "status": {"$in": ["pending", "running", "pausing"]},
+        },
+        {
+            "_id": 0,
+            "task_id": 1,
+            "status": 1,
+            "params.target_id": 1,
+            "params.company_name": 1,
+        },
+    ).to_list(None)
+
+
 async def prepare_interrupted_tasks(
     db: AsyncIOMotorDatabase,
 ) -> tuple[list[dict[str, Any]], int]:

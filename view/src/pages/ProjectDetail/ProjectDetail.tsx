@@ -38,7 +38,7 @@ import { stringToColor } from '../../utils/colorUtils'
 import { mapWebTaggingEnum } from '../../utils/webTaggingMap'
 import { renderFindingValue } from '../../utils/findingValueRenderer'
 import ProfileDrawer from '../../components/ProfileDrawer'
-import { listTasks, createTask, createCompanyScanBatch, getProjectStats, deleteTask, batchDeleteTasks, getFindingCopywriting, getFindingProfile, pauseTask, resumeTask } from '../../services/taskService'
+import { listTasks, createTask, createCompanyScanBatch, createCompanyScanCoverageBatch, getProjectStats, deleteTask, batchDeleteTasks, getFindingCopywriting, getFindingProfile, pauseTask, resumeTask } from '../../services/taskService'
 import type { Task, TaskType, TaskStatus, FindingCopywriting, ProjectStatsResponse, FindingProfile } from '../../services/taskService'
 import {
   fetchMobileScreenshotBlob,
@@ -165,6 +165,14 @@ const TARGET_HIGH_SCORE_LABELS: ReadonlyArray<{ key: TargetHighScoreKey; label: 
   ...TARGET_MODULES.map((module) => ({ key: module.highScoreKey, label: module.label })),
   { key: 'other', label: '其他' },
 ]
+const TARGET_SCAN_CHANNEL_LABELS: Record<string, string> = {
+  website: '网站',
+  wechat: '公众号',
+  xhs: '小红书',
+  bidding: '招投标',
+  scholar: '学者联系',
+  control: '控股关系',
+}
 
 interface WechatDeviceOption {
   deviceId: string
@@ -663,7 +671,9 @@ export default function ProjectDetail() {
   // 任务下发状态
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
   const [taskForm] = Form.useForm()
+  const [coverageModal, coverageModalContext] = Modal.useModal()
   const [taskSubmitting, setTaskSubmitting] = useState(false)
+  const [coverageSubmitting, setCoverageSubmitting] = useState(false)
   const [taskDefaultsLoading, setTaskDefaultsLoading] = useState(false)
   const [taskTuningValues, setTaskTuningValues] = useState(TASK_TUNING_FORM_DEFAULTS)
   const [wechatDeviceOptions, setWechatDeviceOptions] = useState<WechatDeviceOption[]>([])
@@ -4021,41 +4031,151 @@ export default function ProjectDetail() {
     }
   }
 
+  const runCoverageBatch = async () => {
+    if (!projectId || coverageSubmitting) return
+    const batchTag = targetBatchTag || (
+      targetBatchOptions.length === 1 ? targetBatchOptions[0].batch_tag : ''
+    )
+    if (!batchTag) {
+      message.info('请先选择需要补扫的 Target 批次')
+      return
+    }
+    setCoverageSubmitting(true)
+    try {
+      const pool = await getPool()
+      const onlineDevice = pool.devices.find((device) => device.online)
+      if (!onlineDevice) {
+        message.error('设备池中没有在线手机，无法补齐公众号渠道')
+        return
+      }
+      const request = {
+        batch_tag: batchTag,
+        required_channels: ['website', 'wechat', 'scholar', 'bidding'] as const,
+        excluded_sectors: ['financial'],
+        wechat_device_id: onlineDevice.device_id,
+        subsidiary_scan_limit: 12,
+        bidding_max_records: 10,
+        company_scan_concurrency: taskTuningValues.company_scan_concurrency,
+      }
+      const preview = await createCompanyScanCoverageBatch(projectId, {
+        ...request,
+        required_channels: [...request.required_channels],
+        dry_run: true,
+      })
+      if (!preview.plan.planned_count) {
+        message.success(`“${batchTag}”当前没有待补齐渠道`)
+        return
+      }
+      coverageModal.confirm({
+        title: `补齐“${batchTag}”采集覆盖`,
+        icon: <ExclamationCircleOutlined />,
+        width: 560,
+        content: (
+          <Space orientation="vertical" size={4}>
+            <Text>将下发 {preview.plan.planned_count} 个主 Target 任务。</Text>
+            <Text type="secondary">
+              已完整 {preview.plan.completed_count} 个，运行中 {preview.plan.inflight_count} 个，按策略排除 {preview.plan.excluded_count} 个金融目标。
+            </Text>
+            <Text type="secondary">网站、公众号、学者和招投标只补缺失渠道；已有子孙关系按缺口和域名优先抽取。</Text>
+          </Space>
+        ),
+        okText: '确认下发',
+        cancelText: '取消',
+        onOk: async () => {
+          setCoverageSubmitting(true)
+          try {
+            const result = await createCompanyScanCoverageBatch(projectId, {
+              ...request,
+              required_channels: [...request.required_channels],
+              dry_run: false,
+            })
+            message.success(`已下发 ${result.batch?.task_count || 0} 个完整性补扫任务`)
+            await Promise.all([
+              fetchTasks(projectId),
+              fetchProjectTargets(
+                projectId,
+                targetPage,
+                targetPageSize,
+                targetSearchQuery,
+                targetBatchTag,
+              ),
+            ])
+          } catch (error) {
+            message.error(error instanceof Error ? error.message : '完整性补扫下发失败')
+            throw error
+          } finally {
+            setCoverageSubmitting(false)
+          }
+        },
+      })
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '完整性补扫预览失败')
+    } finally {
+      setCoverageSubmitting(false)
+    }
+  }
+
   const renderTargetDashboard = () => {
     const columns: ColumnsType<TargetDashboardRow> = [
       {
         title: '公司 / 机构',
         key: 'target',
-        width: 280,
+        width: 340,
         render: (_, target) => target.isLoadingPlaceholder ? (
           <Space size={8}>
             {targetBranchLoading[target.parent_target_id || ''] ? <Spin size="small" /> : null}
             <Text type="secondary">{target.target_name}</Text>
           </Space>
-        ) : (
-          <div className="target-company-cell">
-            <Space size={6} wrap>
-              <Text strong>{target.target_name}</Text>
-              {(target.batch_tags || []).map((batchTag) => (
-                <Tag key={batchTag} color="processing">{batchTag}</Tag>
-              ))}
-              {targetSearchQuery && target.search_match ? <Tag color="blue">匹配</Tag> : null}
-              {target.collection_complete ? <Tag color="success">采集完成</Tag> : <Tag>待完成</Tag>}
-              {(target.relation_depth ?? 0) >= 2
-                ? <Tag color="gold">孙单位</Tag>
-                : (target.relation_depth ?? 0) === 1
-                ? <Tag color="cyan">子单位</Tag>
-                : <Tag color="blue">主目标</Tag>}
-            </Space>
-            {target.root_domain ? <Text type="secondary">{target.root_domain}</Text> : null}
-            {target.parent_target_name ? (
-              <Text type="secondary">
-                上级：{target.parent_target_name}
-                {target.ownership_percent != null ? ` · 持股 ${target.ownership_percent}%` : ''}
-              </Text>
-            ) : null}
-          </div>
-        ),
+        ) : (() => {
+          const displayName = target.display_name?.trim() || target.target_name
+          const scanNames = (target.scan_aliases || target.short_names || [])
+            .filter((name) => name && name !== displayName && name !== target.target_name)
+            .slice(0, 4)
+          const completedChannels = Object.entries(target.scan_coverage || {})
+            .filter(([, coverage]) => (
+              coverage?.status === 'completed'
+              && (
+                !target.scan_profile_fingerprint
+                || coverage.profile_fingerprint === target.scan_profile_fingerprint
+              )
+            ))
+            .map(([channel]) => TARGET_SCAN_CHANNEL_LABELS[channel] || channel)
+          return (
+            <div className="target-company-cell">
+              <Space size={6} wrap>
+                <Text strong>{displayName}</Text>
+                {(target.batch_tags || []).map((batchTag) => (
+                  <Tag key={batchTag} color="processing">{batchTag}</Tag>
+                ))}
+                {targetSearchQuery && target.search_match ? <Tag color="blue">匹配</Tag> : null}
+                <Tag color={target.collection_complete ? 'success' : 'default'}>
+                  覆盖 {target.coverage_completed_count || 0}/{target.coverage_required_count || 4}
+                </Tag>
+                {(target.relation_depth ?? 0) >= 2
+                  ? <Tag color="gold">孙单位</Tag>
+                  : (target.relation_depth ?? 0) === 1
+                  ? <Tag color="cyan">子单位</Tag>
+                  : <Tag color="blue">主目标</Tag>}
+              </Space>
+              {displayName !== target.target_name ? (
+                <Text type="secondary">全称：{target.target_name}</Text>
+              ) : null}
+              {scanNames.length ? (
+                <Text type="secondary">检索名：{scanNames.join(' · ')}</Text>
+              ) : null}
+              {target.root_domain ? <Text type="secondary">域名：{target.root_domain}</Text> : null}
+              {completedChannels.length ? (
+                <Text type="secondary">已覆盖：{completedChannels.join(' · ')}</Text>
+              ) : null}
+              {target.parent_target_name ? (
+                <Text type="secondary">
+                  上级：{target.parent_target_name}
+                  {target.ownership_percent != null ? ` · 持股 ${target.ownership_percent}%` : ''}
+                </Text>
+              ) : null}
+            </div>
+          )
+        })(),
       },
       {
         title: '高分 Finding',
@@ -4183,6 +4303,16 @@ export default function ProjectDetail() {
               aria-label="搜索 Target"
               onChange={(event) => setTargetSearchText(event.target.value)}
             />
+            <Tooltip title="按当前扫描画像补齐网站、公众号、学者和招投标，默认排除金融目标">
+              <Button
+                size="small"
+                icon={<RocketOutlined />}
+                loading={coverageSubmitting}
+                onClick={() => void runCoverageBatch()}
+              >
+                补齐覆盖
+              </Button>
+            </Tooltip>
             <Button
               size="small"
               icon={<SyncOutlined />}
@@ -4650,6 +4780,7 @@ export default function ProjectDetail() {
 
   return (
     <div className="project-detail page-container fade-in">
+      {coverageModalContext}
       <div className="page-header slide-up">
         <div>
           <Title level={2} className="page-title">
@@ -5028,9 +5159,9 @@ export default function ProjectDetail() {
                     }
                     params.enable_copywriting = values.enable_copywriting ?? true
                     params.enable_control_structure = values.enable_control_structure ?? false
-                    if (values.enable_control_structure) {
-                      params.control_max_depth = values.control_max_depth ?? 1
-                    }
+                    params.control_max_depth = values.control_max_depth ?? 1
+                    params.subsidiary_scan_limit = values.subsidiary_scan_limit ?? 12
+                    params.skip_completed_subsidiaries = values.skip_completed_subsidiaries ?? true
                     params.incremental_scan = values.asset_scan_mode === 'incremental'
                     if (values.xhs_max_notes) params.xhs_max_notes = values.xhs_max_notes
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
@@ -5129,7 +5260,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -5244,19 +5375,28 @@ export default function ProjectDetail() {
                             </Form.Item>
                           </Space>
                         </Form.Item>
-                        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_control_structure !== cur.enable_control_structure}>
-                          {({ getFieldValue }) => getFieldValue('enable_control_structure') ? (
-                            <Form.Item
-                              name="control_max_depth"
-                              label="全资单位层级"
-                              extra="孙单位必须由根单位到子单位、再到孙单位连续两层均为直接 100% 持股。"
-                            >
-                              <Segmented block options={[
-                                { label: '仅直属子单位', value: 1 },
-                                { label: '包含孙单位', value: 2 },
-                              ]} />
-                            </Form.Item>
-                          ) : null}
+                        <Form.Item
+                          name="control_max_depth"
+                          label="关联单位扫描层级"
+                          extra="始终复用项目中已保存的控股关系；开启天眼查时会先补全关系。孙单位必须连续两层均为直接 100% 持股。"
+                        >
+                          <Segmented block options={[
+                            { label: '仅直属子单位', value: 1 },
+                            { label: '包含孙单位', value: 2 },
+                          ]} />
+                        </Form.Item>
+                        <Form.Item
+                          name="subsidiary_scan_limit"
+                          label="关联单位补扫上限"
+                          extra="优先扫描有域名、仍在经营且存在渠道缺口的子、孙单位。"
+                        >
+                          <InputNumber min={1} max={100} style={{ width: '100%' }} />
+                        </Form.Item>
+                        <Form.Item
+                          name="skip_completed_subsidiaries"
+                          valuePropName="checked"
+                        >
+                          <Checkbox>跳过已完成对应渠道的关联单位</Checkbox>
                         </Form.Item>
                         <Form.Item noStyle shouldUpdate={(prev, cur) => (
                           prev.enable_xhs !== cur.enable_xhs

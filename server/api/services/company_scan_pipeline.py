@@ -194,6 +194,7 @@ class CompanyScanPipeline:
         xhs_target_selection_mode: str = "auto",
         xhs_manual_targets: list[str] | str | None = None,
         enable_bidding: bool = False,
+        enable_bidding_visual_analysis: bool | None = None,
         bidding_page_size: int = 20,
         bidding_max_records: int = 20,
         enable_wechat: bool = False,
@@ -222,6 +223,8 @@ class CompanyScanPipeline:
         control_lookup_concurrency: int = 4,
         control_icp_concurrency: int = 6,
         control_scan_concurrency: int = 1,
+        subsidiary_scan_limit: int = 12,
+        skip_completed_subsidiaries: bool = True,
         company_core_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY,
         requested_by: str = "",
     ) -> dict[str, Any]:
@@ -242,6 +245,11 @@ class CompanyScanPipeline:
         subsidiary_bidding_enabled = bool(
             enable_bidding and enable_subsidiary_bidding
         )
+        bidding_visual_analysis_enabled = (
+            bool(enable_url_scan)
+            if enable_bidding_visual_analysis is None
+            else bool(enable_bidding_visual_analysis)
+        )
         manual_xhs_targets = parse_manual_targets(xhs_manual_targets)
         result = {
             "task_id": task_id,
@@ -256,6 +264,15 @@ class CompanyScanPipeline:
                 "max_depth": max(1, min(int(control_max_depth or 1), 2)),
                 "relation_depth": 0,
                 "ownership_percent": 100.0,
+                "scan_policy": {
+                    "max_entities": max(
+                        1, min(int(subsidiary_scan_limit or 12), 100)
+                    ),
+                    "skip_completed": bool(skip_completed_subsidiaries),
+                    "selected_count": 0,
+                    "skipped_count": 0,
+                    "requested_channels": [],
+                },
                 "entities": [],
                 "errors": [],
             },
@@ -517,6 +534,9 @@ class CompanyScanPipeline:
                     *list(company_meta.get("icp_domains") or []),
                 ]
             )[:6]
+            normalization_matches_target = True
+            router_matches_target = True
+            input_matches_target = True
 
             if pinned_target is not None:
                 normalized_name = str(
@@ -537,9 +557,13 @@ class CompanyScanPipeline:
                 router_matches_target = (
                     targets_dao.normalize_target_name(router_legal_name) == pinned_key
                 )
+                input_matches_target = bool(
+                    normalization_matches_target
+                    or targets_dao.normalize_target_name(company_name) == pinned_key
+                )
                 aliases = self._dedupe_text(
                     [
-                        company_name,
+                        *([company_name] if input_matches_target else []),
                         normalized_name,
                         *list(pinned_target.get("identity_aliases") or []),
                         *(
@@ -559,14 +583,15 @@ class CompanyScanPipeline:
                         "pinned_target_id": requested_target_id,
                         "normalization_candidate_name": candidate_name,
                         "normalization_identity_mismatch": not normalization_matches_target,
+                        "input_identity_mismatch": not input_matches_target,
                     }
                 )
-                if not normalization_matches_target:
+                if not input_matches_target:
                     logger.warning(
-                        "[company_scan] task=%s 忽略与固定 Target 不一致的规范化身份: %s -> %s",
+                        "[company_scan] task=%s 忽略与固定 Target 不一致的输入身份: %s -> %s",
                         task_id,
                         normalized_name,
-                        candidate_name,
+                        company_name,
                     )
             else:
                 normalized_name = candidate_name
@@ -603,6 +628,50 @@ class CompanyScanPipeline:
                 batch_tags=target_batch_tags,
             )
             target_id = str(target.get("target_id") or "")
+            from api.services.target_scan_profile import (
+                build_target_scan_profile,
+                persist_target_scan_profile,
+            )
+
+            scan_profile = build_target_scan_profile(
+                canonical_name=normalized_name,
+                identity_aliases=list(target.get("identity_aliases") or []),
+                verified_aliases=(
+                    [
+                        str(item)
+                        for item in company_meta.get("aliases") or []
+                        if str(item).strip()
+                    ]
+                    if pinned_target is None or normalization_matches_target
+                    else []
+                ),
+                ai_aliases=(
+                    list(getattr(router_profile, "colloquial_names", []) or [])
+                    if router_profile
+                    and (
+                        pinned_target is None
+                        or router_matches_target
+                    )
+                    else []
+                ),
+                fallback_aliases=aliases,
+                existing_profile=dict(target.get("scan_profile") or {}),
+                ai_identity_verified=bool(
+                    router_profile
+                    and (pinned_target is None or router_matches_target)
+                ),
+                source="company_scan_router",
+            )
+            target = await persist_target_scan_profile(
+                self.db,
+                project_id=project_id,
+                target=target,
+                profile=scan_profile,
+                routed_terms_by_channel=(
+                    router_output.all_keywords if router_output.success else {}
+                ),
+            )
+            aliases = list(scan_profile.get("search_aliases") or [normalized_name])
             company_meta = await company_meta_dao.upsert_company_meta(
                 self.db,
                 project_id=project_id,
@@ -623,6 +692,10 @@ class CompanyScanPipeline:
                 "root_domain": root_domain,
                 "root_domains": root_domains,
                 "aliases": aliases,
+                "display_name": scan_profile.get("display_name") or normalized_name,
+                "short_names": list(scan_profile.get("short_names") or []),
+                "scan_profile_version": scan_profile.get("version"),
+                "scan_profile_fingerprint": scan_profile.get("fingerprint"),
                 "target_id": target_id,
                 "normalization_error": normalization_error or None,
             }
@@ -963,7 +1036,7 @@ class CompanyScanPipeline:
                         target_id=target_id,
                         page_size=bidding_page_size,
                         max_records=bidding_max_records,
-                        enable_visual_analysis=enable_url_scan,
+                        enable_visual_analysis=bidding_visual_analysis_enabled,
                         enable_copywriting=enable_copywriting,
                         min_attention_score=min_attention_score,
                         scan_concurrency=url_scan_concurrency,
@@ -1020,6 +1093,70 @@ class CompanyScanPipeline:
                 ))
 
             async def _checkpoint_module(kind: str, outcome: Any) -> None:
+                coverage_channels = {
+                    "control_structure": "control",
+                    "asset_url": "website",
+                    "xhs": "xhs",
+                    "bidding": "bidding",
+                    "wechat": "wechat",
+                    "scholar": "scholar",
+                }
+                coverage_channel = coverage_channels.get(kind, "")
+                if coverage_channel and isinstance(outcome, dict):
+                    from api.services.target_scan_profile import (
+                        coverage_status_from_result,
+                        record_target_scan_coverage,
+                    )
+
+                    coverage_outcome = (
+                        dict(outcome.get("result") or {})
+                        if kind == "control_structure"
+                        else outcome
+                    )
+                    coverage_status = coverage_status_from_result(
+                        coverage_channel,
+                        coverage_outcome,
+                    )
+                    coverage_summary = {
+                        key: value
+                        for key, value in coverage_outcome.items()
+                        if isinstance(value, (str, int, float, bool))
+                        and key not in {"error"}
+                    }
+                    await record_target_scan_coverage(
+                        self.db,
+                        project_id=project_id,
+                        target_id=target_id,
+                        channel=coverage_channel,
+                        status=coverage_status,
+                        task_id=task_id,
+                        summary=coverage_summary,
+                        profile_fingerprint=str(
+                            scan_profile.get("fingerprint") or ""
+                        ),
+                    )
+                    if kind == "wechat":
+                        for related_target_id in outcome.get("target_ids") or []:
+                            normalized_related_id = str(related_target_id or "")
+                            if not normalized_related_id or normalized_related_id == target_id:
+                                continue
+                            await record_target_scan_coverage(
+                                self.db,
+                                project_id=project_id,
+                                target_id=normalized_related_id,
+                                channel="wechat",
+                                status=coverage_status,
+                                task_id=task_id,
+                                summary={
+                                    "via_root_target_id": target_id,
+                                    "keywords_completed": int(
+                                        outcome.get("keywords_completed") or 0
+                                    ),
+                                    "keyword_total": int(
+                                        outcome.get("keyword_total") or 0
+                                    ),
+                                },
+                            )
                 if kind in restored_primary_modules:
                     return
                 if not isinstance(outcome, dict) or outcome.get("status") == "error":
@@ -1095,10 +1232,103 @@ class CompanyScanPipeline:
                     phases=["core_completed", "mobile_completed"],
                 )
 
-            wholly_owned_entities = list(result["control_structure"].get("entities") or [])
+            from api.services.target_scan_profile import (
+                load_project_descendant_scan_entities,
+            )
+
+            discovered_entities = list(
+                result["control_structure"].get("entities") or []
+            )
+            stored_entities = await load_project_descendant_scan_entities(
+                self.db,
+                project_id=project_id,
+                root_target_id=target_id,
+                max_depth=control_max_depth,
+            )
+            entities_by_target = {
+                str(entity.get("target_id") or ""): entity
+                for entity in stored_entities
+                if str(entity.get("target_id") or "")
+            }
+            for entity in discovered_entities:
+                entity_target_id = str(entity.get("target_id") or "")
+                if not entity_target_id:
+                    continue
+                stored = entities_by_target.get(entity_target_id, {})
+                entities_by_target[entity_target_id] = {
+                    **stored,
+                    **entity,
+                    "aliases": list(
+                        entity.get("aliases")
+                        or stored.get("aliases")
+                        or []
+                    ),
+                    "scan_profile": dict(
+                        entity.get("scan_profile")
+                        or stored.get("scan_profile")
+                        or {}
+                    ),
+                }
+            wholly_owned_entities = sorted(
+                entities_by_target.values(),
+                key=lambda entity: (
+                    int(entity.get("relation_depth") or 1),
+                    str(entity.get("name") or "").casefold(),
+                ),
+            )
+            result["control_structure"]["entities"] = wholly_owned_entities
+            result["control_structure"]["stored_entities_loaded"] = len(
+                stored_entities
+            )
+            subsidiary_channels = [
+                *(
+                    ["website"]
+                    if enable_asset_discovery or enable_url_scan
+                    else []
+                ),
+                *(["xhs"] if subsidiary_xhs_enabled else []),
+                *(["bidding"] if subsidiary_bidding_enabled else []),
+                *(["scholar"] if enable_scholar else []),
+            ]
+            subsidiary_scope: dict[str, Any] = {
+                "selected": [],
+                "skipped": [],
+                "requested_channels": subsidiary_channels,
+                "selected_count": 0,
+                "skipped_count": len(wholly_owned_entities),
+            }
+            if wholly_owned_entities and subsidiary_channels:
+                from api.services.target_scan_profile import (
+                    select_subsidiary_scan_scope,
+                )
+
+                subsidiary_scope = await select_subsidiary_scan_scope(
+                    self.db,
+                    project_id=project_id,
+                    entities=wholly_owned_entities,
+                    channels=subsidiary_channels,
+                    max_entities=subsidiary_scan_limit,
+                    skip_completed=skip_completed_subsidiaries,
+                )
+            scoped_wholly_owned_entities = list(
+                subsidiary_scope.get("selected") or []
+            )
+            result["control_structure"]["scan_policy"].update(
+                {
+                    "selected_count": int(
+                        subsidiary_scope.get("selected_count") or 0
+                    ),
+                    "skipped_count": int(
+                        subsidiary_scope.get("skipped_count") or 0
+                    ),
+                    "requested_channels": list(
+                        subsidiary_scope.get("requested_channels") or []
+                    ),
+                }
+            )
             child_xhs_decisions: dict[str, dict[str, Any]] = {}
             selected_child_xhs = False
-            if wholly_owned_entities and subsidiary_xhs_enabled and xhs_selector:
+            if scoped_wholly_owned_entities and subsidiary_xhs_enabled and xhs_selector:
                 from api.services.xhs_target_selection import (
                     XhsTargetCandidate,
                     merge_xhs_target_selection_results,
@@ -1128,7 +1358,7 @@ class CompanyScanPipeline:
                                 ),
                             },
                         )
-                        for entity in wholly_owned_entities
+                        for entity in scoped_wholly_owned_entities
                         if str(entity.get("target_id") or "")
                         and str(entity.get("name") or "").strip()
                     ],
@@ -1160,8 +1390,9 @@ class CompanyScanPipeline:
                         checkpoint_results["wholly_owned_entities"]
                     ),
                 ))
-            elif wholly_owned_entities and (
+            elif scoped_wholly_owned_entities and (
                 enable_asset_discovery
+                or enable_url_scan
                 or selected_child_xhs
                 or subsidiary_bidding_enabled
             ):
@@ -1170,7 +1401,7 @@ class CompanyScanPipeline:
                     lambda: self._scan_wholly_owned_entities(
                         task_id=task_id,
                         project_id=project_id,
-                        entities=wholly_owned_entities,
+                        entities=scoped_wholly_owned_entities,
                         enable_asset_discovery=enable_asset_discovery,
                         enable_url_scan=enable_url_scan,
                         enable_copywriting=enable_copywriting,
@@ -1201,13 +1432,20 @@ class CompanyScanPipeline:
                         checkpoint_results["scholar_entities"]
                     ),
                 ))
-            elif wholly_owned_entities and enable_scholar:
+            elif enable_scholar and any(
+                "scholar" in (entity.get("scan_channels") or [])
+                for entity in scoped_wholly_owned_entities
+            ):
                 followup_factories.append((
                     "scholar_entities",
                     lambda: self._scan_scholar_entities(
                         task_id=task_id,
                         project_id=project_id,
-                        entities=wholly_owned_entities,
+                        entities=[
+                            entity
+                            for entity in scoped_wholly_owned_entities
+                            if "scholar" in (entity.get("scan_channels") or [])
+                        ],
                         manual_direction=scholar_direction,
                         limit=scholar_limit,
                         entity_concurrency=control_scan_concurrency,
@@ -1239,7 +1477,46 @@ class CompanyScanPipeline:
                             result["sub_errors"].append(error_message)
                             raise outcome
                         if kind == "wholly_owned_entities":
-                            result["control_structure"]["entities"] = outcome["entities"]
+                            scanned_by_target = {
+                                str(item.get("target_id") or ""): item
+                                for item in outcome.get("entities") or []
+                            }
+                            skipped_by_target = {
+                                str(item.get("target_id") or ""): item
+                                for item in subsidiary_scope.get("skipped") or []
+                            }
+                            merged_entities: list[dict[str, Any]] = []
+                            for entity in wholly_owned_entities:
+                                entity_target_id = str(entity.get("target_id") or "")
+                                if entity_target_id in scanned_by_target:
+                                    merged_entities.append(
+                                        scanned_by_target[entity_target_id]
+                                    )
+                                    continue
+                                skipped_entity = skipped_by_target.get(
+                                    entity_target_id
+                                )
+                                merged_entities.append(
+                                    {
+                                        **entity,
+                                        "scan": {
+                                            "status": "skipped",
+                                            "reason": str(
+                                                (skipped_entity or {}).get(
+                                                    "skip_reason"
+                                                )
+                                                or "not_selected"
+                                            ),
+                                            "coverage": dict(
+                                                (skipped_entity or {}).get(
+                                                    "scan_coverage"
+                                                )
+                                                or {}
+                                            ),
+                                        },
+                                    }
+                                )
+                            result["control_structure"]["entities"] = merged_entities
                             result["control_structure"]["scan_summary"] = outcome["summary"]
                             result["control_structure"]["errors"].extend(outcome["errors"])
                             result["profile_copywritings"]["count"] = int(
@@ -1717,6 +1994,10 @@ class CompanyScanPipeline:
     ) -> dict[str, Any]:
         """关联单位限流采集；招投标固定单通道，资产和社媒沿用资源池。"""
         from api.services.search_terms import build_channel_terms
+        from api.services.target_scan_profile import (
+            coverage_status_from_result,
+            record_target_scan_coverage,
+        )
         from api.services.task_progress import update_source_progress
 
         semaphore = asyncio.Semaphore(max(1, entity_concurrency))
@@ -1724,6 +2005,38 @@ class CompanyScanPipeline:
         progress_lock = asyncio.Lock()
         processed_entities = 0
         total_entities = len(entities)
+
+        async def _record_coverage(
+            *,
+            entity: dict[str, Any],
+            channel: str,
+            status: str,
+            summary: dict[str, Any] | None = None,
+        ) -> None:
+            target_id = str(entity.get("target_id") or "").strip()
+            if not target_id:
+                return
+            try:
+                await record_target_scan_coverage(
+                    self.db,
+                    project_id=project_id,
+                    target_id=target_id,
+                    channel=channel,
+                    status=status,
+                    task_id=task_id,
+                    summary=summary,
+                    profile_fingerprint=str(
+                        (entity.get("scan_profile") or {}).get("fingerprint") or ""
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[company_scan] 子单位覆盖状态写入失败 target=%s channel=%s: %s",
+                    target_id,
+                    channel,
+                    exc,
+                )
+
         await update_source_progress(
             self.db,
             task_id=task_id,
@@ -1738,9 +2051,32 @@ class CompanyScanPipeline:
             async with semaphore:
                 name = str(entity.get("name") or "").strip()
                 target_id = str(entity.get("target_id") or "")
+                scan_profile = dict(entity.get("scan_profile") or {})
                 aliases = self._dedupe_text(
-                    [name, *list(entity.get("aliases") or [])]
+                    [
+                        name,
+                        *list(scan_profile.get("search_aliases") or []),
+                        *list(entity.get("aliases") or []),
+                    ]
                 )[:20]
+                default_channels = {
+                    *(
+                        ["website"]
+                        if enable_asset_discovery or enable_url_scan
+                        else []
+                    ),
+                    *(["bidding"] if enable_bidding else []),
+                    *(["xhs"] if enable_xhs else []),
+                }
+                scan_channels = {
+                    str(channel or "").strip().lower()
+                    for channel in (
+                        entity.get("scan_channels")
+                        if "scan_channels" in entity
+                        else default_channels
+                    )
+                    if str(channel or "").strip()
+                }
                 identity = {
                     "input_name": name,
                     "normalized_name": name,
@@ -1752,6 +2088,7 @@ class CompanyScanPipeline:
                 xhs_decision = (xhs_decisions or {}).get(target_id)
                 entity_xhs_enabled = bool(
                     enable_xhs
+                    and "xhs" in scan_channels
                     and (
                         xhs_decisions is None
                         or (
@@ -1760,16 +2097,20 @@ class CompanyScanPipeline:
                         )
                     )
                 )
-                subtasks: list[Any] = []
-                if enable_asset_discovery:
+                subtasks: list[tuple[str, Awaitable[dict[str, Any]]]] = []
+                if "website" in scan_channels and (
+                    enable_asset_discovery or enable_url_scan
+                ):
                     subtasks.append(
-                        self._run_asset_and_url_scan(
+                        (
+                            "website",
+                            self._run_asset_and_url_scan(
                             task_id=f"{task_id}_wholly_owned_{index}",
                             project_id=project_id,
                             identity=identity,
                             url_text="",
                             urls=[],
-                            enable_asset_discovery=True,
+                            enable_asset_discovery=enable_asset_discovery,
                             enable_url_scan=enable_url_scan,
                             enable_copywriting=enable_copywriting,
                             min_attention_score=min_attention_score,
@@ -1782,9 +2123,13 @@ class CompanyScanPipeline:
                             copywriting_concurrency=copywriting_concurrency,
                             progress_task_id=task_id,
                             progress_source=f"wholly_owned_{index}_url_scan",
+                            ),
                         )
                     )
-                if enable_bidding and target_id:
+                entity_bidding_enabled = bool(
+                    enable_bidding and "bidding" in scan_channels and target_id
+                )
+                if entity_bidding_enabled:
                     async def _run_bidding_serially() -> dict[str, Any]:
                         async with bidding_semaphore:
                             return await self._run_bidding_collection(
@@ -1801,7 +2146,7 @@ class CompanyScanPipeline:
                                 copywriting_concurrency=copywriting_concurrency,
                             )
 
-                    subtasks.append(_run_bidding_serially())
+                    subtasks.append(("bidding", _run_bidding_serially()))
                 xhs_keywords: list[str] = []
                 if entity_xhs_enabled:
                     xhs_keywords = build_channel_terms(
@@ -1810,7 +2155,9 @@ class CompanyScanPipeline:
                         limit=20,
                     )
                     subtasks.append(
-                        self._run_xhs_search(
+                        (
+                            "xhs",
+                            self._run_xhs_search(
                             f"{task_id}_wholly_owned_{index}",
                             project_id,
                             xhs_keywords,
@@ -1819,15 +2166,18 @@ class CompanyScanPipeline:
                             target_id=target_id,
                             target_name=name,
                             search_concurrency=xhs_search_concurrency,
+                            ),
                         )
                     )
                 scan_result: dict[str, Any] = {
+                    "requested_channels": sorted(scan_channels),
+                    "channel_statuses": {},
                     "assets": {},
                     "url_scan": {},
                     "xhs": {"enabled": entity_xhs_enabled, "keywords_used": xhs_keywords},
                     "bidding": {
-                        "enabled": enable_bidding,
-                        "status": "pending" if enable_bidding else "disabled",
+                        "enabled": entity_bidding_enabled,
+                        "status": "pending" if entity_bidding_enabled else "disabled",
                     },
                     "profile_copywritings": {"count": 0},
                     "errors": [],
@@ -1835,10 +2185,46 @@ class CompanyScanPipeline:
                 if xhs_decision:
                     scan_result["xhs"]["selection"] = xhs_decision
                 xhs_succeeded = False
-                for sub in await asyncio.gather(*subtasks, return_exceptions=True):
+                if subtasks:
+                    await asyncio.gather(
+                        *(
+                            _record_coverage(
+                                entity=entity,
+                                channel=channel,
+                                status="running",
+                            )
+                            for channel, _operation in subtasks
+                        )
+                    )
+                outcomes = await asyncio.gather(
+                    *(operation for _channel, operation in subtasks),
+                    return_exceptions=True,
+                )
+                for (channel, _operation), sub in zip(subtasks, outcomes):
                     if isinstance(sub, Exception):
                         scan_result["errors"].append(str(sub))
-                    elif sub.get("kind") == "asset_url":
+                        scan_result["channel_statuses"][channel] = "error"
+                        await _record_coverage(
+                            entity=entity,
+                            channel=channel,
+                            status="error",
+                            summary={"error": str(sub)},
+                        )
+                        continue
+                    channel_status = coverage_status_from_result(channel, sub)
+                    scan_result["channel_statuses"][channel] = channel_status
+                    await _record_coverage(
+                        entity=entity,
+                        channel=channel,
+                        status=channel_status,
+                        summary={
+                            key: value
+                            for key, value in sub.items()
+                            if isinstance(value, (str, int, float, bool))
+                            and key != "error"
+                        },
+                    )
+                    if sub.get("kind") == "asset_url":
                         scan_result["assets"] = sub.get("assets") or {}
                         scan_result["url_scan"] = sub.get("url_scan") or {}
                     elif sub.get("kind") == "bidding":
@@ -1849,7 +2235,7 @@ class CompanyScanPipeline:
                             )
                     elif "notes_count" in sub:
                         scan_result["xhs"].update(sub)
-                        xhs_succeeded = True
+                        xhs_succeeded = channel_status == "completed"
                 if entity_xhs_enabled and enable_copywriting and xhs_succeeded:
                     from Sere1nGraph.graph.company_router.router import CompanyRouterResult
 
@@ -1866,6 +2252,18 @@ class CompanyScanPipeline:
                         )
                     except Exception as exc:  # noqa: BLE001
                         scan_result["errors"].append(f"画像话术生成失败: {exc}")
+                completed_channels = sum(
+                    status == "completed"
+                    for status in scan_result["channel_statuses"].values()
+                )
+                if scan_result["errors"]:
+                    scan_result["status"] = (
+                        "partial" if completed_channels else "error"
+                    )
+                elif subtasks:
+                    scan_result["status"] = "completed"
+                else:
+                    scan_result["status"] = "skipped"
                 return {**entity, "scan": scan_result}
 
         async def _scan_with_progress(
@@ -1969,6 +2367,7 @@ class CompanyScanPipeline:
         """按已持久化控制关系采集子、孙单位学者联系。"""
         from Sere1nGraph.graph.company_router.router import CompanyRouterResult
         from api.services.scholar_direction import resolve_scholar_direction
+        from api.services.target_scan_profile import record_target_scan_coverage
         from api.services.task_progress import update_source_progress
 
         semaphore = asyncio.Semaphore(max(1, min(int(entity_concurrency), 3)))
@@ -2011,6 +2410,39 @@ class CompanyScanPipeline:
                         unit_en=self._derive_scholar_unit_en(aliases),
                         limit=limit,
                     )
+                raw_status = str(scholar.get("status") or "completed").lower()
+                coverage_status = (
+                    "error"
+                    if raw_status == "error"
+                    else "partial"
+                    if raw_status in {"partial", "timed_out", "stopped"}
+                    else "completed"
+                )
+                try:
+                    await record_target_scan_coverage(
+                        self.db,
+                        project_id=project_id,
+                        target_id=target_id,
+                        channel="scholar",
+                        status=coverage_status,
+                        task_id=task_id,
+                        summary={
+                            key: value
+                            for key, value in scholar.items()
+                            if isinstance(value, (str, int, float, bool))
+                            and key != "error"
+                        },
+                        profile_fingerprint=str(
+                            (entity.get("scan_profile") or {}).get("fingerprint")
+                            or ""
+                        ),
+                    )
+                except Exception as coverage_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[company_scan] 子单位学者覆盖状态写入失败 target=%s: %s",
+                        target_id,
+                        coverage_exc,
+                    )
                 return {
                     "target_id": target_id,
                     "name": name,
@@ -2018,6 +2450,28 @@ class CompanyScanPipeline:
                     "parent_target_id": str(entity.get("parent_target_id") or ""),
                     "scholar": scholar,
                 }
+            except Exception as exc:
+                try:
+                    await record_target_scan_coverage(
+                        self.db,
+                        project_id=project_id,
+                        target_id=target_id,
+                        channel="scholar",
+                        status="error",
+                        task_id=task_id,
+                        summary={"error": str(exc)},
+                        profile_fingerprint=str(
+                            (entity.get("scan_profile") or {}).get("fingerprint")
+                            or ""
+                        ),
+                    )
+                except Exception as coverage_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[company_scan] 子单位学者覆盖状态写入失败 target=%s: %s",
+                        target_id,
+                        coverage_exc,
+                    )
+                raise
             finally:
                 async with progress_lock:
                     processed += 1
