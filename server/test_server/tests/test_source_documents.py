@@ -589,6 +589,9 @@ def test_rejected_relevance_review_stops_before_source_persistence(monkeypatch):
     async def get_version(*_args, **_kwargs):
         return None
 
+    async def get_document_link(*_args, **_kwargs):
+        return None
+
     async def reject(*_args, **_kwargs):
         return {
             "fields": {"summary": "目标仅为汇总中的一个条目"},
@@ -606,6 +609,11 @@ def test_rejected_relevance_review_stops_before_source_persistence(monkeypatch):
 
     monkeypatch.setattr(service, "get_source_document_provider", lambda _url: _Provider())
     monkeypatch.setattr(service.source_dao, "get_version", get_version)
+    monkeypatch.setattr(
+        service.source_dao,
+        "get_document_link",
+        get_document_link,
+    )
     monkeypatch.setattr(service, "analyze_and_review_article", reject)
     monkeypatch.setattr(service.source_dao, "begin_version", forbidden)
     monkeypatch.setattr(service.source_dao, "upsert_document", forbidden)
@@ -627,6 +635,81 @@ def test_rejected_relevance_review_stops_before_source_persistence(monkeypatch):
     assert result["rejected"] is True
     assert result["review_decision"] == "reject"
     assert result["article_scope"] == "multi_entity_roundup"
+
+
+def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+    linked: list[dict] = []
+
+    class _Provider:
+        async def capture(self, *_args, **_kwargs):
+            return capture
+
+    async def get_version(*_args, **_kwargs):
+        return {
+            "version_id": "version-existing",
+            "status": "ready",
+            "media_policy_version": service._MEDIA_POLICY_VERSION,
+            "capture_metadata": {"analyzed_image_urls": []},
+            "contacts": [],
+            "image_analysis": [],
+        }
+
+    async def get_document_link(*_args, **_kwargs):
+        return {"document_id": "document-existing"}
+
+    async def reject(*_args, **_kwargs):
+        return {
+            "fields": {"summary": "正文主体不是目标单位"},
+            "score": 20,
+            "subject_match": 15,
+            "score_reason": "目标仅被顺带提及",
+            "article_scope": "incidental_mention",
+            "review_decision": "reject",
+            "target_contact_values": [],
+            "target_contacts": [],
+        }
+
+    async def complete(analysis, **_kwargs):
+        return analysis
+
+    async def link(*_args, **kwargs):
+        linked.append(kwargs)
+
+    monkeypatch.setattr(service, "get_source_document_provider", lambda _url: _Provider())
+    monkeypatch.setattr(service.source_dao, "get_version", get_version)
+    monkeypatch.setattr(
+        service.source_dao,
+        "get_document_link",
+        get_document_link,
+    )
+    monkeypatch.setattr(service, "analyze_and_review_article", reject)
+    monkeypatch.setattr(service, "_complete_contextual_analysis", complete)
+    monkeypatch.setattr(service, "_link_discovery", link)
+
+    result = asyncio.run(
+        service.ingest_source_url(
+            object(),
+            url=capture.canonical_url,
+            project_id="project-1",
+            target={"target_id": "target-1", "canonical_name": "目标单位"},
+            task_def_id="task-1",
+            run_task_id="run-review-1",
+            keyword="目标单位 联系方式",
+            min_subject_match=70,
+        )
+    )
+
+    assert result["rejected"] is True
+    assert len(linked) == 1
+    assert linked[0]["run_task_id"] == "run-review-1"
+    assert linked[0]["score"] == 20
+    assert linked[0]["subject_match"] == 15
+    assert linked[0]["contextual_analysis"]["review_decision"] == "reject"
 
 
 def test_source_detail_can_select_immutable_version(monkeypatch):

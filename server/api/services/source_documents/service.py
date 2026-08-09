@@ -710,6 +710,21 @@ async def ingest_source_url(
                     contextual_analysis,
                     required_subject_match,
                 ):
+                    await _persist_existing_link_review(
+                        db,
+                        document_id=document_id,
+                        version_id=version_id,
+                        project_id=project_id,
+                        target=target,
+                        task_def_id=task_def_id,
+                        run_task_id=run_task_id,
+                        keyword=keyword,
+                        analysis=contextual_analysis,
+                        analysis_fingerprint=analysis_fingerprint,
+                        discovery_score=discovery_score,
+                        discovery_subject_match=discovery_subject_match,
+                        discovery_context=discovery_context,
+                    )
                     return _rejected_source_result(
                         capture,
                         contextual_analysis,
@@ -769,6 +784,22 @@ async def ingest_source_url(
                 task_id=run_task_id,
             )
             if not _passes_target_review(analysis, required_subject_match):
+                if persist:
+                    await _persist_existing_link_review(
+                        db,
+                        document_id=document_id,
+                        version_id=version_id,
+                        project_id=project_id,
+                        target=target,
+                        task_def_id=task_def_id,
+                        run_task_id=run_task_id,
+                        keyword=keyword,
+                        analysis=analysis,
+                        analysis_fingerprint=analysis_fingerprint,
+                        discovery_score=discovery_score,
+                        discovery_subject_match=discovery_subject_match,
+                        discovery_context=discovery_context,
+                    )
                 return _rejected_source_result(
                     capture,
                     analysis,
@@ -1022,6 +1053,62 @@ async def _link_discovery(
             target_id=target_id,
             run_task_id=run_task_id,
         )
+
+
+async def _persist_existing_link_review(
+    db: AsyncIOMotorDatabase,
+    *,
+    document_id: str,
+    version_id: str,
+    project_id: str,
+    target: dict[str, Any] | None,
+    task_def_id: str,
+    run_task_id: str,
+    keyword: str,
+    analysis: dict[str, Any],
+    analysis_fingerprint: str,
+    discovery_score: int | None,
+    discovery_subject_match: int | None,
+    discovery_context: dict[str, Any] | None,
+) -> None:
+    """Refresh a prior discovery link without creating links for new rejects."""
+    if not project_id:
+        return
+    version = await source_dao.get_version(db, version_id)
+    if not version or version.get("status") != "ready":
+        return
+    target_id = str((target or {}).get("target_id") or "")
+    existing_link = await source_dao.get_document_link(
+        db,
+        project_id=project_id,
+        target_id=target_id,
+        document_id=document_id,
+    )
+    if not existing_link:
+        return
+    await _link_discovery(
+        db,
+        document_id=document_id,
+        version_id=version_id,
+        project_id=project_id,
+        target=target,
+        task_def_id=task_def_id,
+        run_task_id=run_task_id,
+        keyword=keyword,
+        score=(
+            analysis.get("score")
+            if analysis.get("score") is not None
+            else discovery_score
+        ),
+        subject_match=(
+            analysis.get("subject_match")
+            if analysis.get("subject_match") is not None
+            else discovery_subject_match
+        ),
+        discovery_context=discovery_context,
+        contextual_analysis=_compact_contextual_analysis(analysis),
+        analysis_fingerprint=analysis_fingerprint,
+    )
 
 
 async def get_source_document_detail(
