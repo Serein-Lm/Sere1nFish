@@ -40,6 +40,7 @@ from core.mobile.executor import (
 from core.mobile.manager import MobileDeviceManager
 from core.mobile.prompt_runtime import load_mobile_prompt
 from core.mobile.screen_capture import capture_ready_screen, wake_device
+from core.mobile.vision_payload import prepare_vision_data_url
 from core.observability import observation_context
 
 
@@ -112,7 +113,7 @@ async def describe_screen(
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{shot.base64_data}"
+                                "url": prepare_vision_data_url(shot.base64_data)
                             },
                         },
                     ]

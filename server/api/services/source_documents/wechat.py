@@ -13,7 +13,13 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from PIL import Image
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 from browser_manager import get_browser_provider
 from core.logger import get_logger
@@ -164,7 +170,7 @@ class WechatArticleProvider:
             raw_html = await response.body() if response else b""
             rendered_html = (await page.content()).encode("utf-8")
             metadata = await self._extract_metadata(page)
-            screenshots = await self._capture_screenshots(page)
+            screenshots, screenshot_error = await self._capture_screenshots(page)
             image_urls = metadata.pop("image_urls")
             images, image_errors = await self._download_images(
                 context, image_urls
@@ -187,6 +193,7 @@ class WechatArticleProvider:
                     "final_url": page.url,
                     "image_urls": image_urls,
                     "image_download_errors": image_errors,
+                    "screenshot_capture_error": screenshot_error,
                 },
             )
 
@@ -266,12 +273,19 @@ class WechatArticleProvider:
         )
 
     @staticmethod
-    async def _capture_screenshots(page: Page) -> list[CapturedScreenshot]:
+    async def _capture_screenshots(
+        page: Page,
+    ) -> tuple[list[CapturedScreenshot], str]:
         screenshots: list[CapturedScreenshot] = []
         await page.evaluate("window.scrollTo(0, 0)")
         previous_y = -1
         for index in range(_MAX_SCREENSHOTS):
-            data = await page.screenshot(type="jpeg", quality=72)
+            try:
+                data = await page.screenshot(type="jpeg", quality=72)
+            except PlaywrightTimeoutError as exc:
+                error = f"截图超时，已保留前 {len(screenshots)} 张: {exc}"
+                logger.warning("微信公众号文章截图部分失败: %s", error)
+                return screenshots, error[:500]
             screenshots.append(CapturedScreenshot(index=index, data=data))
             state = await page.evaluate(
                 """() => {
@@ -285,7 +299,12 @@ class WechatArticleProvider:
             current_y = await page.evaluate("window.scrollY")
             if current_y >= state["maxY"]:
                 if current_y != state["before"]:
-                    data = await page.screenshot(type="jpeg", quality=72)
+                    try:
+                        data = await page.screenshot(type="jpeg", quality=72)
+                    except PlaywrightTimeoutError as exc:
+                        error = f"末屏截图超时，已保留前 {len(screenshots)} 张: {exc}"
+                        logger.warning("微信公众号文章截图部分失败: %s", error)
+                        return screenshots, error[:500]
                     screenshots.append(
                         CapturedScreenshot(index=len(screenshots), data=data)
                     )
@@ -293,7 +312,7 @@ class WechatArticleProvider:
             if current_y == previous_y or current_y == state["before"]:
                 break
             previous_y = current_y
-        return screenshots
+        return screenshots, ""
 
     @staticmethod
     async def _download_images(

@@ -12,25 +12,153 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Literal
+import re
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, BeforeValidator, Field, create_model
 
 from Sere1nGraph.graph.agents.runtime import create_llm
 from api.services.runtime_config import get_runtime_app_config
 from core.mobile.prompt_runtime import load_mobile_prompt
+from core.mobile.vision_payload import prepare_vision_data_url
 from core.observability import observation_context
 
 from api.models.mobile_collect import ExtractField
 
 
+def _coerce_text(value: Any) -> str | None:
+    """Keep one malformed model field from discarding the whole screen."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, (list, tuple, set)):
+        return "；".join(
+            text for item in value if (text := _coerce_text(item)) not in (None, "")
+        )
+    return str(value)
+
+
+def _coerce_required_text(value: Any) -> str:
+    return _coerce_text(value) or ""
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    return [
+        text
+        for item in values
+        if (text := _coerce_text(item)) not in (None, "")
+    ]
+
+
+def _coerce_number(value: Any) -> float | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(match.group(0)) if match else None
+
+
+def _coerce_boolean(value: Any) -> bool | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().casefold()
+    if text in {"true", "yes", "y", "1", "是", "有"}:
+        return True
+    if text in {"false", "no", "n", "0", "否", "无", "没有"}:
+        return False
+    return None
+
+
+def _coerce_required_boolean(value: Any) -> bool:
+    return bool(_coerce_boolean(value))
+
+
+def _coerce_required_int(value: Any) -> int:
+    number = _coerce_number(value)
+    return int(number) if number is not None else 0
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    number = _coerce_number(value)
+    return int(number) if number is not None else None
+
+
+def _coerce_content_kind(value: Any) -> str:
+    text = (_coerce_text(value) or "").casefold()
+    allowed = {
+        "article",
+        "account",
+        "video",
+        "live",
+        "mini_program",
+        "place",
+        "review",
+        "image",
+        "ad",
+        "other",
+    }
+    if text in allowed:
+        return text
+    aliases = {
+        "文章": "article",
+        "图文": "article",
+        "公众号": "account",
+        "账号": "account",
+        "视频": "video",
+        "直播": "live",
+        "小程序": "mini_program",
+        "地点": "place",
+        "评价": "review",
+        "评论": "review",
+        "图片": "image",
+        "广告": "ad",
+    }
+    return next((kind for label, kind in aliases.items() if label in text), "other")
+
+
+_OptionalText = Annotated[str | None, BeforeValidator(_coerce_text)]
+_RequiredText = Annotated[str, BeforeValidator(_coerce_required_text)]
+_OptionalNumber = Annotated[float | None, BeforeValidator(_coerce_number)]
+_OptionalBoolean = Annotated[bool | None, BeforeValidator(_coerce_boolean)]
+_RequiredBoolean = Annotated[bool, BeforeValidator(_coerce_required_boolean)]
+_StringList = Annotated[list[str], BeforeValidator(_coerce_string_list)]
+_RequiredInt = Annotated[int, BeforeValidator(_coerce_required_int)]
+_OptionalInt = Annotated[int | None, BeforeValidator(_coerce_optional_int)]
+_ContentKind = Annotated[
+    Literal[
+        "article",
+        "account",
+        "video",
+        "live",
+        "mini_program",
+        "place",
+        "review",
+        "image",
+        "ad",
+        "other",
+    ],
+    BeforeValidator(_coerce_content_kind),
+]
+
 _PY_TYPE = {
-    "string": (str | None, None),
-    "number": (float | None, None),
-    "boolean": (bool | None, None),
-    "list": (list[str], ...),
+    "string": (_OptionalText, None),
+    "number": (_OptionalNumber, None),
+    "boolean": (_OptionalBoolean, None),
+    "list": (_StringList, ...),
 }
 
 # schema 内固定追加的字段名(与业务字段区分,便于从结果里剥离)
@@ -120,7 +248,7 @@ def _build_item_model(
             ),
         )
     item_field_defs["subject_match"] = (
-        int,
+        _RequiredInt,
         Field(
             default=0,
             description=(
@@ -131,66 +259,55 @@ def _build_item_model(
         ),
     )
     item_field_defs["relevance_score"] = (
-        int,
+        _RequiredInt,
         Field(default=0, description="相关性/价值分(0-100),依据搜索词与内容价值,越相关越高"),
     )
     item_field_defs["score_reason"] = (
-        str,
+        _RequiredText,
         Field(default="", description="简短打分理由"),
     )
     item_field_defs["source_url"] = (
-        str | None,
+        _OptionalText,
         Field(
             default=None,
             description="若画面中可见该条目的原文链接/URL(http/https)则填写,看不到就留空,不要臆造",
         ),
     )
     item_field_defs["content_kind"] = (
-        Literal[
-            "article",
-            "account",
-            "video",
-            "live",
-            "mini_program",
-            "place",
-            "review",
-            "image",
-            "ad",
-            "other",
-        ],
+        _ContentKind,
         Field(default="other", description="列表条目的真实内容类型"),
     )
     item_field_defs["is_article_result"] = (
-        bool,
+        _RequiredBoolean,
         Field(default=False, description="只有明确可点击进入图文文章详情时为 true"),
     )
     item_field_defs["target_evidence"] = (
-        str,
+        _RequiredText,
         Field(default="", description="画面中证明条目主体与目标一致的可见文本依据"),
     )
     if with_coords:
         item_field_defs["tap_x"] = (
-            int | None,
+            _OptionalInt,
             Field(default=None, description="该条目可点击中心点的横坐标(0-1000 归一化)"),
         )
         item_field_defs["tap_y"] = (
-            int | None,
+            _OptionalInt,
             Field(default=None, description="该条目可点击中心点的纵坐标(0-1000 归一化)"),
         )
         item_field_defs["tap_left"] = (
-            int | None,
+            _OptionalInt,
             Field(default=None, description="该条目可点击区域左边界(0-1000 归一化)"),
         )
         item_field_defs["tap_top"] = (
-            int | None,
+            _OptionalInt,
             Field(default=None, description="该条目可点击区域上边界(0-1000 归一化)"),
         )
         item_field_defs["tap_right"] = (
-            int | None,
+            _OptionalInt,
             Field(default=None, description="该条目可点击区域右边界(0-1000 归一化)"),
         )
         item_field_defs["tap_bottom"] = (
-            int | None,
+            _OptionalInt,
             Field(default=None, description="该条目可点击区域下边界(0-1000 归一化)"),
         )
     return create_model("CollectItem", **item_field_defs)  # type: ignore[call-overload]
@@ -267,6 +384,20 @@ def _get_vision_llm(app_config: Any):
     return create_llm(app_config, model_name=vision_model, streaming=False)
 
 
+async def _invoke_vision(runnable: Any, messages: list[Any], *, attempts: int = 2):
+    """Retry a failed vision transport once before a screen is discarded."""
+    last_error: Exception | None = None
+    for index in range(max(1, attempts)):
+        try:
+            return await runnable.ainvoke(messages)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if index + 1 < max(1, attempts):
+                await asyncio.sleep(0.45 * (index + 1))
+    assert last_error is not None
+    raise last_error
+
+
 def _fields_desc(fields: list[ExtractField]) -> str:
     return "、".join(f"{f.name}({f.description})" for f in fields) or "关键条目"
 
@@ -305,7 +436,7 @@ async def triage_screenshot(
             {"type": "text", "text": "请分诊当前列表页并按 schema 输出。"},
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                "image_url": {"url": prepare_vision_data_url(image_base64)},
             },
         ]
     )
@@ -315,7 +446,9 @@ async def triage_screenshot(
         phase="mobile_collect_triage",
         agent="collect",
     ):
-        result = await structured.ainvoke([SystemMessage(content=system), message])
+        result = await _invoke_vision(
+            structured, [SystemMessage(content=system), message]
+        )
 
     items = getattr(result, "items", []) or []
     out: list[dict[str, Any]] = []
@@ -361,7 +494,7 @@ async def verify_detail_entry(
             {"type": "text", "text": "校验点击后页面并按 schema 输出。"},
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                "image_url": {"url": prepare_vision_data_url(image_base64)},
             },
         ]
     )
@@ -371,7 +504,9 @@ async def verify_detail_entry(
         phase="mobile_collect_detail_verify",
         agent="collect",
     ):
-        result = await structured.ainvoke([SystemMessage(content=system), message])
+        result = await _invoke_vision(
+            structured, [SystemMessage(content=system), message]
+        )
     data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
     data["candidate_match"] = _clamp_score(data.get("candidate_match"))
     data["target_match"] = _clamp_score(data.get("target_match"))
@@ -410,7 +545,7 @@ async def analyze_social_media_frame(
             {"type": "text", "text": "审核当前公开图片并按 schema 输出。"},
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                "image_url": {"url": prepare_vision_data_url(image_base64)},
             },
         ]
     )
@@ -420,7 +555,9 @@ async def analyze_social_media_frame(
         phase="mobile_collect_social_media",
         agent="collect",
     ):
-        result = await structured.ainvoke([SystemMessage(content=system), message])
+        result = await _invoke_vision(
+            structured, [SystemMessage(content=system), message]
+        )
     data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
     bounds = [
         int(data.pop("image_left", 0) or 0),
@@ -473,7 +610,7 @@ async def analyze_detail(
     ]
     for b64 in image_base64s:
         content.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            {"type": "image_url", "image_url": {"url": prepare_vision_data_url(b64)}}
         )
     message = HumanMessage(content=content)
     with observation_context(
@@ -482,7 +619,9 @@ async def analyze_detail(
         phase="mobile_collect_detail",
         agent="collect",
     ):
-        result = await structured.ainvoke([SystemMessage(content=system), message])
+        result = await _invoke_vision(
+            structured, [SystemMessage(content=system), message]
+        )
 
     data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
     rec = _split_record(data)
@@ -514,7 +653,7 @@ async def analyze_screenshot(
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                    "image_url": {"url": prepare_vision_data_url(image_base64)},
                 },
             ]
         )
@@ -524,7 +663,7 @@ async def analyze_screenshot(
             phase="mobile_collect_analyze",
             agent="collect",
         ):
-            resp = await llm.ainvoke([message])
+            resp = await _invoke_vision(llm, [message])
         summary = resp.content if isinstance(resp.content, str) else str(resp.content)
         summary = summary.strip()
         if not summary:
@@ -556,7 +695,7 @@ async def analyze_screenshot(
             {"type": "text", "text": "请提取截图中的条目并按 schema 输出。"},
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                "image_url": {"url": prepare_vision_data_url(image_base64)},
             },
         ]
     )
@@ -566,7 +705,9 @@ async def analyze_screenshot(
         phase="mobile_collect_analyze",
         agent="collect",
     ):
-        result = await structured.ainvoke([SystemMessage(content=system), message])
+        result = await _invoke_vision(
+            structured, [SystemMessage(content=system), message]
+        )
     items = getattr(result, "items", []) or []
     out: list[dict[str, Any]] = []
     for item in items:

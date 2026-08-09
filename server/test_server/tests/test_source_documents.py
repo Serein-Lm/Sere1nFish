@@ -111,6 +111,56 @@ def test_contact_extraction_preserves_local_evidence_context():
     assert phone["contexts"] == [phone["context"]]
 
 
+def test_contact_extraction_normalizes_full_width_email_and_service_phone():
+    from core.mobile.collect.contacts import extract_contacts
+
+    contacts = extract_contacts(
+        "监督邮箱：lwzx_jw＠126.com；服务热线：400 123 4567。"
+    )
+
+    assert [(item["channel"], item["value"]) for item in contacts] == [
+        ("email", "lwzx_jw@126.com"),
+        ("telephone", "4001234567"),
+    ]
+
+
+def test_contact_extraction_normalizes_grouped_mobile_number():
+    from core.mobile.collect.contacts import extract_contacts
+
+    contacts = extract_contacts("有意向者联系邵部长 136 9362 0306。")
+
+    assert [(item["channel"], item["value"]) for item in contacts] == [
+        ("phone", "13693620306")
+    ]
+    assert "邵部长" in contacts[0]["context"]
+
+
+def test_visual_contact_validation_rejects_domain_mislabeled_as_email():
+    from core.mobile.collect.contacts import normalize_contact_candidate
+
+    assert (
+        normalize_contact_candidate(
+            {"channel": "email", "value": "www.example.org", "context": "官网"}
+        )
+        is None
+    )
+
+
+def test_visual_contact_validation_accepts_anchored_local_telephone():
+    from core.mobile.collect.contacts import normalize_contact_candidate
+
+    contact = normalize_contact_candidate(
+        {
+            "channel": "telephone",
+            "value": "58158252",
+            "context": "项目咨询电话：58158252",
+        }
+    )
+
+    assert contact is not None
+    assert contact["value"] == "58158252"
+
+
 def test_contextual_analysis_is_separate_from_source_version_fields():
     from api.models.mobile_collect import ExtractField
     from api.services.source_documents.service import (
@@ -196,17 +246,21 @@ def test_source_document_prompts_reject_multi_entity_roundups():
     from Sere1nGraph.graph.prompts.loader import load_prompt
     from api.services.source_documents.analysis import (
         ARTICLE_ANALYSIS_PROMPT_SLUG,
+        CONTACT_ATTRIBUTION_PROMPT_SLUG,
         RELEVANCE_REVIEW_PROMPT_SLUG,
     )
 
     extraction_prompt = load_prompt(ARTICLE_ANALYSIS_PROMPT_SLUG)
     review_prompt = load_prompt(RELEVANCE_REVIEW_PROMPT_SLUG)
+    contact_prompt = load_prompt(CONTACT_ATTRIBUTION_PROMPT_SLUG)
 
     assert "multi_entity_roundup" in extraction_prompt
     assert "不得超过 39" in extraction_prompt
     assert "目标只是其中一个条目" in review_prompt
     assert "此类必须 `reject`" in review_prompt
     assert "独立相关性审核员" in review_prompt
+    assert "不得依据常识" in contact_prompt
+    assert "第三方公众号" in contact_prompt
 
 
 def test_article_scope_caps_prevent_single_roundup_item_from_passing():
@@ -270,6 +324,117 @@ def test_target_contact_filter_can_restore_dual_agent_declared_wechat_name():
             "source": "text",
             "attribution": "dual_agent_declared",
         }
+    ]
+
+
+def test_target_contact_filter_accepts_labeled_model_values():
+    from core.mobile.collect.contacts import extract_contacts
+    from api.services.source_documents.analysis import filter_target_contacts
+
+    text = "联系人：陈老师，联系电话：0756-2191815，邮箱：hr＠example.com。"
+    contacts = filter_target_contacts(
+        extract_contacts(text),
+        ["联系电话：0756-2191815", "E-mail：hr＠example.com"],
+        text=text,
+    )
+
+    assert [(item["channel"], item["value"]) for item in contacts] == [
+        ("email", "hr@example.com"),
+        ("telephone", "0756-2191815"),
+    ]
+
+
+def test_contextual_completion_uses_contact_attribution_for_image_evidence(
+    monkeypatch,
+):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    candidate = {
+        "channel": "telephone",
+        "value": "010-68377160",
+        "label": "座机: 010-68377160",
+        "context": "王老师：010-68377160",
+        "source": "image",
+        "image_index": 1,
+    }
+
+    async def attribute(**kwargs):
+        assert kwargs["target_name"] == "目标研究院"
+        return [{**candidate, "attribution": "contact_review_agent"}], ""
+
+    monkeypatch.setattr(service, "attribute_target_contacts", attribute)
+    result = asyncio.run(
+        service._complete_contextual_analysis(
+            {
+                "fields": {"summary": "目标研究院招聘"},
+                "relevance_review": {"target_contact_values": []},
+            },
+            capture=_capture(raw_html=b"raw", rendered_html=b"dom"),
+            contacts=[candidate],
+            image_analysis=[{"index": 1, "visible_text": "目标研究院招聘"}],
+            target_name="目标研究院",
+            target_aliases=[],
+            project_id="project-1",
+            task_id="task-1",
+        )
+    )
+
+    assert result["target_contacts"][0]["value"] == "010-68377160"
+    assert result["fields"]["contact"] == "座机: 010-68377160"
+
+
+def test_contextual_completion_audits_unresolved_contacts_after_review_match(
+    monkeypatch,
+):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    contacts = [
+        {
+            "channel": "telephone",
+            "value": "010-68377160",
+            "label": "座机: 010-68377160",
+            "context": "招聘电话：010-68377160",
+            "source": "text",
+        },
+        {
+            "channel": "email",
+            "value": "hr@example.com",
+            "label": "邮箱: hr@example.com",
+            "context": "招聘邮箱：hr@example.com",
+            "source": "text",
+        },
+    ]
+
+    async def attribute(**kwargs):
+        assert [item["value"] for item in kwargs["contacts"]] == ["hr@example.com"]
+        return [{**kwargs["contacts"][0], "attribution": "contact_review_agent"}], ""
+
+    monkeypatch.setattr(service, "attribute_target_contacts", attribute)
+    result = asyncio.run(
+        service._complete_contextual_analysis(
+            {
+                "fields": {"summary": "目标招聘"},
+                "relevance_review": {
+                    "target_contact_values": ["联系电话：010-68377160"]
+                },
+            },
+            capture=_capture(raw_html=b"raw", rendered_html=b"dom"),
+            contacts=contacts,
+            image_analysis=[],
+            target_name="目标研究院",
+            target_aliases=[],
+            project_id="project-1",
+            task_id="task-1",
+        )
+    )
+
+    assert [item["value"] for item in result["target_contacts"]] == [
+        "010-68377160",
+        "hr@example.com",
     ]
 
 
@@ -487,17 +652,20 @@ def test_article_image_analysis_normalizes_model_importance(monkeypatch):
     from api.services.source_documents.contracts import CapturedImage
 
     async def _analyze(*args, **kwargs):
-        return [
-            {
-                "index": 3,
-                "description": "招标联系人截图",
-                "visible_text": "联系电话 13800138000",
-                "contacts": [],
-                "is_key_evidence": True,
-                "importance_score": 88.7,
-                "archive_reason": "包含联系方式",
-            }
-        ]
+        return (
+            [
+                {
+                    "index": 3,
+                    "description": "招标联系人截图",
+                    "visible_text": "联系电话 13800138000",
+                    "contacts": [],
+                    "is_key_evidence": True,
+                    "importance_score": 88.7,
+                    "archive_reason": "包含联系方式",
+                }
+            ],
+            [],
+        )
 
     monkeypatch.setattr(analysis, "_analyze_image_batch", _analyze)
     result, error = asyncio.run(
@@ -516,6 +684,38 @@ def test_article_image_analysis_normalizes_model_importance(monkeypatch):
     assert error == ""
     assert result[0]["importance_score"] == 89
     assert result[0]["is_key_evidence"] is True
+
+
+def test_article_image_preflight_isolates_unsupported_svg():
+    from io import BytesIO
+
+    from PIL import Image
+
+    from api.services.source_documents.analysis import _prepare_image_inputs
+    from api.services.source_documents.contracts import CapturedImage
+
+    output = BytesIO()
+    Image.new("RGB", (320, 180), "white").save(output, format="PNG")
+    prepared, errors = _prepare_image_inputs(
+        [
+            CapturedImage(
+                index=0,
+                source_url="https://example.com/icon.svg",
+                data=b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+                content_type="image/svg+xml",
+            ),
+            CapturedImage(
+                index=1,
+                source_url="https://example.com/evidence.png",
+                data=output.getvalue(),
+                content_type="image/png",
+            ),
+        ]
+    )
+
+    assert [image.index for image, _media_type, _encoded in prepared] == [1]
+    assert len(errors) == 1
+    assert "index=0" in errors[0]
 
 
 def test_source_document_lock_serializes_waiters_and_cleans_registry():
@@ -578,3 +778,70 @@ def test_image_archive_policy_keeps_only_contact_and_key_evidence():
     )
 
     assert [image.index for image in selected] == [1, 2]
+
+
+def test_image_archive_policy_discards_low_value_key_and_tiny_decoration():
+    from api.services.source_documents.contracts import CapturedImage
+    from api.services.source_documents.service import _select_archive_images
+
+    images = [
+        CapturedImage(
+            index=0,
+            source_url="https://example.com/scene.jpg",
+            data=b"scene",
+            content_type="image/jpeg",
+            width=1080,
+            height=720,
+        ),
+        CapturedImage(
+            index=1,
+            source_url="https://example.com/icon.gif",
+            data=b"icon",
+            content_type="image/gif",
+            width=94,
+            height=94,
+        ),
+    ]
+
+    selected = _select_archive_images(
+        images,
+        [
+            {"index": 0, "is_key_evidence": True, "importance_score": 70},
+            {"index": 1, "is_key_evidence": True, "importance_score": 95},
+        ],
+    )
+
+    assert selected == []
+
+
+def test_image_archive_policy_rejects_invalid_model_contact():
+    from api.services.source_documents.contracts import CapturedImage
+    from api.services.source_documents.service import _select_archive_images
+
+    selected = _select_archive_images(
+        [
+            CapturedImage(
+                index=0,
+                source_url="https://example.com/footer.jpg",
+                data=b"footer",
+                content_type="image/jpeg",
+                width=800,
+                height=300,
+            )
+        ],
+        [
+            {
+                "index": 0,
+                "importance_score": 20,
+                "contacts": [
+                    {
+                        "channel": "email",
+                        "value": "www.example.org",
+                        "context": "官方网站",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert selected == []

@@ -9,21 +9,26 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from typing import Any
 
 # ── 正则 ────────────────────────────────────────────────
 
-# 手机号:11 位,1 开头,第二位 3-9;两侧非数字边界避免截取长串中段
-_RE_MOBILE = re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
+# 手机号:11 位,允许公众号正文/OCR 常见的空格或连字符分组；两侧非数字边界
+_RE_MOBILE = re.compile(r"(?<!\d)(1[3-9]\d(?:[-\s]?\d){8})(?!\d)")
 # 座机:区号(3-4位,可选 0 前缀)+ 分隔 + 7-8 位;要求带分隔符降低误报
 _RE_TEL = re.compile(r"(?<!\d)(0\d{2,3}[-\s]\d{7,8})(?!\d)")
+_RE_SERVICE_TEL = re.compile(
+    r"(?<!\d)((?:400|800)[-\s]?\d{3}[-\s]?\d{4})(?!\d)"
+)
 # 关键词锚定电话:电话/联系电话/联系方式/tel 后接 7-12 位数字(可含区号分隔),
 # 用于捕捉无区号的本地座机(如「电话：58158252」)等 _RE_TEL 漏掉的情况
 _RE_TEL_KW = re.compile(
     r"(?:联系电话|电话|联系方式|Tel|TEL|tel)\s*[:：]?\s*(\d{11}|(?:0\d{2,3}[-\s]?)?\d{7,8}(?!\d))",
 )
 _RE_MOBILE_KW = re.compile(
-    r"(?:手机|手机号码?|联系人电话|移动电话|mobile)\s*[:：]?\s*(1[3-9]\d{9})",
+    r"(?:手机|手机号码?|联系人电话|移动电话|mobile)\s*[:：]?\s*"
+    r"(1[3-9]\d(?:[-\s]?\d){8})",
     re.IGNORECASE,
 )
 # 邮箱
@@ -48,6 +53,11 @@ _CHANNEL_LABEL = {
 
 def _clean_tel(value: str) -> str:
     return re.sub(r"\s+", "", value)
+
+
+def _normalize_contact_text(value: Any) -> str:
+    """Normalize full-width punctuation without inventing missing contact data."""
+    return unicodedata.normalize("NFKC", str(value or ""))
 
 
 def _context_excerpt(text: str, start: int, end: int, radius: int = 140) -> str:
@@ -75,6 +85,8 @@ def extract_contacts(text_blob: str) -> list[dict[str, Any]]:
     """
     if not text_blob:
         return []
+    original_text = text_blob
+    text_blob = _normalize_contact_text(text_blob)
     found: list[dict[str, Any]] = []
     found_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     seen: set[tuple[str, str]] = set()
@@ -84,7 +96,7 @@ def extract_contacts(text_blob: str) -> list[dict[str, Any]]:
         if not value:
             return
         key = (channel, value.lower())
-        context = _context_excerpt(text_blob, match.start(), match.end())
+        context = _context_excerpt(original_text, match.start(), match.end())
         if key in seen:
             item = found_by_key[key]
             contexts = item.setdefault("contexts", [])
@@ -106,10 +118,12 @@ def extract_contacts(text_blob: str) -> list[dict[str, Any]]:
     for m in _RE_EMAIL.finditer(text_blob):
         _add("email", m.group(1), m)
     for m in _RE_MOBILE.finditer(text_blob):
-        _add("phone", m.group(1), m)
+        _add("phone", re.sub(r"[-\s]", "", m.group(1)), m)
     for m in _RE_MOBILE_KW.finditer(text_blob):
-        _add("phone", m.group(1), m)
+        _add("phone", re.sub(r"[-\s]", "", m.group(1)), m)
     for m in _RE_TEL.finditer(text_blob):
+        _add("telephone", _clean_tel(m.group(1)), m)
+    for m in _RE_SERVICE_TEL.finditer(text_blob):
         _add("telephone", _clean_tel(m.group(1)), m)
     for m in _RE_TEL_KW.finditer(text_blob):
         digits = _clean_tel(m.group(1))
@@ -122,6 +136,66 @@ def extract_contacts(text_blob: str) -> list[dict[str, Any]]:
     for m in _RE_QQ.finditer(text_blob):
         _add("qq", m.group(1), m)
     return found
+
+
+def normalize_contact_candidate(
+    contact: dict[str, Any],
+    *,
+    source: str = "image",
+) -> dict[str, Any] | None:
+    """Validate one model-produced contact against its declared channel.
+
+    OCR/vision output is evidence, not a trusted parser.  This boundary prevents
+    values such as a bare web domain from being persisted as an email address.
+    """
+    channel = str(contact.get("channel") or "").strip().lower()
+    value = _normalize_contact_text(contact.get("value")).strip()
+    context = _normalize_contact_text(contact.get("context")).strip()
+    if not channel or not value:
+        return None
+
+    normalized_value = value
+    if channel == "email":
+        match = _RE_EMAIL.fullmatch(value)
+        if not match:
+            return None
+        normalized_value = match.group(1)
+    elif channel == "phone":
+        compact = re.sub(r"[\s\-()（）]", "", value)
+        if not _RE_MOBILE.fullmatch(compact):
+            return None
+        normalized_value = compact
+    elif channel == "telephone":
+        compact = _clean_tel(value)
+        if (
+            _RE_TEL.fullmatch(compact)
+            or _RE_SERVICE_TEL.fullmatch(compact)
+            or re.fullmatch(r"0\d{9,11}", compact)
+        ):
+            normalized_value = compact
+        elif re.fullmatch(r"\d{5,8}", compact) and re.search(
+            r"(?:电话|热线|客服|买票|发货|咨询|传真)", context
+        ):
+            normalized_value = compact
+        else:
+            return None
+    elif channel == "qq":
+        if not re.fullmatch(r"\d{5,12}", value):
+            return None
+    elif channel == "wechat":
+        if not 2 <= len(value) <= 40 or any(char in value for char in "\r\n\t"):
+            return None
+    else:
+        return None
+
+    return {
+        "channel": channel,
+        "value": normalized_value,
+        "label": f"{_CHANNEL_LABEL.get(channel, channel)}: {normalized_value}",
+        "context": context,
+        "contexts": [context] if context else [],
+        "source": source,
+    }
 
 
 # 有无联系方式决定分级基准:有联系方式 → 高分带(>=80);无 → 低分带(<40)

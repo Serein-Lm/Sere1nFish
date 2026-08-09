@@ -283,6 +283,41 @@ async def test_wechat_capture_timeout_recovers_and_releases_browser(
     assert events == ["recover", "release"]
 
 
+@pytest.mark.asyncio
+async def test_wechat_screenshot_timeout_preserves_partial_archive() -> None:
+    from api.services.source_documents import wechat as module
+
+    class _Page:
+        def __init__(self) -> None:
+            self.screenshot_calls = 0
+            self.scroll_reads = 0
+
+        async def screenshot(self, **_kwargs: Any) -> bytes:
+            self.screenshot_calls += 1
+            if self.screenshot_calls == 2:
+                raise module.PlaywrightTimeoutError("screenshot timeout")
+            return b"screen-one"
+
+        async def evaluate(self, script: str):
+            if script == "window.scrollY":
+                self.scroll_reads += 1
+                return 500
+            if "window.scrollBy" in script:
+                return {"before": 0, "maxY": 1000}
+            return None
+
+        async def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+    screenshots, error = await module.WechatArticleProvider._capture_screenshots(
+        _Page()
+    )
+
+    assert len(screenshots) == 1
+    assert screenshots[0].data == b"screen-one"
+    assert "已保留前 1 张" in error
+
+
 def test_dingtalk_webhook_url_can_be_saved_without_stream_credentials() -> None:
     from api.services.dingtalk_configuration import normalize_webhook_access_token
 

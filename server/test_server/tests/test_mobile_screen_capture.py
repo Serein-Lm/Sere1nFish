@@ -9,6 +9,7 @@ from core.mobile.screen_capture import (
     ScreenCaptureUnavailableError,
     capture_ready_screen,
 )
+from core.mobile.vision_payload import prepare_vision_data_url
 from AutoGLM_GUI.device_protocol import Screenshot
 
 
@@ -99,3 +100,20 @@ def test_mobile_health_rejects_capture_failure_placeholder(monkeypatch) -> None:
     assert health.screenshot_ready is False
     assert health.capture_failed is True
     assert health.error == "设备未返回有效截图"
+
+
+def test_large_mobile_vision_payload_is_bounded_jpeg() -> None:
+    image = Image.effect_noise((1080, 2400), 100).convert("RGB")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    original = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    data_url = prepare_vision_data_url(original)
+    encoded = data_url.split(",", 1)[1]
+    decoded = base64.b64decode(encoded)
+
+    assert data_url.startswith("data:image/jpeg;base64,")
+    assert len(decoded) < len(buffer.getvalue())
+    assert len(decoded) <= 1_000_000
+    with Image.open(BytesIO(decoded)) as prepared:
+        assert max(prepared.size) <= 2048

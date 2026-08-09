@@ -18,12 +18,13 @@ from api.dao import source_documents as source_dao
 from api.dao import targets as targets_dao
 from api.models.mobile_collect import ExtractField
 from api.storage import get_object_storage
-from core.mobile.collect.contacts import extract_contacts
+from core.mobile.collect.contacts import extract_contacts, normalize_contact_candidate
 
 from .analysis import (
     analyze_and_review_article,
     analyze_article_images,
     article_analysis_prompt_fingerprint,
+    attribute_target_contacts,
     filter_target_contacts,
     stable_content_hash,
 )
@@ -34,8 +35,8 @@ from .urls import canonicalize_source_url
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
-_CONTEXT_ANALYSIS_SCHEMA_VERSION = 5
-_MEDIA_POLICY_VERSION = 2
+_CONTEXT_ANALYSIS_SCHEMA_VERSION = 6
+_MEDIA_POLICY_VERSION = 3
 _SOURCE_FIELD_KEYS = {
     "title",
     "account",
@@ -106,19 +107,75 @@ def _compact_contextual_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     return {**analysis, "fields": fields}
 
 
-def _complete_contextual_analysis(
+async def _complete_contextual_analysis(
     analysis: dict[str, Any],
     *,
     capture: CapturedDocument,
     contacts: list[dict[str, Any]],
     image_analysis: list[dict[str, Any]],
+    target_name: str,
+    target_aliases: list[str],
+    project_id: str,
+    task_id: str,
 ) -> dict[str, Any]:
+    validated_contacts: list[dict[str, Any]] = []
+    for contact in contacts:
+        if str(contact.get("source") or "text") != "image":
+            validated_contacts.append(contact)
+            continue
+        normalized = normalize_contact_candidate(contact, source="image")
+        if normalized:
+            validated_contacts.append(
+                {
+                    **contact,
+                    **normalized,
+                    "contexts": list(
+                        contact.get("contexts") or normalized["contexts"]
+                    ),
+                }
+            )
+    contacts = validated_contacts
     fields = dict(analysis.get("fields") or {})
+    review_values = list(
+        (analysis.get("relevance_review") or {}).get("target_contact_values") or []
+    )
+    declared_values = review_values or list(analysis.get("target_contact_values") or [])
     target_contacts = filter_target_contacts(
         contacts,
-        list(analysis.get("target_contact_values") or []),
+        declared_values,
         text=capture.text,
     )
+    selected_keys = {
+        (str(item.get("channel") or ""), str(item.get("value") or "").casefold())
+        for item in target_contacts
+    }
+    unresolved = [
+        item
+        for item in contacts
+        if (str(item.get("channel") or ""), str(item.get("value") or "").casefold())
+        not in selected_keys
+    ]
+    attribution_error = ""
+    if unresolved:
+        attributed, attribution_error = await attribute_target_contacts(
+            target_name=target_name,
+            target_aliases=target_aliases,
+            title=capture.title,
+            account=capture.account,
+            summary=str(fields.get("summary") or ""),
+            contacts=unresolved,
+            image_analysis=image_analysis,
+            project_id=project_id,
+            task_id=task_id,
+        )
+        for item in attributed:
+            key = (
+                str(item.get("channel") or ""),
+                str(item.get("value") or "").casefold(),
+            )
+            if key not in selected_keys:
+                target_contacts.append(item)
+                selected_keys.add(key)
     fields.update(
         {
             "title": capture.title,
@@ -135,7 +192,12 @@ def _complete_contextual_analysis(
             ],
         }
     )
-    return {**analysis, "fields": fields, "target_contacts": target_contacts}
+    return {
+        **analysis,
+        "fields": fields,
+        "target_contacts": target_contacts,
+        "contact_attribution_error": attribution_error,
+    }
 
 
 def _version_image_analysis(version: dict[str, Any]) -> list[dict[str, Any]]:
@@ -238,12 +300,17 @@ def _merge_contacts(
     for contact in text_contacts:
         _add(contact)
     for image in image_analysis:
-        index = int(image.get("index", -1))
+        try:
+            index = int(image.get("index", -1))
+        except (TypeError, ValueError):
+            index = -1
         visible_text = str(image.get("visible_text") or "")
         for contact in extract_contacts(visible_text):
             _add({**contact, "source": "image", "image_index": index})
         for contact in image.get("contacts") or []:
-            _add({**contact, "source": "image", "image_index": index})
+            normalized = normalize_contact_candidate(contact, source="image")
+            if normalized:
+                _add({**normalized, "image_index": index})
     return list(merged.values())
 
 
@@ -251,7 +318,7 @@ def _select_archive_images(
     images: list[CapturedImage],
     analysis: list[dict[str, Any]],
     *,
-    limit: int = 12,
+    limit: int = 8,
 ) -> list[CapturedImage]:
     """Archive only contact-bearing or high-value images after analyzing all."""
     by_index = {int(item.get("index", -1)): item for item in analysis}
@@ -259,9 +326,23 @@ def _select_archive_images(
     for image in images:
         item = by_index.get(image.index, {})
         visible_contacts = extract_contacts(str(item.get("visible_text") or ""))
-        has_contacts = bool(visible_contacts or item.get("contacts"))
+        model_contacts = [
+            normalized
+            for contact in item.get("contacts") or []
+            if (normalized := normalize_contact_candidate(contact, source="image"))
+        ]
+        has_contacts = bool(visible_contacts or model_contacts)
         importance = int(item.get("importance_score") or 0)
-        if not has_contacts and not item.get("is_key_evidence") and importance < 70:
+        is_key = bool(item.get("is_key_evidence"))
+        is_tiny = bool(
+            image.width
+            and image.height
+            and image.width < 160
+            and image.height < 160
+        )
+        if not has_contacts and (
+            is_tiny or (not is_key and importance < 90) or importance < 80
+        ):
             continue
         rank = (200 if has_contacts else 0) + importance
         ranked.append((-rank, image.index, image))
@@ -433,14 +514,25 @@ async def _store_capture_artifacts(
             "size": len(data),
         }
 
+    upload_semaphore = asyncio.Semaphore(12)
+
+    async def _bounded_upload(awaitable):
+        async with upload_semaphore:
+            return await awaitable
+
     results = await asyncio.gather(
-        raw_task,
-        dom_task,
-        *(_store_image(image) for image in (images_to_archive or [])),
         *(
-            _store_screenshot(screenshot)
-            for screenshot in capture.screenshots
-        ),
+            _bounded_upload(awaitable)
+            for awaitable in (
+                raw_task,
+                dom_task,
+                *(_store_image(image) for image in (images_to_archive or [])),
+                *(
+                    _store_screenshot(screenshot)
+                    for screenshot in capture.screenshots
+                ),
+            )
+        )
     )
     raw = results[0]
     dom = results[1]
@@ -616,11 +708,15 @@ async def ingest_source_url(
                         project_id=project_id,
                         task_id=run_task_id,
                     )
-                contextual_analysis = _complete_contextual_analysis(
+                contextual_analysis = await _complete_contextual_analysis(
                     contextual_analysis,
                     capture=capture,
                     contacts=list(existing.get("contacts") or []),
                     image_analysis=_version_image_analysis(existing),
+                    target_name=target_name,
+                    target_aliases=target_aliases,
+                    project_id=project_id,
+                    task_id=run_task_id,
                 )
                 required_subject_match = max(
                     0, min(100, int(min_subject_match or 0))
@@ -736,11 +832,15 @@ async def ingest_source_url(
             contacts = _merge_contacts(
                 extract_contacts(capture.text), image_analysis
             )
-            analysis = _complete_contextual_analysis(
+            analysis = await _complete_contextual_analysis(
                 analysis,
                 capture=capture,
                 contacts=contacts,
                 image_analysis=image_analysis,
+                target_name=target_name,
+                target_aliases=target_aliases,
+                project_id=project_id,
+                task_id=run_task_id,
             )
             analysis_fields = dict(analysis.get("fields") or {})
             identity = {

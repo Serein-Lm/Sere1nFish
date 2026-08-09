@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 from typing import Any, Literal
 
 from PIL import Image
@@ -31,6 +32,7 @@ _RELEVANCE_REVIEW_TIMEOUT_SECONDS = 120
 _IMAGE_BATCH_TIMEOUT_SECONDS = 120
 ARTICLE_ANALYSIS_PROMPT_SLUG = "source_document/source_document"
 RELEVANCE_REVIEW_PROMPT_SLUG = "source_document/relevance_review"
+CONTACT_ATTRIBUTION_PROMPT_SLUG = "source_document/contact_attribution"
 
 
 _PY_TYPE = {
@@ -60,6 +62,13 @@ _CONTACT_CHANNEL_LABELS = {
     "wechat": "微信号",
     "qq": "QQ",
 }
+
+
+def _safe_index(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
 
 
 class VisualContact(BaseModel):
@@ -95,6 +104,17 @@ class ArticleRelevanceReview(BaseModel):
     summary: str = ""
     target_contact_values: list[str] = Field(default_factory=list)
     reason: str = ""
+
+
+class ContactAttributionDecision(BaseModel):
+    candidate_id: str
+    belongs_to_target: bool = False
+    confidence: int = Field(default=0, ge=0, le=100)
+    reason: str = ""
+
+
+class ContactAttributionBatch(BaseModel):
+    items: list[ContactAttributionDecision] = Field(default_factory=list)
 
 
 def stable_content_hash(capture: CapturedDocument) -> str:
@@ -218,7 +238,23 @@ def apply_article_scope_cap(subject_match: Any, article_scope: Any) -> int:
 
 
 def _contact_value_key(value: Any) -> str:
-    return re.sub(r"[\s\-‐‑‒–—()（）]", "", str(value or "")).casefold()
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return re.sub(r"[\s\-‐‑‒–—()（）]", "", normalized).casefold()
+
+
+def _declared_contact_values(values: list[Any]) -> list[str]:
+    """Turn model labels such as ``联系电话：010-...`` into contact atoms."""
+    normalized: list[str] = []
+    for raw in values:
+        declared = unicodedata.normalize("NFKC", str(raw or "")).strip()
+        if not declared:
+            continue
+        parsed = extract_contacts(declared)
+        if parsed:
+            normalized.extend(str(item.get("value") or "") for item in parsed)
+        else:
+            normalized.append(declared)
+    return list(dict.fromkeys(value for value in normalized if value))
 
 
 def filter_target_contacts(
@@ -228,11 +264,7 @@ def filter_target_contacts(
     text: str = "",
 ) -> list[dict[str, Any]]:
     """只保留结构化分析明确归属于当前 Target 的联系方式。"""
-    declared = [
-        str(value).strip()
-        for value in target_contact_values
-        if str(value).strip()
-    ]
+    declared = _declared_contact_values(target_contact_values)
     allowed = {_contact_value_key(value) for value in declared}
     if not allowed:
         return []
@@ -257,13 +289,16 @@ def _declared_contact_from_text(text: str, value: str) -> dict[str, Any] | None:
     """补齐正则未覆盖、但两个 Agent 均声明且正文精确出现的联系方式。"""
     if not text or not value:
         return None
-    index = text.casefold().find(value.casefold())
+    original_text = text
+    normalized_text = unicodedata.normalize("NFKC", text)
+    value = unicodedata.normalize("NFKC", value).strip()
+    index = normalized_text.casefold().find(value.casefold())
     if index < 0:
         return None
     left = max(0, index - 80)
-    right = min(len(text), index + len(value) + 120)
-    context = re.sub(r"\s+", " ", text[left:right]).strip()
-    anchor = text[left:index].casefold()
+    right = min(len(original_text), index + len(value) + 120)
+    context = re.sub(r"\s+", " ", original_text[left:right]).strip()
+    anchor = normalized_text[left:index].casefold()
     compact = _contact_value_key(value)
     if "@" in value:
         channel = "email"
@@ -304,6 +339,7 @@ def article_analysis_prompt_fingerprint() -> str:
     payload = {
         ARTICLE_ANALYSIS_PROMPT_SLUG: load_prompt(ARTICLE_ANALYSIS_PROMPT_SLUG),
         RELEVANCE_REVIEW_PROMPT_SLUG: load_prompt(RELEVANCE_REVIEW_PROMPT_SLUG),
+        CONTACT_ATTRIBUTION_PROMPT_SLUG: load_prompt(CONTACT_ATTRIBUTION_PROMPT_SLUG),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -636,10 +672,113 @@ async def analyze_and_review_article(
     return apply_relevance_review(capture, draft, review)
 
 
+async def attribute_target_contacts(
+    *,
+    target_name: str,
+    target_aliases: list[str],
+    title: str,
+    account: str,
+    summary: str,
+    contacts: list[dict[str, Any]],
+    image_analysis: list[dict[str, Any]],
+    project_id: str = "",
+    task_id: str = "",
+) -> tuple[list[dict[str, Any]], str]:
+    """Audit source-level contact candidates before exposing Target findings."""
+    if not contacts:
+        return [], ""
+
+    images = {_safe_index(item.get("index")): item for item in image_analysis}
+    candidates: list[dict[str, Any]] = []
+    candidate_by_id: dict[str, dict[str, Any]] = {}
+    for index, contact in enumerate(contacts):
+        candidate_id = f"contact_{index}"
+        image = images.get(_safe_index(contact.get("image_index")), {})
+        candidate = {
+            "candidate_id": candidate_id,
+            "channel": str(contact.get("channel") or ""),
+            "value": str(contact.get("value") or ""),
+            "source": str(contact.get("source") or "text"),
+            "context": str(contact.get("context") or "")[:1200],
+            "contexts": [str(value)[:800] for value in contact.get("contexts") or []][:5],
+            "image_description": str(image.get("description") or "")[:1200],
+            "image_visible_text": str(image.get("visible_text") or "")[:5000],
+        }
+        candidates.append(candidate)
+        candidate_by_id[candidate_id] = contact
+
+    try:
+        app_config = await get_runtime_app_config()
+        model_name = app_config.runtime.models.default
+        llm = create_llm(app_config, model_name=model_name, streaming=False)
+        structured = llm.with_structured_output(ContactAttributionBatch)
+        system = load_prompt(CONTACT_ATTRIBUTION_PROMPT_SLUG)
+        for placeholder, value in {
+            "{{target_name}}": target_name or "未指定",
+            "{{target_aliases}}": "、".join(target_aliases) or "无",
+        }.items():
+            system = system.replace(placeholder, value)
+        message = HumanMessage(
+            content=(
+                f"文章标题：{title}\n"
+                f"公众号：{account}\n"
+                f"目标摘要：{summary}\n\n"
+                "候选联系方式（只能按 candidate_id 审核，不得新增）：\n"
+                f"{json.dumps(candidates, ensure_ascii=False)}"
+            )
+        )
+        with observation_context(
+            project_id=project_id or None,
+            task_id=task_id or None,
+            phase="source_document_contact_attribution",
+            agent="source_document_contact_reviewer",
+            task_type="wechat_article",
+        ):
+            result = await asyncio.wait_for(
+                structured.ainvoke([SystemMessage(content=system), message]),
+                timeout=_RELEVANCE_REVIEW_TIMEOUT_SECONDS,
+            )
+        selected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in getattr(result, "items", []) or []:
+            decision = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+            candidate_id = str(decision.get("candidate_id") or "")
+            candidate = candidate_by_id.get(candidate_id)
+            if (
+                candidate is None
+                or candidate_id in seen
+                or not decision.get("belongs_to_target")
+                or clamp_score(decision.get("confidence")) < 80
+            ):
+                continue
+            seen.add(candidate_id)
+            selected.append(
+                {
+                    **candidate,
+                    "attribution": "contact_review_agent",
+                    "attribution_confidence": clamp_score(decision.get("confidence")),
+                    "attribution_reason": str(decision.get("reason") or ""),
+                }
+            )
+        return selected, ""
+    except Exception as exc:  # noqa: BLE001
+        return [], str(exc)[:2000]
+
+
 def _vision_payload(image: CapturedImage) -> tuple[str, str]:
     """把任意原图（含 GIF）转为适合视觉模型的受限尺寸 JPEG。"""
     with Image.open(io.BytesIO(image.data)) as source:
-        frame = source.convert("RGB")
+        source.seek(0)
+        source.load()
+        if source.mode in {"RGBA", "LA"} or (
+            source.mode == "P" and "transparency" in source.info
+        ):
+            rgba = source.convert("RGBA")
+            background = Image.new("RGBA", rgba.size, "white")
+            background.alpha_composite(rgba)
+            frame = background.convert("RGB")
+        else:
+            frame = source.convert("RGB")
         frame.thumbnail((1600, 1600))
         output = io.BytesIO()
         frame.save(output, format="JPEG", quality=86, optimize=True)
@@ -647,12 +786,33 @@ def _vision_payload(image: CapturedImage) -> tuple[str, str]:
     return "image/jpeg", encoded
 
 
+def _prepare_image_inputs(
+    images: list[CapturedImage],
+) -> tuple[list[tuple[CapturedImage, str, str]], list[str]]:
+    """Isolate malformed/unsupported images instead of failing their batch."""
+    prepared: list[tuple[CapturedImage, str, str]] = []
+    errors: list[str] = []
+    for image in images:
+        try:
+            media_type, encoded = _vision_payload(image)
+            prepared.append((image, media_type, encoded))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                f"image index={image.index} content_type={image.content_type or 'unknown'} "
+                f"url={image.source_url[:300]} prepare_failed={type(exc).__name__}"
+            )
+    return prepared, errors
+
+
 async def _analyze_image_batch(
     images: list[CapturedImage],
     *,
     project_id: str,
     task_id: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
+    prepared, errors = _prepare_image_inputs(images)
+    if not prepared:
+        return [], errors
     app_config = await get_runtime_app_config()
     model_name = app_config.runtime.models.vision
     llm = create_llm(app_config, model_name=model_name, streaming=False)
@@ -664,14 +824,14 @@ async def _analyze_image_batch(
                 "按图片前的 index 逐张识别：给出主要内容、所有清晰可见文字；如果图片中明确出现"
                 "手机号、座机、邮箱、微信号或 QQ，提取联系方式及其邻近上下文。看不清就留空，"
                 "不得猜测。还要判断图片是否包含联系方式、关键人物/单位、业务流程、公告数据、"
-                "核心图表或其它文章关键证据；装饰图、头像、二维码外的品牌重复图、分隔图和无信息"
-                "配图不得标为关键。输出 is_key_evidence、0-100 importance_score 和简短 archive_reason。"
+                "核心图表或其它不可由正文替代的关键证据；普通场景照、品牌页脚、作者头像、关注二维码、"
+                "平台导流图、分隔图和无信息配图不得标为关键。只有二维码本身承载明确的目标联系方式或"
+                "业务入口时才可标为关键。输出 is_key_evidence、0-100 importance_score 和简短 archive_reason。"
                 "每张输入图片必须返回一个同 index 的 item。"
             ),
         }
     ]
-    for image in images:
-        media_type, encoded = _vision_payload(image)
+    for image, media_type, encoded in prepared:
         content.append({"type": "text", "text": f"index={image.index}"})
         content.append(
             {
@@ -691,7 +851,13 @@ async def _analyze_image_batch(
             timeout=_IMAGE_BATCH_TIMEOUT_SECONDS,
         )
     items = getattr(result, "items", []) or []
-    return [item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in items]
+    return (
+        [
+            item.model_dump() if hasattr(item, "model_dump") else dict(item)
+            for item in items
+        ],
+        errors,
+    )
 
 
 async def analyze_article_images(
@@ -722,7 +888,9 @@ async def analyze_article_images(
         if isinstance(result, BaseException):
             errors.append(str(result))
         else:
-            merged.extend(result)
+            items, batch_errors = result
+            merged.extend(items)
+            errors.extend(batch_errors)
     by_index = {int(item.get("index", -1)): item for item in merged}
     ordered = [
         {

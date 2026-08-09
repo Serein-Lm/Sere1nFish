@@ -9,6 +9,51 @@ import asyncio
 import pytest
 
 
+def test_dynamic_vision_schema_coerces_malformed_fields_without_losing_screen():
+    from api.models.mobile_collect import ExtractField
+    from core.mobile.collect.analysis import _build_records_model
+
+    model = _build_records_model(
+        [
+            ExtractField(name="title", type="string"),
+            ExtractField(name="tags", type="list"),
+            ExtractField(name="read_count", type="number"),
+        ],
+        with_coords=True,
+    )
+    result = model.model_validate(
+        {
+            "items": [
+                {
+                    "title": ["招聘公告", {"部门": "技术中心"}],
+                    "tags": "公开招聘",
+                    "read_count": "约 1,234 次",
+                    "subject_match": "92%",
+                    "relevance_score": 88.7,
+                    "score_reason": ["主体一致", "存在联系方式"],
+                    "content_kind": "图文文章",
+                    "is_article_result": "是",
+                    "target_evidence": {"标题": "目标单位招聘"},
+                    "tap_x": "500px",
+                    "tap_y": 320.9,
+                }
+            ]
+        }
+    )
+
+    item = result.items[0]
+    assert item.title.startswith("招聘公告；")
+    assert item.tags == ["公开招聘"]
+    assert item.read_count == 1234
+    assert item.subject_match == 92
+    assert item.relevance_score == 88
+    assert item.score_reason == "主体一致；存在联系方式"
+    assert item.content_kind == "article"
+    assert item.is_article_result is True
+    assert item.tap_x == 500
+    assert item.tap_y == 320
+
+
 class _FakeShot:
     base64_data = "QUJD"
     width = 100

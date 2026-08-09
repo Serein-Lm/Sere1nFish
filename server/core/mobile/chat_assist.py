@@ -27,6 +27,7 @@ from core.mobile.manager import MobileDeviceManager
 from core.mobile.events import publish
 from core.mobile.prompt_runtime import load_mobile_prompt
 from core.mobile.screen_capture import capture_ready_screen
+from core.mobile.vision_payload import prepare_vision_data_url
 from core.observability import observation_context
 
 
@@ -76,7 +77,7 @@ async def read_screen(
             },
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{shot.base64_data}"},
+                "image_url": {"url": prepare_vision_data_url(shot.base64_data)},
             },
         ]
     )
