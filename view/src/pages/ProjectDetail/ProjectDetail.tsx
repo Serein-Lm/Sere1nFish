@@ -59,7 +59,8 @@ import {
   listRecords as listCollectRecords,
   type CollectRecord,
 } from '../../services/mobileCollectService'
-import CollectRecordsView, { extractContactsFromFields } from '../../components/CollectRecordsView/CollectRecordsView'
+import CollectRecordsView from '../../components/CollectRecordsView/CollectRecordsView'
+import { extractContactsFromFields } from '../../components/CollectRecordsView/collectRecordUtils'
 import AuthenticatedImage from '../../components/AuthenticatedImage'
 import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
