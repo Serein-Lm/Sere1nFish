@@ -7,6 +7,7 @@ WEB_TAGS_COLLECTION = "web_tagging_results"
 # ── 统一 Findings 集合 ──
 # 所有数据源（web_tagging、xhs、douyin）的 findings 统一存储
 FINDINGS_COLLECTION = "findings"
+FINDING_CONTEXTS_COLLECTION = "finding_contexts"
 COPYWRITINGS_COLLECTION = "copywritings"
 PROFILES_COLLECTION = "profiles"
 

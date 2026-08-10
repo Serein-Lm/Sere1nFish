@@ -75,6 +75,7 @@
 - `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
 - `SourceDocumentLink` 是 Project、Target、任务、关键词发现某个文档的关系，持久化在 `source_document_links`。任务字段、主体对应度和相关性评分属于该场景关联，不得写成全局来源事实；相同场景可按分析指纹复用，不同 Target 必须独立分析。
 - `Finding` 是从来源证据派生的项目级事实。联系方式 Finding 必须保留 `target_id`、`source_document_id`、`source_document_version_id`、原文 URL、联系方式邻近上下文和证据引用；同一联系方式的多次发现累计 evidence，不覆盖历史来源。
+- `FindingContext` 是按 `finding_id` 唯一关联的派生上下文，持久化在 `finding_contexts`。它只能消费已归档的来源版本、Target 场景分析、浏览器结果和 OSS 视觉证据，通过 `api.services.finding_context` 的可恢复队列与独立多模态 Agent 生成；事实、推断、置信度和证据引用必须分层保存。采集流水线只负责排队，不得同步等待 Agent，也不得在页面重复拼装上下文。
 - 虚构人设持久化在 `persons`，AI 先通过 summary 投影筛选，再按 `person_id` 渐进读取完整档案；持续研究保持稳定身份并累加 `profile_version`、`research_rounds` 和来源证据。生成与升级进度独立持久化在 `persona_research_tasks`，进程重启时必须把遗留运行态明确标记为中断。
 - 公众号深采采用“手机发现、浏览器读取”的职责划分：手机只负责应用内搜索、命中文章和复制真实链接；链接交给 `api.services.source_documents` 的 Provider registry，由项目 Chrome 池读取全文和媒体。浏览器读取失败时才回退原有手机逐屏深采。
 - 社交地点图片采集通过 `api.services.social_collection` 统一编排：`SocialCollectionJob` 保存美团/抖音跨平台任务状态并复用现有设备租约与手机采集 pipeline，平台差异收敛在 adapter registry；AI 中枢和钉钉只能通过统一工具创建、查询 Job，不得直接执行 ADB 或绕过设备队列。
@@ -101,6 +102,7 @@
 - 通知类能力必须走统一通知 Hook/Service，例如 `api.services.notifications.notify_event` 或 `notify_event_background`。业务流程只表达事件、级别、标题和上下文，不直接 import 钉钉、邮件、Webhook 等具体通道。
 - 配置读取和敏感字段处理应通过 `api.services.runtime_config`、`api.dao.config`、配置加密工具或既有配置入口接入，不在业务模块散落解析逻辑。
 - AI 技能、提示词、模型客户端和 AIGC 能力应通过技能/提示词库、runtime service 或模型适配层接入；业务模块不要直接绑定单一模型供应商。
+- Finding 上下文整理统一通过 `api.services.finding_context` 接入。浏览器和公众号 Finding 共用同一 Agent、Prompt、Schema、DAO 和恢复 worker；图片只按 `storage_object_id` 经统一对象存储读取，输出中的每个叙述、事实、主体、时间线和视觉结论都必须引用允许的证据 ID，未知引用在持久化前丢弃。
 - 人物 OSINT 是 AI 中枢的一等核心能力：真实人物的公网检索、身份消歧、来源核验、事实/推断分层、画像、公开职业联系方式、沟通方案和话术统一通过独立 OSINT Agent 与 `person_intelligence` 领域层处理。真实人物情报不得写入虚构人设 `persons`；虚构人设只能用于渐进式匹配沟通风格，不能作为真实事实。任何基于真实人物生成的话术都必须保留可追溯公开来源，AI 中枢与钉钉入口复用同一工具、Prompt、Chrome Provider 和持久化服务。
 - 深度业务方案统一通过 Strategy Agent 与 `api.services.context_resolver.resolve_engagement_context` 构建：先聚合 Finding、Target 深研、网站/应用架构、来源证据、真实人物情报和虚构人设候选，再由 Agent 只补公网缺口，完成职责推断、利益相关方、发送产物、话术和异议应对。事实与推断必须分层，禁止业务模块另写平行聚合逻辑。
 - 钉钉等提前 ACK 的外部渠道必须把执行轮次持久化到 `ai_hub_turns`，回调凭据加密保存；消息写入使用稳定 turn/message ID 保证幂等。热重载中断时保留 `interrupted` 或 `response_ready` 状态，由新进程续跑或只补发结果，禁止只依赖进程内后台任务。

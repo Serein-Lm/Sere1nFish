@@ -55,6 +55,7 @@ import {
   type MobileScreenshot,
 } from '../../services/mobileService'
 import CopywritingRenderer from '../../components/CopywritingRenderer/CopywritingRenderer'
+import FindingContextDrawer from '../../components/FindingContextDrawer/FindingContextDrawer'
 import {
   listRecords as listCollectRecords,
   type CollectRecord,
@@ -397,7 +398,10 @@ const taggingColumns: ColumnsType<WebTaggingRecord> = [
 
 type WebTaggingFinding = WebTaggingRecord['data']['findings'][number]
 
-const findingsColumns = (onViewCopywriting?: (finding: WebTaggingFinding) => void): ColumnsType<WebTaggingFinding> => [
+const findingsColumns = (
+  onViewCopywriting?: (finding: WebTaggingFinding) => void,
+  onViewContext?: (finding: WebTaggingFinding) => void,
+): ColumnsType<WebTaggingFinding> => [
   {
     title: '标签',
     dataIndex: 'label',
@@ -498,14 +502,33 @@ const findingsColumns = (onViewCopywriting?: (finding: WebTaggingFinding) => voi
     width: 70,
     align: 'center' as const,
     render: (_: unknown, f: WebTaggingFinding) => (
-      <Button type="link" size="small" icon={<EyeOutlined />} onClick={(e) => { e.stopPropagation(); onViewCopywriting(f) }}>
+      <Button type="link" size="small" icon={<RobotOutlined />} onClick={(e) => { e.stopPropagation(); onViewCopywriting(f) }}>
         话术
+      </Button>
+    ),
+  }] : []),
+  ...(onViewContext ? [{
+    title: '梳理',
+    key: 'context_detail',
+    width: 88,
+    align: 'center' as const,
+    render: (_: unknown, f: WebTaggingFinding) => (
+      <Button type="link" size="small" icon={<EyeOutlined />} onClick={(e) => { e.stopPropagation(); onViewContext(f) }}>
+        上下文
       </Button>
     ),
   }] : []),
 ]
 
-function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggingRecord; onViewCopywriting?: (finding: WebTaggingFinding) => void }) {
+function ExpandedRecordContent({
+  record,
+  onViewCopywriting,
+  onViewContext,
+}: {
+  record: WebTaggingRecord
+  onViewCopywriting?: (finding: WebTaggingFinding) => void
+  onViewContext?: (finding: WebTaggingFinding) => void
+}) {
   const findings = record.data?.findings ?? []
   const hasFindings = Boolean(record.data?.has_findings)
 
@@ -545,7 +568,7 @@ function ExpandedRecordContent({ record, onViewCopywriting }: { record: WebTaggi
           <Table
             className="findings-table"
             dataSource={findings}
-            columns={findingsColumns(onViewCopywriting)}
+            columns={findingsColumns(onViewCopywriting, onViewContext)}
             rowKey={(finding) => finding.finding_id || `${finding.source_url}:${finding.type}:${finding.value || ''}`}
             pagination={false}
             size="small"
@@ -823,6 +846,9 @@ export default function ProjectDetail() {
   const [currentCopywriting, setCurrentCopywriting] = useState<FindingCopywriting | null>(null)
   const [currentFindingLabel, setCurrentFindingLabel] = useState('')
   const [currentFindingId, setCurrentFindingId] = useState('')
+  const [findingContextOpen, setFindingContextOpen] = useState(false)
+  const [findingContextId, setFindingContextId] = useState('')
+  const [findingContextTitle, setFindingContextTitle] = useState('')
 
   const fetchRecords = async (
     pid: string,
@@ -1171,6 +1197,23 @@ export default function ProjectDetail() {
     } finally {
       setCopywritingLoading(false)
     }
+  }
+
+  const handleViewFindingContextById = (findingId: string, label?: string) => {
+    if (!findingId) {
+      message.warning('该信息节点缺少 finding_id')
+      return
+    }
+    setFindingContextId(findingId)
+    setFindingContextTitle(label || 'Finding 上下文')
+    setFindingContextOpen(true)
+  }
+
+  const handleViewFindingContext = (finding: WebTaggingFinding) => {
+    handleViewFindingContextById(
+      finding.finding_id,
+      finding.label || finding.value || 'Finding 上下文',
+    )
   }
 
   // finding 深链：读取 finding_id 查询参数，打开对应人物画像抽屉
@@ -2782,7 +2825,13 @@ export default function ProjectDetail() {
             }}
             scroll={{ x: 1308 }}
             expandable={{
-              expandedRowRender: (rec) => <ExpandedRecordContent record={rec} onViewCopywriting={handleViewFindingCopywriting} />,
+              expandedRowRender: (rec) => (
+                <ExpandedRecordContent
+                  record={rec}
+                  onViewCopywriting={handleViewFindingCopywriting}
+                  onViewContext={handleViewFindingContext}
+                />
+              ),
               expandRowByClick: true,
             }}
             columns={taggingColumns}
@@ -4280,10 +4329,22 @@ export default function ProjectDetail() {
       {
         title: '',
         key: 'actions',
-        width: 80,
+        width: 112,
         fixed: 'right',
         render: (_, contact) => (
           <Space size={0}>
+            <Tooltip title={contact.finding_id ? '查看完整上下文' : '暂无关联 Finding'}>
+              <Button
+                type="text"
+                icon={<EyeOutlined />}
+                disabled={!contact.finding_id}
+                aria-label="查看联系方式上下文"
+                onClick={() => handleViewFindingContextById(
+                  contact.finding_id || '',
+                  contact.contact_name || contact.label || contact.value,
+                )}
+              />
+            </Tooltip>
             <Tooltip title={contact.source_url ? '打开原文' : '暂无原文链接'}>
               <Button
                 type="text"
@@ -4346,10 +4407,21 @@ export default function ProjectDetail() {
       {
         title: '',
         key: 'actions',
-        width: 90,
+        width: 122,
         fixed: 'right',
         render: (_, finding) => (
           <Space size={0}>
+            <Tooltip title="查看完整上下文">
+              <Button
+                type="text"
+                icon={<EyeOutlined />}
+                aria-label="查看 Finding 上下文"
+                onClick={() => handleViewFindingContextById(
+                  finding.finding_id,
+                  finding.label || finding.value || 'Finding 上下文',
+                )}
+              />
+            </Tooltip>
             <Tooltip title={finding.source_url ? '打开原文' : '暂无原文链接'}>
               <Button
                 type="text"
@@ -6451,6 +6523,17 @@ export default function ProjectDetail() {
       >
         {copywritingLoading ? <Skeleton active /> : currentCopywriting ? <CopywritingRenderer data={currentCopywriting} /> : null}
       </Drawer>
+
+      <FindingContextDrawer
+        open={findingContextOpen}
+        findingId={findingContextId}
+        title={findingContextTitle}
+        onClose={() => {
+          setFindingContextOpen(false)
+          setFindingContextId('')
+          setFindingContextTitle('')
+        }}
+      />
 
       {/* finding 人物画像 Drawer（从 AI 中枢引用跳转） */}
       <Drawer

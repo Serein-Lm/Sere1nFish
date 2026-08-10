@@ -418,6 +418,10 @@ class CompanyScanCoverageRequest(BaseModel):
     dry_run: bool = True
 
 
+class FindingContextOrganizeRequest(BaseModel):
+    force: bool = Field(default=True, description="是否强制按最新证据重新整理")
+
+
 @router.get("/projects/{project_id}/assets")
 async def list_project_assets(
     project_id: str,
@@ -999,6 +1003,41 @@ async def get_finding(finding_id: str):
     if not finding:
         raise HTTPException(404, "Finding 不存在")
     return finding
+
+
+@router.get("/findings/{finding_id}/context")
+async def get_finding_context(finding_id: str):
+    """读取上下文；缺失或证据已变化时自动进入可恢复整理队列。"""
+    from api.services.finding_context import get_or_queue_finding_context
+
+    db = get_db()
+    if not await findings_dao.get_finding(db, finding_id):
+        raise HTTPException(404, "Finding 不存在")
+    context = await get_or_queue_finding_context(db, finding_id)
+    if not context:
+        raise HTTPException(404, "Finding 上下文不存在")
+    return context
+
+
+@router.post("/findings/{finding_id}/context/organize")
+async def organize_finding_context(
+    finding_id: str,
+    body: FindingContextOrganizeRequest | None = None,
+):
+    """显式刷新一个 Finding 的多模态上下文。"""
+    from api.services.finding_context import get_or_queue_finding_context
+
+    db = get_db()
+    if not await findings_dao.get_finding(db, finding_id):
+        raise HTTPException(404, "Finding 不存在")
+    context = await get_or_queue_finding_context(
+        db,
+        finding_id,
+        force=True if body is None else body.force,
+    )
+    if not context:
+        raise HTTPException(500, "Finding 上下文排队失败")
+    return context
 
 
 @router.get("/findings/{finding_id}/copywriting")

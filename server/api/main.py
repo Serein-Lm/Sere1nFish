@@ -178,6 +178,18 @@ async def lifespan(app: FastAPI):
             [("project_id", 1), ("source", 1), ("bidding_record_id", 1)],
             sparse=True,
         )
+        from api.dao import finding_contexts as finding_contexts_dao
+
+        await finding_contexts_dao.ensure_indexes(db)
+        recovered_finding_contexts = await finding_contexts_dao.recover_interrupted(db)
+        if recovered_finding_contexts:
+            logger.info(
+                "Finding 上下文任务已恢复: %s",
+                recovered_finding_contexts,
+            )
+        from api.services.finding_context import kick_finding_context_worker
+
+        kick_finding_context_worker(db)
         from api.dao import web_tagging as web_tagging_dao
         from api.services.website_records import (
             ensure_indexes as ensure_website_record_indexes,

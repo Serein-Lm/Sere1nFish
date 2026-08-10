@@ -1293,6 +1293,12 @@ class UrlScanPipeline:
                             finding["finding_id"] = findings_dao.stable_finding_id(finding)
                     all_findings.extend(unified)
                     await findings_dao.upsert_findings_batch(self.db, unified)
+                    from api.services.finding_context import schedule_finding_contexts
+
+                    schedule_finding_contexts(
+                        self.db,
+                        [str(finding["finding_id"]) for finding in unified],
+                    )
                     if enable_copywriting:
                         copywriting_candidates = sorted(
                             unified,

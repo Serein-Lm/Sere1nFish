@@ -319,6 +319,96 @@ export interface FindingNote {
   tags: string[]
 }
 
+export type FindingContextStatus = 'pending' | 'running' | 'completed' | 'error'
+
+export interface FindingContextFact {
+  statement: string
+  kind: 'fact' | 'inference'
+  confidence: number
+  evidence_refs: string[]
+}
+
+export interface FindingContextNarrative {
+  text: string
+  kind: 'fact' | 'inference'
+  confidence: number
+  evidence_refs: string[]
+}
+
+export interface FindingContextParty {
+  name: string
+  role: string
+  relationship: string
+  evidence_refs: string[]
+}
+
+export interface FindingContextTimelineEvent {
+  time: string
+  event: string
+  evidence_refs: string[]
+}
+
+export interface FindingContextVisualFinding {
+  evidence_ref: string
+  summary: string
+  visible_text: string
+  relevance: string
+}
+
+export interface FindingContextResult {
+  schema_version: number
+  title: string
+  overview: FindingContextNarrative
+  target_relationship: FindingContextNarrative
+  source_overview: FindingContextNarrative
+  business_background: FindingContextNarrative
+  event_context: FindingContextNarrative
+  contact_context: FindingContextNarrative
+  finding_interpretation: FindingContextNarrative
+  parties: FindingContextParty[]
+  timeline: FindingContextTimelineEvent[]
+  key_facts: FindingContextFact[]
+  visual_findings: FindingContextVisualFinding[]
+  uncertainties: string[]
+  reading_guide: string[]
+}
+
+export interface FindingContextImageEvidence {
+  storage_object_id: string
+  evidence_ref: string
+  kind: string
+  description: string
+  visible_text: string
+  relevance: string
+  loaded_for_agent: boolean
+}
+
+export interface FindingContext {
+  context_id: string
+  finding_id: string
+  project_id: string
+  target_id?: string
+  source: string
+  source_url?: string
+  source_document_ids: string[]
+  source_document_version_ids: string[]
+  status: FindingContextStatus
+  priority: number
+  model?: string
+  prompt_slug?: string
+  error?: string
+  result?: FindingContextResult
+  evidence_manifest?: {
+    images?: FindingContextImageEvidence[]
+    image_errors?: string[]
+    allowed_evidence_refs?: string[]
+  }
+  queued_at?: string
+  started_at?: string
+  completed_at?: string
+  updated_at?: string
+}
+
 // ============================================
 // API 调用
 // ============================================
@@ -504,6 +594,20 @@ export async function listProjectFindings(projectId: string, params?: {
 
 export async function getFindingDetail(findingId: string): Promise<UnifiedFinding> {
   return apiFetch(`/v1/findings/${encodeURIComponent(findingId)}`, { method: 'GET' })
+}
+
+export async function getFindingContext(findingId: string): Promise<FindingContext> {
+  return apiFetch(`/v1/findings/${encodeURIComponent(findingId)}/context`)
+}
+
+export async function organizeFindingContext(
+  findingId: string,
+  force = true,
+): Promise<FindingContext> {
+  return apiFetch(`/v1/findings/${encodeURIComponent(findingId)}/context/organize`, {
+    method: 'POST',
+    body: JSON.stringify({ force }),
+  })
 }
 
 export async function getFindingProfile(findingId: string): Promise<FindingProfile> {

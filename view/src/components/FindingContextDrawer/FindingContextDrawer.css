@@ -1,0 +1,132 @@
+.finding-context-drawer .ant-drawer-content-wrapper {
+  max-width: 94vw;
+}
+
+.finding-context-drawer .ant-drawer-body {
+  padding: 20px 24px 32px;
+}
+
+.finding-context-content {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.finding-context-header {
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--ant-color-border-secondary, rgba(5, 5, 5, 0.06));
+}
+
+.finding-context-header .ant-typography {
+  margin-bottom: 0;
+}
+
+.finding-context-header h4.ant-typography {
+  margin-top: 12px;
+  margin-bottom: 8px;
+}
+
+.finding-context-section {
+  min-width: 0;
+}
+
+.finding-context-section h5.ant-typography {
+  margin-top: 0;
+  margin-bottom: 12px;
+  font-size: 15px;
+}
+
+.finding-context-list-item {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.finding-context-list {
+  border-top: 1px solid var(--ant-color-border-secondary, rgba(5, 5, 5, 0.06));
+}
+
+.finding-context-list-row {
+  min-width: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--ant-color-border-secondary, rgba(5, 5, 5, 0.06));
+}
+
+.finding-context-reading-list .finding-context-list-row {
+  padding: 8px 0;
+}
+
+.finding-context-narrative {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.finding-context-evidence-refs {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.finding-context-progress {
+  display: flex;
+  min-height: 260px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  text-align: center;
+}
+
+.finding-context-progress .ant-progress {
+  width: min(360px, 80%);
+}
+
+.finding-context-image-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.finding-context-image {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--ant-color-border-secondary, rgba(5, 5, 5, 0.06));
+  border-radius: 6px;
+  background: var(--ant-color-bg-container, #fff);
+}
+
+.finding-context-image .ant-image,
+.finding-context-image .ant-image-img,
+.finding-context-image > img {
+  display: block;
+  width: 100% !important;
+}
+
+.finding-context-image figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px 12px;
+}
+
+.finding-context-image figcaption .ant-typography {
+  margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .finding-context-drawer .ant-drawer-content-wrapper {
+    max-width: 100vw;
+  }
+
+  .finding-context-drawer .ant-drawer-body {
+    padding: 16px;
+  }
+
+  .finding-context-image-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

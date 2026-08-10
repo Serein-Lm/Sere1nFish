@@ -286,6 +286,90 @@ def test_contextual_analysis_fingerprint_tracks_prompt_content(monkeypatch):
     assert first != second
 
 
+def test_finding_context_identity_is_stable_and_finding_scoped():
+    from api.dao.finding_contexts import context_id_for_finding
+
+    assert context_id_for_finding("finding-1") == context_id_for_finding("finding-1")
+    assert context_id_for_finding("finding-1") != context_id_for_finding("finding-2")
+
+
+def test_finding_context_agent_normalizes_singleton_provider_wrapper():
+    from api.services.finding_context.agent import parse_finding_context_result
+
+    parsed = parse_finding_context_result([{"title": "测试上下文"}])
+
+    assert parsed.title == "测试上下文"
+
+
+def test_finding_context_sanitizes_untrusted_evidence_references():
+    from api.services.finding_context.schemas import (
+        ContextFact,
+        ContextNarrative,
+        ContextVisualFinding,
+        FindingContextResult,
+    )
+    from api.services.finding_context.service import sanitize_agent_result
+
+    result = FindingContextResult(
+        title="测试上下文",
+        overview=ContextNarrative(
+            text="证据化概览",
+            kind="fact",
+            confidence=90,
+            evidence_refs=["finding:f-1", "source:invented"],
+        ),
+        business_background=ContextNarrative(
+            text="缺少证据的背景",
+            kind="fact",
+            confidence=95,
+        ),
+        key_facts=[
+            ContextFact(
+                statement="可确认事实",
+                confidence=100,
+                evidence_refs=["finding:f-1", "image:invented"],
+            ),
+            ContextFact(
+                statement="无证据内容",
+                confidence=100,
+                evidence_refs=["source:invented"],
+            ),
+        ],
+        visual_findings=[
+            ContextVisualFinding(
+                evidence_ref="image:valid",
+                summary="有效视觉证据",
+            ),
+            ContextVisualFinding(
+                evidence_ref="image:invented",
+                summary="无效视觉证据",
+            ),
+        ],
+    )
+
+    payload = sanitize_agent_result(
+        result,
+        allowed_refs={"finding:f-1", "image:valid"},
+        fallback_title="",
+        fallback_overview="",
+    )
+
+    assert payload["overview"]["evidence_refs"] == ["finding:f-1"]
+    assert payload["business_background"]["kind"] == "inference"
+    assert payload["business_background"]["confidence"] <= 40
+    assert len(payload["key_facts"]) == 1
+    assert payload["key_facts"][0]["evidence_refs"] == ["finding:f-1"]
+    assert [item["evidence_ref"] for item in payload["visual_findings"]] == [
+        "image:valid"
+    ]
+
+
+def test_finding_context_prompt_is_runtime_critical():
+    from api.services.library_runtime import CORE_PROMPT_SLUGS
+
+    assert "finding_context/organizer" in CORE_PROMPT_SLUGS
+
+
 def test_source_document_prompts_reject_multi_entity_roundups():
     from Sere1nGraph.graph.prompts.loader import load_prompt
     from api.services.source_documents.analysis import (

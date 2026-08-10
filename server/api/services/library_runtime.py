@@ -87,6 +87,7 @@ CORE_PROMPT_SLUGS = {
     "router/classify",
     "source_document/relevance_review",
     "source_document/source_document",
+    "finding_context/organizer",
     "web_tagging/tagging_taxonomy",
     "web_tagging/web_tagging",
     "wechat_target_selection/wechat_target_selection",

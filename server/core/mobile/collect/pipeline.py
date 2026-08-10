@@ -1618,6 +1618,9 @@ class _PersistStage(Stage):
             for f in findings:
                 await findings_dao.upsert_contact_finding(st["db"], f)
             finding_ids = [str(f["finding_id"]) for f in findings]
+            from api.services.finding_context import schedule_finding_contexts
+
+            schedule_finding_contexts(st["db"], finding_ids)
             counters["contacts"] = counters.get("contacts", 0) + len(findings)
             obs_log(
                 f"发现联系方式 {len(findings)} 条 kw={payload['keyword'] or '-'}",
