@@ -618,6 +618,7 @@ async def test_discover_recovers_http_probe_failure_with_browser_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services.asset_intelligence import service as module
+    browser_probe_options: dict[str, Any] = {}
 
     class _DeadHttpProbe:
         async def probe(self, urls: list[str], **_kwargs: Any) -> dict[str, dict]:
@@ -631,7 +632,8 @@ async def test_discover_recovers_http_probe_failure_with_browser_probe(
         def supports(_url: str) -> bool:
             return True
 
-        async def probe(self, urls: list[str], **_kwargs: Any) -> dict[str, dict]:
+        async def probe(self, urls: list[str], **kwargs: Any) -> dict[str, dict]:
+            browser_probe_options.update(kwargs)
             return {
                 url: {
                     "url": url,
@@ -684,10 +686,12 @@ async def test_discover_recovers_http_probe_failure_with_browser_probe(
         project_id="project_1",
         task_id="task_1",
         provider_sizes={"fofa": 25},
+        probe_concurrency=96,
     )
 
     assert result["alive_urls"] == ["https://legacy.example"]
     assert result["browser_probe_recovered"] == 1
+    assert browser_probe_options["concurrency"] == 96
     assert persisted[0]["is_alive"] is True
     assert persisted[0]["probe"]["is_browser_accessible"] is True
     assert persisted[0]["probe"]["http_probe_error"] == "tls handshake failed"

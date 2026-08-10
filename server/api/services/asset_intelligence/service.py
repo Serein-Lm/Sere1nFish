@@ -87,7 +87,7 @@ class AssetIntelligenceService:
         )
         browser_probe_by_url = await self.browser_probe.probe(
             unresolved_urls,
-            concurrency=max(1, min(probe_concurrency, 32)),
+            concurrency=max(1, int(probe_concurrency)),
             timeout=max(10.0, min(probe_timeout * 2, 30.0)),
         ) if unresolved_urls else {}
         browser_recovered = 0

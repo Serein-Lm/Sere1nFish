@@ -68,10 +68,10 @@ _BROWSER_PROBE_LIMITER_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 def _get_browser_probe_limiter(concurrency: int) -> ResizableLimiter:
-    """Share one Chrome fallback budget across all concurrent company scans."""
+    """Share the configured Chrome budget across all concurrent company scans."""
     global _BROWSER_PROBE_LIMITER, _BROWSER_PROBE_LIMITER_LOOP
     loop = asyncio.get_running_loop()
-    safe_concurrency = max(1, min(int(concurrency), 32))
+    safe_concurrency = max(1, int(concurrency))
     if _BROWSER_PROBE_LIMITER is None or _BROWSER_PROBE_LIMITER_LOOP is not loop:
         _BROWSER_PROBE_LIMITER = ResizableLimiter(safe_concurrency)
         _BROWSER_PROBE_LIMITER_LOOP = loop
