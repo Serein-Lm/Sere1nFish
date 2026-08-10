@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from api.dao import url_scan
-from api.db.collections import URL_SCAN_RESULTS_COLLECTION
+from api.db.collections import (
+    URL_SCAN_RESULTS_COLLECTION,
+    URL_SCAN_TASKS_COLLECTION,
+)
 
 
 class _Cursor:
@@ -27,6 +30,7 @@ class _Collection:
         self.update_query = None
         self.update = None
         self.distinct_query = None
+        self.find_one_query = None
 
     def find(self, query, _projection):
         self.find_query = query
@@ -44,13 +48,17 @@ class _Collection:
         self.distinct_query = query
         return ["task-retry"]
 
+    async def find_one(self, query, _projection):
+        self.find_one_query = query
+        return {"_id": "task"}
+
 
 class _Db:
     def __init__(self):
         self.collection = _Collection()
 
     def __getitem__(self, name):
-        assert name == URL_SCAN_RESULTS_COLLECTION
+        assert name in {URL_SCAN_RESULTS_COLLECTION, URL_SCAN_TASKS_COLLECTION}
         return self.collection
 
 
@@ -134,3 +142,14 @@ async def test_retryable_task_ids_query_explicit_non_terminal_rows() -> None:
         "terminal": False,
         "retryable": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_incomplete_incremental_task_requires_full_scan() -> None:
+    db = _Db()
+
+    required = await url_scan.task_requires_full_scan(db, task_id="task-retry")
+
+    assert required is True
+    assert db.collection.find_one_query["task_id"] == "task-retry"
+    assert db.collection.find_one_query["remaining_urls"] == {"$gt": 0}

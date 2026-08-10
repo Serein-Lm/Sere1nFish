@@ -7,7 +7,10 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from api.db.collections import URL_SCAN_RESULTS_COLLECTION
+from api.db.collections import (
+    URL_SCAN_RESULTS_COLLECTION,
+    URL_SCAN_TASKS_COLLECTION,
+)
 from api.utils.url_identity import endpoint_identity
 
 
@@ -246,6 +249,34 @@ async def retryable_task_ids(
         },
     )
     return {str(value) for value in values if str(value or "").strip()}
+
+
+async def task_requires_full_scan(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+) -> bool:
+    """Return whether an interrupted incremental task must revisit all alive URLs."""
+    if not task_id:
+        return False
+    task = await db[URL_SCAN_TASKS_COLLECTION].find_one(
+        {
+            "task_id": task_id,
+            "status": {
+                "$in": [
+                    "pending",
+                    "running",
+                    "probing",
+                    "scanning",
+                    "waiting_model",
+                    "error",
+                ]
+            },
+            "remaining_urls": {"$gt": 0},
+        },
+        {"_id": 1},
+    )
+    return task is not None
 
 
 async def summarize_task(

@@ -1232,7 +1232,12 @@ class UrlScanPipeline:
                     remaining = max(0, len(alive) - processed)
                     task_result["remaining_urls"] = remaining
                     should_publish = processed == len(alive) or processed % 5 == 0
+                    if should_publish:
+                        task_result["scanned_urls"] = progress_counts["succeeded"]
+                        task_result["failed_urls"] = progress_counts["failed"]
+                        task_snapshot = dict(task_result)
                 if should_publish:
+                    await self._update_task(task_id, task_snapshot)
                     await update_source_progress(
                         self.db,
                         task_id=progress_task_id,
@@ -1380,11 +1385,16 @@ class UrlScanPipeline:
                 task_id=task_id,
                 urls=alive_urls,
             )
+            completed_after = await url_scan_dao.completed_urls(
+                self.db,
+                task_id=task_id,
+                urls=alive_urls,
+                project_id=project_id,
+                target_id=target_id,
+            )
             task_result["scanned_urls"] = persisted_summary["succeeded"]
             task_result["failed_urls"] = persisted_summary["failed"]
-            task_result["remaining_urls"] = max(
-                0, len(alive) - persisted_summary["processed"]
-            )
+            task_result["remaining_urls"] = max(0, len(alive) - len(completed_after))
             task_result["short_circuited_urls"] = persisted_summary[
                 "short_circuited"
             ]
@@ -1402,7 +1412,11 @@ class UrlScanPipeline:
                     "URL 终态持久化不完整，"
                     f"仍有 {task_result['remaining_urls']} 条等待恢复"
                 )
-            if alive and task_result["scanned_urls"] == 0:
+            if (
+                pending_alive
+                and persisted_summary["processed"] > 0
+                and persisted_summary["succeeded"] == 0
+            ):
                 failures = [str(item.get("error") or "") for item in scan_results]
                 raise RuntimeError(
                     "全部存活 URL 扫描失败"
@@ -1423,12 +1437,16 @@ class UrlScanPipeline:
                 task_id=progress_task_id,
                 source=progress_source_name,
                 total=len(alive),
-                processed=persisted_summary["processed"],
+                processed=len(completed_after),
                 succeeded=persisted_summary["succeeded"],
                 failed=persisted_summary["failed"],
                 skipped=len(completed_before),
                 status="completed",
-                message=f"URL 深扫完成，共处理 {persisted_summary['processed']} 条",
+                message=(
+                    f"URL 深扫完成，覆盖 {len(completed_after)} 条，"
+                    f"本轮处理 {persisted_summary['processed']} 条，"
+                    f"复用 {len(completed_before)} 条"
+                ),
                 extra={"remaining": task_result["remaining_urls"]},
             )
             await self._update_task(task_id, task_result)

@@ -426,10 +426,11 @@ class DashScopeVoiceAdapter:
         await asyncio.to_thread(self._start_sync)
 
     def _start_sync(self) -> None:
-        # The SDK pool scans once per second and reconnects idle sockets. Keep
-        # provider maintenance noise out of the project's DEBUG application log.
+        # The SDK pool scans once per second and reports idle pre-connection
+        # losses as ERROR. Request failures still surface through ResultCallback
+        # and this adapter, so suppress only the third-party maintenance loggers.
         for logger_name in ("dashscope", "websocket", "websockets.client"):
-            logging.getLogger(logger_name).setLevel(logging.WARNING)
+            logging.getLogger(logger_name).setLevel(logging.CRITICAL)
         dashscope.api_key = self.config.api_key
         dashscope.base_http_api_url = self.config.base_http
         dashscope.base_websocket_api_url = self.config.base_ws

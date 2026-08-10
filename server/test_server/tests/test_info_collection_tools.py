@@ -196,6 +196,10 @@ class _FakeCollection:
     @staticmethod
     def _matches(doc, query):
         for key, expected in query.items():
+            if key == "$and":
+                if not all(_FakeCollection._matches(doc, branch) for branch in expected):
+                    return False
+                continue
             if key == "$or":
                 if not any(_FakeCollection._matches(doc, branch) for branch in expected):
                     return False
@@ -743,6 +747,107 @@ def test_url_scan_restart_skips_same_task_terminal_urls(monkeypatch):
         assert second["status"] == "completed"
         assert second["skipped_urls"] == 1
         assert len(tool.requests) == 1
+
+    asyncio.run(_run())
+
+
+def test_url_scan_completion_counts_reused_target_endpoints(monkeypatch):
+    async def _run():
+        from api.dao import url_scan as url_scan_dao
+
+        tool = _FakeScanTool()
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": tool,
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        db = _FakeDB()
+        await url_scan_dao.upsert_terminal_result(
+            db,
+            task_id="older-task",
+            project_id="project-1",
+            target_id="target-1",
+            source="web_tagging",
+            url="https://reused.example",
+            success=True,
+        )
+
+        result = await UrlScanPipeline(db, object()).run_pipeline(
+            task_id="current-task",
+            project_id="project-1",
+            target_id="target-1",
+            url_content="https://reused.example\nhttps://fresh.example",
+            known_alive_urls=[
+                "https://reused.example",
+                "https://fresh.example",
+            ],
+            enable_copywriting=False,
+        )
+
+        assert result["status"] == "completed"
+        assert result["skipped_urls"] == 1
+        assert result["scanned_urls"] == 1
+        assert result["remaining_urls"] == 0
+        assert [request.target for request in tool.requests] == [
+            "https://fresh.example"
+        ]
+
+    asyncio.run(_run())
+
+
+def test_url_scan_allows_all_urls_reused_from_target_history(monkeypatch):
+    async def _run():
+        from api.dao import url_scan as url_scan_dao
+
+        tool = _FakeScanTool()
+
+        class _Toolset:
+            def state(self):
+                return {
+                    "url_scan_tool": tool,
+                    "copywriting_tool": _FakeCopywritingTool(),
+                    "url_probe_tool": None,
+                }
+
+        monkeypatch.setattr(
+            InfoCollectionToolFactory,
+            "create_url_toolset",
+            lambda self, response_parser=None: _Toolset(),
+        )
+        db = _FakeDB()
+        await url_scan_dao.upsert_terminal_result(
+            db,
+            task_id="older-task",
+            project_id="project-1",
+            target_id="target-1",
+            source="web_tagging",
+            url="https://reused.example",
+            success=True,
+        )
+
+        result = await UrlScanPipeline(db, object()).run_pipeline(
+            task_id="current-task",
+            project_id="project-1",
+            target_id="target-1",
+            url_content="https://reused.example",
+            known_alive_urls=["https://reused.example"],
+            enable_copywriting=False,
+        )
+
+        assert result["status"] == "completed"
+        assert result["skipped_urls"] == 1
+        assert result["scanned_urls"] == 0
+        assert result["remaining_urls"] == 0
+        assert tool.requests == []
 
     asyncio.run(_run())
 

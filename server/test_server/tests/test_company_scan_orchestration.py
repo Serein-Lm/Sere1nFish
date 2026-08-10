@@ -7,7 +7,11 @@ from typing import Any
 
 import pytest
 
-from api.services.company_scan_pipeline import CompanyScanPipeline
+from api.services.company_scan_pipeline import (
+    CompanyScanPipeline,
+    related_entity_task_id,
+    should_checkpoint_module,
+)
 
 
 def test_subsidiary_xhs_is_disabled_by_default() -> None:
@@ -41,6 +45,21 @@ def test_tianyancha_collection_is_disabled_by_default() -> None:
     assert parameters["enable_control_structure"].default is False
     assert parameters["bidding_page_size"].default == 20
     assert parameters["bidding_max_records"].default == 20
+
+
+def test_partial_followup_module_is_not_cached_as_complete() -> None:
+    assert should_checkpoint_module(
+        "wholly_owned_entities",
+        {"status": "partial"},
+    ) is False
+    assert should_checkpoint_module(
+        "scholar_entities",
+        {"status": "completed"},
+    ) is True
+    assert should_checkpoint_module(
+        "bidding",
+        {"status": "partial"},
+    ) is True
 
 
 def test_wechat_target_selection_is_automatic_by_default() -> None:
@@ -1120,9 +1139,16 @@ async def test_control_entity_identity_does_not_reuse_a_shared_brand_alias() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("incremental_scan", "expected_urls", "expected_known_alive"),
+    (
+        "incremental_scan",
+        "recovery_required",
+        "expected_urls",
+        "expected_known_alive",
+        "expected_scan_mode",
+    ),
     [
         (
+            False,
             False,
             [
                 "https://bilibili.com",
@@ -1135,24 +1161,46 @@ async def test_control_entity_identity_does_not_reuse_a_shared_brand_alias() -> 
                 "https://manual.example.com",
                 "https://stable.example.com",
             ],
+            "full",
         ),
         (
             True,
+            False,
             [
                 "https://bilibili.com",
                 "https://manual.example.com",
                 "https://new.example.com",
             ],
             ["https://new.example.com"],
+            "incremental",
+        ),
+        (
+            True,
+            True,
+            [
+                "https://bilibili.com",
+                "https://manual.example.com",
+                "https://new.example.com",
+                "https://stable.example.com",
+            ],
+            [
+                "https://new.example.com",
+                "https://manual.example.com",
+                "https://stable.example.com",
+            ],
+            "full",
         ),
     ],
 )
 async def test_asset_and_manual_urls_share_one_deep_scan(
     monkeypatch: pytest.MonkeyPatch,
     incremental_scan: bool,
+    recovery_required: bool,
     expected_urls: list[str],
     expected_known_alive: list[str],
+    expected_scan_mode: str,
 ) -> None:
+    from api.dao import url_scan as url_scan_dao
     from api.services.asset_intelligence import AssetIntelligenceService
 
     async def discover(_self: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -1173,6 +1221,15 @@ async def test_asset_and_manual_urls_share_one_deep_scan(
         }
 
     monkeypatch.setattr(AssetIntelligenceService, "discover", discover)
+
+    async def no_recovery(*_args: Any, **_kwargs: Any) -> bool:
+        return recovery_required
+
+    monkeypatch.setattr(
+        url_scan_dao,
+        "task_requires_full_scan",
+        no_recovery,
+    )
     pipeline = CompanyScanPipeline(object(), object())
     calls: list[dict[str, Any]] = []
 
@@ -1209,7 +1266,8 @@ async def test_asset_and_manual_urls_share_one_deep_scan(
     assert calls[0]["args"][3] == expected_urls
     assert calls[0]["kwargs"]["known_alive_urls"] == expected_known_alive
     assert calls[0]["kwargs"]["target_id"] == "tgt-1"
-    assert result["assets"]["scan_mode"] == ("incremental" if incremental_scan else "full")
+    assert result["assets"]["scan_mode"] == expected_scan_mode
+    assert result["assets"]["recovery_full_scan"] is recovery_required
     assert result["assets"]["scan_candidates"] == len(expected_known_alive)
 
 
@@ -1260,6 +1318,7 @@ async def test_wholly_owned_entity_setup_failure_is_aggregated_without_notificat
     )
 
     assert result["summary"]["completed"] == 0
+    assert result["status"] == "error"
     assert result["errors"] == ["子公司: setup failed"]
     assert captured == []
 
@@ -1306,7 +1365,13 @@ async def test_wholly_owned_url_scan_reports_progress_to_parent_task(
 
     assert result["summary"]["completed"] == 1
     assert calls[0]["progress_task_id"] == "parent-task"
-    assert calls[0]["progress_source"] == "wholly_owned_0_url_scan"
+    assert calls[0]["task_id"] == related_entity_task_id(
+        "parent-task",
+        target_id="target-child",
+        name="子公司",
+    )
+    assert calls[0]["progress_source"].startswith("entity_")
+    assert calls[0]["progress_source"].endswith("_url_scan")
 
 
 @pytest.mark.asyncio

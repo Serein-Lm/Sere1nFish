@@ -47,6 +47,27 @@ COMPANY_NORMALIZE_TIMEOUT_SECONDS = 300
 COMPANY_ROUTER_TIMEOUT_SECONDS = 120
 
 
+def related_entity_task_id(
+    parent_task_id: str,
+    *,
+    target_id: str,
+    name: str,
+) -> str:
+    """Build a stable child task identity independent of selection order."""
+    identity = str(target_id or name).strip()
+    suffix = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex[:12]
+    return f"{parent_task_id}_entity_{suffix}"
+
+
+def should_checkpoint_module(kind: str, outcome: Any) -> bool:
+    """Only cache follow-up modules when every selected entity is complete."""
+    if not isinstance(outcome, dict) or outcome.get("status") == "error":
+        return False
+    if kind in {"wholly_owned_entities", "scholar_entities"}:
+        return outcome.get("status") == "completed"
+    return True
+
+
 class _ProfileCopywritingStage(Stage):
     """Generate copywriting for one high-score profile through a copywriting tool."""
 
@@ -1159,7 +1180,7 @@ class CompanyScanPipeline:
                             )
                 if kind in restored_primary_modules:
                     return
-                if not isinstance(outcome, dict) or outcome.get("status") == "error":
+                if not should_checkpoint_module(kind, outcome):
                     return
                 from api.services.task_progress import save_module_checkpoint
 
@@ -2051,6 +2072,12 @@ class CompanyScanPipeline:
             async with semaphore:
                 name = str(entity.get("name") or "").strip()
                 target_id = str(entity.get("target_id") or "")
+                entity_task_id = related_entity_task_id(
+                    task_id,
+                    target_id=target_id,
+                    name=name,
+                )
+                entity_progress_key = entity_task_id.rsplit("_", 1)[-1]
                 scan_profile = dict(entity.get("scan_profile") or {})
                 aliases = self._dedupe_text(
                     [
@@ -2105,24 +2132,26 @@ class CompanyScanPipeline:
                         (
                             "website",
                             self._run_asset_and_url_scan(
-                            task_id=f"{task_id}_wholly_owned_{index}",
-                            project_id=project_id,
-                            identity=identity,
-                            url_text="",
-                            urls=[],
-                            enable_asset_discovery=enable_asset_discovery,
-                            enable_url_scan=enable_url_scan,
-                            enable_copywriting=enable_copywriting,
-                            min_attention_score=min_attention_score,
-                            fofa_size=fofa_size,
-                            hunter_size=hunter_size,
-                            probe_concurrency=asset_probe_concurrency,
-                            incremental_scan=incremental_scan,
-                            url_probe_concurrency=url_probe_concurrency,
-                            url_scan_concurrency=url_scan_concurrency,
-                            copywriting_concurrency=copywriting_concurrency,
-                            progress_task_id=task_id,
-                            progress_source=f"wholly_owned_{index}_url_scan",
+                                task_id=entity_task_id,
+                                project_id=project_id,
+                                identity=identity,
+                                url_text="",
+                                urls=[],
+                                enable_asset_discovery=enable_asset_discovery,
+                                enable_url_scan=enable_url_scan,
+                                enable_copywriting=enable_copywriting,
+                                min_attention_score=min_attention_score,
+                                fofa_size=fofa_size,
+                                hunter_size=hunter_size,
+                                probe_concurrency=asset_probe_concurrency,
+                                incremental_scan=incremental_scan,
+                                url_probe_concurrency=url_probe_concurrency,
+                                url_scan_concurrency=url_scan_concurrency,
+                                copywriting_concurrency=copywriting_concurrency,
+                                progress_task_id=task_id,
+                                progress_source=(
+                                    f"entity_{entity_progress_key}_url_scan"
+                                ),
                             ),
                         )
                     )
@@ -2133,7 +2162,7 @@ class CompanyScanPipeline:
                     async def _run_bidding_serially() -> dict[str, Any]:
                         async with bidding_semaphore:
                             return await self._run_bidding_collection(
-                                task_id=f"{task_id}_wholly_owned_{index}",
+                                task_id=entity_task_id,
                                 project_id=project_id,
                                 company_name=name,
                                 target_id=target_id,
@@ -2158,7 +2187,7 @@ class CompanyScanPipeline:
                         (
                             "xhs",
                             self._run_xhs_search(
-                            f"{task_id}_wholly_owned_{index}",
+                            entity_task_id,
                             project_id,
                             xhs_keywords,
                             xhs_max_notes,
@@ -2242,7 +2271,7 @@ class CompanyScanPipeline:
                     try:
                         scan_result["profile_copywritings"]["count"] = (
                             await self._run_profile_copywriting(
-                                f"{task_id}_wholly_owned_{index}",
+                                entity_task_id,
                                 project_id,
                                 name,
                                 CompanyRouterResult(success=False),
@@ -2341,6 +2370,13 @@ class CompanyScanPipeline:
             errors.extend(
                 f"{item.get('name')}: {message}" for message in scan.get("errors") or []
             )
+        status = (
+            "completed"
+            if not errors
+            else "partial"
+            if summary["completed"]
+            else "error"
+        )
         await update_source_progress(
             self.db,
             task_id=task_id,
@@ -2349,10 +2385,16 @@ class CompanyScanPipeline:
             processed=total_entities,
             succeeded=summary["completed"],
             failed=max(0, total_entities - summary["completed"]),
-            status="completed",
+            status=status,
             message=f"全资关联单位采集完成 {summary['completed']}/{total_entities}",
         )
-        return {"entities": output_entities, "summary": summary, "errors": errors}
+        return {
+            "kind": "wholly_owned_entities",
+            "status": status,
+            "entities": output_entities,
+            "summary": summary,
+            "errors": errors,
+        }
 
     async def _scan_scholar_entities(
         self,
@@ -2596,13 +2638,26 @@ class CompanyScanPipeline:
                 provider_sizes={"fofa": fofa_size, "hunter": hunter_size},
                 probe_concurrency=probe_concurrency,
             )
-            candidate_key = "scan_urls" if incremental_scan else "alive_urls"
+            from api.dao import url_scan as url_scan_dao
+
+            recovery_full_scan = bool(
+                incremental_scan
+                and await url_scan_dao.task_requires_full_scan(
+                    self.db,
+                    task_id=f"{task_id}_url",
+                )
+            )
+            effective_incremental = incremental_scan and not recovery_full_scan
+            candidate_key = "scan_urls" if effective_incremental else "alive_urls"
             discovered_urls = [
                 str(value)
                 for value in asset_result.get(candidate_key) or []
                 if str(value).strip()
             ]
-            asset_result["scan_mode"] = "incremental" if incremental_scan else "full"
+            asset_result["scan_mode"] = (
+                "incremental" if effective_incremental else "full"
+            )
+            asset_result["recovery_full_scan"] = recovery_full_scan
             asset_result["scan_candidates"] = len(discovered_urls)
             known_alive_metadata = dict(
                 asset_result.get("probe_metadata_by_url") or {}
