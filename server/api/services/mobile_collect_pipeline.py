@@ -26,7 +26,7 @@ _QUEUE_PRIORITY_ORDER = {
     "low": 20,
     "skip": 30,
 }
-_DEVICE_READY_TIMEOUT_SECONDS = 120.0
+_DEVICE_READY_TIMEOUT_SECONDS: float | None = None
 _DEVICE_READY_POLL_SECONDS = 2.0
 
 
@@ -107,10 +107,10 @@ def _queue_priority_value(priority: str) -> int:
 async def wait_for_mobile_device_ready(
     device_id: str,
     *,
-    timeout_seconds: float = _DEVICE_READY_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = _DEVICE_READY_TIMEOUT_SECONDS,
     poll_seconds: float = _DEVICE_READY_POLL_SECONDS,
 ) -> str:
-    """Wait for a stable device identity to resolve to an online ADB endpoint."""
+    """Wait for a stable device identity without failing background work on disconnect."""
     normalized = str(device_id or "").strip()
     if not normalized:
         raise ValueError("手机采集任务缺少执行设备")
@@ -120,7 +120,12 @@ async def wait_for_mobile_device_ready(
     manager = MobileDeviceManager()
     manager.start_polling()
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(0.1, float(timeout_seconds))
+    deadline = (
+        None
+        if timeout_seconds is None
+        else loop.time() + max(0.1, float(timeout_seconds))
+    )
+    waiting_logged = False
     while True:
         endpoint = await asyncio.to_thread(
             manager.resolve_ready_adb_device_id,
@@ -128,12 +133,22 @@ async def wait_for_mobile_device_ready(
         )
         if endpoint:
             return endpoint
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise RuntimeError(
-                f"手机设备未就绪: {normalized}，等待 {timeout_seconds:.0f}s 后仍无在线 ADB 端点"
+        if not waiting_logged:
+            logger.warning(
+                "手机设备离线，采集任务保持排队等待 | device=%s",
+                normalized,
             )
-        await asyncio.sleep(min(max(0.0, float(poll_seconds)), remaining))
+            waiting_logged = True
+        sleep_seconds = max(0.0, float(poll_seconds))
+        if deadline is not None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"手机设备未就绪: {normalized}，等待 "
+                    f"{timeout_seconds:.0f}s 后仍无在线 ADB 端点"
+                )
+            sleep_seconds = min(sleep_seconds, remaining)
+        await asyncio.sleep(sleep_seconds)
 
 
 async def run_mobile_collect_definition(

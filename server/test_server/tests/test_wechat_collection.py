@@ -7,8 +7,10 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _mobile_device_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+def _mobile_device_is_ready(monkeypatch: pytest.MonkeyPatch):
     from api.services import mobile_collect_pipeline
+
+    wait_for_mobile_device_ready = mobile_collect_pipeline.wait_for_mobile_device_ready
 
     async def ready(device_id: str, **_kwargs: Any) -> str:
         return device_id or "device-a"
@@ -18,6 +20,38 @@ def _mobile_device_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
         "wait_for_mobile_device_ready",
         ready,
     )
+    return wait_for_mobile_device_ready
+
+
+@pytest.mark.asyncio
+async def test_mobile_device_disconnect_waits_until_endpoint_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+    _mobile_device_is_ready,
+) -> None:
+    from core.mobile import manager as mobile_manager
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def start_polling(self) -> None:
+            return None
+
+        def resolve_ready_adb_device_id(self, device_id: str) -> str:
+            assert device_id == "stable-device-id"
+            self.attempts += 1
+            return "10.144.144.3:5555" if self.attempts >= 3 else ""
+
+    manager = _Manager()
+    monkeypatch.setattr(mobile_manager, "MobileDeviceManager", lambda: manager)
+
+    endpoint = await _mobile_device_is_ready(
+        "stable-device-id",
+        poll_seconds=0,
+    )
+
+    assert endpoint == "10.144.144.3:5555"
+    assert manager.attempts == 3
 
 
 def test_company_wechat_definition_enforces_phone_work_limits() -> None:
