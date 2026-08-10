@@ -7,6 +7,7 @@ from api.dao import targets as targets_dao
 from api.services.targets import (
     _select_target_relation_page,
     _summarize_finding_counts,
+    _target_batch_priority,
     _target_scan_coverage_summary,
     _target_summary_sort_key,
     assign_project_target_batches,
@@ -323,11 +324,24 @@ def test_summarize_finding_counts_groups_high_scores_by_frontend_module() -> Non
     assert "" not in result
 
 
-def test_target_summary_sort_prioritizes_high_scores_then_completion() -> None:
+def test_target_batch_priority_parses_numeric_and_chinese_level_tags() -> None:
+    assert _target_batch_priority(["核心关键扫描", "第二等级"]) == {
+        "batch_priority_rank": 2,
+        "batch_priority_label": "第二等级",
+        "is_expanded_target": False,
+    }
+    assert _target_batch_priority(["第12等级", "拓展目标"])[
+        "batch_priority_rank"
+    ] == 12
+    assert _target_batch_priority(["普通批次"])["batch_priority_rank"] is None
+
+
+def test_target_summary_sort_prioritizes_level_then_high_scores() -> None:
     items = [
         {
             "target_id": "completed-low",
             "target_name": "已完成低分",
+            "batch_tags": ["第一等级"],
             "high_score_finding_count": 2,
             "collection_complete": True,
             "finding_count": 100,
@@ -335,6 +349,7 @@ def test_target_summary_sort_prioritizes_high_scores_then_completion() -> None:
         {
             "target_id": "running-high",
             "target_name": "运行中高分",
+            "batch_tags": ["第二等级"],
             "high_score_finding_count": 12,
             "collection_complete": False,
             "finding_count": 20,
@@ -342,6 +357,7 @@ def test_target_summary_sort_prioritizes_high_scores_then_completion() -> None:
         {
             "target_id": "completed-high",
             "target_name": "已完成高分",
+            "batch_tags": ["第二等级"],
             "high_score_finding_count": 12,
             "collection_complete": True,
             "finding_count": 18,
@@ -351,10 +367,31 @@ def test_target_summary_sort_prioritizes_high_scores_then_completion() -> None:
     items.sort(key=_target_summary_sort_key)
 
     assert [item["target_id"] for item in items] == [
+        "completed-low",
         "completed-high",
         "running-high",
-        "completed-low",
     ]
+
+
+def test_target_summary_sort_keeps_primary_before_expansion_within_level() -> None:
+    items = [
+        {
+            "target_id": "expanded",
+            "target_name": "拓展目标",
+            "batch_tags": ["第一等级", "拓展目标"],
+            "high_score_finding_count": 50,
+        },
+        {
+            "target_id": "primary",
+            "target_name": "主目标",
+            "batch_tags": ["第一等级"],
+            "high_score_finding_count": 1,
+        },
+    ]
+
+    items.sort(key=_target_summary_sort_key)
+
+    assert [item["target_id"] for item in items] == ["primary", "expanded"]
 
 
 def test_target_page_paginates_roots_by_high_score() -> None:
@@ -411,6 +448,39 @@ def test_target_page_paginates_roots_by_high_score() -> None:
     assert [item["target_id"] for item in second_page["relations"]] == ["root-a"]
     assert second_page["child_counts"]["root-a"] == 1
     assert second_page["descendant_counts"]["root-a"] == 1
+
+
+def test_target_page_paginates_roots_by_level_before_high_score() -> None:
+    relations = [
+        {
+            "project_target_id": "pt-first",
+            "target_id": "first",
+            "target_name": "第一等级机构",
+            "batch_tags": ["第一等级"],
+            "relation_depth": 0,
+        },
+        {
+            "project_target_id": "pt-second",
+            "target_id": "second",
+            "target_name": "第二等级机构",
+            "batch_tags": ["第二等级"],
+            "relation_depth": 0,
+        },
+    ]
+
+    result = _select_target_relation_page(
+        relations,
+        {},
+        query="",
+        page=1,
+        page_size=1,
+        root_stats={
+            "first": {"high_score_finding_count": 1},
+            "second": {"high_score_finding_count": 100},
+        },
+    )
+
+    assert [item["target_id"] for item in result["relations"]] == ["first"]
 
 
 def test_target_page_filters_business_batch_and_keeps_branch_context() -> None:

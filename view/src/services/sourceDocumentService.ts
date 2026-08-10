@@ -136,6 +136,9 @@ export interface ProjectTargetSummary {
   lineage_target_ids?: string[]
   lineage_target_names?: string[]
   batch_tags?: string[]
+  batch_priority_rank?: number | null
+  batch_priority_label?: string
+  is_expanded_target?: boolean
   relation?: Record<string, unknown>
   task_def_ids?: string[]
   document_count: number

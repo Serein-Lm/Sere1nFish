@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -43,9 +44,70 @@ _FINDING_SOURCE_MODULES = {
     "scholar_contact": "scholars",
 }
 
+_BATCH_PRIORITY_PATTERN = re.compile(
+    r"^第(?P<level>\d+|[一二三四五六七八九十]+)等级$"
+)
+_CHINESE_PRIORITY_DIGITS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_UNRANKED_BATCH_PRIORITY = 1_000_000
+
 
 def _empty_high_score_breakdown() -> dict[str, int]:
     return {key: 0 for key in _HIGH_SCORE_SOURCE_KEYS}
+
+
+def _parse_priority_level(value: str) -> int | None:
+    if value.isdigit():
+        level = int(value)
+        return level if level > 0 else None
+    if value == "十":
+        return 10
+    if "十" in value:
+        left, right = value.split("十", 1)
+        tens = _CHINESE_PRIORITY_DIGITS.get(left, 1) if left else 1
+        units = _CHINESE_PRIORITY_DIGITS.get(right, 0) if right else 0
+        return tens * 10 + units if tens and units >= 0 else None
+    return _CHINESE_PRIORITY_DIGITS.get(value)
+
+
+def _target_batch_priority(
+    batch_tags: list[str] | tuple[str, ...] | str | None,
+) -> dict[str, Any]:
+    """Resolve business priority from level tags without coupling callers to labels."""
+    tags = targets_dao.normalize_batch_tags(batch_tags)
+    ranked: list[tuple[int, str]] = []
+    for tag in tags:
+        match = _BATCH_PRIORITY_PATTERN.fullmatch(tag)
+        if not match:
+            continue
+        level = _parse_priority_level(match.group("level"))
+        if level is not None:
+            ranked.append((level, tag))
+    rank, label = min(ranked, default=(_UNRANKED_BATCH_PRIORITY, ""))
+    return {
+        "batch_priority_rank": rank if label else None,
+        "batch_priority_label": label,
+        "is_expanded_target": "拓展目标" in tags,
+    }
+
+
+def _target_batch_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+    priority = _target_batch_priority(item.get("batch_tags"))
+    rank = priority["batch_priority_rank"]
+    return (
+        int(rank) if rank is not None else _UNRANKED_BATCH_PRIORITY,
+        int(bool(priority["is_expanded_target"])),
+        str(priority["batch_priority_label"]),
+    )
 
 
 def _summarize_finding_counts(
@@ -82,7 +144,7 @@ def _summarize_finding_counts(
 
 
 def _target_summary_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
-    """高分 Finding 优先，随后按完成度和数据量稳定排序。"""
+    """业务等级优先，同等级按高分、完成度和数据量稳定排序。"""
     module_total = sum(
         int(item.get(field) or 0)
         for field in (
@@ -94,6 +156,7 @@ def _target_summary_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
         )
     )
     return (
+        *_target_batch_sort_key(item),
         -int(item.get("high_score_finding_count") or 0),
         -int(bool(item.get("collection_complete"))),
         -int(item.get("finding_count") or 0),
@@ -322,6 +385,7 @@ def _select_target_relation_page(
         stats = root_stats.get(root_id, {})
         return (
             -group_scores.get(root_id, 0),
+            *_target_batch_sort_key(relation),
             -int(stats.get("high_score_finding_count") or 0),
             -int(bool(relation.get("last_collected_at"))),
             -int(stats.get("finding_count") or 0),
@@ -904,6 +968,7 @@ async def list_project_target_summaries(
     summaries = [
         {
             **_relation_payload(relation),
+            **_target_batch_priority(relation.get("batch_tags")),
             "document_count": int(
                 by_target.get(str(relation.get("target_id") or ""), {}).get(
                     "document_count", 0
@@ -1054,14 +1119,21 @@ async def list_project_target_batches(
             )
             values["target_ids"].add(target_id)
             values["root_target_ids"].add(root_target_id)
-    return [
+    items = [
         {
             "batch_tag": batch_tag,
             "target_count": len(values["target_ids"]),
             "root_count": len(values["root_target_ids"]),
         }
-        for batch_tag, values in sorted(counts.items())
+        for batch_tag, values in counts.items()
     ]
+    items.sort(
+        key=lambda item: (
+            *_target_batch_sort_key({"batch_tags": [item["batch_tag"]]}),
+            str(item["batch_tag"]).casefold(),
+        )
+    )
+    return items
 
 
 async def assign_project_target_batches(

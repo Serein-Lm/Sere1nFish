@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber } from 'antd'
+import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber, Grid } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, FilterOutlined, PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import {
@@ -172,6 +172,11 @@ const TARGET_SCAN_CHANNEL_LABELS: Record<string, string> = {
   bidding: '招投标',
   scholar: '学者联系',
   control: '控股关系',
+}
+const TARGET_PRIORITY_COLORS: Record<number, string> = {
+  1: 'red',
+  2: 'orange',
+  3: 'gold',
 }
 
 interface WechatDeviceOption {
@@ -593,6 +598,7 @@ function MobileScreenshotImage({ screenshot, variant = 'thumb' }: { screenshot: 
 export default function ProjectDetail() {
   const navigate = useNavigate()
   const { projectId } = useParams<{ projectId: string }>()
+  const screens = Grid.useBreakpoint()
 
   const [loading, setLoading] = useState(true)
   const [project, setProject] = useState<Project | null>(null)
@@ -3864,6 +3870,12 @@ export default function ProjectDetail() {
         const searchDiff = Number(right.search_score || 0) - Number(left.search_score || 0)
         if (searchDiff) return searchDiff
       }
+      const priorityDiff = Number(left.batch_priority_rank || Number.MAX_SAFE_INTEGER)
+        - Number(right.batch_priority_rank || Number.MAX_SAFE_INTEGER)
+      if (priorityDiff) return priorityDiff
+      const expandedDiff = Number(Boolean(left.is_expanded_target))
+        - Number(Boolean(right.is_expanded_target))
+      if (expandedDiff) return expandedDiff
       const highScoreDiff = Number(right.high_score_finding_count || 0)
         - Number(left.high_score_finding_count || 0)
       if (highScoreDiff) return highScoreDiff
@@ -4118,6 +4130,20 @@ export default function ProjectDetail() {
   const renderTargetDashboard = () => {
     const columns: ColumnsType<TargetDashboardRow> = [
       {
+        title: '等级',
+        key: 'batch_priority_rank',
+        width: 96,
+        render: (_, target) => target.isLoadingPlaceholder
+          ? null
+          : target.batch_priority_label
+            ? (
+              <Tag color={TARGET_PRIORITY_COLORS[target.batch_priority_rank || 0] || 'default'}>
+                {target.batch_priority_label}
+              </Tag>
+            )
+            : <Text type="secondary">-</Text>,
+      },
+      {
         title: '公司 / 机构',
         key: 'target',
         width: 340,
@@ -4144,9 +4170,11 @@ export default function ProjectDetail() {
             <div className="target-company-cell">
               <Space size={6} wrap>
                 <Text strong>{displayName}</Text>
-                {(target.batch_tags || []).map((batchTag) => (
+                {(target.batch_tags || [])
+                  .filter((batchTag) => batchTag !== target.batch_priority_label)
+                  .map((batchTag) => (
                   <Tag key={batchTag} color="processing">{batchTag}</Tag>
-                ))}
+                  ))}
                 {targetSearchQuery && target.search_match ? <Tag color="blue">匹配</Tag> : null}
                 <Tag color={target.collection_complete ? 'success' : 'default'}>
                   覆盖 {target.coverage_completed_count || 0}/{target.coverage_required_count || 4}
@@ -4182,7 +4210,6 @@ export default function ProjectDetail() {
         key: 'high_score_finding_count',
         width: 310,
         sorter: (a, b) => (a.high_score_finding_count || 0) - (b.high_score_finding_count || 0),
-        defaultSortOrder: 'descend',
         sortDirections: ['descend', 'ascend'],
         render: (_, target) => {
           if (target.isLoadingPlaceholder) return null
@@ -4253,7 +4280,7 @@ export default function ProjectDetail() {
         title: '操作',
         key: 'actions',
         width: 120,
-        fixed: 'right',
+        fixed: screens.md ? 'right' : undefined,
         render: (_, target) => target.isLoadingPlaceholder ? null : (
           <Tooltip title="联网核验机构资料，扩展可信 Target 后自动扫描">
             <Button
