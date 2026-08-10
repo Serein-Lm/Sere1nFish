@@ -171,6 +171,57 @@ export interface ProjectTargetSummary {
   descendant_count?: number
 }
 
+export interface TargetDashboardContact {
+  contact_id: string
+  finding_id?: string
+  kind: 'personal_phone' | 'personal_email'
+  channel: 'phone' | 'email'
+  value: string
+  contact_name?: string
+  label?: string
+  role?: string
+  party_name?: string
+  context?: string
+  attention_score: number
+  source: string
+  module: 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars' | 'other'
+  module_label: string
+  source_url?: string
+  source_document_id?: string
+  evidence_count: number
+  verified: boolean
+  updated_at?: string
+}
+
+export interface TargetDashboardFinding {
+  finding_id: string
+  source: string
+  module: TargetDashboardContact['module']
+  module_label: string
+  type: string
+  channel: string
+  label: string
+  value: string
+  context: string
+  attention_score: number
+  party_name: string
+  source_url?: string
+  source_document_id?: string
+  screenshot_url?: string
+  updated_at?: string
+}
+
+export interface ProjectTargetDashboard {
+  target: ProjectTargetSummary
+  contact_counts: {
+    personal_phone: number
+    personal_email: number
+  }
+  personal_phones: TargetDashboardContact[]
+  personal_emails: TargetDashboardContact[]
+  top_findings: TargetDashboardFinding[]
+}
+
 export interface ProjectTargetOption {
   project_target_id: string
   target_id: string
@@ -294,6 +345,12 @@ export function listProjectTargetBatches(projectId: string) {
 export function getProjectTargetSummary(projectId: string, targetId: string) {
   return apiFetch<{ item: ProjectTargetSummary }>(
     `/v1/targets/${encodeURIComponent(targetId)}/summary?project_id=${encodeURIComponent(projectId)}`,
+  )
+}
+
+export function getProjectTargetDashboard(projectId: string, targetId: string) {
+  return apiFetch<ProjectTargetDashboard>(
+    `/v1/targets/${encodeURIComponent(targetId)}/dashboard?project_id=${encodeURIComponent(projectId)}`,
   )
 }
 

@@ -5,6 +5,8 @@ import pytest
 from api.dao import findings as findings_dao
 from api.dao import targets as targets_dao
 from api.services.targets import (
+    _dashboard_contact_from_finding,
+    _merge_target_dashboard_contacts,
     _select_target_relation_page,
     _summarize_finding_counts,
     _target_batch_priority,
@@ -392,6 +394,146 @@ def test_target_summary_sort_keeps_primary_before_expansion_within_level() -> No
     items.sort(key=_target_summary_sort_key)
 
     assert [item["target_id"] for item in items] == ["primary", "expanded"]
+
+
+def test_target_dashboard_contact_uses_persisted_personal_taxonomy() -> None:
+    contact = _dashboard_contact_from_finding({
+        "finding_id": "finding-1",
+        "type": "personal_mobile",
+        "scope": "official",
+        "channel": "phone",
+        "subtype": "mobile_personal",
+        "value": "138-0013-8000",
+        "source": "bidding",
+        "source_url": "https://example.cn/bid/1",
+        "attention_score": 91,
+    })
+
+    assert contact is not None
+    assert contact["kind"] == "personal_phone"
+    assert contact["module"] == "bidding"
+    assert contact["source_url"] == "https://example.cn/bid/1"
+    assert _dashboard_contact_from_finding({
+        "type": "business_contact",
+        "scope": "official",
+        "channel": "phone",
+        "subtype": "hotline_landline",
+        "value": "010-12345678",
+    }) is None
+
+
+def test_target_dashboard_contact_accepts_generic_public_mobile_number() -> None:
+    contact = _dashboard_contact_from_finding({
+        "finding_id": "finding-mobile",
+        "type": "contact",
+        "channel": "phone",
+        "label": "手机号",
+        "value": "+86 175-2686-8257",
+        "source": "wechat_article",
+        "attention_score": 92,
+    })
+
+    assert contact is not None
+    assert contact["kind"] == "personal_phone"
+    assert contact["module"] == "wechat"
+
+
+def test_target_dashboard_contacts_deduplicate_and_merge_richer_evidence() -> None:
+    contacts = _merge_target_dashboard_contacts([
+        {
+            "contact_id": "finding-1",
+            "kind": "personal_phone",
+            "channel": "phone",
+            "value": "+86 138-0013-8000",
+            "attention_score": 92,
+            "contact_name": "",
+            "source_url": "https://example.cn/1",
+            "evidence_count": 2,
+            "verified": True,
+        },
+        {
+            "contact_id": "finding-2",
+            "kind": "personal_phone",
+            "channel": "phone",
+            "value": "13800138000",
+            "attention_score": 80,
+            "contact_name": "张老师",
+            "source_url": "",
+            "evidence_count": 1,
+            "verified": False,
+        },
+    ])
+
+    assert len(contacts) == 1
+    assert contacts[0]["contact_id"] == "finding-1"
+    assert contacts[0]["contact_name"] == "张老师"
+    assert contacts[0]["evidence_count"] == 3
+    assert contacts[0]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_project_target_dashboard_combines_findings_and_scholars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import targets as targets_service
+
+    async def load_summary(*_args, **_kwargs):
+        return {"target_id": "target-1", "finding_count": 3}
+
+    async def load_findings(*_args, **_kwargs):
+        personal_email = {
+            "finding_id": "finding-email",
+            "type": "personal_email",
+            "channel": "email",
+            "value": "author@example.edu.cn",
+            "source": "web_tagging",
+            "attention_score": 88,
+            "source_url": "https://example.edu.cn/contact",
+        }
+        personal_phone = {
+            "finding_id": "finding-phone",
+            "type": "personal_mobile",
+            "channel": "phone",
+            "value": "13800138000",
+            "source": "bidding",
+            "attention_score": 95,
+            "source_url": "https://example.edu.cn/bid",
+        }
+        return [personal_phone], [personal_email, personal_phone]
+
+    async def load_scholars(*_args, **_kwargs):
+        return ([{
+            "doc_id": "scholar-1",
+            "email": "author@example.edu.cn",
+            "email_kind": "personal",
+            "author_name": "李老师",
+            "unit": "目标机构",
+            "article_url": "https://doi.org/10.1/example",
+            "unit_verified": True,
+            "is_corresponding": True,
+        }], 1)
+
+    monkeypatch.setattr(targets_service, "get_project_target_summary", load_summary)
+    monkeypatch.setattr(
+        findings_dao,
+        "query_target_dashboard_findings",
+        load_findings,
+    )
+    monkeypatch.setattr(targets_service.scholar_dao, "query_contacts", load_scholars)
+
+    dashboard = await targets_service.get_project_target_dashboard(
+        object(),
+        project_id="project-1",
+        target_id="target-1",
+    )
+
+    assert dashboard is not None
+    assert dashboard["contact_counts"] == {
+        "personal_phone": 1,
+        "personal_email": 1,
+    }
+    assert dashboard["personal_emails"][0]["contact_name"] == "李老师"
+    assert dashboard["top_findings"][0]["module"] == "bidding"
 
 
 def test_target_page_paginates_roots_by_high_score() -> None:

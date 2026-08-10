@@ -8,7 +8,9 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import projects as projects_dao
+from api.dao import findings as findings_dao
 from api.dao import mobile_collect as mobile_collect_dao
+from api.dao import scholar_contact as scholar_dao
 from api.dao import targets as targets_dao
 from api.dao.project_scope import project_scope_query
 from api.db.collections import (
@@ -59,6 +61,15 @@ _CHINESE_PRIORITY_DIGITS = {
     "九": 9,
 }
 _UNRANKED_BATCH_PRIORITY = 1_000_000
+
+_TARGET_MODULE_LABELS = {
+    "website": "网站",
+    "xiaohongshu": "小红书",
+    "wechat": "公众号",
+    "bidding": "招投标",
+    "scholars": "学者联系",
+    "other": "其他",
+}
 
 
 def _empty_high_score_breakdown() -> dict[str, int]:
@@ -141,6 +152,192 @@ def _summarize_finding_counts(
         source_key = _FINDING_SOURCE_MODULES.get(source, "other")
         summary["high_score_by_source"][source_key] += high_score_count
     return summaries
+
+
+def _finding_module(source: Any) -> str:
+    return _FINDING_SOURCE_MODULES.get(
+        str(source or "").strip().lower(),
+        "other",
+    )
+
+
+def _finding_source_url(item: dict[str, Any]) -> str:
+    latest_evidence = item.get("latest_evidence_ref") or {}
+    for value in (
+        item.get("source_url"),
+        item.get("url"),
+        latest_evidence.get("source_url")
+        if isinstance(latest_evidence, dict)
+        else "",
+    ):
+        url = str(value or "").strip()
+        if url.lower().startswith(("http://", "https://")):
+            return url
+    return ""
+
+
+def _dashboard_finding(item: dict[str, Any]) -> dict[str, Any]:
+    module = _finding_module(item.get("source"))
+    return {
+        "finding_id": str(item.get("finding_id") or ""),
+        "source": str(item.get("source") or ""),
+        "module": module,
+        "module_label": _TARGET_MODULE_LABELS[module],
+        "type": str(item.get("type") or ""),
+        "channel": str(item.get("channel") or ""),
+        "label": str(item.get("label") or ""),
+        "value": str(item.get("value") or ""),
+        "context": str(item.get("context") or item.get("summary") or "")[:600],
+        "attention_score": int(item.get("attention_score") or 0),
+        "party_name": str(item.get("party_name") or item.get("entity_name") or ""),
+        "source_url": _finding_source_url(item),
+        "source_document_id": str(item.get("source_document_id") or ""),
+        "screenshot_url": str(item.get("screenshot_url") or ""),
+        "updated_at": item.get("updated_at") or item.get("created_at"),
+    }
+
+
+def _dashboard_contact_from_finding(item: dict[str, Any]) -> dict[str, Any] | None:
+    finding_type = str(item.get("type") or "").strip().lower()
+    channel = str(item.get("channel") or "").strip().lower()
+    subtype = str(item.get("subtype") or "").strip().lower()
+    scope = str(item.get("scope") or "").strip().lower()
+    value = str(item.get("value") or "").strip()
+    digits = re.sub(r"\D", "", value)
+    if len(digits) == 13 and digits.startswith("86"):
+        digits = digits[2:]
+    is_mainland_mobile = bool(re.fullmatch(r"1[3-9]\d{9}", digits))
+    if channel in {"phone", "telephone"} and (
+        finding_type == "personal_mobile"
+        or scope == "personal"
+        or subtype == "mobile_personal"
+        or is_mainland_mobile
+    ):
+        kind = "personal_phone"
+        channel = "phone"
+    elif channel == "email" and (
+        finding_type == "personal_email"
+        or scope == "personal"
+        or subtype == "email_personal"
+    ):
+        kind = "personal_email"
+    else:
+        return None
+    if not value:
+        return None
+    module = _finding_module(item.get("source"))
+    evidence_refs = item.get("evidence_refs") or []
+    return {
+        "contact_id": str(item.get("finding_id") or value),
+        "finding_id": str(item.get("finding_id") or ""),
+        "kind": kind,
+        "channel": channel,
+        "value": value,
+        "contact_name": "",
+        "label": str(item.get("label") or ""),
+        "role": str(item.get("role") or ""),
+        "party_name": str(item.get("party_name") or item.get("entity_name") or ""),
+        "context": str(item.get("context") or item.get("summary") or "")[:600],
+        "attention_score": int(item.get("attention_score") or 0),
+        "source": str(item.get("source") or ""),
+        "module": module,
+        "module_label": _TARGET_MODULE_LABELS[module],
+        "source_url": _finding_source_url(item),
+        "source_document_id": str(item.get("source_document_id") or ""),
+        "evidence_count": max(1, len(evidence_refs))
+        if isinstance(evidence_refs, list)
+        else 1,
+        "verified": str(item.get("target_relation") or "") != "not_target",
+        "updated_at": item.get("updated_at") or item.get("created_at"),
+    }
+
+
+def _dashboard_contact_from_scholar(item: dict[str, Any]) -> dict[str, Any] | None:
+    value = str(item.get("email") or "").strip().lower()
+    if not value or str(item.get("email_kind") or "").lower() != "personal":
+        return None
+    return {
+        "contact_id": str(item.get("doc_id") or value),
+        "finding_id": "",
+        "kind": "personal_email",
+        "channel": "email",
+        "value": value,
+        "contact_name": str(item.get("author_name") or ""),
+        "label": "通讯作者" if item.get("is_corresponding") else "学术联系",
+        "role": "scholar",
+        "party_name": str(item.get("unit") or ""),
+        "context": str(
+            item.get("article_title")
+            or item.get("direction")
+            or item.get("evidence")
+            or ""
+        )[:600],
+        "attention_score": 82 if item.get("is_corresponding") else 72,
+        "source": "scholar_contact",
+        "module": "scholars",
+        "module_label": _TARGET_MODULE_LABELS["scholars"],
+        "source_url": str(item.get("article_url") or ""),
+        "source_document_id": "",
+        "evidence_count": 1,
+        "verified": bool(item.get("unit_verified")),
+        "updated_at": item.get("updated_at") or item.get("created_at"),
+    }
+
+
+def _contact_identity(item: dict[str, Any]) -> tuple[str, str]:
+    channel = str(item.get("channel") or "").lower()
+    value = str(item.get("value") or "").strip().casefold()
+    if channel == "phone":
+        digits = re.sub(r"\D", "", value)
+        if len(digits) == 13 and digits.startswith("86"):
+            digits = digits[2:]
+        value = digits or value
+    return channel, value
+
+
+def _merge_target_dashboard_contacts(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deduplicate one public contact while retaining its richest evidence."""
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in items:
+        item = dict(raw)
+        identity = _contact_identity(item)
+        if not identity[1]:
+            continue
+        current = merged.get(identity)
+        if current is None:
+            merged[identity] = item
+            continue
+        current_quality = (
+            int(current.get("attention_score") or 0),
+            int(bool(current.get("source_url"))),
+            int(bool(current.get("contact_name"))),
+        )
+        item_quality = (
+            int(item.get("attention_score") or 0),
+            int(bool(item.get("source_url"))),
+            int(bool(item.get("contact_name"))),
+        )
+        preferred, supplement = (
+            (item, current) if item_quality > current_quality else (current, item)
+        )
+        for field in ("contact_name", "label", "role", "party_name", "context", "source_url"):
+            if not preferred.get(field) and supplement.get(field):
+                preferred[field] = supplement[field]
+        preferred["evidence_count"] = int(current.get("evidence_count") or 0) + int(
+            item.get("evidence_count") or 0
+        )
+        preferred["verified"] = bool(current.get("verified") or item.get("verified"))
+        merged[identity] = preferred
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            -int(item.get("attention_score") or 0),
+            str(item.get("contact_name") or item.get("label") or "").casefold(),
+            str(item.get("value") or "").casefold(),
+        ),
+    )
 
 
 def _target_summary_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
@@ -833,7 +1030,7 @@ async def list_project_target_summaries(
                 }
             },
         ]
-    ).to_list(len(target_ids))
+    ).to_list(None)
     from api.services.website_records import count_project_website_records_by_target
 
     website_counts_job = count_project_website_records_by_target(
@@ -1240,6 +1437,66 @@ async def get_project_target_summary(
         relations=[relation],
     )
     return summaries[0] if summaries else None
+
+
+async def get_project_target_dashboard(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+) -> dict[str, Any] | None:
+    """Build the actionable Target overview consumed by web and AI surfaces."""
+    summary_job = get_project_target_summary(
+        db,
+        project_id=project_id,
+        target_id=target_id,
+    )
+    findings_job = findings_dao.query_target_dashboard_findings(
+        db,
+        project_id=project_id,
+        target_id=target_id,
+    )
+    scholar_job = scholar_dao.query_contacts(
+        db,
+        project_id,
+        target_id=target_id,
+        only_verified=True,
+        email_kind="personal",
+        limit=500,
+    )
+    summary, (top_findings, contact_findings), (scholar_contacts, _) = (
+        await asyncio.gather(summary_job, findings_job, scholar_job)
+    )
+    if summary is None:
+        return None
+
+    contact_candidates = [
+        contact
+        for item in contact_findings
+        if (contact := _dashboard_contact_from_finding(item)) is not None
+    ]
+    contact_candidates.extend(
+        contact
+        for item in scholar_contacts
+        if (contact := _dashboard_contact_from_scholar(item)) is not None
+    )
+    contacts = _merge_target_dashboard_contacts(contact_candidates)
+    personal_phones = [
+        item for item in contacts if item.get("kind") == "personal_phone"
+    ]
+    personal_emails = [
+        item for item in contacts if item.get("kind") == "personal_email"
+    ]
+    return {
+        "target": summary,
+        "contact_counts": {
+            "personal_phone": len(personal_phones),
+            "personal_email": len(personal_emails),
+        },
+        "personal_phones": personal_phones[:200],
+        "personal_emails": personal_emails[:200],
+        "top_findings": [_dashboard_finding(item) for item in top_findings],
+    }
 
 
 async def list_project_target_branch(

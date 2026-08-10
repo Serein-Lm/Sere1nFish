@@ -463,6 +463,7 @@ async def query_contacts(
     target_id: str = "",
     only_corresponding: bool = False,
     only_verified: bool = False,
+    email_kind: str = "",
     limit: int = 20,
     skip: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -488,6 +489,8 @@ async def query_contacts(
         query["unit"] = unit
     if only_corresponding:
         query["is_corresponding"] = True
+    if email_kind:
+        query["email_kind"] = str(email_kind).strip().lower()
     if only_verified:
         conditions.append(
             _target_verified_query(target_id)

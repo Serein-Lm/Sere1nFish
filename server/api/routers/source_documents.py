@@ -15,6 +15,7 @@ from api.services.source_documents import get_source_document_detail
 from api.services.targets import (
     assign_project_target_batches,
     get_project_target_summary,
+    get_project_target_dashboard,
     list_project_target_branch,
     list_project_target_batches,
     list_project_target_options,
@@ -201,6 +202,18 @@ async def get_target_summary(target_id: str, project_id: str = Query(min_length=
     if item is None:
         raise HTTPException(404, "项目 Target 不存在")
     return {"item": item}
+
+
+@router.get("/targets/{target_id}/dashboard")
+async def get_target_dashboard(target_id: str, project_id: str = Query(min_length=1)):
+    item = await get_project_target_dashboard(
+        get_db(),
+        project_id=project_id,
+        target_id=target_id,
+    )
+    if item is None:
+        raise HTTPException(404, "项目 Target 不存在")
+    return item
 
 
 @router.get("/targets/{target_id}/research")

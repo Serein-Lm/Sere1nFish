@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button, Card, Descriptions, Skeleton, Tag, Typography, Table, Empty, Space, Tooltip, Modal, Form, Input, Select, Segmented, message, Tabs, Avatar, Progress, Collapse, Spin, Statistic, Row, Col, Drawer, Checkbox, InputNumber, Grid } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, FilterOutlined, PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, ArrowRightOutlined, DashboardOutlined, GlobalOutlined, InfoCircleOutlined, LinkOutlined, MailOutlined, PhoneOutlined, WarningOutlined, FileTextOutlined, FileSearchOutlined, SearchOutlined, RocketOutlined, ExclamationCircleOutlined, CheckCircleOutlined, CopyOutlined, EditOutlined, DeleteOutlined, UserOutlined, EyeOutlined, EyeInvisibleOutlined, TeamOutlined, AimOutlined, PlusOutlined, ThunderboltOutlined, SyncOutlined, ClockCircleOutlined, BarChartOutlined, DollarOutlined, MobileOutlined, PictureOutlined, RobotOutlined, FilterOutlined, PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import {
   getProject,
   createWebTagging,
@@ -66,6 +66,7 @@ import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
 import {
   createTargetResearch,
+  getProjectTargetDashboard,
   getProjectTargetSummary,
   listProjectTargetBranch,
   listProjectTargetBatches,
@@ -74,6 +75,9 @@ import {
   openAuthenticatedArtifact,
   type ProjectTargetOption,
   type ProjectTargetBatchOption,
+  type ProjectTargetDashboard,
+  type TargetDashboardContact,
+  type TargetDashboardFinding,
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
 import { listScholarContacts, type ScholarContact } from '../../services/scholarContactService'
@@ -135,7 +139,7 @@ function boundedTaskTuning(value: unknown, fallback: number, maximum: number): n
   return Number.isFinite(parsed) ? Math.max(1, Math.min(Math.trunc(parsed), maximum)) : fallback
 }
 
-type TabKey = 'targets' | 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'bidding' | 'mobile' | 'scholars' | 'tasks' | 'stats'
+type TabKey = 'targets' | 'target' | 'website' | 'xiaohongshu' | 'douyin' | 'wechat' | 'bidding' | 'mobile' | 'scholars' | 'tasks' | 'stats'
 type TargetDataTabKey = 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars'
 type TargetCountKey = 'website_count' | 'xhs_count' | 'wechat_count' | 'bidding_count' | 'scholar_contact_count'
 type TargetHighScoreKey = 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars' | 'other'
@@ -735,6 +739,9 @@ export default function ProjectDetail() {
   const [targetSummaryLoading, setTargetSummaryLoading] = useState(false)
   const [targetResearchActionId, setTargetResearchActionId] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
+  const [selectedTargetDashboard, setSelectedTargetDashboard] = useState<ProjectTargetDashboard | null>(null)
+  const [selectedTargetDashboardLoading, setSelectedTargetDashboardLoading] = useState(false)
+  const selectedTargetDashboardRequestRef = useRef(0)
   const [websiteTargetId, setWebsiteTargetId] = useState('')
   const [wechatTargetId, setWechatTargetId] = useState('')
   const [scholarContacts, setScholarContacts] = useState<ScholarContact[]>([])
@@ -776,6 +783,36 @@ export default function ProjectDetail() {
       if (requestId === targetSummaryRequestRef.current[requestKey]) {
         targetSummaryPendingRef.current.delete(requestKey)
         setTargetSummaryLoading(targetSummaryPendingRef.current.size > 0)
+      }
+    }
+  }
+
+  const fetchSelectedTargetDashboard = async (pid: string, targetId: string) => {
+    if (!targetId) return
+    const requestId = ++selectedTargetDashboardRequestRef.current
+    setSelectedTargetDashboardLoading(true)
+    try {
+      const result = await getProjectTargetDashboard(pid, targetId)
+      if (requestId !== selectedTargetDashboardRequestRef.current) return
+      setSelectedTargetDashboard(result)
+      const mergeSummary = (target: ProjectTargetSummary) => (
+        target.target_id === targetId ? { ...target, ...result.target } : target
+      )
+      setProjectTargets((current) => current.map(mergeSummary))
+      setTargetBranches((current) => Object.fromEntries(
+        Object.entries(current).map(([rootId, branch]) => [
+          rootId,
+          branch.map(mergeSummary),
+        ]),
+      ))
+    } catch (error) {
+      if (requestId !== selectedTargetDashboardRequestRef.current) return
+      setSelectedTargetDashboard(null)
+      console.error('加载 Target 看板失败:', error)
+      message.error(error instanceof Error ? error.message : '加载 Target 看板失败')
+    } finally {
+      if (requestId === selectedTargetDashboardRequestRef.current) {
+        setSelectedTargetDashboardLoading(false)
       }
     }
   }
@@ -1244,6 +1281,9 @@ export default function ProjectDetail() {
       loadedTabsRef.current = new Set<TabKey>()
       setActiveTab('targets')
       setSelectedTargetId('')
+      setSelectedTargetDashboard(null)
+      setSelectedTargetDashboardLoading(false)
+      selectedTargetDashboardRequestRef.current += 1
       setXhsTargetId('')
       setWebsiteTargetId('')
       setWechatTargetId('')
@@ -1276,7 +1316,10 @@ export default function ProjectDetail() {
         const data = await getProject(projectId)
         if (!cancelled) {
           setProject(data)
-          void fetchProjectTargetOptions(projectId)
+          void Promise.all([
+            fetchProjectTargetOptions(projectId),
+            fetchDashboard(projectId),
+          ])
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : '加载失败'
@@ -1294,6 +1337,8 @@ export default function ProjectDetail() {
           setTargetBranches({})
           setTargetBranchLoading({})
           setSelectedTargetId('')
+          setSelectedTargetDashboard(null)
+          setSelectedTargetDashboardLoading(false)
           setXhsNotes([])
           setXhsProfiles([])
           setXhsTargetId('')
@@ -1354,6 +1399,11 @@ export default function ProjectDetail() {
 
     const loadActiveTab = async () => {
       switch (activeTab) {
+        case 'target':
+          if (selectedTargetId) {
+            await fetchSelectedTargetDashboard(projectId, selectedTargetId)
+          }
+          break
         case 'website':
           await fetchRecords(projectId, 1, websitePageSize, websiteTargetId)
           break
@@ -3811,11 +3861,15 @@ export default function ProjectDetail() {
     )
   }
 
-  // 数据源中文映射
-  const sourceNameMap: Record<string, string> = { web_tagging: '官网打标', bidding: '招投标', xhs: '小红书', douyin: '抖音', mobile: '手机画像' }
-  // 渲染简易看板（基本信息下方）
+  // 渲染项目级摘要，放在标题区内避免重复占用首屏空间。
   const renderMiniDashboard = () => {
-    if (dashboardLoading) return <Skeleton active paragraph={{ rows: 1 }} />
+    if (dashboardLoading && !dashboardData) {
+      return (
+        <div className="project-header-metrics project-header-metrics-loading" aria-label="项目摘要加载中">
+          {Array.from({ length: 6 }, (_, index) => <Skeleton.Button key={index} active size="small" block />)}
+        </div>
+      )
+    }
     if (!dashboardData) return null
 
     const f = dashboardData.findings ?? { total: 0, by_source: {}, score_distribution: { high: 0, medium: 0, low: 0 } }
@@ -3832,28 +3886,31 @@ export default function ProjectDetail() {
       mobile_profile_observations: 0,
       bidding_records: 0,
     }
+    const activeTaskCount = ['pending', 'probing', 'scanning', 'generating', 'running']
+      .reduce((total, status) => total + Number(t.by_status?.[status] || 0), 0)
+    const archivedDataCount = Number(c.web_tagging || 0)
+      + Number(c.xhs_notes || 0)
+      + Number(c.douyin_tagged || 0)
+      + Number(c.mobile_profiles || 0)
+      + Number(c.mobile_profile_observations || 0)
+      + Number(c.bidding_records || 0)
+    const metrics = [
+      { label: 'Target', value: allProjectTargetTotal || projectTargetTotal },
+      { label: 'Finding', value: f.total },
+      { label: '高分 Finding', value: f.score_distribution?.high ?? 0, tone: 'danger' },
+      { label: '任务', value: t.total },
+      { label: '运行中', value: activeTaskCount, tone: activeTaskCount > 0 ? 'active' : undefined },
+      { label: '归档数据', value: archivedDataCount },
+    ]
 
     return (
-      <div className="mini-dashboard slide-up stagger-2">
-        <Row gutter={[8, 8]}>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="发现" value={f.total} styles={{ content: { fontSize: 16 } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="高分" value={f.score_distribution?.high ?? 0} styles={{ content: { fontSize: 16, color: '#ff4d4f' } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="任务" value={t.total} styles={{ content: { fontSize: 16 } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="话术" value={c.copywritings} styles={{ content: { fontSize: 16 } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="笔记" value={c.xhs_notes} styles={{ content: { fontSize: 16 } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="画像" value={(c.xhs_profiles ?? 0) + (c.douyin_profiles ?? 0) + (c.mobile_profiles ?? 0)} styles={{ content: { fontSize: 16 } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="打标" value={c.web_tagging} styles={{ content: { fontSize: 16 } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}><Statistic title="招投标" value={c.bidding_records ?? 0} styles={{ content: { fontSize: 16 } }} /></Col>
-          <Col xs={8} sm={6} md={4} lg={3}>
-            <Statistic title="数据源" valueRender={() => (
-              <Space size={4}>
-                {Object.entries(f.by_source ?? {}).map(([src, cnt]) => (
-                  <Tag key={src} style={{ fontSize: 11 }}>{sourceNameMap[src] || src}: {cnt as number}</Tag>
-                ))}
-              </Space>
-            )} />
-          </Col>
-        </Row>
+      <div className="project-header-metrics slide-up stagger-2">
+        {metrics.map((metric) => (
+          <div className={`project-header-metric${metric.tone ? ` is-${metric.tone}` : ''}`} key={metric.label}>
+            <Text type="secondary">{metric.label}</Text>
+            <Text strong>{metric.value.toLocaleString()}</Text>
+          </div>
+        ))}
       </div>
     )
   }
@@ -3969,6 +4026,9 @@ export default function ProjectDetail() {
   const applyTargetScope = (targetId: string) => {
     if (targetId !== selectedTargetId) {
       TARGET_DATA_TAB_KEYS.forEach((tab) => loadedTabsRef.current.delete(tab))
+      loadedTabsRef.current.delete('target')
+      selectedTargetDashboardRequestRef.current += 1
+      setSelectedTargetDashboard(null)
     }
     setSelectedTargetId(targetId)
     setWebsiteTargetId(targetId)
@@ -3979,13 +4039,25 @@ export default function ProjectDetail() {
   }
 
   const returnToTargetDashboard = () => {
+    selectedTargetDashboardRequestRef.current += 1
     setSelectedTargetId('')
+    setSelectedTargetDashboard(null)
+    setSelectedTargetDashboardLoading(false)
     setWebsiteTargetId('')
     setXhsTargetId('')
     setWechatTargetId('')
     setBiddingTargetId('')
     setScholarTargetId('')
     setActiveTab('targets')
+  }
+
+  const openTargetOverview = (targetId: string) => {
+    if (!projectId || !targetId) return
+    blurFocusedTabPaneElement()
+    applyTargetScope(targetId)
+    loadedTabsRef.current.add('target')
+    setActiveTab('target')
+    void fetchSelectedTargetDashboard(projectId, targetId)
   }
 
   const openTargetModule = (targetId: string, tab: TargetDataTabKey) => {
@@ -4018,10 +4090,7 @@ export default function ProjectDetail() {
   }
 
   const openTargetDetails = (target: ProjectTargetSummary) => {
-    const defaultModule = TARGET_MODULES.find(
-      (module) => Number(target[module.countKey] || 0) > 0,
-    ) || TARGET_MODULES[0]
-    openTargetModule(target.target_id, defaultModule.tab)
+    openTargetOverview(target.target_id)
   }
 
   const runTargetResearch = async (target: ProjectTargetSummary) => {
@@ -4125,6 +4194,281 @@ export default function ProjectDetail() {
     } finally {
       setCoverageSubmitting(false)
     }
+  }
+
+  const renderTargetOverview = () => {
+    if (!selectedTarget) return <Empty description="请选择 Target" />
+    if (selectedTargetDashboardLoading && !selectedTargetDashboard) {
+      return <Skeleton active paragraph={{ rows: 8 }} />
+    }
+    if (!selectedTargetDashboard) {
+      return (
+        <Empty
+          description="Target 看板暂未加载"
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+        >
+          <Button
+            icon={<SyncOutlined />}
+            loading={selectedTargetDashboardLoading}
+            onClick={() => {
+              if (projectId) void fetchSelectedTargetDashboard(projectId, selectedTarget.target_id)
+            }}
+          >
+            重新加载
+          </Button>
+        </Empty>
+      )
+    }
+
+    const dashboard = selectedTargetDashboard
+    const summary = dashboard.target
+    const openSource = (url?: string) => {
+      if (url) window.open(url, '_blank', 'noopener,noreferrer')
+    }
+    const canOpenModule = (module: string): module is TargetDataTabKey => (
+      TARGET_DATA_TAB_KEYS.has(module as TabKey)
+    )
+    const contactColumns: ColumnsType<TargetDashboardContact> = [
+      {
+        title: '联系方式',
+        dataIndex: 'value',
+        key: 'value',
+        width: 210,
+        render: (value: string, contact) => (
+          <Space orientation="vertical" size={0}>
+            <Typography.Link
+              href={contact.channel === 'email' ? `mailto:${value}` : `tel:${value}`}
+              copyable={{ text: value }}
+            >
+              {value}
+            </Typography.Link>
+            {contact.evidence_count > 1 ? (
+              <Text type="secondary">{contact.evidence_count} 条证据</Text>
+            ) : null}
+          </Space>
+        ),
+      },
+      {
+        title: '联系人 / 场景',
+        key: 'identity',
+        render: (_, contact) => (
+          <div className="target-contact-identity">
+            <Space size={6} wrap>
+              <Text strong>{contact.contact_name || contact.label || '公开联系人'}</Text>
+              {contact.verified ? <Tag color="success">已核验</Tag> : null}
+            </Space>
+            {contact.party_name ? <Text type="secondary">{contact.party_name}</Text> : null}
+            {contact.context ? (
+              <Tooltip title={contact.context}>
+                <Text type="secondary" className="target-contact-context">{contact.context}</Text>
+              </Tooltip>
+            ) : null}
+          </div>
+        ),
+      },
+      {
+        title: '来源',
+        key: 'source',
+        width: 92,
+        render: (_, contact) => (
+          <Space orientation="vertical" size={2}>
+            <Tag>{contact.module_label}</Tag>
+            <Text type="secondary">{contact.attention_score} 分</Text>
+          </Space>
+        ),
+      },
+      {
+        title: '',
+        key: 'actions',
+        width: 80,
+        fixed: 'right',
+        render: (_, contact) => (
+          <Space size={0}>
+            <Tooltip title={contact.source_url ? '打开原文' : '暂无原文链接'}>
+              <Button
+                type="text"
+                icon={<LinkOutlined />}
+                disabled={!contact.source_url}
+                aria-label="打开联系方式原文"
+                onClick={() => openSource(contact.source_url)}
+              />
+            </Tooltip>
+            <Tooltip title={canOpenModule(contact.module) ? `进入${contact.module_label}` : '暂无对应模块'}>
+              <Button
+                type="text"
+                icon={<ArrowRightOutlined />}
+                disabled={!canOpenModule(contact.module)}
+                aria-label="进入联系方式来源模块"
+                onClick={() => {
+                  if (canOpenModule(contact.module)) {
+                    openTargetModule(selectedTarget.target_id, contact.module)
+                  }
+                }}
+              />
+            </Tooltip>
+          </Space>
+        ),
+      },
+    ]
+    const findingColumns: ColumnsType<TargetDashboardFinding> = [
+      {
+        title: '分值',
+        dataIndex: 'attention_score',
+        key: 'attention_score',
+        width: 76,
+        render: (score: number) => <Tag color={score >= 80 ? 'red' : score >= 70 ? 'orange' : 'default'}>{score}</Tag>,
+      },
+      {
+        title: '发现',
+        key: 'finding',
+        render: (_, finding) => (
+          <div className="target-finding-summary">
+            <Space size={6} wrap>
+              <Text strong>{finding.label || finding.type || '未命名 Finding'}</Text>
+              <Tag>{finding.module_label}</Tag>
+            </Space>
+            {finding.value ? <Text copyable={{ text: finding.value }}>{finding.value}</Text> : null}
+            {finding.context ? (
+              <Tooltip title={finding.context}>
+                <Text type="secondary" className="target-contact-context">{finding.context}</Text>
+              </Tooltip>
+            ) : null}
+          </div>
+        ),
+      },
+      {
+        title: '归属',
+        dataIndex: 'party_name',
+        key: 'party_name',
+        width: 180,
+        render: (value: string) => value || <Text type="secondary">当前 Target</Text>,
+      },
+      {
+        title: '',
+        key: 'actions',
+        width: 90,
+        fixed: 'right',
+        render: (_, finding) => (
+          <Space size={0}>
+            <Tooltip title={finding.source_url ? '打开原文' : '暂无原文链接'}>
+              <Button
+                type="text"
+                icon={<LinkOutlined />}
+                disabled={!finding.source_url}
+                aria-label="打开 Finding 原文"
+                onClick={() => openSource(finding.source_url)}
+              />
+            </Tooltip>
+            <Tooltip title={canOpenModule(finding.module) ? `进入${finding.module_label}` : '暂无对应模块'}>
+              <Button
+                type="text"
+                icon={<ArrowRightOutlined />}
+                disabled={!canOpenModule(finding.module)}
+                aria-label="进入 Finding 来源模块"
+                onClick={() => {
+                  if (canOpenModule(finding.module)) {
+                    openTargetModule(selectedTarget.target_id, finding.module)
+                  }
+                }}
+              />
+            </Tooltip>
+          </Space>
+        ),
+      },
+    ]
+
+    return (
+      <div className="target-overview">
+        <div className="target-overview-metrics">
+          <Statistic title="Finding" value={summary.finding_count || 0} />
+          <Statistic
+            title="高分 Finding"
+            value={summary.high_score_finding_count || 0}
+            styles={{ content: { color: summary.high_score_finding_count ? '#cf1322' : undefined } }}
+          />
+          <Statistic title="存活资产" value={summary.alive_asset_count || 0} suffix={`/ ${summary.asset_count || 0}`} />
+          <Statistic title="个人电话" value={dashboard.contact_counts.personal_phone} />
+          <Statistic title="个人邮箱" value={dashboard.contact_counts.personal_email} />
+          <Statistic title="采集覆盖" value={summary.coverage_completed_count || 0} suffix={`/ ${summary.coverage_required_count || 4}`} />
+        </div>
+
+        <div className="target-overview-jumpbar">
+          <Text strong>快速进入</Text>
+          <Space size={[6, 6]} wrap>
+            {TARGET_MODULES.map((module) => (
+              <Button
+                key={module.tab}
+                size="small"
+                onClick={() => openTargetModule(selectedTarget.target_id, module.tab)}
+              >
+                {module.label} {summary[module.countKey] || 0}
+              </Button>
+            ))}
+          </Space>
+          <Tooltip title="刷新当前 Target 聚合数据">
+            <Button
+              type="text"
+              icon={<SyncOutlined spin={selectedTargetDashboardLoading} />}
+              disabled={selectedTargetDashboardLoading}
+              aria-label="刷新 Target 看板"
+              onClick={() => {
+                if (projectId) void fetchSelectedTargetDashboard(projectId, selectedTarget.target_id)
+              }}
+            />
+          </Tooltip>
+        </div>
+
+        <Row gutter={[20, 20]} className="target-contact-grid">
+          <Col xs={24} xl={12}>
+            <section className="target-overview-section">
+              <div className="target-overview-section-title">
+                <Space><PhoneOutlined /><Text strong>个人电话</Text><Tag>{dashboard.contact_counts.personal_phone}</Tag></Space>
+              </div>
+              <Table<TargetDashboardContact>
+                rowKey="contact_id"
+                size="small"
+                columns={contactColumns}
+                dataSource={dashboard.personal_phones}
+                scroll={{ x: 690 }}
+                locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档个人电话" /> }}
+                pagination={dashboard.personal_phones.length > 5 ? { pageSize: 5, size: 'small', showSizeChanger: false } : false}
+              />
+            </section>
+          </Col>
+          <Col xs={24} xl={12}>
+            <section className="target-overview-section">
+              <div className="target-overview-section-title">
+                <Space><MailOutlined /><Text strong>个人邮箱</Text><Tag>{dashboard.contact_counts.personal_email}</Tag></Space>
+              </div>
+              <Table<TargetDashboardContact>
+                rowKey="contact_id"
+                size="small"
+                columns={contactColumns}
+                dataSource={dashboard.personal_emails}
+                scroll={{ x: 690 }}
+                locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档个人邮箱" /> }}
+                pagination={dashboard.personal_emails.length > 5 ? { pageSize: 5, size: 'small', showSizeChanger: false } : false}
+              />
+            </section>
+          </Col>
+        </Row>
+
+        <section className="target-overview-section target-overview-findings">
+          <div className="target-overview-section-title">
+            <Space><WarningOutlined /><Text strong>高价值 Finding</Text><Tag>{dashboard.top_findings.length}</Tag></Space>
+          </div>
+          <Table<TargetDashboardFinding>
+            rowKey="finding_id"
+            size="small"
+            columns={findingColumns}
+            dataSource={dashboard.top_findings}
+            scroll={{ x: 820 }}
+            locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Finding" /> }}
+            pagination={false}
+          />
+        </section>
+      </div>
+    )
   }
 
   const renderTargetDashboard = () => {
@@ -4426,13 +4770,23 @@ export default function ProjectDetail() {
       label: (
         <Space>
           <AimOutlined />
-          Target 看板
+          Target 列表
           <Tag>{targetBatchTag ? `${projectTargetTotal}/${allProjectTargetTotal}` : projectTargetTotal}</Tag>
         </Space>
       ),
       children: renderTargetDashboard(),
     },
     ...(selectedTarget ? [
+    {
+      key: 'target' as TabKey,
+      label: (
+        <Space>
+          <DashboardOutlined />
+          概览
+        </Space>
+      ),
+      children: renderTargetOverview(),
+    },
     {
       key: 'website' as TabKey,
       label: (
@@ -4515,7 +4869,7 @@ export default function ProjectDetail() {
         <Space>
           <ThunderboltOutlined />
           任务
-          <Tag>{tasks.length}</Tag>
+          <Tag>{loadedTabsRef.current.has('tasks') ? tasksTotal : (dashboardData?.tasks.total ?? tasks.length)}</Tag>
         </Space>
       ),
       children: (
@@ -4808,16 +5162,23 @@ export default function ProjectDetail() {
   return (
     <div className="project-detail page-container fade-in">
       {coverageModalContext}
-      <div className="page-header slide-up">
-        <div>
+      <div className="page-header project-overview-header slide-up">
+        <div className="project-overview-main">
+          <div className="project-overview-eyebrow">
+            <Text type="secondary">项目</Text>
+            {tags.map((tag) => (
+              <Tag key={tag} color={stringToColor(tag)}>{tag}</Tag>
+            ))}
+          </div>
           <Title level={2} className="page-title">
-            项目详情
+            {project?.name || '项目详情'}
           </Title>
           <Paragraph className="page-description">
-            查看项目基本信息与更新时间
+            {project?.description || (loading ? '正在加载项目数据' : '暂无项目描述')}
           </Paragraph>
+          {renderMiniDashboard()}
         </div>
-        <Space>
+        <Space className="project-header-actions" size={[8, 8]} wrap>
           <Button
             icon={<ArrowLeftOutlined />}
             onClick={() => navigate('/projects')}
@@ -4884,17 +5245,6 @@ export default function ProjectDetail() {
           </div>
         ) : project ? (
           <>
-            <div className="project-detail-header">
-              <Title level={3} className="project-detail-title">{project.name}</Title>
-              <div className="project-detail-tags">
-                {tags.map((t) => (
-                  <Tag key={t} color={stringToColor(t)}>
-                    {t}
-                  </Tag>
-                ))}
-              </div>
-            </div>
-
             <Collapse
               className="project-basic-collapse slide-up stagger-2"
               size="small"
@@ -4924,9 +5274,6 @@ export default function ProjectDetail() {
               }]}
             />
 
-            {/* 简易看板 */}
-            {renderMiniDashboard()}
-
             {selectedTarget && activeTab !== 'targets' && (
               <div className="target-scope-bar">
                 <Button
@@ -4934,7 +5281,7 @@ export default function ProjectDetail() {
                   icon={<ArrowLeftOutlined />}
                   onClick={returnToTargetDashboard}
                 >
-                  返回 Target 看板
+                  返回 Target 列表
                 </Button>
                 <div className="target-scope-identity">
                   <Space size={[6, 4]} wrap>

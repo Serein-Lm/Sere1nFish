@@ -290,6 +290,98 @@ async def query_target_findings_with_copywriting(
     ], total
 
 
+async def query_target_dashboard_findings(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+    top_limit: int = 12,
+    contact_limit: int = 500,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load the bounded Finding projections needed by one Target dashboard."""
+    project_id = str(project_id or "").strip()
+    target_id = str(target_id or "").strip()
+    if not project_id or not target_id:
+        return [], []
+
+    target_query: dict[str, Any] = {
+        "project_id": project_id,
+        "$or": [
+            {"target_id": target_id},
+            {"target_ids": target_id},
+        ],
+    }
+    contact_query: dict[str, Any] = {
+        "$and": [
+            target_query,
+            {"channel": {"$in": ["phone", "telephone", "email"]}},
+            {"value": {"$nin": [None, ""]}},
+            {
+                "$or": [
+                    # Generic collectors already distinguish mobile numbers as
+                    # ``phone`` and landlines as ``telephone``.  The service
+                    # performs a second format check before exposing a number.
+                    {"channel": "phone"},
+                    {"type": {"$in": ["personal_mobile", "personal_email"]}},
+                    {"scope": "personal"},
+                    {
+                        "subtype": {
+                            "$in": ["mobile_personal", "email_personal"]
+                        }
+                    },
+                ]
+            },
+        ]
+    }
+    projection = {
+        "_id": 0,
+        "finding_id": 1,
+        "source": 1,
+        "type": 1,
+        "scope": 1,
+        "channel": 1,
+        "subtype": 1,
+        "role": 1,
+        "label": 1,
+        "value": 1,
+        "context": 1,
+        "summary": 1,
+        "attention_score": 1,
+        "party_name": 1,
+        "party_role": 1,
+        "entity_name": 1,
+        "target_relation": 1,
+        "url": 1,
+        "source_url": 1,
+        "source_document_id": 1,
+        "screenshot_url": 1,
+        "evidence_refs": 1,
+        "latest_evidence_ref": 1,
+        "created_at": 1,
+        "updated_at": 1,
+    }
+    bounded_top_limit = max(1, min(int(top_limit or 12), 30))
+    bounded_contact_limit = max(20, min(int(contact_limit or 500), 1_000))
+    collection = db[FINDINGS_COLLECTION]
+    top_job = (
+        collection.find(
+            {**target_query, "attention_score": {"$gte": 70}},
+            projection,
+        )
+        .sort([("attention_score", -1), ("updated_at", -1), ("created_at", -1)])
+        .limit(bounded_top_limit)
+        .to_list(bounded_top_limit)
+    )
+    contacts_job = (
+        collection.find(contact_query, projection)
+        .sort([("attention_score", -1), ("updated_at", -1), ("created_at", -1)])
+        .limit(bounded_contact_limit)
+        .to_list(bounded_contact_limit)
+    )
+    top_findings, contact_findings = await asyncio.gather(top_job, contacts_job)
+    return list(top_findings), list(contact_findings)
+
+
 def mobile_profile_finding_id(project_id: str, contact_id: str) -> str:
     """Stable finding id for one mobile contact profile within a project."""
     raw = f"mobile:{project_id}:{contact_id}".encode("utf-8")
