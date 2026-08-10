@@ -52,6 +52,9 @@ class ProjectPartitionRequest(BaseModel):
     batches: list[ProjectBatchPartitionSpec] = Field(min_length=1, max_length=50)
     copy_source_links: bool = True
     copy_bidding_links: bool = True
+    merge_existing_data: bool = False
+    archive_source_after_merge: bool = False
+    delete_source_after_merge: bool = False
     keep_source_project_in_group: bool = True
     dry_run: bool = True
 

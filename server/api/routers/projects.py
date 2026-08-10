@@ -127,7 +127,8 @@ async def partition_project_batches(
             request=body,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status_code = 404 if str(exc) == "源项目不存在" else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @router.get("/{project_id}", response_model=ProjectOut)

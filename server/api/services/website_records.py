@@ -14,6 +14,7 @@ from pymongo import UpdateOne
 
 from api.dao import targets as targets_dao
 from api.dao import web_tagging as web_tagging_dao
+from api.dao.project_scope import project_scope_query
 from api.db.collections import FINDINGS_COLLECTION, URL_SCAN_RESULTS_COLLECTION
 from api.services.site_relevance import classify_generic_surface
 from api.utils.url_identity import endpoint_identity, prefer_https_url
@@ -26,6 +27,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     collection = db[URL_SCAN_RESULTS_COLLECTION]
     await collection.create_index(
         [("project_id", 1), ("source", 1), ("target_id", 1)]
+    )
+    await collection.create_index(
+        [("project_ids", 1), ("source", 1), ("target_id", 1)]
     )
     await collection.create_index(
         [
@@ -192,13 +196,13 @@ async def _list_url_scan_candidates(
     target_id: str,
     candidate_limit: int | None,
 ) -> tuple[list[dict[str, Any]], int]:
-    query: dict[str, Any] = {
-        "project_id": project_id,
+    conditions: dict[str, Any] = {
         "source": "web_tagging",
         "excluded": {"$ne": True},
     }
     if target_id:
-        query["target_id"] = target_id
+        conditions["target_id"] = target_id
+    query = project_scope_query(project_id, conditions)
     collection = db[URL_SCAN_RESULTS_COLLECTION]
     if hasattr(collection, "aggregate"):
         sort = {
@@ -274,6 +278,7 @@ async def _list_url_scan_records(
             str(scan.get("endpoint_key") or endpoint_identity(str(scan.get("url") or ""))),
         )
         record = _adapt_url_scan_record(scan, findings_by_record.get(key, []))
+        record["project_id"] = project_id
         if not _is_excluded(record):
             records.append(record)
     return records, total
@@ -384,12 +389,14 @@ async def count_project_website_records_by_target(
 
     async def _list_scan_identities() -> list[dict[str, Any]]:
         cursor = db[URL_SCAN_RESULTS_COLLECTION].find(
-            {
-                "project_id": project_id,
+            project_scope_query(
+                project_id,
+                {
                 "source": "web_tagging",
                 "target_id": {"$in": list(selected)},
                 "excluded": {"$ne": True},
-            },
+                },
+            ),
             {
                 "_id": 0,
                 "target_id": 1,

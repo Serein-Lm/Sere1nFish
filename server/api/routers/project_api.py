@@ -21,6 +21,7 @@ from api.db.mongodb import init_mongo, get_db
 from api.dao import projects as projects_dao
 from api.dao import findings as findings_dao
 from api.dao import tasks as tasks_dao
+from api.dao.project_scope import project_scope_query
 from api.services.project_task_runtime import (
     execute_project_task,
     register_task_dispatchers,
@@ -941,7 +942,10 @@ async def get_findings_summary(project_id: str):
 
     # 附加无风险 URL 数
     safe_count = await db["url_scan_results"].count_documents(
-        {"project_id": project_id, "success": True, "has_findings": False}
+        project_scope_query(
+            project_id,
+            {"success": True, "has_findings": False},
+        )
     )
     summary["safe_count"] = safe_count
 
@@ -970,7 +974,10 @@ async def query_findings(project_id: str, body: FindingsQueryRequest | None = No
 
     if body.include_safe:
         cursor = db["url_scan_results"].find(
-            {"project_id": project_id, "success": True, "has_findings": False},
+            project_scope_query(
+                project_id,
+                {"success": True, "has_findings": False},
+            ),
             {"url": 1, "_id": 0},
         )
         safe_docs = await cursor.to_list(500)

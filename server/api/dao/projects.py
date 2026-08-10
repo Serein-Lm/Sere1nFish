@@ -23,6 +23,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     collection = db[PROJECTS_COLLECTION]
     await collection.create_index([("group_id", 1), ("updated_at", -1)])
     await collection.create_index([("name", 1), ("updated_at", -1)])
+    await collection.create_index([("archived_at", 1), ("updated_at", -1)])
 
 
 async def create_project(
@@ -91,7 +92,7 @@ async def list_projects(
     search: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     """列出项目，返回 (items, total)"""
-    query: dict[str, Any] = {}
+    query: dict[str, Any] = {"archived_at": {"$exists": False}}
     if group_id:
         query["group_id"] = group_id
     normalized_search = str(search or "").strip()
@@ -160,6 +161,34 @@ async def delete_project(db: AsyncIOMotorDatabase, project_id: str) -> bool:
 
     result = await db[PROJECTS_COLLECTION].delete_one({"_id": oid})
     return bool(result.deleted_count)
+
+
+async def archive_project(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    *,
+    reason: str,
+    merged_into_project_ids: list[str],
+    merge_summary: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Hide a merged project while retaining its audit and evidence history."""
+    now = _now()
+    return await update_project(
+        db,
+        project_id,
+        {
+            "archived_at": now,
+            "archive_reason": str(reason or "project_data_merged"),
+            "merged_into_project_ids": list(
+                dict.fromkeys(
+                    str(value or "").strip()
+                    for value in merged_into_project_ids
+                    if str(value or "").strip()
+                )
+            ),
+            "merge_summary": dict(merge_summary or {}),
+        },
+    )
 
 
 async def append_project_content(

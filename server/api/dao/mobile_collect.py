@@ -24,6 +24,7 @@ from api.db.collections import (
     MOBILE_COLLECT_RECORDS_COLLECTION,
     MOBILE_COLLECT_TASKS_COLLECTION,
 )
+from api.dao.project_scope import project_scope_query
 
 
 def _now() -> datetime:
@@ -41,6 +42,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await records.create_index([("task_def_id", 1), ("last_seen", -1)])
     await records.create_index([("task_def_id", 1), ("is_new", 1)])
     await records.create_index([("project_id", 1), ("last_seen", -1)])
+    await records.create_index([("project_ids", 1), ("last_seen", -1)])
     await records.create_index([("target_id", 1), ("last_seen", -1)])
     await records.create_index("source_document_id", sparse=True)
     await records.create_index(
@@ -537,7 +539,6 @@ async def upsert_record(
     set_fields: dict[str, Any] = {
         "record_id": record_id,
         "task_def_id": task_def_id,
-        "project_id": project_id,
         "keyword": keyword,
         "last_seen": now,
         "latest_run_task_id": run_task_id,
@@ -582,6 +583,8 @@ async def upsert_record(
         "$set": set_fields,
         "$setOnInsert": {"first_seen": now},
     }
+    if project_id:
+        update["$setOnInsert"]["project_id"] = project_id
     if legacy_duplicate and legacy_duplicate.get("first_seen"):
         existing_first_seen = (existing or {}).get("first_seen")
         duplicate_first_seen = legacy_duplicate["first_seen"]
@@ -594,6 +597,8 @@ async def upsert_record(
     add_to_set: dict[str, Any] = {}
     if run_task_id:
         add_to_set["run_task_ids"] = run_task_id
+    if project_id:
+        add_to_set["project_ids"] = project_id
     if screenshot_ids:
         add_to_set["screenshot_ids"] = {"$each": screenshot_ids}
     if screenshot_urls:
@@ -738,8 +743,6 @@ async def list_records(
     query: dict[str, Any] = {"superseded_by_record_id": {"$exists": False}}
     if task_def_id:
         query["task_def_id"] = task_def_id
-    if project_id:
-        query["project_id"] = project_id
     if target_id:
         query["target_id"] = target_id
     if only_incremental:
@@ -748,6 +751,8 @@ async def list_records(
         query["source_document_id"] = {"$exists": True, "$nin": ["", None]}
     if min_score is not None:
         query["score"] = {"$gte": min_score}
+    if project_id:
+        query = project_scope_query(project_id, query)
     total = await db[MOBILE_COLLECT_RECORDS_COLLECTION].count_documents(query)
     cursor = (
         db[MOBILE_COLLECT_RECORDS_COLLECTION]

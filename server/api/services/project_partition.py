@@ -118,6 +118,10 @@ async def partition_project_by_batch_tags(
     request: ProjectPartitionRequest,
 ) -> dict[str, Any]:
     """Create idempotent batch projects while preserving the source as archive."""
+    if (
+        request.archive_source_after_merge or request.delete_source_after_merge
+    ) and not request.merge_existing_data:
+        raise ValueError("归档或删除源项目必须同时启用历史数据合并")
     source_project = await projects_dao.get_project(db, source_project_id)
     if not source_project:
         raise ValueError("源项目不存在")
@@ -153,6 +157,44 @@ async def partition_project_by_batch_tags(
         "batches": plans,
     }
     if request.dry_run:
+        if request.merge_existing_data:
+            from api.services.project_data_merge import (
+                MergeDestination,
+                merge_project_data,
+            )
+
+            destinations: list[MergeDestination] = []
+            for spec in request.batches:
+                project = await projects_dao.get_project_by_name(
+                    db,
+                    spec.project_name.strip(),
+                )
+                if not project:
+                    continue
+                destinations.append(
+                    MergeDestination(
+                        project_id=str(project.get("_id") or ""),
+                        target_ids=frozenset(
+                            str(item.get("target_id") or "")
+                            for item in selected_by_tag[spec.batch_tag]
+                            if str(item.get("target_id") or "")
+                        ),
+                        batch_tag=spec.batch_tag,
+                    )
+                )
+            if len(destinations) == len(request.batches):
+                result["data_merge"] = await merge_project_data(
+                    db,
+                    source_project_id=source_project_id,
+                    destinations=destinations,
+                    dry_run=True,
+                )
+            else:
+                result["data_merge"] = {
+                    "dry_run": True,
+                    "available": False,
+                    "reason": "部分目标项目尚未创建，应用拆分后才能计算稳定 ID",
+                }
         return result
 
     group = await _ensure_group(
@@ -169,6 +211,7 @@ async def partition_project_by_batch_tags(
         )
 
     applied: list[dict[str, Any]] = []
+    merge_destinations = []
     for spec in request.batches:
         project = await projects_dao.upsert_get_project_by_name(
             db,
@@ -223,5 +266,69 @@ async def partition_project_by_batch_tags(
                 "bidding_links_copied": bidding_links,
             }
         )
+        if request.merge_existing_data:
+            from api.services.project_data_merge import MergeDestination
+
+            merge_destinations.append(
+                MergeDestination(
+                    project_id=destination_project_id,
+                    target_ids=frozenset(target_ids),
+                    batch_tag=spec.batch_tag,
+                )
+            )
+    data_merge: dict[str, Any] | None = None
+    if request.merge_existing_data:
+        from api.services.project_data_merge import merge_project_data
+
+        data_merge = await merge_project_data(
+            db,
+            source_project_id=source_project_id,
+            destinations=merge_destinations,
+            dry_run=False,
+        )
+        if request.delete_source_after_merge:
+            from api.services.project_data_merge import purge_merged_source_project
+
+            cleanup = await purge_merged_source_project(
+                db,
+                source_project_id=source_project_id,
+                destinations=merge_destinations,
+            )
+            data_merge["source_project_deleted"] = True
+            data_merge["source_cleanup"] = cleanup
+        elif request.archive_source_after_merge:
+            if not data_merge.get("complete"):
+                raise ValueError("数据合并存在未映射记录，源项目未归档")
+            active_tasks = await db["tasks"].count_documents(
+                {
+                    "project_id": source_project_id,
+                    "status": {"$in": ["queued", "pending", "running", "pausing"]},
+                }
+            )
+            if active_tasks:
+                raise ValueError("源项目仍有运行中的任务，数据已合并但未归档")
+            await projects_dao.archive_project(
+                db,
+                source_project_id,
+                reason="partition_data_merged",
+                merged_into_project_ids=[
+                    destination.project_id for destination in merge_destinations
+                ],
+                merge_summary={
+                    key: data_merge.get(key)
+                    for key in (
+                        "source_target_count",
+                        "mapped_target_count",
+                        "planned_relations_total",
+                        "existing_relations_total",
+                        "inserted_total",
+                        "updated_total",
+                        "generated_at",
+                    )
+                },
+            )
+            data_merge["source_project_archived"] = True
     result.update({"group_id": group_id, "applied": applied})
+    if data_merge is not None:
+        result["data_merge"] = data_merge
     return result

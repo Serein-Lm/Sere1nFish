@@ -24,6 +24,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     collection = db[URL_SCAN_RESULTS_COLLECTION]
     await collection.create_index("result_id", unique=True, sparse=True)
     await collection.create_index([("task_id", 1), ("url", 1)])
+    await collection.create_index([("project_ids", 1), ("updated_at", -1)])
     await collection.create_index(
         [("task_id", 1), ("terminal", 1), ("success", 1)]
     )
@@ -80,7 +81,11 @@ async def upsert_terminal_result(
     }
     await db[URL_SCAN_RESULTS_COLLECTION].update_one(
         {"result_id": stable_id},
-        {"$set": fields, "$setOnInsert": {"created_at": now}},
+        {
+            "$set": fields,
+            "$setOnInsert": {"created_at": now},
+            "$addToSet": {"project_ids": project_id},
+        },
         upsert=True,
     )
     return fields
@@ -124,6 +129,7 @@ async def upsert_retryable_result(
             "$set": fields,
             "$unset": {"completed_at": ""},
             "$setOnInsert": {"created_at": now},
+            "$addToSet": {"project_ids": project_id},
             "$push": {
                 "attempt_errors": {
                     "$each": [entry],

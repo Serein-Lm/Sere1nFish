@@ -8,6 +8,7 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.db.collections import TARGET_RESEARCH_COLLECTION
+from api.dao.project_scope import project_scope_query
 
 
 def research_id(target_id: str, task_id: str) -> str:
@@ -20,6 +21,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await coll.create_index("research_id", unique=True)
     await coll.create_index([("target_id", 1), ("researched_at", -1)])
     await coll.create_index([("project_id", 1), ("researched_at", -1)])
+    await coll.create_index([("project_ids", 1), ("researched_at", -1)])
     await coll.create_index([("project_id", 1), ("target_id", 1), ("is_latest", 1)])
     await coll.create_index("task_id", sparse=True)
 
@@ -65,9 +67,14 @@ async def save_research(
         "researched_at": now,
         "updated_at": now,
     }
+    payload.pop("project_id", None)
     await db[TARGET_RESEARCH_COLLECTION].update_one(
         {"research_id": rid},
-        {"$set": payload, "$setOnInsert": {"created_at": now}},
+        {
+            "$set": payload,
+            "$setOnInsert": {"created_at": now, "project_id": project_id},
+            "$addToSet": {"project_ids": project_id},
+        },
         upsert=True,
     )
     return await db[TARGET_RESEARCH_COLLECTION].find_one(
@@ -83,7 +90,7 @@ async def get_latest_research(
 ) -> dict[str, Any] | None:
     query: dict[str, Any] = {"target_id": target_id, "is_latest": True}
     if project_id:
-        query["project_id"] = project_id
+        query = project_scope_query(project_id, query)
     return await db[TARGET_RESEARCH_COLLECTION].find_one(
         query, {"_id": 0}, sort=[("researched_at", -1)]
     )
@@ -97,9 +104,10 @@ async def list_project_research(
     skip: int = 0,
     limit: int = 50,
 ) -> tuple[list[dict[str, Any]], int]:
-    query: dict[str, Any] = {"project_id": project_id}
+    query: dict[str, Any] = {}
     if target_id:
         query["target_id"] = target_id
+    query = project_scope_query(project_id, query)
     coll = db[TARGET_RESEARCH_COLLECTION]
     total = await coll.count_documents(query)
     bounded = max(1, min(int(limit or 50), 200))

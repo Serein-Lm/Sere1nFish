@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.dao import projects as projects_dao
 from api.dao import mobile_collect as mobile_collect_dao
 from api.dao import targets as targets_dao
+from api.dao.project_scope import project_scope_query
 from api.db.collections import (
     FOFA_ASSETS_COLLECTION,
     FINDINGS_COLLECTION,
@@ -661,11 +662,13 @@ async def list_project_target_summaries(
     record_counts_job = db[MOBILE_COLLECT_RECORDS_COLLECTION].aggregate(
         [
             {
-                "$match": {
-                    "project_id": project_id,
-                    "target_id": {"$in": target_ids},
-                    "superseded_by_record_id": {"$exists": False},
-                }
+                "$match": project_scope_query(
+                    project_id,
+                    {
+                        "target_id": {"$in": target_ids},
+                        "superseded_by_record_id": {"$exists": False},
+                    },
+                ),
             },
             {"$group": {"_id": "$target_id", "record_count": {"$sum": 1}}},
         ]
@@ -673,12 +676,17 @@ async def list_project_target_summaries(
     wechat_counts_job = db[MOBILE_COLLECT_RECORDS_COLLECTION].aggregate(
         [
             {
-                "$match": {
-                    "project_id": project_id,
-                    "target_id": {"$in": target_ids},
-                    "superseded_by_record_id": {"$exists": False},
-                    "source_document_id": {"$exists": True, "$nin": ["", None]},
-                }
+                "$match": project_scope_query(
+                    project_id,
+                    {
+                        "target_id": {"$in": target_ids},
+                        "superseded_by_record_id": {"$exists": False},
+                        "source_document_id": {
+                            "$exists": True,
+                            "$nin": ["", None],
+                        },
+                    },
+                ),
             },
             {"$group": {"_id": "$target_id", "wechat_count": {"$sum": 1}}},
         ]

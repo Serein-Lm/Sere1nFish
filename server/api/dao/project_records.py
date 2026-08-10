@@ -19,6 +19,7 @@ from api.db.collections import (
     URL_SCAN_RESULTS_COLLECTION,
     URL_SCAN_TASKS_COLLECTION,
 )
+from api.dao.project_scope import project_scope_query
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ async def list_project_records(
     spec = PROJECT_RECORD_SOURCES.get(str(source or "").strip())
     if spec is None:
         raise ValueError(f"未知项目记录源: {source!r}")
-    query = {"project_id": project_id}
+    query = project_scope_query(project_id)
     bounded_limit = max(1, min(int(limit or 50), 200))
     collection = db[spec.collection]
     total = await collection.count_documents(query)

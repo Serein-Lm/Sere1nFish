@@ -14,6 +14,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.dao import findings as findings_dao
 from api.dao import mobile_collect as mobile_collect_dao
 from api.dao import scholar_contact as scholar_contact_dao
+from api.dao.project_scope import project_scope_query
 from api.db.collections import (
     TASKS_COLLECTION,
     XHS_NOTES_COLLECTION,
@@ -111,7 +112,10 @@ async def resolve_project_dashboard(
             {"_id": 0, "finding_id": 1, "source": 1, "type": 1, "label": 1, "value": 1, "attention_score": 1},
         ).sort("attention_score", -1).limit(10).to_list(10),
         db[URL_SCAN_RESULTS_COLLECTION].count_documents(
-            {"project_id": project_id, "success": True, "has_findings": False}
+            project_scope_query(
+                project_id,
+                {"success": True, "has_findings": False},
+            )
         ),
     )
 

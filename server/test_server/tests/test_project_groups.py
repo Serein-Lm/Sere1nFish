@@ -168,3 +168,106 @@ def test_partition_link_ids_are_project_scoped_and_stable() -> None:
     assert document_link_id("project-a", "target-a", "document-a") != (
         document_link_id("project-b", "target-a", "document-a")
     )
+
+
+def test_project_scope_query_keeps_domain_or_conditions() -> None:
+    from api.dao.project_scope import project_scope_query
+
+    query = project_scope_query(
+        "project-a",
+        {"$or": [{"is_new": True}, {"is_changed": True}], "score": {"$gte": 70}},
+    )
+
+    assert query == {
+        "$and": [
+            {
+                "$or": [
+                    {"project_id": "project-a"},
+                    {"project_ids": "project-a"},
+                ]
+            },
+            {
+                "$or": [{"is_new": True}, {"is_changed": True}],
+                "score": {"$gte": 70},
+            },
+        ]
+    }
+
+
+def test_merge_routes_intentional_target_overlap_once_per_project() -> None:
+    from api.services.project_data_merge import MergeDestination, route_destinations
+
+    destinations = [
+        MergeDestination("project-first", frozenset({"target-a", "target-b"})),
+        MergeDestination("project-education", frozenset({"target-b"})),
+    ]
+
+    selected = route_destinations(["target-b", "target-b"], destinations)
+
+    assert [item.project_id for item in selected] == [
+        "project-first",
+        "project-education",
+    ]
+
+
+def test_merge_rekeys_finding_and_filters_project_targets() -> None:
+    from api.services.project_data_merge import (
+        MergeDestination,
+        _CLONE_ADAPTERS,
+        prepare_project_clone,
+    )
+
+    adapter = next(item for item in _CLONE_ADAPTERS if item.name == "findings")
+    source = {
+        "finding_id": "old-finding",
+        "project_id": "source-project",
+        "target_id": "target-a",
+        "target_ids": ["target-a", "target-outside"],
+        "source": "web_tagging",
+        "url": "https://example.com/login",
+        "channel": "email",
+        "value": "contact@example.com",
+        "type": "contact",
+    }
+
+    clone, identity = prepare_project_clone(
+        adapter,
+        source,
+        MergeDestination("destination-project", frozenset({"target-a"})),
+    )
+
+    assert identity.startswith("fnd_")
+    assert identity != source["finding_id"]
+    assert clone["project_id"] == "destination-project"
+    assert clone["target_ids"] == ["target-a"]
+
+
+@pytest.mark.asyncio
+async def test_partition_archive_requires_data_merge() -> None:
+    from api.models.projects import ProjectBatchPartitionSpec, ProjectPartitionRequest
+    from api.services.project_partition import partition_project_by_batch_tags
+
+    request = ProjectPartitionRequest(
+        group_name="批次",
+        batches=[ProjectBatchPartitionSpec(batch_tag="第一批", project_name="新项目")],
+        archive_source_after_merge=True,
+    )
+
+    with pytest.raises(ValueError, match="必须同时启用历史数据合并"):
+        await partition_project_by_batch_tags(
+            object(),
+            source_project_id="source-project",
+            request=request,
+        )
+
+
+def test_merge_project_ids_removes_source_and_preserves_destinations() -> None:
+    from api.services.project_data_merge import _merge_project_ids
+
+    merged = _merge_project_ids(
+        {"project_ids": ["source", "destination-a"]},
+        ["destination-a", "destination-b"],
+        "source",
+    )
+
+    assert merged == ["destination-a", "destination-b"]

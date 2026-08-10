@@ -86,7 +86,12 @@ async def get_group_names(
 async def list_groups(db: AsyncIOMotorDatabase) -> list[dict[str, Any]]:
     count_cursor = db[PROJECTS_COLLECTION].aggregate(
         [
-            {"$match": {"group_id": {"$exists": True, "$nin": [None, ""]}}},
+            {
+                "$match": {
+                    "group_id": {"$exists": True, "$nin": [None, ""]},
+                    "archived_at": {"$exists": False},
+                }
+            },
             {"$group": {"_id": "$group_id", "count": {"$sum": 1}}},
         ]
     )
@@ -119,7 +124,7 @@ async def update_group(
     if doc is None:
         return None
     project_count = await db[PROJECTS_COLLECTION].count_documents(
-        {"group_id": group_id}
+        {"group_id": group_id, "archived_at": {"$exists": False}}
     )
     return {**doc, "project_count": project_count}
 
