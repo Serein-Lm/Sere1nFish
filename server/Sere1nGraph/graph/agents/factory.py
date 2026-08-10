@@ -32,8 +32,10 @@ from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT = 6
 PERSONA_RESEARCH_MCP_TOOLS = ("navigate_page", "evaluate_script")
+TARGET_RESEARCH_MCP_TOOLS = ("navigate_page", "take_snapshot")
 PERSONA_RESEARCH_MCP_TOOL_LIMIT = 24
 PERSONA_RESEARCH_TOOL_OUTPUT_MAX_CHARS = 7000
+RESEARCH_NAVIGATION_TIMEOUT_MS = 12_000
 PERSONA_RESEARCH_SUMMARY_PROMPT = """\
 把下面的浏览研究历史压缩为可继续执行的证据账本，最多 1200 个中文字符。
 必须保留 mission_id、已经访问的每个来源 URL 与标题、各来源支持的具体事实、
@@ -48,11 +50,63 @@ PERSONA_RESEARCH_RUNTIME_POLICY = """
 
 - 运行时只提供 `navigate_page` 与 `evaluate_script`。不得尝试调用快照、截图、点击、表单或下载工具。
 - 先用 3 个有差异的检索词打开搜索结果页；每个结果页只读取一次，并提取候选 URL。
-- 页面读取统一使用只读 `evaluate_script`：搜索页返回当前 URL、标题及不超过 30 条候选链接；正文页优先读取 article/main，并把正文限制在 4500 字符内。
+- 导航由运行时固定为 12 秒预算；超时后不要重复等待，直接尝试读取已经加载的正文。
+- 页面读取统一使用只读 `evaluate_script`；运行时适配器会忽略自定义 DOM 脚本，并固定返回当前 URL、标题、最多 4500 字符正文和 30 条候选链接。
 - `evaluate_script` 不得发起 fetch/XHR，不得点击、提交表单、读取 Cookie 或本地存储。
+- 单个页面读取返回 `Tool ... error` 时，记录该 URL 并立即切换到不同域名；不得在同一页面重复读取。
 - 每个 URL 最多导航两次。维护来源证据账本，不要反复读取已经获得的页面内容。
 - 实际读取 8 个跨站点有效正文来源并形成至少 12 条有 URL 关联的具体洞察后，立即输出最终 JSON。
 """
+TARGET_RESEARCH_RUNTIME_POLICY = """
+# 只读深研浏览策略
+
+- 运行时只提供 `navigate_page` 与 `take_snapshot`。不得尝试调用脚本、截图、点击、表单或下载工具。
+- 每轮只能调用一个工具，按“导航 -> 读取 -> 判断下一来源”的顺序执行。
+- 先用 3 个有差异的检索词打开搜索结果页；每个结果页只读取一次，并提取候选 URL。
+- 页面读取统一使用 `take_snapshot`；快照保留当前 URL、可访问文本与候选链接，不执行模型提供的页面脚本。
+- 百科、问答、地图商户、企业目录和内容聚合页不得打开或计入来源；应直接选择官网、主管单位、政府、监管或机构一手页面。
+- 单个页面读取返回 `Tool ... error` 时，记录该 URL 并立即切换到不同域名；不得在同一页面重复读取。
+- 每个 URL 最多导航两次。维护来源证据账本，不要反复读取已经获得的页面内容。
+- 实际读取 8 个跨站点有效正文来源并形成至少 12 条有 URL 关联的具体洞察后，立即输出最终 JSON。
+"""
+RESEARCH_PAGE_READ_FUNCTION = r"""() => {
+  try { window.stop(); } catch (_) {}
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const root = document.querySelector('article, main, [role="main"], #content, .content, .main') || document.body || document.documentElement;
+  const ignored = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'TEMPLATE']);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const chunks = [];
+  let textLength = 0;
+  let visitedTextNodes = 0;
+  while (visitedTextNodes < 800 && textLength < 4500) {
+    const node = walker.nextNode();
+    if (!node) break;
+    visitedTextNodes += 1;
+    if (ignored.has(node.parentElement?.tagName || '')) continue;
+    const value = clean(node.nodeValue);
+    if (!value) continue;
+    const chunk = value.slice(0, 4500 - textLength);
+    chunks.push(chunk);
+    textLength += chunk.length + 1;
+  }
+  const anchors = document.links || [];
+  const links = [];
+  for (let index = 0; index < Math.min(anchors.length, 200) && links.length < 30; index += 1) {
+    const anchor = anchors[index];
+    const url = String(anchor.href || '');
+    if (!/^https?:\/\//i.test(url)) continue;
+    const labelNode = anchor.querySelector('h1, h2, h3') || anchor.firstChild;
+    const title = clean(anchor.getAttribute('aria-label') || anchor.title || labelNode?.textContent).slice(0, 160);
+    links.push({ title, url });
+  }
+  return {
+    url: location.href,
+    title: clean(document.title).slice(0, 300),
+    text: chunks.join(' ').slice(0, 4500),
+    links,
+  };
+}"""
+RESEARCH_PAGE_READ_SCRIPT = f"({RESEARCH_PAGE_READ_FUNCTION})()"
 WEB_TAGGING_RUNTIME_POLICY = (
     "运行时浏览约束覆盖旧版提示词中的次数说明：浏览器工具最多调用 6 次；"
     "允许同站 HTTP 转 HTTPS 重试一次；遇到登录弹窗不得登录，"
@@ -105,9 +159,55 @@ def _compact_persona_research_result(_tool_name: str, result: Any) -> Any:
     return _compact_content(result)
 
 
+def _standardize_research_browser_call(
+    tool_name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Apply bounded navigation and page-read semantics to research calls."""
+    if tool_name in {"navigate_page", "navigate"}:
+        call_args = tuple(args)
+        call_kwargs = dict(kwargs)
+        if tool_name == "navigate":
+            return call_args, call_kwargs
+        if call_args and isinstance(call_args[0], dict):
+            payload = dict(call_args[0])
+            payload["timeout"] = RESEARCH_NAVIGATION_TIMEOUT_MS
+            return (payload, *call_args[1:]), call_kwargs
+        call_kwargs["timeout"] = RESEARCH_NAVIGATION_TIMEOUT_MS
+        return call_args, call_kwargs
+
+    if tool_name not in {"evaluate_script", "evaluate"}:
+        return args, kwargs
+
+    call_args = tuple(args)
+    call_kwargs = dict(kwargs)
+    if tool_name == "evaluate":
+        if call_args and isinstance(call_args[0], dict):
+            payload = dict(call_args[0])
+            payload.clear()
+            payload["script"] = RESEARCH_PAGE_READ_SCRIPT
+            return (payload, *call_args[1:]), call_kwargs
+        if call_args:
+            return (RESEARCH_PAGE_READ_SCRIPT, *call_args[1:]), call_kwargs
+        return (), {"script": RESEARCH_PAGE_READ_SCRIPT}
+
+    call_kwargs.pop("args", None)
+    if "function" in call_kwargs or not call_args:
+        call_kwargs["function"] = RESEARCH_PAGE_READ_FUNCTION
+        return call_args, call_kwargs
+    if isinstance(call_args[0], dict):
+        payload = dict(call_args[0])
+        payload.pop("args", None)
+        payload["function"] = RESEARCH_PAGE_READ_FUNCTION
+        return (payload, *call_args[1:]), call_kwargs
+    return (RESEARCH_PAGE_READ_FUNCTION, *call_args[1:]), call_kwargs
+
+
 def _build_persona_research_guard(
 ) -> Callable[[str, tuple[Any, ...], dict[str, Any]], str | None]:
     navigation_counts: dict[str, int] = {}
+    navigation_pending_read = False
 
     def _argument(
         name: str,
@@ -124,7 +224,10 @@ def _build_persona_research_guard(
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> str | None:
-        if tool_name == "navigate_page":
+        nonlocal navigation_pending_read
+        if tool_name in {"navigate_page", "navigate"}:
+            if navigation_pending_read:
+                return "当前页面尚未读取；请先调用页面读取工具，再导航到下一来源。"
             url = _argument("url", args, kwargs)
             if not url:
                 return None
@@ -135,10 +238,19 @@ def _build_persona_research_guard(
             navigation_counts[normalized] = navigation_counts.get(normalized, 0) + 1
             if navigation_counts[normalized] > 2:
                 return "该 URL 已达到两次导航上限，请使用现有证据或更换来源。"
+            navigation_pending_read = True
             return None
 
-        if tool_name == "evaluate_script":
-            script = _argument("function", args, kwargs)
+        if tool_name == "take_snapshot":
+            navigation_pending_read = False
+            return None
+
+        if tool_name in {"evaluate_script", "evaluate"}:
+            script = _argument(
+                "script" if tool_name == "evaluate" else "function",
+                args,
+                kwargs,
+            )
             lowered = script.lower().replace(" ", "")
             unsafe_markers = (
                 "fetch(",
@@ -153,6 +265,7 @@ def _build_persona_research_guard(
             )
             if len(script) > 3000 or any(marker in lowered for marker in unsafe_markers):
                 return "脚本已被阻止：只允许紧凑、只读的 DOM 文本与链接提取。"
+            navigation_pending_read = False
         return None
 
     return _guard
@@ -360,7 +473,7 @@ async def create_target_research_agent(
         app_config=app_config,
         system_prompt=(
             f"{load_prompt('target_research/target_research')}\n\n"
-            f"{PERSONA_RESEARCH_RUNTIME_POLICY}"
+            f"{TARGET_RESEARCH_RUNTIME_POLICY}"
         ),
         builtin_tools=[],
         middleware=[
@@ -378,14 +491,20 @@ async def create_target_research_agent(
             ),
         ],
         mcp_server_name=server_name,
-        mcp_tool_names=("navigate_page", "evaluate_script"),
+        mcp_server_profile="readonly_research",
+        parallel_tool_calls=False,
+        mcp_tool_names=TARGET_RESEARCH_MCP_TOOLS,
         mcp_tool_limit=20,
+        mcp_tool_timeout=20,
+        # MCP 工具超时后底层请求可能继续占用会话，立即交给外层换容器；
+        # 页面级错误仍由官方工具转为文本，Agent 可正常切换来源。
         mcp_error_limit=1,
         timeout=900,
         # Browser transport retries are owned by target_research so every
         # retry gets a different managed Chrome container.
         max_attempts=1,
         output_mode=output_mode,
+        mcp_call_transform=_standardize_research_browser_call,
         mcp_call_guard=_build_persona_research_guard(),
         mcp_result_transform=_compact_persona_research_result,
         mcp_result_observer=mcp_result_observer,
@@ -687,6 +806,7 @@ async def create_persona_research_agent(
         timeout=420,
         mcp_tool_limit=PERSONA_RESEARCH_MCP_TOOL_LIMIT,
         max_attempts=1,
+        mcp_call_transform=_standardize_research_browser_call,
         mcp_call_guard=_build_persona_research_guard(),
         mcp_tool_names=PERSONA_RESEARCH_MCP_TOOLS,
         mcp_result_transform=_compact_persona_research_result,

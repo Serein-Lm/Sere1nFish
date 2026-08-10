@@ -13,6 +13,7 @@ MCP 客户端配置辅助模块。
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..config.models import AppConfig, McpServerConfig
@@ -20,6 +21,34 @@ from ..config.models import AppConfig, McpServerConfig
 
 CHROME_DEVTOOLS_MCP_COMMAND = "chrome-devtools-mcp"
 CHROME_ACCEPT_INSECURE_CERTS_ARG = "--acceptInsecureCerts"
+CHROME_MCP_PRELOAD_PATH = str(
+    Path(__file__).resolve().parents[3]
+    / "browser_manager"
+    / "chrome_mcp_preload.cjs"
+)
+CHROME_MCP_PROFILE_ARGS: dict[str, tuple[str, ...]] = {
+    # Keep official navigation and accessibility snapshots while omitting
+    # unrelated diagnostics from the specialized read-only research runtime.
+    "readonly_research": (
+        "--no-category-emulation",
+        "--no-category-performance",
+        "--no-category-network",
+        "--no-performance-crux",
+        "--no-usage-statistics",
+    ),
+}
+
+
+def _chrome_mcp_env(values: dict[str, str] | None = None) -> dict[str, str]:
+    """Install the narrow Chrome/MCP compatibility filter in child processes."""
+    env = dict(values or {})
+    preload = f"--require={CHROME_MCP_PRELOAD_PATH}"
+    node_options = str(env.get("NODE_OPTIONS") or "").strip()
+    if preload not in node_options.split():
+        env["NODE_OPTIONS"] = " ".join(
+            value for value in (node_options, preload) if value
+        )
+    return env
 
 
 def get_mcp_servers(
@@ -45,6 +74,8 @@ def get_mcp_servers(
 def build_mcp_connections(
     app_config: AppConfig,
     server_names: Iterable[str] | str | None = None,
+    *,
+    server_profile: str = "",
 ) -> dict[str, dict[str, Any]]:
     """
     基于 AppConfig 构造 MultiServerMCPClient 需要的 connections 字典。
@@ -58,7 +89,7 @@ def build_mcp_connections(
     servers = get_mcp_servers(app_config, server_names=server_names)
     return {
         name: (
-            _build_chrome_connection_dict(cfg)
+            _build_chrome_connection_dict(cfg, profile=server_profile)
             if name == "chrome-devtools" and cfg.transport == "stdio"
             else _build_connection_dict(cfg)
         )
@@ -89,6 +120,8 @@ def _build_connection_dict(cfg: McpServerConfig) -> dict[str, Any]:
 
 def _build_chrome_connection_dict(
     cfg: McpServerConfig,
+    *,
+    profile: str = "",
 ) -> dict[str, Any]:
     """Use the image-pinned executable instead of racing through shared npx."""
     result = _build_connection_dict(cfg)
@@ -101,7 +134,16 @@ def _build_chrome_connection_dict(
     ]
     if CHROME_ACCEPT_INSECURE_CERTS_ARG not in args:
         args.append(CHROME_ACCEPT_INSECURE_CERTS_ARG)
+    if profile:
+        try:
+            profile_args = CHROME_MCP_PROFILE_ARGS[profile]
+        except KeyError as exc:
+            raise ValueError(f"未知 Chrome MCP profile: {profile}") from exc
+        for arg in profile_args:
+            if arg not in args:
+                args.append(arg)
     result["args"] = args
+    result["env"] = _chrome_mcp_env(result.get("env"))
     return result
 
 
@@ -126,5 +168,6 @@ def build_chrome_mcp_connection(browser_url: str) -> dict[str, dict[str, Any]]:
                 f"--wsEndpoint={browser_url}",
                 CHROME_ACCEPT_INSECURE_CERTS_ARG,
             ],
+            "env": _chrome_mcp_env(),
         }
     }

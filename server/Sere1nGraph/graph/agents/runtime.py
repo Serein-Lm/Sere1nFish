@@ -39,6 +39,10 @@ logger = get_logger("agent_runtime")
 OutputMode = Literal["silent", "console", "sse"]
 ToolResultTransform = Callable[[str, Any], Any]
 ToolResultObserver = Callable[[str, Any], None]
+ToolCallTransform = Callable[
+    [str, tuple[Any, ...], dict[str, Any]],
+    tuple[tuple[Any, ...], dict[str, Any]],
+]
 
 # 默认超时（秒）
 DEFAULT_AGENT_TIMEOUT = 500
@@ -203,6 +207,7 @@ def _wrap_tools_with_error_handling(
     call_guard: Callable[
         [str, tuple[Any, ...], dict[str, Any]], str | None
     ] | None = None,
+    call_transform: ToolCallTransform | None = None,
     result_transform: ToolResultTransform | None = None,
     result_observer: ToolResultObserver | None = None,
 ) -> list:
@@ -248,12 +253,19 @@ def _wrap_tools_with_error_handling(
                         "请停止调用 MCP，并使用已获得的信息直接输出最终结果。"
                     )
                     return (message, "") if _art else message
-                if call_guard:
-                    blocked = call_guard(_name, args, kwargs)
-                    if blocked:
-                        return (blocked, "") if _art else blocked
                 try:
-                    call = _orig(*args, **kwargs)
+                    call_args, call_kwargs = args, kwargs
+                    if call_transform:
+                        call_args, call_kwargs = call_transform(
+                            _name,
+                            args,
+                            kwargs,
+                        )
+                    if call_guard:
+                        blocked = call_guard(_name, call_args, call_kwargs)
+                        if blocked:
+                            return (blocked, "") if _art else blocked
+                    call = _orig(*call_args, **call_kwargs)
                     result = await _await_tool_call(call, float(tool_timeout))
                     _es["consecutive"] = 0  # 成功则重置
                     _es["container_error_consecutive"] = 0
@@ -312,12 +324,19 @@ def _wrap_tools_with_error_handling(
                         "请停止调用 MCP，并使用已获得的信息直接输出最终结果。"
                     )
                     return (message, "") if _art else message
-                if call_guard:
-                    blocked = call_guard(_name, args, kwargs)
-                    if blocked:
-                        return (blocked, "") if _art else blocked
                 try:
-                    result = _orig(*args, **kwargs)
+                    call_args, call_kwargs = args, kwargs
+                    if call_transform:
+                        call_args, call_kwargs = call_transform(
+                            _name,
+                            args,
+                            kwargs,
+                        )
+                    if call_guard:
+                        blocked = call_guard(_name, call_args, call_kwargs)
+                        if blocked:
+                            return (blocked, "") if _art else blocked
+                    result = _orig(*call_args, **call_kwargs)
                     _es["consecutive"] = 0
                     _es["container_error_consecutive"] = 0
                     if result_observer is not None:
@@ -375,6 +394,7 @@ def create_llm(
     temperature: float = 0,
     streaming: bool = True,
     extra_body: dict[str, Any] | None = None,
+    parallel_tool_calls: bool | None = None,
 ) -> ChatOpenAI:
     """
     基于配置创建 ChatOpenAI。
@@ -390,6 +410,10 @@ def create_llm(
         "extra_body": disable_thinking_extra_body(extra_body),
         "max_retries": 0,
     }
+    if parallel_tool_calls is not None:
+        kwargs["model_kwargs"] = {
+            "parallel_tool_calls": bool(parallel_tool_calls),
+        }
 
     # 注入观测层 callback
     tracker = get_global_tracker()
@@ -422,15 +446,19 @@ def create_agent_node(
     builtin_tools: list[Callable[..., Any]] | None = None,
     middleware: list[Any] | None = None,
     mcp_server_name: str | None = None,
+    mcp_server_profile: str = "",
+    parallel_tool_calls: bool = True,
     output_mode: OutputMode = "silent",
     streaming: bool = True,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     mcp_tool_limit: int = 0,
+    mcp_tool_timeout: int = DEFAULT_TOOL_TIMEOUT,
     mcp_error_limit: int = 4,
     max_attempts: int = 3,
     mcp_call_guard: Callable[
         [str, tuple[Any, ...], dict[str, Any]], str | None
     ] | None = None,
+    mcp_call_transform: ToolCallTransform | None = None,
     mcp_tool_names: Sequence[str] | None = None,
     mcp_result_transform: ToolResultTransform | None = None,
     mcp_result_observer: ToolResultObserver | None = None,
@@ -444,11 +472,15 @@ def create_agent_node(
     - builtin_tools: 内置工具列表
     - middleware: 中间件列表
     - mcp_server_name: MCP server 名称（如 "playwright", "xhs"）
+    - mcp_server_profile: MCP 适配层运行 profile；空字符串表示默认能力集
+    - parallel_tool_calls: 是否允许模型在同一轮并行调用工具；单浏览器 Agent 应关闭
     - output_mode: 输出模式
     - streaming: LLM 是否使用流式输出（默认 True，关闭可获得完整 token 统计）
     - timeout: Agent 执行超时秒数（默认从 config.runtime.agent_timeout 读取，fallback 500s，0 表示不限）
     - mcp_tool_names: 专用 Agent 可见的 MCP 工具白名单；None 表示保留全部工具
+    - mcp_tool_timeout: 单次 MCP 工具调用超时秒数
     - mcp_error_limit: 同一 MCP 会话连续工具错误上限；由外层换容器的 Agent 可设为 1
+    - mcp_call_transform: MCP 调用进入适配器前的统一参数转换器
     - mcp_result_transform: MCP 工具结果进入模型上下文前的统一转换器
     - mcp_result_observer: 在压缩前观察原始 MCP 工具结果，用于独立证据账本等运行时状态
     
@@ -458,7 +490,11 @@ def create_agent_node(
     """
     from ..tools.mcp import build_mcp_connections
     
-    llm = create_llm(app_config, streaming=streaming)
+    llm = create_llm(
+        app_config,
+        streaming=streaming,
+        parallel_tool_calls=parallel_tool_calls,
+    )
     base_tools = list(builtin_tools or [])
     middleware_list = list(middleware or [])
 
@@ -470,7 +506,24 @@ def create_agent_node(
 
     mcp_connections = None
     if mcp_server_name:
-        mcp_connections = build_mcp_connections(app_config, server_names=mcp_server_name)
+        mcp_connections = build_mcp_connections(
+            app_config,
+            server_names=mcp_server_name,
+            server_profile=mcp_server_profile,
+        )
+
+    def _prepare_mcp_tools(mcp_tools: list[Any]) -> list[Any]:
+        prepared = _filter_mcp_tools(list(mcp_tools), mcp_tool_names)
+        return _wrap_tools_with_error_handling(
+            prepared,
+            tool_timeout=mcp_tool_timeout,
+            max_calls=mcp_tool_limit,
+            max_consecutive_errors=mcp_error_limit,
+            call_guard=mcp_call_guard,
+            call_transform=mcp_call_transform,
+            result_transform=mcp_result_transform,
+            result_observer=mcp_result_observer,
+        )
 
     if output_mode == "sse":
         async def _stream_once(state: MessagesState) -> AsyncGenerator[dict[str, Any], None]:
@@ -483,15 +536,7 @@ def create_agent_node(
                 if transport == "stdio":
                     async with _bounded_mcp_session(client, mcp_server_name) as session:
                         mcp_tools = await load_mcp_tools(session)
-                        mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
-                        mcp_tools = _wrap_tools_with_error_handling(
-                            mcp_tools,
-                            max_calls=mcp_tool_limit,
-                            max_consecutive_errors=mcp_error_limit,
-                            call_guard=mcp_call_guard,
-                            result_transform=mcp_result_transform,
-                            result_observer=mcp_result_observer,
-                        )
+                        mcp_tools = _prepare_mcp_tools(mcp_tools)
                         all_tools.extend(mcp_tools)
                         agent = create_agent(
                             model=llm,
@@ -505,15 +550,7 @@ def create_agent_node(
                         return
                 else:
                     mcp_tools = await client.get_tools()
-                    mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
-                    mcp_tools = _wrap_tools_with_error_handling(
-                        mcp_tools,
-                        max_calls=mcp_tool_limit,
-                        max_consecutive_errors=mcp_error_limit,
-                        call_guard=mcp_call_guard,
-                        result_transform=mcp_result_transform,
-                        result_observer=mcp_result_observer,
-                    )
+                    mcp_tools = _prepare_mcp_tools(mcp_tools)
                     all_tools.extend(mcp_tools)
 
             agent = create_agent(
@@ -571,28 +608,12 @@ def create_agent_node(
                     if transport == "stdio":
                         async with _bounded_mcp_session(client, mcp_server_name) as session:
                             mcp_tools = await load_mcp_tools(session)
-                            mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
-                            mcp_tools = _wrap_tools_with_error_handling(
-                                mcp_tools,
-                                max_calls=mcp_tool_limit,
-                                max_consecutive_errors=mcp_error_limit,
-                                call_guard=mcp_call_guard,
-                                result_transform=mcp_result_transform,
-                                result_observer=mcp_result_observer,
-                            )
+                            mcp_tools = _prepare_mcp_tools(mcp_tools)
                             all_tools.extend(mcp_tools)
                             return await _execute(all_tools)
                     else:
                         mcp_tools = await client.get_tools()
-                        mcp_tools = _filter_mcp_tools(mcp_tools, mcp_tool_names)
-                        mcp_tools = _wrap_tools_with_error_handling(
-                            mcp_tools,
-                            max_calls=mcp_tool_limit,
-                            max_consecutive_errors=mcp_error_limit,
-                            call_guard=mcp_call_guard,
-                            result_transform=mcp_result_transform,
-                            result_observer=mcp_result_observer,
-                        )
+                        mcp_tools = _prepare_mcp_tools(mcp_tools)
                         all_tools.extend(mcp_tools)
 
                 return await _execute(all_tools)

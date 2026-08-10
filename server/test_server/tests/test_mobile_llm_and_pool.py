@@ -140,6 +140,7 @@ def test_shared_llm_factory_preserves_vision_parameters(monkeypatch) -> None:
         model_name="qwen3.7-plus",
         streaming=False,
         extra_body={"vl_high_resolution_images": True},
+        parallel_tool_calls=False,
     )
 
     assert captured["extra_body"] == {
@@ -147,6 +148,7 @@ def test_shared_llm_factory_preserves_vision_parameters(monkeypatch) -> None:
         "vl_high_resolution_images": True,
     }
     assert captured["stream_usage"] is False
+    assert captured["model_kwargs"] == {"parallel_tool_calls": False}
     assert len(captured["callbacks"]) == 1
 
 

@@ -138,8 +138,27 @@ def _selected_browser_urls(text: str) -> list[str]:
     )
 
 
+def _unverified_navigation_domains(
+    attempted_urls: list[str],
+    verified_urls: set[str],
+) -> list[str]:
+    """Return failed page hosts in navigation order for browser failover."""
+    verified_hosts = {
+        (urlsplit(url).hostname or "").lower().rstrip(".")
+        for url in verified_urls
+    }
+    domains: list[str] = []
+    for value in attempted_urls:
+        url = _canonical_browser_url(value)
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        if host and host not in verified_hosts and host not in domains:
+            domains.append(host)
+    return domains
+
+
 def _build_navigation_evidence_observer(
     urls: set[str],
+    attempted_urls: list[str] | None = None,
 ) -> Callable[[str, Any], None]:
     """Record browser evidence before Agent summarization can discard messages."""
     pending_selected_url = ""
@@ -147,12 +166,46 @@ def _build_navigation_evidence_observer(
     def observe(tool_name: str, result: Any) -> None:
         nonlocal pending_selected_url
         text = _browser_tool_text(result)
-        if tool_name == "evaluate_script":
-            if pending_selected_url and "Script ran on page and returned:" in text:
-                urls.add(pending_selected_url)
+        if tool_name in {"evaluate_script", "evaluate", "take_snapshot"}:
+            if tool_name == "take_snapshot":
+                evaluation_succeeded = "## Latest page snapshot" in text
+                evaluated_values = re.findall(
+                    r'RootWebArea[^\n]*url="(https?://[^"\\]+)',
+                    text,
+                )
+            else:
+                evaluation_succeeded = (
+                    "Script ran on page and returned:" in text
+                    if tool_name == "evaluate_script"
+                    else '"url"' in text and '"text"' in text
+                )
+                evaluated_values = re.findall(
+                    r'"url"\s*:\s*"(https?://[^"\\]+)',
+                    text,
+                )
+            evaluated_url = (
+                _canonical_browser_url(evaluated_values[-1])
+                if evaluated_values
+                else ""
+            )
+            if evaluation_succeeded and (evaluated_url or pending_selected_url):
+                urls.add(evaluated_url or pending_selected_url)
                 pending_selected_url = ""
             return
-        if tool_name != "navigate_page":
+        if tool_name not in {"navigate_page", "navigate"}:
+            return
+
+        if tool_name == "navigate":
+            values = re.findall(r"Navigated to\s+(https?://[^\s]+)", text)
+            pending_selected_url = (
+                _canonical_browser_url(values[-1]) if values else ""
+            )
+            if (
+                pending_selected_url
+                and attempted_urls is not None
+                and pending_selected_url not in attempted_urls
+            ):
+                attempted_urls.append(pending_selected_url)
             return
 
         selected_urls = _selected_browser_urls(text)
@@ -160,14 +213,25 @@ def _build_navigation_evidence_observer(
             pending_selected_url = selected_urls[-1] if selected_urls else ""
             return
 
-        pending_selected_url = ""
-        for value in re.findall(
-            r"Successfully navigated to\s+(https?://[^\s]+)",
-            text,
+        successful_urls = [
+            url
+            for value in re.findall(
+                r"Successfully navigated to\s+(https?://[^\s]+)",
+                text,
+            )
+            if (url := _canonical_browser_url(value))
+        ]
+        pending_selected_url = (
+            selected_urls[-1]
+            if selected_urls
+            else (successful_urls[-1] if successful_urls else "")
+        )
+        if (
+            pending_selected_url
+            and attempted_urls is not None
+            and pending_selected_url not in attempted_urls
         ):
-            if url := _canonical_browser_url(value):
-                urls.add(url)
-        urls.update(selected_urls)
+            attempted_urls.append(pending_selected_url)
 
     return observe
 
@@ -888,10 +952,12 @@ async def run_target_research(
     prompt = load_prompt("target_research/target_research")
     parsed: dict[str, Any] | None = None
     navigated_urls: set[str] = set()
+    failed_domains: list[str] = []
     try:
         cdp_url = ""
         for browser_attempt in range(1, TARGET_RESEARCH_BROWSER_ATTEMPTS + 1):
             attempt_urls: set[str] = set()
+            attempted_urls: list[str] = []
             try:
                 if browser_attempt == 1:
                     cdp_url = await provider.get_cdp_endpoint(
@@ -927,7 +993,8 @@ async def run_target_research(
                 agent = await create_target_research_agent(
                     worker_config,
                     mcp_result_observer=_build_navigation_evidence_observer(
-                        attempt_urls
+                        attempt_urls,
+                        attempted_urls,
                     ),
                 )
 
@@ -973,19 +1040,38 @@ async def run_target_research(
                         ),
                     )
 
-                parsed = await run_research_pass(query, phase="target_research")
+                attempt_query = query
+                if failed_domains:
+                    attempt_query += (
+                        "\n\n以下域名在本任务此前的浏览器中未能成功读取，"
+                        "本轮禁止再次访问，请改用其他独立权威来源："
+                        + "、".join(failed_domains)
+                    )
+                parsed = await run_research_pass(
+                    attempt_query,
+                    phase="target_research",
+                )
                 if not parsed:
                     logger.warning(
                         "机构深研首次浏览证据不足，启动一次补充检索 | target=%s navigated=%s",
                         target_id,
                         len(attempt_urls),
                     )
+                    retry_failed_domains = _unverified_navigation_domains(
+                        attempted_urls,
+                        attempt_urls,
+                    )
                     retry_query = (
-                        query
+                        attempt_query
                         + "\n\n上一次浏览没有形成可校验结果。请重新检索并实际打开、读取至少两个正文页面，"
                         "其中至少一个必须是官网、政府、监管或机构一手来源。不要输出搜索结果页，"
                         "不要引用未打开的 URL；先完成补证，再输出完整 JSON。"
                     )
+                    if retry_failed_domains:
+                        retry_query += (
+                            "\n本轮未成功读取的以下域名不要再次访问："
+                            + "、".join(retry_failed_domains)
+                        )
                     parsed = await run_research_pass(
                         retry_query,
                         phase="target_research_evidence_retry",
@@ -993,16 +1079,23 @@ async def run_target_research(
                 navigated_urls = attempt_urls
                 break
             except Exception as exc:
+                for domain in _unverified_navigation_domains(
+                    attempted_urls,
+                    attempt_urls,
+                ):
+                    if domain not in failed_domains:
+                        failed_domains.append(domain)
                 if (
                     browser_attempt >= TARGET_RESEARCH_BROWSER_ATTEMPTS
                     or not is_browser_infrastructure_error(exc)
                 ):
                     raise
                 logger.warning(
-                    "机构深研浏览器故障，准备热切换重试 | target=%s attempt=%s/%s error=%s",
+                    "机构深研浏览器故障，准备热切换重试 | target=%s attempt=%s/%s avoid=%s error=%s",
                     target_id,
                     browser_attempt,
                     TARGET_RESEARCH_BROWSER_ATTEMPTS,
+                    failed_domains,
                     exc,
                 )
                 await update_task_stage(

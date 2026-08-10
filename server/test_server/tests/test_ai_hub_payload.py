@@ -116,7 +116,7 @@ def test_persona_profile_sources_are_kept_as_public_evidence() -> None:
 
 @pytest.mark.asyncio
 async def test_mobile_status_service_enriches_and_filters_devices(monkeypatch) -> None:
-    from api.dao import device_metadata
+    from api.dao import device_metadata, mobile_execution_leases
     from api.services.mobile_status import list_mobile_device_statuses
     from core.mobile.pool import DevicePool
 
@@ -155,8 +155,12 @@ async def test_mobile_status_service_enriches_and_filters_devices(monkeypatch) -
             }
         }
 
+    async def fake_active_leases(_db):
+        return []
+
     monkeypatch.setattr(DevicePool, "get_instance", staticmethod(lambda: FakePool()))
     monkeypatch.setattr(device_metadata, "get_metadata_map", fake_metadata)
+    monkeypatch.setattr(mobile_execution_leases, "list_active", fake_active_leases)
 
     all_items = await list_mobile_device_statuses(object())
     grouped = await list_mobile_device_statuses(object(), group_id="group-1")
@@ -164,6 +168,7 @@ async def test_mobile_status_service_enriches_and_filters_devices(monkeypatch) -
 
     assert len(all_items) == 2
     assert all_items[0]["meta"]["display_name"] == "测试手机"
+    assert all(item["executing"] is False for item in all_items)
     assert grouped == [all_items[0]]
     assert ungrouped == [all_items[1]]
 
@@ -821,8 +826,13 @@ def test_persona_research_browser_context_is_compact_and_read_only() -> None:
     from Sere1nGraph.graph.agents.factory import (
         PERSONA_RESEARCH_MCP_TOOLS,
         PERSONA_RESEARCH_TOOL_OUTPUT_MAX_CHARS,
+        RESEARCH_NAVIGATION_TIMEOUT_MS,
+        RESEARCH_PAGE_READ_FUNCTION,
+        RESEARCH_PAGE_READ_SCRIPT,
+        TARGET_RESEARCH_MCP_TOOLS,
         _build_persona_research_guard,
         _compact_persona_research_result,
+        _standardize_research_browser_call,
     )
     from Sere1nGraph.graph.agents.runtime import _filter_mcp_tools
 
@@ -847,7 +857,20 @@ def test_persona_research_browser_context_is_compact_and_read_only() -> None:
     guard = _build_persona_research_guard()
     public_url = "https://example.com/report#section"
     assert guard("navigate_page", (), {"url": public_url}) is None
+    assert "先调用页面读取工具" in str(
+        guard("navigate_page", (), {"url": public_url})
+    )
+    assert guard(
+        "evaluate_script",
+        (),
+        {"function": RESEARCH_PAGE_READ_FUNCTION},
+    ) is None
     assert guard("navigate_page", (), {"url": public_url}) is None
+    assert guard(
+        "evaluate_script",
+        (),
+        {"function": RESEARCH_PAGE_READ_FUNCTION},
+    ) is None
     assert "两次导航上限" in str(
         guard("navigate_page", (), {"url": public_url})
     )
@@ -857,6 +880,43 @@ def test_persona_research_browser_context_is_compact_and_read_only() -> None:
     assert "脚本已被阻止" in str(
         guard("evaluate_script", (), {"function": "async () => fetch('/private')"})
     )
+
+    call_args, call_kwargs = _standardize_research_browser_call(
+        "evaluate_script",
+        (),
+        {"function": "() => document.querySelector('.missing').innerText"},
+    )
+    assert call_args == ()
+    assert call_kwargs == {"function": RESEARCH_PAGE_READ_FUNCTION}
+    assert "innerText" not in RESEARCH_PAGE_READ_FUNCTION
+    assert "window.stop()" in RESEARCH_PAGE_READ_FUNCTION
+    assert ".slice(0, 4500)" in RESEARCH_PAGE_READ_FUNCTION
+
+    navigation_args, navigation_kwargs = _standardize_research_browser_call(
+        "navigate_page",
+        (),
+        {"type": "url", "url": "https://example.com", "timeout": 60_000},
+    )
+    assert navigation_args == ()
+    assert navigation_kwargs["timeout"] == RESEARCH_NAVIGATION_TIMEOUT_MS
+
+    positional_args, positional_kwargs = _standardize_research_browser_call(
+        "navigate_page",
+        ({"type": "url", "url": "https://example.com"},),
+        {},
+    )
+    assert positional_args[0]["timeout"] == RESEARCH_NAVIGATION_TIMEOUT_MS
+    assert positional_kwargs == {}
+
+    assert TARGET_RESEARCH_MCP_TOOLS == ("navigate_page", "take_snapshot")
+    slim_args, slim_kwargs = _standardize_research_browser_call(
+        "evaluate",
+        (),
+        {"script": "document.body.innerText"},
+    )
+    assert slim_args == ()
+    assert slim_kwargs == {"script": RESEARCH_PAGE_READ_SCRIPT}
+    assert RESEARCH_PAGE_READ_SCRIPT.endswith(")()")
 
 
 @pytest.mark.asyncio
@@ -872,15 +932,28 @@ async def test_agent_runtime_transforms_mcp_result_before_model_context() -> Non
 
     tool = FakeTool()
     observed: list[tuple[str, object]] = []
+    received: list[str] = []
+
+    original_coroutine = tool.coroutine
+
+    async def capture_call(**kwargs):
+        received.append(kwargs["function"])
+        return await original_coroutine(**kwargs)
+
+    tool.coroutine = capture_call
     wrapped = _wrap_tools_with_error_handling(
         [tool],
+        call_transform=lambda name, args, kwargs: (
+            args,
+            {**kwargs, "function": f"safe:{name}"},
+        ),
         result_transform=lambda name, value: (
             [{"type": "text", "text": f"compact:{name}"}],
             value[1],
         ),
         result_observer=lambda name, value: observed.append((name, value)),
     )[0]
-    content, artifact = await wrapped.coroutine()
+    content, artifact = await wrapped.coroutine(function="unsafe")
 
     assert content == [{"type": "text", "text": "compact:evaluate_script"}]
     assert artifact == {"id": 1}
@@ -888,6 +961,7 @@ async def test_agent_runtime_transforms_mcp_result_before_model_context() -> Non
         "evaluate_script",
         ([{"type": "text", "text": "raw browser output"}], {"id": 1}),
     )]
+    assert received == ["safe:evaluate_script"]
 
 
 @pytest.mark.asyncio
@@ -1770,6 +1844,40 @@ async def test_mcp_tool_error_limit_can_fail_fast_for_outer_failover() -> None:
 
     with pytest.raises(RuntimeError, match="连续 1 次工具调用失败"):
         await wrapped[0].ainvoke({})
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_error_limit_allows_one_page_pair_to_recover() -> None:
+    from langchain_core.tools import StructuredTool
+
+    from Sere1nGraph.graph.agents.runtime import _wrap_tools_with_error_handling
+
+    attempts = 0
+
+    async def flaky_tool() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise TimeoutError("page renderer stalled")
+        return "next source loaded"
+
+    tool = StructuredTool.from_function(
+        coroutine=flaky_tool,
+        name="evaluate_script",
+        description="用于验证单页失败后可切换来源继续研究",
+    )
+    wrapped = _wrap_tools_with_error_handling(
+        [tool],
+        max_consecutive_errors=3,
+    )
+
+    first_result = await wrapped[0].ainvoke({})
+    second_result = await wrapped[0].ainvoke({})
+    third_result = await wrapped[0].ainvoke({})
+
+    assert "TimeoutError" in first_result
+    assert "TimeoutError" in second_result
+    assert third_result == "next source loaded"
 
 
 @pytest.mark.asyncio

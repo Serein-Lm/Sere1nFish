@@ -17,6 +17,7 @@ from api.services.target_research import (
     _normalize_payload,
     _prepare_payload_for_validation,
     _schedule_company_scans,
+    _unverified_navigation_domains,
     run_target_research,
 )
 
@@ -316,22 +317,40 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
                 )
             return {
                 "messages": [
-                    ToolMessage(
-                        name="navigate_page",
-                        tool_call_id="official",
+                        ToolMessage(
+                            name="navigate_page",
+                            tool_call_id="official",
                         content=(
                             "Successfully navigated to "
-                            "https://www.example.edu.cn/about."
+                                "https://www.example.edu.cn/about."
+                            ),
                         ),
-                    ),
-                    ToolMessage(
-                        name="navigate_page",
-                        tool_call_id="government",
+                        ToolMessage(
+                            name="evaluate_script",
+                            tool_call_id="official-read",
+                            content=(
+                                "Script ran on page and returned:\n"
+                                '{"url":"https://www.example.edu.cn/about",'
+                                '"text":"official body"}'
+                            ),
+                        ),
+                        ToolMessage(
+                            name="navigate_page",
+                            tool_call_id="government",
                         content=(
                             "Successfully navigated to "
-                            "https://gov.example.cn/unit."
+                                "https://gov.example.cn/unit."
+                            ),
                         ),
-                    ),
+                        ToolMessage(
+                            name="evaluate_script",
+                            tool_call_id="government-read",
+                            content=(
+                                "Script ran on page and returned:\n"
+                                '{"url":"https://gov.example.cn/unit",'
+                                '"text":"government body"}'
+                            ),
+                        ),
                 ]
             }
 
@@ -436,7 +455,7 @@ def test_target_research_rejects_unconfirmed_navigation_tool_call() -> None:
     assert _extract_navigated_urls(raw) == set()
 
 
-def test_target_research_accepts_successful_navigation_redirect_url() -> None:
+def test_target_research_requires_dom_read_after_successful_navigation() -> None:
     raw = {
         "messages": [
             AIMessage(
@@ -464,8 +483,21 @@ def test_target_research_accepts_successful_navigation_redirect_url() -> None:
         ]
     }
 
+    assert _extract_navigated_urls(raw) == set()
+
+    raw["messages"].append(
+        ToolMessage(
+            name="take_snapshot",
+            tool_call_id="call_2",
+            content=(
+                "## Latest page snapshot\n"
+                'uid=1_0 RootWebArea "About" '
+                'url="https://example.edu.cn/about/index.html"\n'
+                '  uid=1_1 StaticText "Verified body"'
+            ),
+        )
+    )
     assert _extract_navigated_urls(raw) == {
-        "https://example.edu.cn/about",
         "https://example.edu.cn/about/index.html",
     }
 
@@ -513,7 +545,8 @@ def test_target_research_accepts_timed_out_navigation_after_dom_read() -> None:
 
 def test_navigation_evidence_observer_survives_message_compaction() -> None:
     urls: set[str] = set()
-    observe = _build_navigation_evidence_observer(urls)
+    attempted: list[str] = []
+    observe = _build_navigation_evidence_observer(urls, attempted)
 
     observe(
         "navigate_page",
@@ -526,10 +559,80 @@ def test_navigation_evidence_observer_survives_message_compaction() -> None:
             ),
         }], {"raw": "artifact"}),
     )
+    assert urls == set()
+    assert attempted == ["https://example.edu.cn/about/index.html"]
+
+    observe(
+        "take_snapshot",
+        (
+            "## Latest page snapshot\n"
+            'uid=1_0 RootWebArea "About" '
+            'url="https://example.edu.cn/about/index.html"\n'
+            '  uid=1_1 StaticText "Verified body"'
+        ),
+    )
 
     assert urls == {
-        "https://example.edu.cn/about",
         "https://example.edu.cn/about/index.html",
+    }
+
+
+def test_unverified_navigation_domains_exclude_successfully_read_hosts() -> None:
+    assert _unverified_navigation_domains(
+        [
+            "https://official.example.cn/about",
+            "https://directory.example.com/item/1",
+            "https://directory.example.com/item/2",
+        ],
+        {"https://official.example.cn/about"},
+    ) == ["directory.example.com"]
+
+
+def test_slim_navigation_requires_bounded_evaluation() -> None:
+    raw = {
+        "messages": [
+            ToolMessage(
+                name="navigate",
+                tool_call_id="call_1",
+                content="Navigated to https://example.edu.cn/about.",
+            ),
+            ToolMessage(
+                name="evaluate",
+                tool_call_id="call_2",
+                content=(
+                    '{"url":"https://example.edu.cn/about",'
+                    '"title":"About","text":"verified body","links":[]}'
+                ),
+            ),
+        ]
+    }
+
+    assert _extract_navigated_urls(raw) == {
+        "https://example.edu.cn/about",
+    }
+
+
+def test_slim_evaluation_records_url_after_navigation_timeout() -> None:
+    raw = {
+        "messages": [
+            ToolMessage(
+                name="navigate",
+                tool_call_id="call_1",
+                content="Navigation timeout of 30000 ms exceeded",
+            ),
+            ToolMessage(
+                name="evaluate",
+                tool_call_id="call_2",
+                content=(
+                    '{"url":"https://example.edu.cn/loaded",'
+                    '"title":"Loaded","text":"verified body","links":[]}'
+                ),
+            ),
+        ]
+    }
+
+    assert _extract_navigated_urls(raw) == {
+        "https://example.edu.cn/loaded",
     }
 
 
