@@ -26,6 +26,12 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await collection.create_index([("task_id", 1), ("url", 1)])
     await collection.create_index([("project_ids", 1), ("updated_at", -1)])
     await collection.create_index(
+        [("project_id", 1), ("target_id", 1), ("endpoint_key", 1), ("terminal", 1)]
+    )
+    await collection.create_index(
+        [("project_ids", 1), ("target_id", 1), ("endpoint_key", 1), ("terminal", 1)]
+    )
+    await collection.create_index(
         [("task_id", 1), ("terminal", 1), ("success", 1)]
     )
 
@@ -159,19 +165,61 @@ async def completed_urls(
     *,
     task_id: str,
     urls: list[str],
+    project_id: str = "",
+    target_id: str = "",
 ) -> set[str]:
-    """Return terminal URLs, including records written by the legacy batch writer."""
+    """Return terminal URLs, reusing Target endpoints already linked to a project."""
     if not task_id or not urls:
         return set()
-    cursor = db[URL_SCAN_RESULTS_COLLECTION].find(
-        {
+    endpoint_keys = list(
+        dict.fromkeys(
+            key for url in urls if (key := endpoint_identity(url))
+        )
+    )
+    exact_task = {
+        "task_id": task_id,
+        "url": {"$in": urls},
+    }
+    if project_id and target_id and endpoint_keys:
+        query: dict[str, Any] = {
+            "$and": [
+                _terminal_result_filter(),
+                {
+                    "$or": [
+                        exact_task,
+                        {
+                            "target_id": target_id,
+                            "endpoint_key": {"$in": endpoint_keys},
+                            "$or": [
+                                {"project_id": project_id},
+                                {"project_ids": project_id},
+                            ],
+                        },
+                    ]
+                },
+            ]
+        }
+    else:
+        query = {
             "task_id": task_id,
             "url": {"$in": urls},
             **_terminal_result_filter(),
-        },
-        {"_id": 0, "url": 1},
+        }
+    cursor = db[URL_SCAN_RESULTS_COLLECTION].find(
+        query,
+        {"_id": 0, "url": 1, "endpoint_key": 1},
     )
-    return {str(item.get("url") or "") async for item in cursor}
+    rows = [item async for item in cursor]
+    exact_urls = {str(item.get("url") or "") for item in rows}
+    matched_endpoints = {
+        str(item.get("endpoint_key") or endpoint_identity(item.get("url") or ""))
+        for item in rows
+    }
+    return {
+        url
+        for url in urls
+        if url in exact_urls or endpoint_identity(url) in matched_endpoints
+    }
 
 
 async def retryable_task_ids(

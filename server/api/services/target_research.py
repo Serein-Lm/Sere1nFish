@@ -32,6 +32,7 @@ logger = get_logger("target_research")
 MAX_TARGET_RESEARCH_BATCH_SIZE = 100
 MAX_TARGET_RESEARCH_CONCURRENCY = 8
 TARGET_RESEARCH_BROWSER_ATTEMPTS = 3
+EXPANDED_TARGET_BATCH_TAG = "拓展目标"
 _AUTO_EXPAND_RELATIONS = {
     "subsidiary",
     "controlled_entity",
@@ -93,6 +94,35 @@ def _is_search_result_url(url: str) -> bool:
         parts.path.startswith(prefix)
         for prefix in _SEARCH_RESULT_PATHS.get(host, ())
     )
+
+
+def _filter_scan_urls_by_domains(
+    values: list[Any] | None,
+    domains: list[Any] | None,
+    *,
+    limit: int = 60,
+) -> list[str]:
+    """Keep verified first-party URLs under one of the Target root domains."""
+    normalized_domains = _clean_strings(
+        [normalize_root_domain(value) for value in domains or []],
+        limit=20,
+    )
+    if not normalized_domains:
+        return []
+    result: list[str] = []
+    for value in values or []:
+        url = _canonical_browser_url(value)
+        host = (urlsplit(url).hostname or "").strip().lower().rstrip(".")
+        if not url or not host or not any(
+            host == domain or host.endswith(f".{domain}")
+            for domain in normalized_domains
+        ):
+            continue
+        if url not in result:
+            result.append(url)
+        if len(result) >= max(1, int(limit or 1)):
+            break
+    return result
 
 
 def _selected_browser_urls(text: str) -> list[str]:
@@ -214,7 +244,13 @@ def _normalize_payload(
 
     evidence = normalize_many(list(data.get("evidence") or []))
     key_people = normalize_many(list(data.get("key_people") or []))
-    related = normalize_many(list(data.get("related_targets") or []))
+    related = [
+        {
+            **item,
+            "web_scan_urls": normalize_urls(item.get("web_scan_urls") or []),
+        }
+        for item in normalize_many(list(data.get("related_targets") or []))
+    ]
     contacts: list[dict[str, Any]] = []
     for item in data.get("public_contacts") or []:
         urls = normalize_urls([item.get("source_url")])
@@ -241,6 +277,7 @@ def _normalize_payload(
         "canonical_name": str(data.get("canonical_name") or "").strip(),
         "aliases": _clean_strings(data.get("aliases"), limit=30),
         "root_domains": root_domains,
+        "web_scan_urls": normalize_urls(data.get("web_scan_urls") or []),
         "business_keywords": _clean_strings(data.get("business_keywords"), limit=80),
         "search_terms_by_channel": channel_terms,
         "sources": list(sources_by_url.values()),
@@ -293,7 +330,12 @@ def _prepare_payload_for_validation(
             if not urls:
                 dropped += 1
                 continue
-            prepared.append({**raw_item, "source_urls": urls})
+            item = {**raw_item, "source_urls": urls}
+            if field == "related_targets":
+                item["web_scan_urls"] = valid_urls(
+                    raw_item.get("web_scan_urls") or []
+                )
+            prepared.append(item)
         data[field] = prepared
 
     for field in ("evidence", "key_people", "related_targets"):
@@ -310,6 +352,7 @@ def _prepare_payload_for_validation(
             continue
         contacts.append({**raw_item, "source_url": urls[0]})
     data["public_contacts"] = contacts
+    data["web_scan_urls"] = valid_urls(data.get("web_scan_urls") or [])
     if dropped:
         logger.warning(
             "机构深研预校验已丢弃无有效来源的派生事实 | count=%s",
@@ -429,11 +472,15 @@ def _candidate_scan_params(
     name: str,
     target_id: str = "",
     is_root: bool,
+    seed_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Apply reusable root/related-Target source policies to one scan."""
     params = {**base_params, "company_name": name}
     if target_id:
         params["target_id"] = target_id
+    normalized_seed_urls = _clean_strings(seed_urls, limit=60)
+    if normalized_seed_urls:
+        params["urls"] = normalized_seed_urls
     if not is_root and not bool(params.get("enable_subsidiary_bidding", False)):
         params["enable_bidding"] = False
     if not is_root and not bool(params.get("enable_subsidiary_wechat", False)):
@@ -451,6 +498,7 @@ async def _schedule_company_scans(
     requested_by: str,
     scan_params: dict[str, Any] | None,
     rescan_root: bool,
+    root_seed_urls: list[str] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
     from api.services.project_task_runtime import execute_project_task
 
@@ -468,6 +516,7 @@ async def _schedule_company_scans(
     skipped: list[dict[str, str]] = []
     seen_candidates: set[str] = set()
     now = datetime.now(timezone.utc)
+    root_target_id = str(root_target.get("target_id") or "")
     for candidate in candidates:
         name = str(candidate.get("canonical_name") or candidate.get("name") or "").strip()
         target_id = str(candidate.get("target_id") or "")
@@ -505,11 +554,26 @@ async def _schedule_company_scans(
                 skipped.append({"target_id": target_id, "reason": "当前项目已有完成扫描"})
                 continue
         child_task_id = uuid.uuid4().hex[:12]
+        is_root = target_id == root_target_id
+        relation = dict(candidate.get("research_relation") or {})
+        seed_urls = (
+            list(root_seed_urls or [])
+            if is_root
+            else _filter_scan_urls_by_domains(
+                list(relation.get("web_scan_urls") or []),
+                [
+                    candidate.get("root_domain"),
+                    *(candidate.get("root_domains") or []),
+                ],
+                limit=30,
+            )
+        )
         params = _candidate_scan_params(
             base_params,
             name=name,
             target_id=target_id,
-            is_root=target_id == str(root_target.get("target_id") or ""),
+            is_root=is_root,
+            seed_urls=seed_urls,
         )
         documents.append(
             {
@@ -815,7 +879,9 @@ async def run_target_research(
         f"机构名称: {target.get('canonical_name') or ''}\n"
         f"可信身份别名: {target.get('identity_aliases') or []}\n"
         f"已有根域名: {target.get('root_domains') or []}\n"
-        "目标：补全机构信息，识别可继续扫描的明确隶属、控制、直属服务或平台运营单位；"
+        "目标：使用 Bing 结合机构全称、可信简称和已知根域名补全机构信息，"
+        "实际打开并核验可进入网站深扫的自营业务页面；识别可继续扫描的明确隶属、"
+        "控制、直属服务或平台运营单位；"
         "合作方、供应商、媒体转载主体和同名第三方不得标记为自动扫描。"
         f"\n{REQUIRE_EVIDENCE_TOOL_MARKER}"
     )
@@ -1007,6 +1073,13 @@ async def run_target_research(
             ),
         ],
     ) or target
+    root_scan_urls = _filter_scan_urls_by_domains(
+        list(data.get("web_scan_urls") or []),
+        [
+            enriched_target.get("root_domain"),
+            *(enriched_target.get("root_domains") or []),
+        ],
+    )
     scan_profile = build_target_scan_profile(
         canonical_name=str(enriched_target.get("canonical_name") or ""),
         identity_aliases=list(enriched_target.get("identity_aliases") or []),
@@ -1143,6 +1216,10 @@ async def run_target_research(
             objectives=["机构深研发现的高置信关联单位"],
             task_def_id=task_id,
             relation=relation_doc,
+            batch_tags=[
+                *(relation.get("batch_tags") or []),
+                EXPANDED_TARGET_BATCH_TAG,
+            ],
         )
         related_profile = build_target_scan_profile(
             canonical_name=str(related.get("canonical_name") or candidate_name),
@@ -1209,6 +1286,7 @@ async def run_target_research(
             requested_by=requested_by,
             scan_params=scan_params,
             rescan_root=rescan_root,
+            root_seed_urls=root_scan_urls,
         )
     result = {
         "research_id": research.get("research_id"),
@@ -1217,6 +1295,7 @@ async def run_target_research(
         "summary": data.get("summary"),
         "source_count": len(data.get("sources") or []),
         "evidence_count": len(data.get("evidence") or []),
+        "web_scan_url_count": len(root_scan_urls),
         "expanded_target_count": len(expanded),
         "expanded_targets": research.get("expanded_targets") or [],
         "scan_task_ids": scan_task_ids,

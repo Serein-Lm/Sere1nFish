@@ -13,6 +13,7 @@ from api.services.target_research import (
     _candidate_scan_params,
     _eligible_related_targets,
     _extract_navigated_urls,
+    _filter_scan_urls_by_domains,
     _normalize_payload,
     _prepare_payload_for_validation,
     _schedule_company_scans,
@@ -63,6 +64,7 @@ def _payload(**overrides):
         "industry": "教育",
         "organization_type": "事业单位",
         "root_domains": ["https://www.example.edu.cn/path"],
+        "web_scan_urls": ["https://www.example.edu.cn/about#intro"],
         "sources": [
             {
                 "title": "机构官网",
@@ -96,6 +98,7 @@ def _payload(**overrides):
                 "relationship_summary": "官网列为直属服务单位",
                 "confidence": 0.92,
                 "source_urls": ["https://www.example.edu.cn/about"],
+                "web_scan_urls": ["https://www.example.edu.cn/about"],
                 "scan_priority": 90,
                 "should_scan": True,
             }
@@ -112,6 +115,24 @@ def test_target_research_normalizes_domains_and_traceable_urls() -> None:
     assert normalized["sources"][0]["url"] == "https://www.example.edu.cn/about"
     assert normalized["evidence"][1]["source_urls"] == [
         "https://www.example.edu.cn/about"
+    ]
+    assert normalized["web_scan_urls"] == ["https://www.example.edu.cn/about"]
+    assert normalized["related_targets"][0]["web_scan_urls"] == [
+        "https://www.example.edu.cn/about"
+    ]
+
+
+def test_target_research_scan_urls_stay_under_verified_domains() -> None:
+    assert _filter_scan_urls_by_domains(
+        [
+            "https://service.example.edu.cn/login",
+            "https://example.edu.cn/portal",
+            "https://vendor.example.com/product",
+        ],
+        ["example.edu.cn"],
+    ) == [
+        "https://service.example.edu.cn/login",
+        "https://example.edu.cn/portal",
     ]
 
 
@@ -208,12 +229,20 @@ async def test_company_scan_dispatch_deduplicates_same_target_identity(
         },
         expanded_targets=[
             {"target_id": "target-root", "canonical_name": "主目标平台"},
-            {"target_id": "target-child", "canonical_name": "独立子单位"},
+            {
+                "target_id": "target-child",
+                "canonical_name": "独立子单位",
+                "root_domains": ["child.example.cn"],
+                "research_relation": {
+                    "web_scan_urls": ["https://child.example.cn/service"]
+                },
+            },
         ],
         task_id="research-task",
         requested_by="admin",
         scan_params=None,
         rescan_root=True,
+        root_seed_urls=["https://root.example.cn/portal"],
     )
 
     assert len(task_ids) == 2
@@ -226,7 +255,9 @@ async def test_company_scan_dispatch_deduplicates_same_target_identity(
         "target-child",
     ]
     assert inserted[0]["params"]["enable_bidding"] is True
+    assert inserted[0]["params"]["urls"] == ["https://root.example.cn/portal"]
     assert inserted[1]["params"]["enable_bidding"] is False
+    assert inserted[1]["params"]["urls"] == ["https://child.example.cn/service"]
     assert skipped == [{
         "target_id": "target-root",
         "reason": "与本轮其他扫描归并为同一 Target",

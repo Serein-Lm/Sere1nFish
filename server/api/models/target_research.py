@@ -52,6 +52,7 @@ class RelatedTargetCandidate(BaseModel):
     ] = "other"
     relationship_summary: str = Field(min_length=1, max_length=3000)
     root_domains: list[str] = Field(default_factory=list, max_length=12)
+    web_scan_urls: list[str] = Field(default_factory=list, max_length=30)
     confidence: float = Field(ge=0.01, le=1.0)
     source_urls: list[str] = Field(min_length=1, max_length=20)
     scan_priority: int = Field(default=50, ge=0, le=100)
@@ -67,6 +68,7 @@ class TargetResearchPayload(BaseModel):
     services: list[str] = Field(default_factory=list, max_length=80)
     aliases: list[str] = Field(default_factory=list, max_length=50)
     root_domains: list[str] = Field(default_factory=list, max_length=20)
+    web_scan_urls: list[str] = Field(default_factory=list, max_length=60)
     business_keywords: list[str] = Field(default_factory=list, max_length=100)
     search_terms_by_channel: dict[str, list[str]] = Field(default_factory=dict)
     public_contacts: list[TargetPublicContact] = Field(default_factory=list, max_length=50)

@@ -557,6 +557,11 @@ async def _merge_finding_dependents(
             for finding_id, clone, source_finding_id in batch:
                 created_at = clone.pop("created_at", None)
                 clone.pop("_id", None)
+                # A source dependent may itself have been migrated before.
+                # Tracking arrays are owned by $addToSet below and therefore
+                # cannot also appear in $setOnInsert in the same update.
+                clone.pop("merged_from_project_ids", None)
+                clone.pop("merged_source_finding_ids", None)
                 update: dict[str, Any] = {
                     "$setOnInsert": clone,
                     "$addToSet": {

@@ -1118,6 +1118,8 @@ class UrlScanPipeline:
                 self.db,
                 task_id=task_id,
                 urls=alive_urls,
+                project_id=project_id,
+                target_id=target_id,
             )
             pending_alive = [
                 item for item in alive if str(item.get("url") or "") not in completed_before

@@ -30,7 +30,10 @@ class _Collection:
 
     def find(self, query, _projection):
         self.find_query = query
-        return _Cursor([{"url": "https://done.example"}])
+        return _Cursor([{
+            "url": "https://done.example",
+            "endpoint_key": "done.example",
+        }])
 
     async def update_one(self, query, update, **_kwargs):
         self.update_query = query
@@ -68,6 +71,30 @@ async def test_explicit_retryable_result_is_not_completed() -> None:
             "terminal": {"$exists": False},
             "success": {"$exists": True},
         },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_project_target_endpoint_is_reused_across_scan_tasks() -> None:
+    db = _Db()
+
+    completed = await url_scan.completed_urls(
+        db,
+        task_id="task-new",
+        project_id="project-1",
+        target_id="target-1",
+        urls=["http://done.example", "https://new.example"],
+    )
+
+    assert completed == {"http://done.example"}
+    query = db.collection.find_query["$and"][1]["$or"][1]
+    assert query["target_id"] == "target-1"
+    assert query["endpoint_key"] == {
+        "$in": ["done.example", "new.example"]
+    }
+    assert query["$or"] == [
+        {"project_id": "project-1"},
+        {"project_ids": "project-1"},
     ]
 
 
