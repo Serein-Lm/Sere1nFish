@@ -370,6 +370,48 @@ def test_finding_context_prompt_is_runtime_critical():
     assert "finding_context/organizer" in CORE_PROMPT_SLUGS
 
 
+def test_finding_context_worker_wakes_for_incremental_enqueue(monkeypatch):
+    import asyncio
+    from contextlib import suppress
+
+    from api.services.finding_context import service
+
+    async def scenario():
+        pending = []
+        processed = asyncio.Event()
+
+        async def claim_next_pending(_db):
+            return pending.pop(0) if pending else None
+
+        async def process_claimed(_db, context):
+            assert context["finding_id"] == "finding-late"
+            processed.set()
+
+        monkeypatch.setattr(
+            service.context_dao,
+            "claim_next_pending",
+            claim_next_pending,
+        )
+        monkeypatch.setattr(service, "_process_claimed", process_claimed)
+        monkeypatch.setattr(service, "_worker_wakeup", asyncio.Event())
+
+        worker = asyncio.create_task(service._worker_loop(object()))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not worker.done()
+
+        pending.append({"finding_id": "finding-late"})
+        service._worker_wakeup.set()
+        await asyncio.wait_for(processed.wait(), timeout=1)
+        assert not worker.done()
+
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+
+    asyncio.run(scenario())
+
+
 def test_source_document_prompts_reject_multi_entity_roundups():
     from Sere1nGraph.graph.prompts.loader import load_prompt
     from api.services.source_documents.analysis import (

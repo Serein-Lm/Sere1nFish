@@ -41,7 +41,7 @@ _MAX_SOURCE_TEXT = 80_000
 _MAX_IMAGES = 6
 _WORKER_COUNT = 2
 _worker_task: asyncio.Task[Any] | None = None
-_worker_rerun_requested = False
+_worker_wakeup = asyncio.Event()
 
 
 @dataclass
@@ -841,39 +841,35 @@ async def _process_claimed(
 async def _worker_loop(db: AsyncIOMotorDatabase) -> None:
     while True:
         context = await context_dao.claim_next_pending(db)
-        if not context:
-            return
-        await _process_claimed(db, context)
+        if context:
+            # 唤醒其它空闲槽位继续认领同一批新增任务。
+            _worker_wakeup.set()
+            await _process_claimed(db, context)
+            continue
+
+        # 清除旧信号后再次认领，避免“入队发生在 clear 与 wait 之间”
+        # 导致唤醒丢失。若其它 worker 已认领任务，它会重新 set。
+        _worker_wakeup.clear()
+        context = await context_dao.claim_next_pending(db)
+        if context:
+            _worker_wakeup.set()
+            await _process_claimed(db, context)
+            continue
+        await _worker_wakeup.wait()
 
 
 async def _drain_pending(db: AsyncIOMotorDatabase) -> None:
-    global _worker_rerun_requested
-    while True:
-        _worker_rerun_requested = False
-        await asyncio.gather(*(_worker_loop(db) for _ in range(_WORKER_COUNT)))
-        if not _worker_rerun_requested:
-            return
+    await asyncio.gather(*(_worker_loop(db) for _ in range(_WORKER_COUNT)))
 
 
 def kick_finding_context_worker(db: AsyncIOMotorDatabase) -> asyncio.Task[Any]:
-    global _worker_rerun_requested, _worker_task
+    global _worker_task
+    _worker_wakeup.set()
     if _worker_task is not None and not _worker_task.done():
-        _worker_rerun_requested = True
         return _worker_task
 
-    _worker_rerun_requested = False
-    task = spawn_background(
+    _worker_task = spawn_background(
         _drain_pending(db),
         name="finding-context-worker",
     )
-    _worker_task = task
-
-    def restart_if_needed(done: asyncio.Task[Any]) -> None:
-        global _worker_task
-        if _worker_task is done:
-            _worker_task = None
-        if _worker_rerun_requested and not done.cancelled():
-            kick_finding_context_worker(db)
-
-    task.add_done_callback(restart_if_needed)
     return _worker_task
