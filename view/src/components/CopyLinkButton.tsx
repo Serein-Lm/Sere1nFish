@@ -71,6 +71,47 @@ export interface CopyableLinkProps {
   copyLabel?: string
 }
 
+export interface CopyableTextProps {
+  value?: string | null
+  children?: ReactNode
+  className?: string
+  title?: string
+  style?: CSSProperties
+  copyLabel?: string
+}
+
+export function CopyableText({
+  value,
+  children,
+  className,
+  title,
+  style,
+  copyLabel = '内容',
+}: CopyableTextProps) {
+  const normalized = String(value || '').trim()
+
+  return (
+    <span
+      className={className}
+      title={title}
+      style={{
+        display: 'inline-grid',
+        gridTemplateColumns: 'minmax(0, 1fr) 24px',
+        alignItems: 'start',
+        gap: 4,
+        minWidth: 0,
+        maxWidth: '100%',
+        ...style,
+      }}
+    >
+      <span style={{ minWidth: 0, overflowWrap: 'anywhere', lineHeight: '24px' }}>
+        {children ?? normalized}
+      </span>
+      <CopyLinkButton value={normalized} label={copyLabel} />
+    </span>
+  )
+}
+
 export function CopyableLink({
   href,
   children,

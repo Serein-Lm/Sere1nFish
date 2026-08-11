@@ -63,7 +63,7 @@ import {
 import CollectRecordsView from '../../components/CollectRecordsView/CollectRecordsView'
 import { extractContactsFromFields } from '../../components/CollectRecordsView/collectRecordUtils'
 import AuthenticatedImage from '../../components/AuthenticatedImage'
-import CopyLinkButton, { CopyableLink } from '../../components/CopyLinkButton'
+import CopyLinkButton, { CopyableLink, CopyableText } from '../../components/CopyLinkButton'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
 import {
   createTargetResearch,
@@ -346,7 +346,7 @@ const taggingColumns: ColumnsType<WebTaggingRecord> = [
     render: (url: string) => (
       <div className="url-cell">
         <GlobalOutlined className="url-icon" />
-        <CopyableLink href={url} className="url-text" title={url}>{url}</CopyableLink>
+        <CopyableText value={url} className="url-text" title={url} copyLabel="链接">{url}</CopyableText>
       </div>
     ),
   },
@@ -432,7 +432,7 @@ const findingsColumns = (
     dataIndex: 'value',
     key: 'value',
     width: 200,
-    render: (val: string | null) => renderFindingValue(val, { copyable: true, maxWidth: 180 }),
+    render: (val: string | null) => renderFindingValue(val, { copyable: true, maxWidth: 180, linkify: false }),
   },
   {
     title: '类型',
@@ -488,9 +488,14 @@ const findingsColumns = (
     render: (url: string) => (
       <Space size={0}>
         <Tooltip title="打开来源链接">
-          <a href={url} target="_blank" rel="noreferrer" className="source-link">
-            <LinkOutlined />
-          </a>
+          <Button
+            type="text"
+            size="small"
+            icon={<LinkOutlined />}
+            aria-label="打开来源链接"
+            disabled={!url}
+            onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}
+          />
         </Tooltip>
         <CopyLinkButton value={url} />
       </Space>
@@ -536,8 +541,8 @@ function ExpandedRecordContent({
     <div className="expanded-record-content">
       <div className="expanded-intro">
         <Descriptions size="small" column={{ xxl: 3, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }} bordered className="intro-descriptions">
-          <Descriptions.Item label="输入 URL">{record.data?.intro?.url ? renderFindingValue(record.data.intro.url, { copyable: true, maxWidth: 420 }) : '-'}</Descriptions.Item>
-          <Descriptions.Item label="最终 URL">{record.data?.intro?.final_url ? renderFindingValue(record.data.intro.final_url, { copyable: true, maxWidth: 420 }) : '-'}</Descriptions.Item>
+          <Descriptions.Item label="输入 URL">{record.data?.intro?.url ? renderFindingValue(record.data.intro.url, { copyable: true, maxWidth: 420, linkify: false }) : '-'}</Descriptions.Item>
+          <Descriptions.Item label="最终 URL">{record.data?.intro?.final_url ? renderFindingValue(record.data.intro.final_url, { copyable: true, maxWidth: 420, linkify: false }) : '-'}</Descriptions.Item>
           <Descriptions.Item label="域名">{record.data?.intro?.domain || '-'}</Descriptions.Item>
           <Descriptions.Item label="站点名称">{record.data?.intro?.site_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="主体名称">
@@ -3690,108 +3695,114 @@ export default function ProjectDetail() {
         message.error(error instanceof Error ? error.message : '打开归档文件失败')
       }
     }
+    const renderOriginalActions = (record: BiddingRecord) => (
+      <Space size={0} className="bidding-actions">
+        <Tooltip title="打开公告原文">
+          <Button
+            type="text"
+            size="small"
+            icon={<LinkOutlined />}
+            disabled={!record.original_url}
+            aria-label="打开公告原文"
+            onClick={() => record.original_url && window.open(record.original_url, '_blank', 'noopener,noreferrer')}
+          />
+        </Tooltip>
+        <CopyLinkButton value={record.original_url} label="公告链接" />
+      </Space>
+    )
     const columns: ColumnsType<BiddingRecord> = [
       {
-        title: '公告',
-        dataIndex: 'title',
-        key: 'title',
-        width: 260,
-        ellipsis: true,
-        render: (title: string, record) => record.original_url ? (
-          <CopyableLink href={record.original_url} title={title}>{title || '未命名公告'}</CopyableLink>
-        ) : (title || '未命名公告'),
+        title: '公告与介绍',
+        key: 'announcement',
+        width: screens.md ? 300 : 212,
+        render: (_, record) => (
+          <div className="bidding-announcement-cell">
+            <Tooltip title={record.title || '未命名公告'}>
+              <Text strong className="bidding-announcement-title">
+                {record.title || '未命名公告'}
+              </Text>
+            </Tooltip>
+            <Tooltip title={record.overview || undefined}>
+              <Text type="secondary" className="bidding-announcement-overview">
+                {record.overview || '暂无介绍'}
+              </Text>
+            </Tooltip>
+            {!screens.md ? (
+              <div className="bidding-mobile-summary">
+                <Text type="secondary">{record.published_on || '-'}</Text>
+                <Tag color="blue">{record.stage || record.announcement_type || '未标注'}</Tag>
+                <Tag>{record.contacts?.length || 0} 条联系</Tag>
+                {renderOriginalActions(record)}
+              </div>
+            ) : null}
+          </div>
+        ),
       },
       {
-        title: '采购人',
-        dataIndex: 'purchaser',
+        title: '采购信息',
         key: 'purchaser',
-        width: 210,
-        ellipsis: true,
-        render: (value: string) => value || '-',
-      },
-      {
-        title: '大致介绍',
-        dataIndex: 'overview',
-        key: 'overview',
-        width: 300,
-        ellipsis: true,
-        render: (value: string) => value || '-',
+        width: 170,
+        responsive: ['md'],
+        render: (_, record) => (
+          <div className="bidding-purchaser-cell">
+            <Tooltip title={record.purchaser || undefined}>
+              <Text className="bidding-purchaser-name">{record.purchaser || '-'}</Text>
+            </Tooltip>
+            {record.agency ? (
+              <Tooltip title={record.agency}>
+                <Text type="secondary" className="bidding-purchaser-agency">
+                  代理：{record.agency}
+                </Text>
+              </Tooltip>
+            ) : null}
+          </div>
+        ),
       },
       {
         title: '联系方式',
         key: 'contacts',
         width: 280,
+        responsive: ['md'],
         render: (_, record) => (
-          <Space orientation="vertical" size={2}>
+          <div className="bidding-contact-summary">
             {(record.contacts || []).slice(0, 3).map((contact, index) => (
-              <Space key={`${contact.channel || ''}:${contact.value}:${index}`} size={4} wrap>
+              <div className="bidding-contact-line" key={`${contact.channel || ''}:${contact.value}:${index}`}>
                 <Tag color="blue">{contactChannelLabel(contact.channel)}</Tag>
-                {renderFindingValue(contact.value, { copyable: true, maxWidth: 180 })}
-                {contact.party_name ? <Text type="secondary">{contact.party_name}</Text> : null}
-              </Space>
+                <CopyableText value={contact.value} className="bidding-contact-value" />
+                {contact.party_name ? <Text type="secondary" className="bidding-contact-party">{contact.party_name}</Text> : null}
+              </div>
             ))}
             {(record.contacts || []).length > 3 ? <Text type="secondary">另有 {record.contacts.length - 3} 条</Text> : null}
-          </Space>
+          </div>
         ),
       },
       {
-        title: '阶段',
-        key: 'stage',
-        width: 120,
-        render: (_, record) => <Tag color="blue">{record.stage || record.announcement_type || '未标注'}</Tag>,
-      },
-      {
-        title: '发布时间',
-        dataIndex: 'published_on',
-        key: 'published_on',
-        width: 110,
+        title: '状态',
+        key: 'status',
+        width: 140,
+        responsive: ['md'],
         defaultSortOrder: 'descend',
         sorter: (a, b) => String(a.published_on || '').localeCompare(String(b.published_on || '')),
-        render: (value: string) => value || '-',
-      },
-      {
-        title: '归档',
-        key: 'archive',
-        width: 120,
         render: (_, record) => (
-          <Space size={4} wrap>
-            <Tag color={record.provider_payload_url ? 'green' : 'default'}>原始</Tag>
-            <Tag color={record.raw_content_url ? 'green' : 'default'}>正文</Tag>
-            <Tag color={(record.attachments || []).some((item) => item.status === 'ready') ? 'green' : 'default'}>
-              附件 {(record.attachments || []).filter((item) => item.status === 'ready').length}
-            </Tag>
-          </Space>
+          <div className="bidding-status-cell">
+            <Text>{record.published_on || '-'}</Text>
+            <Tag color="blue">{record.stage || record.announcement_type || '未标注'}</Tag>
+            <div className="bidding-archive-status">
+              <Tag color={record.provider_payload_url ? 'green' : 'default'}>原始</Tag>
+              <Tag color={record.raw_content_url ? 'green' : 'default'}>正文</Tag>
+              <Tag color={(record.attachments || []).some((item) => item.status === 'ready') ? 'green' : 'default'}>
+                附件 {(record.attachments || []).filter((item) => item.status === 'ready').length}
+              </Tag>
+            </div>
+          </div>
         ),
       },
       {
         title: '操作',
         key: 'actions',
-        width: 180,
-        render: (_, record) => (
-          <Space size={2}>
-            <Tooltip title="打开公告原文">
-              <Button type="text" size="small" icon={<LinkOutlined />} disabled={!record.original_url} href={record.original_url} target="_blank" />
-            </Tooltip>
-            <CopyLinkButton value={record.original_url} />
-            <Tooltip title="查看供应商原始记录">
-              <Button type="text" size="small" icon={<FileSearchOutlined />} disabled={!record.provider_payload_url} onClick={() => openArtifact(record.provider_payload_url)} />
-            </Tooltip>
-            <Tooltip title="查看 API 原始正文">
-              <Button type="text" size="small" icon={<FileTextOutlined />} disabled={!record.raw_content_url} onClick={() => openArtifact(record.raw_content_url)} />
-            </Tooltip>
-            <Tooltip title="查看归档详情页">
-              <Button type="text" size="small" icon={<GlobalOutlined />} disabled={!record.detail_html_url} onClick={() => openArtifact(record.detail_html_url)} />
-            </Tooltip>
-            {record.provider_url && (
-              <>
-                <Tooltip title="查看天眼查记录">
-                  <Button type="text" size="small" icon={<LinkOutlined />} href={record.provider_url} target="_blank" />
-                </Tooltip>
-                <CopyLinkButton value={record.provider_url} />
-              </>
-            )}
-          </Space>
-        ),
+        width: 64,
+        responsive: ['md'],
+        render: (_, record) => renderOriginalActions(record),
       },
     ]
 
@@ -3818,13 +3829,14 @@ export default function ProjectDetail() {
           </Space>
         </div>
         <Table<BiddingRecord>
+          className="bidding-records-table"
           rowKey="record_id"
           size="small"
           loading={biddingLoading}
           columns={columns}
           dataSource={biddingRecords}
           locale={{ emptyText: <Empty description="暂无招投标公告" /> }}
-          scroll={{ x: 1440 }}
+          scroll={{ x: screens.md ? 960 : 260 }}
           expandable={{
             expandedRowRender: (record) => (
               <div style={{ display: 'grid', gap: 10 }}>
@@ -3846,14 +3858,14 @@ export default function ProjectDetail() {
                     <div className="bidding-contact-list">
                       {(record.contacts || []).map((contact, index) => (
                         <div className="bidding-contact-item" key={`${contact.channel || ''}:${contact.value}:${index}`}>
-                          <Space size={6} wrap>
+                          <div className="bidding-contact-detail-line">
                             <Tag color="blue">{contactChannelLabel(contact.channel)}</Tag>
-                            {renderFindingValue(contact.value, { copyable: true, maxWidth: 420 })}
+                            <CopyableText value={contact.value} className="bidding-contact-value" />
                             {contact.party_name ? <Tag>{contact.party_name}</Tag> : null}
                             {contact.attention_score != null ? (
                               <Tag color={contact.attention_score >= 70 ? 'red' : 'orange'}>{contact.attention_score}</Tag>
                             ) : null}
-                          </Space>
+                          </div>
                           {(contact.context || contact.evidence) ? (
                             <Text type="secondary">{contact.context || contact.evidence}</Text>
                           ) : null}
@@ -3862,10 +3874,14 @@ export default function ProjectDetail() {
                     </div>
                   </Descriptions.Item>
                   <Descriptions.Item label="公告原文">
-                    {record.original_url ? <CopyableLink href={record.original_url} style={{ wordBreak: 'break-all' }} /> : '-'}
+                    {record.original_url ? (
+                      <CopyableText value={record.original_url} copyLabel="公告链接" />
+                    ) : '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="天眼查来源">
-                    {record.provider_url ? <CopyableLink href={record.provider_url} style={{ wordBreak: 'break-all' }} /> : '-'}
+                    {record.provider_url ? (
+                      <CopyableText value={record.provider_url} copyLabel="天眼查链接" />
+                    ) : '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="归档证据">
                     <Space wrap>
@@ -4285,12 +4301,11 @@ export default function ProjectDetail() {
         width: 210,
         render: (value: string, contact) => (
           <Space orientation="vertical" size={0}>
-            <Typography.Link
-              href={contact.channel === 'email' ? `mailto:${value}` : `tel:${value}`}
-              copyable={{ text: value }}
-            >
-              {value}
-            </Typography.Link>
+            <CopyableText
+              value={value}
+              className="target-contact-value"
+              title={value}
+            />
             {contact.evidence_count > 1 ? (
               <Text type="secondary">{contact.evidence_count} 条证据</Text>
             ) : null}
@@ -4330,7 +4345,6 @@ export default function ProjectDetail() {
         title: '',
         key: 'actions',
         width: 112,
-        fixed: 'right',
         render: (_, contact) => (
           <Space size={0}>
             <Tooltip title={contact.finding_id ? '查看完整上下文' : '暂无关联 Finding'}>
@@ -4388,7 +4402,9 @@ export default function ProjectDetail() {
               <Text strong>{finding.label || finding.type || '未命名 Finding'}</Text>
               <Tag>{finding.module_label}</Tag>
             </Space>
-            {finding.value ? <Text copyable={{ text: finding.value }}>{finding.value}</Text> : null}
+            {finding.value ? (
+              <CopyableText value={finding.value} className="target-finding-value" />
+            ) : null}
             {finding.context ? (
               <Tooltip title={finding.context}>
                 <Text type="secondary" className="target-contact-context">{finding.context}</Text>
@@ -4408,7 +4424,6 @@ export default function ProjectDetail() {
         title: '',
         key: 'actions',
         width: 122,
-        fixed: 'right',
         render: (_, finding) => (
           <Space size={0}>
             <Tooltip title="查看完整上下文">
@@ -4490,40 +4505,38 @@ export default function ProjectDetail() {
           </Tooltip>
         </div>
 
-        <Row gutter={[20, 20]} className="target-contact-grid">
-          <Col xs={24} xl={12}>
-            <section className="target-overview-section">
-              <div className="target-overview-section-title">
-                <Space><PhoneOutlined /><Text strong>个人电话</Text><Tag>{dashboard.contact_counts.personal_phone}</Tag></Space>
-              </div>
-              <Table<TargetDashboardContact>
-                rowKey="contact_id"
-                size="small"
-                columns={contactColumns}
-                dataSource={dashboard.personal_phones}
-                scroll={{ x: 690 }}
-                locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档个人电话" /> }}
-                pagination={dashboard.personal_phones.length > 5 ? { pageSize: 5, size: 'small', showSizeChanger: false } : false}
-              />
-            </section>
-          </Col>
-          <Col xs={24} xl={12}>
-            <section className="target-overview-section">
-              <div className="target-overview-section-title">
-                <Space><MailOutlined /><Text strong>个人邮箱</Text><Tag>{dashboard.contact_counts.personal_email}</Tag></Space>
-              </div>
-              <Table<TargetDashboardContact>
-                rowKey="contact_id"
-                size="small"
-                columns={contactColumns}
-                dataSource={dashboard.personal_emails}
-                scroll={{ x: 690 }}
-                locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档个人邮箱" /> }}
-                pagination={dashboard.personal_emails.length > 5 ? { pageSize: 5, size: 'small', showSizeChanger: false } : false}
-              />
-            </section>
-          </Col>
-        </Row>
+        <div className="target-contact-grid">
+          <section className="target-overview-section">
+            <div className="target-overview-section-title">
+              <Space><PhoneOutlined /><Text strong>个人电话</Text><Tag>{dashboard.contact_counts.personal_phone}</Tag></Space>
+            </div>
+            <Table<TargetDashboardContact>
+              className="target-contact-table"
+              rowKey="contact_id"
+              size="small"
+              columns={contactColumns}
+              dataSource={dashboard.personal_phones}
+              scroll={{ x: 640 }}
+              locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档个人电话" /> }}
+              pagination={dashboard.personal_phones.length > 5 ? { pageSize: 5, size: 'small', showSizeChanger: false } : false}
+            />
+          </section>
+          <section className="target-overview-section">
+            <div className="target-overview-section-title">
+              <Space><MailOutlined /><Text strong>个人邮箱</Text><Tag>{dashboard.contact_counts.personal_email}</Tag></Space>
+            </div>
+            <Table<TargetDashboardContact>
+              className="target-contact-table"
+              rowKey="contact_id"
+              size="small"
+              columns={contactColumns}
+              dataSource={dashboard.personal_emails}
+              scroll={{ x: 640 }}
+              locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档个人邮箱" /> }}
+              pagination={dashboard.personal_emails.length > 5 ? { pageSize: 5, size: 'small', showSizeChanger: false } : false}
+            />
+          </section>
+        </div>
 
         <section className="target-overview-section target-overview-findings">
           <div className="target-overview-section-title">
@@ -4544,25 +4557,18 @@ export default function ProjectDetail() {
   }
 
   const renderTargetDashboard = () => {
+    const taskStatusMap: Record<string, { color: string; text: string }> = {
+      completed: { color: 'success', text: '已完成' },
+      running: { color: 'processing', text: '运行中' },
+      pending: { color: 'default', text: '等待中' },
+      error: { color: 'error', text: '失败' },
+      failed: { color: 'error', text: '失败' },
+    }
     const columns: ColumnsType<TargetDashboardRow> = [
-      {
-        title: '等级',
-        key: 'batch_priority_rank',
-        width: 96,
-        render: (_, target) => target.isLoadingPlaceholder
-          ? null
-          : target.batch_priority_label
-            ? (
-              <Tag color={TARGET_PRIORITY_COLORS[target.batch_priority_rank || 0] || 'default'}>
-                {target.batch_priority_label}
-              </Tag>
-            )
-            : <Text type="secondary">-</Text>,
-      },
       {
         title: '公司 / 机构',
         key: 'target',
-        width: 340,
+        width: 320,
         render: (_, target) => target.isLoadingPlaceholder ? (
           <Space size={8}>
             {targetBranchLoading[target.parent_target_id || ''] ? <Spin size="small" /> : null}
@@ -4582,10 +4588,26 @@ export default function ProjectDetail() {
               )
             ))
             .map(([channel]) => TARGET_SCAN_CHANNEL_LABELS[channel] || channel)
+          const populatedModules = TARGET_MODULES.filter(
+            (module) => Number(target[module.countKey] || 0) > 0,
+          )
+          const taskStatus = taskStatusMap[target.latest_task_status || '']
           return (
             <div className="target-company-cell">
-              <Space size={6} wrap>
+              <div className="target-company-heading">
                 <Text strong>{displayName}</Text>
+                {target.batch_priority_label ? (
+                  <Tag color={TARGET_PRIORITY_COLORS[target.batch_priority_rank || 0] || 'default'}>
+                    {target.batch_priority_label}
+                  </Tag>
+                ) : null}
+                {(target.relation_depth ?? 0) >= 2
+                  ? <Tag color="gold">孙单位</Tag>
+                  : (target.relation_depth ?? 0) === 1
+                  ? <Tag color="cyan">子单位</Tag>
+                  : <Tag color="blue">主目标</Tag>}
+              </div>
+              <div className="target-company-tags">
                 {(target.batch_tags || [])
                   .filter((batchTag) => batchTag !== target.batch_priority_label)
                   .map((batchTag) => (
@@ -4595,28 +4617,40 @@ export default function ProjectDetail() {
                 <Tag color={target.collection_complete ? 'success' : 'default'}>
                   覆盖 {target.coverage_completed_count || 0}/{target.coverage_required_count || 4}
                 </Tag>
-                {(target.relation_depth ?? 0) >= 2
-                  ? <Tag color="gold">孙单位</Tag>
-                  : (target.relation_depth ?? 0) === 1
-                  ? <Tag color="cyan">子单位</Tag>
-                  : <Tag color="blue">主目标</Tag>}
-              </Space>
+              </div>
               {displayName !== target.target_name ? (
-                <Text type="secondary">全称：{target.target_name}</Text>
+                <Tooltip title={`全称：${target.target_name}`}>
+                  <Text type="secondary" className="target-company-meta-line">全称：{target.target_name}</Text>
+                </Tooltip>
               ) : null}
               {scanNames.length ? (
-                <Text type="secondary">检索名：{scanNames.join(' · ')}</Text>
+                <Tooltip title={`检索名：${scanNames.join(' · ')}`}>
+                  <Text type="secondary" className="target-company-meta-line">检索名：{scanNames.join(' · ')}</Text>
+                </Tooltip>
               ) : null}
-              {target.root_domain ? <Text type="secondary">域名：{target.root_domain}</Text> : null}
-              {completedChannels.length ? (
-                <Text type="secondary">已覆盖：{completedChannels.join(' · ')}</Text>
+              {(target.root_domain || completedChannels.length) ? (
+                <Text type="secondary" className="target-company-meta-line">
+                  {target.root_domain ? `域名：${target.root_domain}` : ''}
+                  {target.root_domain && completedChannels.length ? ' · ' : ''}
+                  {completedChannels.length ? `已覆盖：${completedChannels.join(' · ')}` : ''}
+                </Text>
               ) : null}
               {target.parent_target_name ? (
-                <Text type="secondary">
+                <Text type="secondary" className="target-company-meta-line">
                   上级：{target.parent_target_name}
                   {target.ownership_percent != null ? ` · 持股 ${target.ownership_percent}%` : ''}
                 </Text>
               ) : null}
+              <div className="target-company-compact-summary">
+                <Tag color={Number(target.high_score_finding_count || 0) > 0 ? 'red' : 'default'}>
+                  高分 {target.high_score_finding_count || 0}
+                </Tag>
+                {populatedModules.map((module) => (
+                  <Tag key={module.tab}>{module.label} {target[module.countKey] || 0}</Tag>
+                ))}
+                <Text type="secondary">资产 {target.alive_asset_count || 0}/{target.asset_count || 0}</Text>
+                {taskStatus ? <Tag color={taskStatus.color}>{taskStatus.text}</Tag> : null}
+              </div>
             </div>
           )
         })(),
@@ -4624,7 +4658,8 @@ export default function ProjectDetail() {
       {
         title: '高分 Finding',
         key: 'high_score_finding_count',
-        width: 310,
+        width: 230,
+        responsive: ['md'],
         sorter: (a, b) => (a.high_score_finding_count || 0) - (b.high_score_finding_count || 0),
         sortDirections: ['descend', 'ascend'],
         render: (_, target) => {
@@ -4633,11 +4668,14 @@ export default function ProjectDetail() {
           const breakdown = target.high_score_by_source || {}
           const sourceCounts = TARGET_HIGH_SCORE_LABELS
             .map((source) => ({ ...source, count: Number(breakdown[source.key] || 0) }))
+          const populatedSources = sourceCounts.filter((source) => source.count > 0)
           return (
             <div className="target-high-score-cell">
-              <Tag color={total > 0 ? 'red' : 'default'}>总计 {total}</Tag>
-              {total > 0 && sourceCounts.map((source) => (
-                <Tag key={source.key} color={source.count > 0 ? 'volcano' : 'default'}>
+              <Tooltip title={sourceCounts.map((source) => `${source.label} ${source.count}`).join(' · ')}>
+                <Tag color={total > 0 ? 'red' : 'default'}>总计 {total}</Tag>
+              </Tooltip>
+              {populatedSources.map((source) => (
+                <Tag key={source.key} color="volcano">
                   {source.label} {source.count}
                 </Tag>
               ))}
@@ -4648,9 +4686,11 @@ export default function ProjectDetail() {
       {
         title: '模块数据',
         key: 'modules',
+        width: 260,
+        responsive: ['lg'],
         render: (_, target) => target.isLoadingPlaceholder ? null : (
-          <Space size={[4, 4]} wrap>
-            {TARGET_MODULES.map((module) => (
+          <div className="target-module-links">
+            {TARGET_MODULES.filter((module) => Number(target[module.countKey] || 0) > 0).map((module) => (
               <Button
                 key={module.tab}
                 type="link"
@@ -4663,53 +4703,46 @@ export default function ProjectDetail() {
                 {module.label} {target[module.countKey] || 0}
               </Button>
             ))}
-          </Space>
+            {TARGET_MODULES.every((module) => Number(target[module.countKey] || 0) === 0) ? (
+              <Text type="secondary">暂无归档数据</Text>
+            ) : null}
+          </div>
         ),
       },
       {
-        title: '资产',
-        key: 'assets',
-        width: 130,
-        render: (_, target) => target.isLoadingPlaceholder
-          ? null
-          : <Text>{target.alive_asset_count || 0} / {target.asset_count || 0} 存活</Text>,
-      },
-      {
-        title: '最近任务',
-        dataIndex: 'latest_task_status',
-        key: 'latest_task_status',
-        width: 110,
-        render: (status: string, target) => {
+        title: '资产 / 任务',
+        key: 'runtime',
+        width: 140,
+        responsive: ['md'],
+        render: (_, target) => {
           if (target.isLoadingPlaceholder) return null
-          const statusMap: Record<string, { color: string; text: string }> = {
-            completed: { color: 'success', text: '已完成' },
-            running: { color: 'processing', text: '运行中' },
-            pending: { color: 'default', text: '等待中' },
-            error: { color: 'error', text: '失败' },
-            failed: { color: 'error', text: '失败' },
-          }
-          const item = statusMap[status]
-          return item ? <Tag color={item.color}>{item.text}</Tag> : <Text type="secondary">-</Text>
+          const item = taskStatusMap[target.latest_task_status || '']
+          return (
+            <div className="target-runtime-cell">
+              <Text>{target.alive_asset_count || 0} / {target.asset_count || 0} 存活</Text>
+              {item ? <Tag color={item.color}>{item.text}</Tag> : <Text type="secondary">暂无任务</Text>}
+            </div>
+          )
         },
       },
       {
         title: '操作',
         key: 'actions',
-        width: 120,
-        fixed: screens.md ? 'right' : undefined,
+        width: 56,
+        align: 'center',
         render: (_, target) => target.isLoadingPlaceholder ? null : (
           <Tooltip title="联网核验机构资料，扩展可信 Target 后自动扫描">
             <Button
+              type="text"
               size="small"
               icon={<SearchOutlined />}
+              aria-label="机构深研"
               loading={targetResearchActionId === target.target_id}
               onClick={(event) => {
                 event.stopPropagation()
                 void runTargetResearch(target)
               }}
-            >
-              机构深研
-            </Button>
+            />
           </Tooltip>
         ),
       },
@@ -4778,6 +4811,7 @@ export default function ProjectDetail() {
           </div>
         </div>
         <Table<TargetDashboardRow>
+          className="target-dashboard-table"
           rowKey="project_target_id"
           size="small"
           columns={columns}
@@ -4823,7 +4857,7 @@ export default function ProjectDetail() {
               }
             },
           }}
-          scroll={{ x: 1380 }}
+          scroll={{ x: screens.lg ? 1006 : screens.md ? 746 : 420 }}
           onRow={(target) => ({
             onClick: () => {
               if (!target.isLoadingPlaceholder) openTargetDetails(target)
@@ -6477,7 +6511,7 @@ export default function ProjectDetail() {
                             <div key={i} className="xhs-note-finding-item">
                               <div className="xhs-note-finding-header">
                                 <Tag color="orange">{finding.type}</Tag>
-                                {renderFindingValue(finding.value, { copyable: true })}
+                                {renderFindingValue(finding.value, { copyable: true, linkify: false })}
                               </div>
                               <div className="xhs-note-finding-evidence">
                                 <Text type="secondary">证据：{finding.evidence}</Text>

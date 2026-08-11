@@ -14,7 +14,7 @@ const PHONE_PATTERN = /^[\d\-+\s()]+$/
 
 export function renderFindingValue(
   value: string | null | undefined,
-  options?: { copyable?: boolean; maxWidth?: number }
+  options?: { copyable?: boolean; maxWidth?: number; linkify?: boolean }
 ): React.ReactNode {
   if (value == null || value === '') {
     return <Tag color="default">入口型发现</Tag>
@@ -39,7 +39,13 @@ export function renderFindingValue(
 
   // 网页链接
   if (URL_PATTERN.test(value)) {
-    const link = (
+    const content = options?.linkify === false ? (
+      <Tooltip title={value}>
+        <span style={{ ...style, wordBreak: 'break-all' }}>
+          {value.length > 40 ? value.slice(0, 40) + '…' : value}
+        </span>
+      </Tooltip>
+    ) : (
       <Tooltip title={value}>
         <a href={value} target="_blank" rel="noopener noreferrer" style={{ ...style, wordBreak: 'break-all' }}>
           {value.length > 40 ? value.slice(0, 40) + '…' : value}
@@ -48,16 +54,16 @@ export function renderFindingValue(
     )
     return options?.copyable ? (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, maxWidth: '100%' }}>
-        {link}
+        {content}
         <CopyLinkButton value={value} />
       </span>
-    ) : link
+    ) : content
   }
 
   // 邮箱
   if (EMAIL_PATTERN.test(value)) {
     return renderCopyable(
-      <a href={`mailto:${value}`}>{value}</a>,
+      options?.linkify === false ? <span style={style}>{value}</span> : <a href={`mailto:${value}`}>{value}</a>,
       value,
       options?.copyable
     )
@@ -66,7 +72,7 @@ export function renderFindingValue(
   // 电话号码
   if (PHONE_PATTERN.test(value) && value.replace(/[\s\-+()]/g, '').length >= 5) {
     return renderCopyable(
-      <a href={`tel:${value}`}>{value}</a>,
+      options?.linkify === false ? <span style={style}>{value}</span> : <a href={`tel:${value}`}>{value}</a>,
       value,
       options?.copyable
     )

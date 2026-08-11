@@ -256,6 +256,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .url-icon {
@@ -267,6 +268,10 @@
 .url-text {
   color: var(--text-primary);
   font-weight: 500;
+  width: 100%;
+}
+
+.url-text > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -490,12 +495,72 @@
 .target-company-cell {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 
-.target-company-cell .ant-typography {
+.target-company-heading,
+.target-company-tags,
+.target-module-links,
+.target-company-compact-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.target-company-heading .ant-typography {
+  margin-inline-end: 2px;
   overflow-wrap: anywhere;
+}
+
+.target-company-heading .ant-tag,
+.target-company-tags .ant-tag,
+.target-company-compact-summary .ant-tag,
+.target-runtime-cell .ant-tag {
+  margin-inline-end: 0;
+}
+
+.target-company-meta-line {
+  display: block;
+  overflow: hidden;
+  width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-company-compact-summary {
+  display: none;
+  padding-top: 2px;
+}
+
+.target-module-links .ant-btn {
+  height: 26px;
+  padding-inline: 5px;
+}
+
+.target-runtime-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.target-dashboard-table .ant-table-thead > tr > th,
+.target-dashboard-table .ant-table-tbody > tr > td {
+  vertical-align: top;
+}
+
+.target-dashboard-table .ant-table-tbody > tr > td:last-child {
+  vertical-align: middle;
+}
+
+@media (max-width: 991px) {
+  .target-company-compact-summary {
+    display: flex;
+  }
 }
 
 .bidding-contact-list {
@@ -503,9 +568,124 @@
   gap: 10px;
 }
 
+.bidding-announcement-cell,
+.bidding-purchaser-cell,
+.bidding-status-cell {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.bidding-announcement-title,
+.bidding-purchaser-name,
+.bidding-purchaser-agency {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bidding-announcement-overview {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.55;
+}
+
+.bidding-archive-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.bidding-archive-status .ant-tag,
+.bidding-status-cell > .ant-tag {
+  width: fit-content;
+  margin-inline-end: 0;
+}
+
+.bidding-mobile-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.bidding-mobile-summary .ant-tag {
+  margin-inline-end: 0;
+}
+
 .bidding-contact-item {
   display: grid;
   gap: 3px;
+}
+
+.bidding-contact-summary {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bidding-contact-line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 2px 6px;
+  min-width: 0;
+}
+
+.bidding-contact-line .ant-tag,
+.bidding-contact-detail-line .ant-tag {
+  margin-inline-end: 0;
+}
+
+.bidding-contact-value {
+  width: 100%;
+  min-width: 0;
+}
+
+.bidding-contact-party {
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bidding-contact-detail-line {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) auto auto;
+  align-items: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bidding-actions {
+  display: grid !important;
+  grid-template-columns: repeat(2, 28px);
+  align-items: center;
+  gap: 0 !important;
+}
+
+.bidding-actions .ant-btn {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.bidding-records-table .ant-table-thead > tr > th,
+.bidding-records-table .ant-table-tbody > tr > td {
+  vertical-align: top;
+}
+
+@media (max-width: 640px) {
+  .bidding-contact-detail-line {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
 }
 
 .detail-tabs .ant-tabs-nav-wrap {
@@ -1564,7 +1744,11 @@
 }
 
 .target-contact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 680px), 1fr));
+  gap: 20px;
   margin-top: 0;
+  min-width: 0;
 }
 
 .target-overview-section {
@@ -1591,6 +1775,17 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+
+.target-contact-value,
+.target-finding-value {
+  width: 100%;
+  min-width: 0;
+}
+
+.target-contact-table .ant-table-thead > tr > th,
+.target-contact-table .ant-table-tbody > tr > td {
+  vertical-align: top;
 }
 
 .target-contact-context {
