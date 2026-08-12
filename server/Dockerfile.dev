@@ -19,6 +19,7 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     antiword \
+    catdoc \
     ca-certificates \
     curl \
     ffmpeg \
@@ -28,6 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-chi-sim \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 

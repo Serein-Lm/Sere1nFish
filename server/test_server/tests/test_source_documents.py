@@ -1085,6 +1085,164 @@ def test_archive_completeness_reports_missing_evidence_as_partial():
     assert any("图片识别失败" in message for message in messages)
 
 
+def test_archive_completeness_keeps_permanent_remote_404_as_warning():
+    from api.services.source_documents import service
+
+    status, messages = service._archive_completeness(
+        capture_metadata={
+            "attachment_download_warnings": ["file.pdf: HTTP 404 Not Found"],
+            "image_download_warnings": ["image.png: HTTP 410 Gone"],
+        },
+        image_analysis_error="",
+        image_analysis_warning="",
+    )
+
+    assert status == "complete_with_warnings"
+    assert messages == [
+        "来源站点已有 1 张原图永久失效",
+        "来源站点已有 1 个附件永久失效",
+    ]
+
+
+def test_capture_repairs_attachment_text_and_image_analysis():
+    from api.services.source_documents import service
+    from api.services.source_documents.contracts import CapturedAttachment
+
+    capture = _capture(raw_html=b"raw", rendered_html=b"dom")
+    capture.attachments = [
+        CapturedAttachment(
+            index=0,
+            source_url="https://example.gov.cn/scan.pdf",
+            filename="scan.pdf",
+            data=b"pdf",
+            content_type="application/pdf",
+            extracted_text="OCR 后的完整正文",
+            text_format="pdf",
+        )
+    ]
+    version = {
+        "media_policy_version": service._MEDIA_POLICY_VERSION,
+        "capture_metadata": {
+            "archived_attachment_urls": ["https://example.gov.cn/scan.pdf"]
+        },
+        "attachments": [
+            {
+                "source_url": "https://example.gov.cn/scan.pdf",
+                "text_error": "PDF 未提取到可读文本，可能为扫描件",
+            }
+        ],
+        "image_analysis_error": "模型结构化输出异常",
+        "image_analysis": [{"index": 0, "description": "普通配图"}],
+    }
+
+    assert service._capture_has_more_complete_images(version, capture) is True
+
+
+def test_ingest_uses_final_redirect_url_as_document_identity(monkeypatch):
+    import asyncio
+
+    from api.dao.source_documents import document_id_for_url
+    from api.services.source_documents import service
+    from api.services.source_documents.contracts import CapturedDocument
+
+    capture = CapturedDocument(
+        source_type="official_website_document",
+        canonical_url="https://www.example.gov.cn/notices/final.html",
+        requested_url="http://example.gov.cn/notices/legacy.html",
+        title="公开通知",
+        account="example.gov.cn",
+        publish_time="2026-08-12",
+        text="公开通知正文",
+        raw_html=b"<html></html>",
+        rendered_html=b"<html></html>",
+    )
+
+    class _Provider:
+        async def capture(self, *_args, **_kwargs):
+            return capture
+
+    monkeypatch.setattr(
+        service, "get_source_document_provider", lambda _url: _Provider()
+    )
+    result = asyncio.run(
+        service.ingest_source_url(
+            object(),
+            url=capture.requested_url,
+            persist=False,
+            analysis_mode="trusted_official",
+        )
+    )
+
+    assert result["source_url"] == capture.canonical_url
+    assert result["document_id"] == document_id_for_url(capture.canonical_url)
+
+
+def test_image_analysis_retries_transient_structured_output(monkeypatch):
+    import asyncio
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from api.services.source_documents import analysis
+    from api.services.source_documents.contracts import CapturedImage
+
+    output = BytesIO()
+    Image.new("RGB", (320, 180), "white").save(output, format="PNG")
+    calls = 0
+
+    class _Structured:
+        async def ainvoke(self, _messages):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("invalid structured JSON")
+            return analysis.ImageUnderstandingBatch(
+                items=[
+                    analysis.ImageUnderstanding(
+                        index=0,
+                        visible_text="联系电话 010-12345678",
+                    )
+                ]
+            )
+
+    class _Llm:
+        def with_structured_output(self, _schema):
+            return _Structured()
+
+    async def _config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(models=SimpleNamespace(vision="v"))
+        )
+
+    async def _sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(analysis, "get_runtime_app_config", _config)
+    monkeypatch.setattr(
+        analysis, "create_llm", lambda *_args, **_kwargs: _Llm()
+    )
+    monkeypatch.setattr(analysis.asyncio, "sleep", _sleep)
+    items, errors = asyncio.run(
+        analysis._analyze_image_batch(
+            [
+                CapturedImage(
+                    index=0,
+                    source_url="https://example.gov.cn/contact.png",
+                    data=output.getvalue(),
+                    content_type="image/png",
+                )
+            ],
+            project_id="project-1",
+            task_id="task-1",
+        )
+    )
+
+    assert calls == 2
+    assert errors == []
+    assert items[0]["visible_text"] == "联系电话 010-12345678"
+
+
 def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
     import asyncio
 

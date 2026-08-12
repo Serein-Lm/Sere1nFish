@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -38,7 +38,33 @@ _DATE_DOCUMENT_RE = re.compile(
     r"/(?:19|20)\d{2}[/_-]\d{1,2}[/_-]\d{1,2}/[^/]+\.s?html?$",
     re.I,
 )
-_PAGINATION_RE = re.compile(r"(?:^|/)index[_-]?\d+\.s?html?$", re.I)
+_PAGINATION_PATH_PATTERNS = (
+    re.compile(r"(?:^|/)(?:index|list)[_-]?\d+\.s?html?$", re.I),
+    re.compile(r"(?:^|/)(?:page|list|index)[/_-]\d+(?:\.s?html?)?/?$", re.I),
+)
+_PAGINATION_QUERY_KEYS = {
+    "current",
+    "currentpage",
+    "offset",
+    "p",
+    "page",
+    "pageindex",
+    "pageno",
+    "pagenum",
+    "start",
+}
+_PAGINATION_LABELS = {
+    "下一页",
+    "下页",
+    "后页",
+    "末页",
+    "尾页",
+    "next",
+    "nextpage",
+    ">",
+    ">>",
+    "»",
+}
 _DOCUMENT_HINTS = (
     "公告",
     "通知",
@@ -54,6 +80,19 @@ _DOCUMENT_HINTS = (
     "附件",
     "联系",
     "人才",
+    "人事",
+    "征集",
+    "遴选",
+    "评审",
+    "名单",
+    "项目",
+    "课题",
+    "政策",
+    "科研",
+    "竞价",
+    "比选",
+    "咨询",
+    "信息公开",
 )
 _SKIP_EXTENSIONS = {
     ".css",
@@ -163,9 +202,24 @@ def select_official_seed_urls(
     return _normalized_primary(fallback_urls)
 
 
-def _is_document_url(url: str) -> bool:
+def _is_pagination_link(url: str, label: str = "") -> bool:
+    parsed = urlsplit(url)
+    path = parsed.path or "/"
+    if any(pattern.search(path) for pattern in _PAGINATION_PATH_PATTERNS):
+        return True
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        normalized_key = re.sub(r"[^a-z]", "", key.casefold())
+        if normalized_key in _PAGINATION_QUERY_KEYS and re.fullmatch(
+            r"\d+", value.strip()
+        ):
+            return True
+    normalized_label = re.sub(r"\s+", "", str(label or "")).casefold()
+    return normalized_label in _PAGINATION_LABELS
+
+
+def _is_document_url(url: str, label: str = "") -> bool:
     path = urlsplit(url).path
-    if _PAGINATION_RE.search(path):
+    if _is_pagination_link(url, label):
         return False
     if _DOCUMENT_PATH_RE.search(path) or _DATE_DOCUMENT_RE.search(path):
         return True
@@ -177,13 +231,13 @@ def _is_document_url(url: str) -> bool:
     )
 
 
-def _link_kind(url: str) -> str:
+def _link_kind(url: str, label: str = "") -> str:
     suffix = PurePosixPath(urlsplit(url).path).suffix.casefold()
     if suffix in ATTACHMENT_EXTENSIONS:
         return "attachment"
     if suffix in _SKIP_EXTENSIONS:
         return "asset"
-    return "document" if _is_document_url(url) else "index"
+    return "document" if _is_document_url(url, label) else "index"
 
 
 def _has_hint(*values: str) -> bool:
@@ -203,7 +257,7 @@ def classify_discovered_link(
     """Return a crawl candidate only when it belongs to a document-rich scope."""
     if depth > max_depth:
         return None
-    kind = _link_kind(url)
+    kind = _link_kind(url, label)
     if kind in {"asset", "attachment"}:
         return None
     path = urlsplit(url).path
@@ -218,7 +272,7 @@ def classify_discovered_link(
         urlsplit(url).hostname == parent_parts.hostname
         and path.startswith(parent_scope)
     )
-    pagination = bool(_PAGINATION_RE.search(path))
+    pagination = _is_pagination_link(url, label)
     hinted = _has_hint(url, label)
     if kind == "document":
         relevant = hinted or (parent_relevant and same_scope)
@@ -413,7 +467,14 @@ class WebsiteDocumentCollectionService:
             counters["total_pages"] = len(seen)
             counters["processed_pages"] = sum(
                 str(item.get("status") or "")
-                in {"discovered", "archived", "rejected", "error", "superseded"}
+                in {
+                    "discovered",
+                    "archived",
+                    "partial",
+                    "rejected",
+                    "error",
+                    "superseded",
+                }
                 for item in existing
             )
             counters["listing_pages"] = sum(
@@ -421,7 +482,11 @@ class WebsiteDocumentCollectionService:
                 for item in existing
             )
             counters["documents_archived"] = sum(
-                str(item.get("status") or "") == "archived"
+                str(item.get("status") or "") in {"archived", "partial"}
+                for item in existing
+            )
+            counters["documents_partial"] = sum(
+                str(item.get("status") or "") == "partial"
                 for item in existing
             )
             counters["documents_rejected"] = sum(

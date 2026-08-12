@@ -30,6 +30,7 @@ from .contracts import CapturedDocument, CapturedImage
 _STRUCTURE_TIMEOUT_SECONDS = 120
 _RELEVANCE_REVIEW_TIMEOUT_SECONDS = 120
 _IMAGE_BATCH_TIMEOUT_SECONDS = 120
+_IMAGE_BATCH_ATTEMPTS = 3
 ARTICLE_ANALYSIS_PROMPT_SLUG = "source_document/source_document"
 RELEVANCE_REVIEW_PROMPT_SLUG = "source_document/relevance_review"
 CONTACT_ATTRIBUTION_PROMPT_SLUG = "source_document/contact_attribution"
@@ -845,17 +846,28 @@ async def _analyze_image_batch(
                 "image_url": {"url": f"data:{media_type};base64,{encoded}"},
             }
         )
-    with observation_context(
-        project_id=project_id or None,
-        task_id=task_id or None,
-        phase="source_document_image_recognition",
-        agent="source_document",
-        task_type="wechat_article",
-    ):
-        result = await asyncio.wait_for(
-            structured.ainvoke([HumanMessage(content=content)]),
-            timeout=_IMAGE_BATCH_TIMEOUT_SECONDS,
-        )
+    last_error: Exception | None = None
+    for attempt in range(_IMAGE_BATCH_ATTEMPTS):
+        try:
+            with observation_context(
+                project_id=project_id or None,
+                task_id=task_id or None,
+                phase="source_document_image_recognition",
+                agent="source_document",
+                task_type="wechat_article",
+            ):
+                result = await asyncio.wait_for(
+                    structured.ainvoke([HumanMessage(content=content)]),
+                    timeout=_IMAGE_BATCH_TIMEOUT_SECONDS,
+                )
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt + 1 >= _IMAGE_BATCH_ATTEMPTS:
+                raise
+            await asyncio.sleep(0.5 * (2**attempt))
+    else:  # pragma: no cover - the loop either succeeds or raises
+        raise last_error or RuntimeError("图片识别失败")
     items = getattr(result, "items", []) or []
     return (
         [

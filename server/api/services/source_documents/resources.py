@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -25,13 +26,22 @@ from lxml import html as lxml_html
 from api.services.url_security import assert_public_http_url
 
 
-DEFAULT_MAX_ATTACHMENT_TEXT_CHARS = 60_000
+DEFAULT_MAX_ATTACHMENT_TEXT_CHARS = 200_000
 ATTACHMENT_EXTENSIONS = {
+    ".7z",
+    ".csv",
     ".pdf",
     ".doc",
     ".docx",
+    ".et",
     ".xls",
     ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".rar",
+    ".rtf",
+    ".txt",
+    ".wps",
     ".zip",
 }
 ATTACHMENT_LABEL_MARKERS = (
@@ -44,6 +54,14 @@ ATTACHMENT_LABEL_MARKERS = (
     "申请表",
 )
 _WHITESPACE_RE = re.compile(r"\s+")
+_QUOTED_LINK_RE = re.compile(r"['\"]([^'\"<>]+)['\"]")
+_LINKISH_SUFFIX_RE = re.compile(
+    r"\.(?:s?html?|pdf|docx?|xlsx?|pptx?|txt|csv|rtf|zip|rar|7z)"
+    r"(?:[?#].*)?$",
+    re.I,
+)
+_PDF_MAX_PAGES = 200
+_PDF_OCR_DEADLINE_SECONDS = 900
 
 
 @dataclass(slots=True)
@@ -68,35 +86,73 @@ def html_text_and_links(
         except (TypeError, ValueError):
             text = _WHITESPACE_RE.sub(" ", str(content)).strip()
             return text, []
-    links: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for anchor in root.xpath("//a[@href]"):
-        href = str(anchor.get("href") or "").strip()
-        if not href or href.lower().startswith(
-            ("javascript:", "data:", "mailto:", "tel:")
-        ):
-            continue
-        absolute = urljoin(base_url, href)
-        try:
-            parsed = urlsplit(absolute)
-        except ValueError:
-            continue
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            continue
-        if absolute in seen:
-            continue
-        seen.add(absolute)
-        links.append(
-            {
-                "url": absolute,
-                "label": _WHITESPACE_RE.sub(" ", anchor.text_content()).strip()[:300],
-            }
-        )
+    links = extract_html_links(root, base_url)
     for node in root.xpath("//script|//style|//noscript|//template"):
         parent = node.getparent()
         if parent is not None:
             parent.remove(node)
     return _WHITESPACE_RE.sub(" ", root.text_content()).strip(), links
+
+
+def extract_html_links(root, base_url: str) -> list[dict[str, str]]:
+    """Extract navigable and embedded resources through one shared policy."""
+    links: list[dict[str, str]] = []
+    seen: set[str] = set()
+    nodes = root.xpath(
+        ".//a[@href or @data-href or @data-url or @onclick] | "
+        ".//iframe[@src or @data-src] | .//embed[@src] | .//object[@data]"
+    )
+    for node in nodes:
+        candidates = [
+            str(node.get(attribute) or "").strip()
+            for attribute in (
+                "href",
+                "data-href",
+                "data-url",
+                "src",
+                "data-src",
+                "data",
+            )
+            if str(node.get(attribute) or "").strip()
+        ]
+        onclick = str(node.get("onclick") or "")
+        for quoted in _QUOTED_LINK_RE.findall(onclick):
+            value = quoted.strip()
+            if value.startswith(("http://", "https://", "/", "./", "../")) or (
+                _LINKISH_SUFFIX_RE.search(value)
+            ):
+                candidates.append(value)
+        label = _WHITESPACE_RE.sub(" ", node.text_content()).strip()
+        if not label:
+            label = str(
+                node.get("title")
+                or node.get("aria-label")
+                or node.get("download")
+                or ""
+            ).strip()
+        for candidate in candidates:
+            if not candidate or candidate.lower().startswith(
+                ("javascript:", "data:", "mailto:", "tel:", "#")
+            ):
+                continue
+            absolute = urljoin(base_url, candidate)
+            try:
+                parsed = urlsplit(absolute)
+            except ValueError:
+                continue
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                continue
+            if absolute in seen:
+                continue
+            seen.add(absolute)
+            links.append(
+                {
+                    "url": absolute,
+                    "label": label[:300]
+                    or safe_remote_filename(PurePosixPath(parsed.path).name),
+                }
+            )
+    return links
 
 
 def is_attachment_link(link: dict[str, str]) -> bool:
@@ -226,22 +282,140 @@ async def fetch_resource_with_retry(
     raise RuntimeError("远程资源读取失败")
 
 
+def _ocr_pdf_pages(
+    data: bytes,
+    page_numbers: list[int],
+) -> tuple[dict[int, str], list[str]]:
+    rasterizer = shutil.which("pdftoppm")
+    tesseract = shutil.which("tesseract")
+    if not rasterizer or not tesseract:
+        missing = [
+            name
+            for name, executable in (
+                ("pdftoppm", rasterizer),
+                ("tesseract", tesseract),
+            )
+            if not executable
+        ]
+        return {}, [f"运行环境缺少 {'/'.join(missing)}，扫描版 PDF 已归档但未 OCR"]
+
+    results: dict[int, str] = {}
+    errors: list[str] = []
+    deadline = time.monotonic() + _PDF_OCR_DEADLINE_SECONDS
+    with tempfile.TemporaryDirectory(prefix="sere1nfish-pdf-") as directory:
+        pdf_path = os.path.join(directory, "source.pdf")
+        with open(pdf_path, "wb") as handle:
+            handle.write(data)
+        for page_number in page_numbers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                errors.append(
+                    f"PDF OCR 超过 {_PDF_OCR_DEADLINE_SECONDS} 秒上限，"
+                    f"从第 {page_number} 页起未处理"
+                )
+                break
+            output_prefix = os.path.join(directory, f"page-{page_number}")
+            image_path = output_prefix + ".png"
+            try:
+                rendered = subprocess.run(
+                    [
+                        rasterizer,
+                        "-f",
+                        str(page_number),
+                        "-l",
+                        str(page_number),
+                        "-singlefile",
+                        "-png",
+                        "-r",
+                        "180",
+                        pdf_path,
+                        output_prefix,
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=max(1, min(60, int(remaining))),
+                )
+                if rendered.returncode or not os.path.exists(image_path):
+                    detail = _decode_command_output(rendered.stderr).strip()
+                    errors.append(
+                        f"PDF 第 {page_number} 页渲染失败: "
+                        f"{detail or f'退出码 {rendered.returncode}'}"
+                    )
+                    continue
+                remaining = deadline - time.monotonic()
+                recognized = subprocess.run(
+                    [
+                        tesseract,
+                        image_path,
+                        "stdout",
+                        "-l",
+                        "chi_sim+eng",
+                        "--psm",
+                        "6",
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=max(1, min(90, int(remaining))),
+                )
+                text = _WHITESPACE_RE.sub(
+                    " ", _decode_command_output(recognized.stdout)
+                ).strip()
+                if recognized.returncode:
+                    detail = _decode_command_output(recognized.stderr).strip()
+                    errors.append(
+                        f"PDF 第 {page_number} 页 OCR 失败: "
+                        f"{detail or f'退出码 {recognized.returncode}'}"
+                    )
+                elif text:
+                    results[page_number] = text
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(f"PDF 第 {page_number} 页 OCR 失败: {exc}")
+            finally:
+                try:
+                    os.unlink(image_path)
+                except OSError:
+                    pass
+    return results, errors
+
+
 def _extract_pdf_text(data: bytes, limit: int) -> tuple[str, str]:
     try:
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(data), strict=False)
-        pages: list[str] = []
-        size = 0
-        for page in reader.pages[:80]:
-            text = (page.extract_text() or "").strip()
-            if text:
-                pages.append(text)
-                size += len(text)
-            if size >= limit:
-                break
-        text = _WHITESPACE_RE.sub(" ", "\n".join(pages)).strip()[:limit]
-        return text, "" if text else "PDF 未提取到可读文本，可能为扫描件"
+        page_count = len(reader.pages)
+        selected_count = min(page_count, _PDF_MAX_PAGES)
+        page_text: dict[int, str] = {}
+        blank_pages: list[int] = []
+        errors: list[str] = []
+        for index, page in enumerate(reader.pages[:selected_count], start=1):
+            extracted = _WHITESPACE_RE.sub(
+                " ", (page.extract_text() or "")
+            ).strip()
+            if extracted:
+                page_text[index] = extracted
+            else:
+                blank_pages.append(index)
+        if blank_pages:
+            ocr_text, ocr_errors = _ocr_pdf_pages(data, blank_pages)
+            page_text.update(ocr_text)
+            errors.extend(ocr_errors)
+        if page_count > _PDF_MAX_PAGES:
+            errors.append(
+                f"PDF 共 {page_count} 页，超过 {_PDF_MAX_PAGES} 页安全上限"
+            )
+        text = _WHITESPACE_RE.sub(
+            " ",
+            "\n".join(
+                page_text.get(index, "")
+                for index in range(1, selected_count + 1)
+            ),
+        ).strip()[:limit]
+        if not text and not errors:
+            errors.append("PDF OCR 未识别到可读文本")
+        return text, "; ".join(errors)[:2_000]
     except Exception as exc:  # noqa: BLE001
         return "", str(exc)
 
@@ -262,11 +436,11 @@ def _extract_docx_text(data: bytes, limit: int) -> tuple[str, str]:
                     break
             if size >= limit:
                 break
-        return (
+        text = (
             _WHITESPACE_RE.sub(" ", "\n".join(item for item in values if item))
-            .strip()[:limit],
-            "",
+            .strip()[:limit]
         )
+        return text, "" if text else "DOCX 未提取到可读文本"
     except Exception as exc:  # noqa: BLE001
         return "", str(exc)
 
@@ -278,6 +452,7 @@ def _extract_xlsx_text(data: bytes, limit: int) -> tuple[str, str]:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         values: list[str] = []
         size = 0
+        has_cell_text = False
         for worksheet in workbook.worksheets[:30]:
             values.append(f"工作表: {worksheet.title}")
             for row_index, row in enumerate(
@@ -292,12 +467,14 @@ def _extract_xlsx_text(data: bytes, limit: int) -> tuple[str, str]:
                 if line:
                     values.append(line)
                     size += len(line)
+                    has_cell_text = True
                 if size >= limit:
                     break
             if size >= limit:
                 break
         workbook.close()
-        return _WHITESPACE_RE.sub(" ", "\n".join(values)).strip()[:limit], ""
+        text = _WHITESPACE_RE.sub(" ", "\n".join(values)).strip()[:limit]
+        return text, "" if has_cell_text else "XLSX 未提取到可读单元格内容"
     except Exception as exc:  # noqa: BLE001
         return "", str(exc)
 
@@ -374,6 +551,102 @@ def _extract_legacy_xls_text(data: bytes, limit: int) -> tuple[str, str]:
         return "", str(exc)
 
 
+def _extract_pptx_text(data: bytes, limit: int) -> tuple[str, str]:
+    try:
+        from pptx import Presentation
+
+        presentation = Presentation(io.BytesIO(data))
+        values: list[str] = []
+        size = 0
+        has_content = False
+        for slide_index, slide in enumerate(presentation.slides, start=1):
+            values.append(f"幻灯片 {slide_index}")
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    text = str(shape.text or "").strip()
+                    if text:
+                        values.append(text)
+                        size += len(text)
+                        has_content = True
+                if getattr(shape, "has_table", False):
+                    for row in shape.table.rows:
+                        line = " | ".join(cell.text.strip() for cell in row.cells)
+                        if line:
+                            values.append(line)
+                            size += len(line)
+                            has_content = True
+                if size >= limit:
+                    break
+            if size >= limit:
+                break
+        text = _WHITESPACE_RE.sub(" ", "\n".join(values)).strip()[:limit]
+        return text, "" if has_content else "PPTX 未提取到可读文本"
+    except Exception as exc:  # noqa: BLE001
+        return "", str(exc)
+
+
+def _extract_legacy_ppt_text(data: bytes, limit: int) -> tuple[str, str]:
+    executable = shutil.which("catppt")
+    if not executable:
+        return "", "运行环境缺少 catppt，旧版 PPT 已归档但未解析"
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".ppt", delete=False) as handle:
+            handle.write(data)
+            path = handle.name
+        result = subprocess.run(
+            [executable, path],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+        text = _WHITESPACE_RE.sub(
+            " ", _decode_command_output(result.stdout)
+        ).strip()[:limit]
+        error = _decode_command_output(result.stderr).strip()
+        if result.returncode and not text:
+            return "", error or f"catppt 退出码 {result.returncode}"
+        return text, "" if text else (error or "旧版 PPT 未提取到可读文本")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", str(exc)
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _extract_plain_text(data: bytes, limit: int) -> tuple[str, str]:
+    encodings = ["utf-8-sig", "gb18030"]
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings.insert(0, "utf-16")
+    for encoding in encodings:
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = data.decode("utf-8", errors="replace")
+    text = _WHITESPACE_RE.sub(" ", text).strip()[:limit]
+    return text, "" if text else "文本附件为空"
+
+
+def _extract_rtf_text(data: bytes, limit: int) -> tuple[str, str]:
+    try:
+        from striprtf.striprtf import rtf_to_text
+
+        decoded, decode_error = _extract_plain_text(data, max(limit * 2, limit))
+        if decode_error:
+            return "", decode_error
+        text = _WHITESPACE_RE.sub(" ", rtf_to_text(decoded)).strip()[:limit]
+        return text, "" if text else "RTF 未提取到可读文本"
+    except Exception as exc:  # noqa: BLE001
+        return "", str(exc)
+
+
 def _extract_zip_text(data: bytes, limit: int) -> tuple[str, str]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -429,6 +702,8 @@ def _openxml_kind(data: bytes) -> str:
         return "docx"
     if "xl/workbook.xml" in names:
         return "xlsx"
+    if "ppt/presentation.xml" in names:
+        return "pptx"
     return ""
 
 
@@ -463,12 +738,28 @@ def extract_attachment_text(
     ):
         text, error = _extract_xlsx_text(data, limit)
         return text, error, "xlsx"
+    if (
+        openxml_kind == "pptx"
+        or suffix == ".pptx"
+        or "presentationml" in normalized_type
+    ):
+        text, error = _extract_pptx_text(data, limit)
+        return text, error, "pptx"
     if suffix == ".doc" or "msword" in normalized_type:
         text, error = _extract_legacy_doc_text(data, limit)
         return text, error, "doc"
     if suffix == ".xls" or "ms-excel" in normalized_type:
         text, error = _extract_legacy_xls_text(data, limit)
         return text, error, "xls"
+    if suffix == ".ppt" or "ms-powerpoint" in normalized_type:
+        text, error = _extract_legacy_ppt_text(data, limit)
+        return text, error, "ppt"
+    if suffix in {".txt", ".csv"} or normalized_type.startswith("text/plain"):
+        text, error = _extract_plain_text(data, limit)
+        return text, error, suffix.removeprefix(".") or "text"
+    if suffix == ".rtf" or "application/rtf" in normalized_type:
+        text, error = _extract_rtf_text(data, limit)
+        return text, error, "rtf"
     if suffix == ".zip" or normalized_type in {
         "application/zip",
         "application/x-zip-compressed",

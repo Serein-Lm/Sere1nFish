@@ -261,16 +261,35 @@ def _archive_completeness(
     )
     if image_download_errors:
         errors.append(f"原图下载失败 {len(image_download_errors)} 张")
+    image_download_warnings = list(
+        capture_metadata.get("image_download_warnings") or []
+    )
+    if image_download_warnings:
+        warnings.append(
+            f"来源站点已有 {len(image_download_warnings)} 张原图永久失效"
+        )
     attachment_download_errors = list(
         capture_metadata.get("attachment_download_errors") or []
     )
     if attachment_download_errors:
         errors.append(f"附件下载失败 {len(attachment_download_errors)} 个")
+    attachment_download_warnings = list(
+        capture_metadata.get("attachment_download_warnings") or []
+    )
+    if attachment_download_warnings:
+        warnings.append(
+            f"来源站点已有 {len(attachment_download_warnings)} 个附件永久失效"
+        )
     attachment_text_errors = list(
         capture_metadata.get("attachment_text_errors") or []
     )
     if attachment_text_errors:
         errors.append(f"附件正文提取不完整 {len(attachment_text_errors)} 个")
+    attachment_text_warnings = list(
+        capture_metadata.get("attachment_text_warnings") or []
+    )
+    if attachment_text_warnings:
+        warnings.append(f"有 {len(attachment_text_warnings)} 个附件仅完成原件归档")
     attachments_truncated = int(
         capture_metadata.get("attachments_truncated") or 0
     )
@@ -372,7 +391,6 @@ def _capture_has_more_complete_images(
     if (
         existing_metadata.get("image_download_errors")
         and not current_metadata.get("image_download_errors")
-        and capture.images
     ):
         return True
     if len(capture.screenshots) > len(version.get("screenshots") or []):
@@ -393,16 +411,29 @@ def _capture_has_more_complete_images(
     captured_attachment_urls = {
         item.source_url for item in capture.attachments if item.source_url
     }
-    declared_attachment_urls = set(
-        current_metadata.get("attachment_urls") or []
-    )
     if captured_attachment_urls - existing_attachment_urls:
         return True
     if (
         existing_metadata.get("attachment_download_errors")
         and not current_metadata.get("attachment_download_errors")
-        and declared_attachment_urls.issubset(captured_attachment_urls)
     ):
+        return True
+    existing_text_errors = {
+        str(item.get("source_url") or "")
+        for item in version.get("attachments") or []
+        if item.get("text_error")
+    }
+    current_text_ready = {
+        item.source_url
+        for item in capture.attachments
+        if item.source_url and item.extracted_text and not item.text_error
+    }
+    if existing_text_errors & current_text_ready:
+        return True
+    image_error, _image_warning = _split_image_analysis_diagnostics(
+        version.get("image_analysis_error")
+    )
+    if image_error and capture.images:
         return True
     return False
 
@@ -1108,9 +1139,9 @@ async def ingest_source_url(
     analysis_mode: str = "full",
 ) -> dict[str, Any]:
     """读取、结构化并永久保存一个来源 URL；同内容版本不会重复上传。"""
-    canonical_url = canonicalize_source_url(url)
-    document_id = source_dao.document_id_for_url(canonical_url)
-    provider = get_source_document_provider(canonical_url)
+    requested_url = canonicalize_source_url(url)
+    requested_document_id = source_dao.document_id_for_url(requested_url)
+    provider = get_source_document_provider(requested_url)
     target_id = str((target or {}).get("target_id") or "")
     target_name = str((target or {}).get("canonical_name") or "")
     target_aliases = [
@@ -1126,11 +1157,16 @@ async def ingest_source_url(
     if normalized_analysis_mode not in {"full", "trusted_official"}:
         raise ValueError(f"不支持的来源分析模式: {analysis_mode}")
 
+    capture = await provider.capture(
+        requested_url,
+        task_id=run_task_id or task_def_id or requested_document_id,
+    )
+    canonical_url = canonicalize_source_url(
+        capture.canonical_url or requested_url
+    )
+    document_id = source_dao.document_id_for_url(canonical_url)
+
     async with _hold_document_lock(document_id):
-        capture = await provider.capture(
-            canonical_url,
-            task_id=run_task_id or task_def_id or document_id,
-        )
         content_hash = stable_content_hash(capture)
         version_id = source_dao.version_id_for_content(document_id, content_hash)
         analysis_fingerprint = _analysis_fingerprint(
@@ -1478,7 +1514,12 @@ async def ingest_source_url(
                 "attachment_text_errors": [
                     item.text_error
                     for item in capture.attachments
-                    if item.text_error
+                    if item.text_error and "仅归档" not in item.text_error
+                ],
+                "attachment_text_warnings": [
+                    item.text_error
+                    for item in capture.attachments
+                    if item.text_error and "仅归档" in item.text_error
                 ],
             }
             archive_status, archive_warnings = _archive_completeness(

@@ -26,8 +26,9 @@ from .contracts import (
     SourceDocumentError,
 )
 from .resources import (
-    fetch_resource_with_retry,
+    extract_html_links,
     extract_attachment_text,
+    fetch_resource_with_retry,
     is_attachment_link,
 )
 from .urls import canonicalize_source_url
@@ -123,24 +124,7 @@ def parse_official_html(
         raise SourceDocumentError(f"HTML 解析失败: {exc}") from exc
 
     main = _select_main(root)
-    links: list[dict[str, str]] = []
-    seen_links: set[str] = set()
-    for anchor in main.xpath(".//a[@href]"):
-        href = str(anchor.get("href") or "").strip()
-        if not href or href.lower().startswith(
-            ("javascript:", "data:", "mailto:", "tel:")
-        ):
-            continue
-        absolute = urljoin(url, href)
-        if absolute in seen_links:
-            continue
-        seen_links.add(absolute)
-        links.append(
-            {
-                "url": absolute,
-                "label": _clean_text(anchor.text_content())[:300],
-            }
-        )
+    links = extract_html_links(main, url)
 
     image_urls: list[str] = []
     for image in main.xpath(".//img"):
@@ -258,13 +242,15 @@ class OfficialWebDocumentProvider:
                 url=page.url,
                 content_type=page.content_type,
             )
-            images, image_errors = await self._download_images(
-                session,
-                parsed["image_urls"],
+            images, image_errors, image_warnings = await self._download_images(
+                session, parsed["image_urls"]
             )
-            attachments, attachment_errors = await self._download_attachments(
-                session,
-                parsed["attachment_links"],
+            (
+                attachments,
+                attachment_errors,
+                attachment_warnings,
+            ) = await self._download_attachments(
+                session, parsed["attachment_links"]
             )
 
         attachment_text = [
@@ -293,11 +279,13 @@ class OfficialWebDocumentProvider:
                 "article_text": parsed["text"],
                 "image_urls": parsed["image_urls"],
                 "image_download_errors": image_errors,
+                "image_download_warnings": image_warnings,
                 "images_truncated": max(0, len(parsed["image_urls"]) - _MAX_IMAGES),
                 "attachment_urls": [
                     link["url"] for link in parsed["attachment_links"]
                 ],
                 "attachment_download_errors": attachment_errors,
+                "attachment_download_warnings": attachment_warnings,
                 "attachments_truncated": max(
                     0,
                     len(parsed["attachment_links"]) - _MAX_ATTACHMENTS,
@@ -310,7 +298,7 @@ class OfficialWebDocumentProvider:
     async def _download_images(
         session: aiohttp.ClientSession,
         urls: list[str],
-    ) -> tuple[list[CapturedImage], list[str]]:
+    ) -> tuple[list[CapturedImage], list[str], list[str]]:
         semaphore = asyncio.Semaphore(8)
 
         async def _download(index: int, image_url: str):
@@ -340,8 +328,14 @@ class OfficialWebDocumentProvider:
                         height=height,
                         sha256=hashlib.sha256(fetched.data).hexdigest(),
                     )
+                except aiohttp.ClientResponseError as exc:
+                    level = "warning" if exc.status in {404, 410} else "error"
+                    return (
+                        level,
+                        f"{image_url}: HTTP {exc.status} {exc.message}"[:800],
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    return f"{image_url}: {exc}"
+                    return ("error", f"{image_url}: {exc}"[:800])
 
         results = await asyncio.gather(
             *(
@@ -351,16 +345,27 @@ class OfficialWebDocumentProvider:
         )
         return (
             [item for item in results if isinstance(item, CapturedImage)],
-            [str(item)[:800] for item in results if isinstance(item, str)],
+            [
+                item[1]
+                for item in results
+                if isinstance(item, tuple) and item[0] == "error"
+            ],
+            [
+                item[1]
+                for item in results
+                if isinstance(item, tuple) and item[0] == "warning"
+            ],
         )
 
     @staticmethod
     async def _download_attachments(
         session: aiohttp.ClientSession,
         links: list[dict[str, str]],
-    ) -> tuple[list[CapturedAttachment], list[str]]:
+    ) -> tuple[list[CapturedAttachment], list[str], list[str]]:
         attachments: list[CapturedAttachment] = []
         errors: list[str] = []
+        warnings: list[str] = []
+        extracted_by_hash: dict[str, tuple[str, str, str]] = {}
         remaining = _MAX_TOTAL_ATTACHMENT_BYTES
         for index, link in enumerate(links[:_MAX_ATTACHMENTS]):
             if remaining <= 0:
@@ -373,12 +378,17 @@ class OfficialWebDocumentProvider:
                     max_bytes=min(_MAX_ATTACHMENT_BYTES, remaining),
                 )
                 remaining -= len(fetched.data)
-                text, text_error, text_format = await asyncio.to_thread(
-                    extract_attachment_text,
-                    fetched.data,
-                    filename=fetched.filename,
-                    content_type=fetched.content_type,
-                )
+                digest = hashlib.sha256(fetched.data).hexdigest()
+                extracted = extracted_by_hash.get(digest)
+                if extracted is None:
+                    extracted = await asyncio.to_thread(
+                        extract_attachment_text,
+                        fetched.data,
+                        filename=fetched.filename,
+                        content_type=fetched.content_type,
+                    )
+                    extracted_by_hash[digest] = extracted
+                text, text_error, text_format = extracted
                 attachments.append(
                     CapturedAttachment(
                         index=index,
@@ -387,12 +397,18 @@ class OfficialWebDocumentProvider:
                         data=fetched.data,
                         content_type=fetched.content_type,
                         label=str(link.get("label") or "")[:300],
-                        sha256=hashlib.sha256(fetched.data).hexdigest(),
+                        sha256=digest,
                         extracted_text=text,
                         text_format=text_format,
                         text_error=text_error,
                     )
                 )
+            except aiohttp.ClientResponseError as exc:
+                message = f"{link['url']}: HTTP {exc.status} {exc.message}"[:1000]
+                if exc.status in {404, 410}:
+                    warnings.append(message)
+                else:
+                    errors.append(message)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{link['url']}: {exc}"[:1000])
-        return attachments, errors
+        return attachments, errors, warnings
