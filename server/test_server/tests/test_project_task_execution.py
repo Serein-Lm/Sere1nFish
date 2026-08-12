@@ -77,8 +77,75 @@ def test_execute_task_persists_dispatch_result_and_completion_time(monkeypatch):
     assert db.tasks.doc["status"] == "completed"
     assert db.tasks.doc["progress.stage"] == "completed"
     assert db.tasks.doc["progress.message"] == "任务已完成"
+    assert db.tasks.doc["result_status"] == "completed"
     assert db.tasks.doc["result"] == {"total": 6, "documents": 1}
     assert db.tasks.doc["completed_at"] == db.tasks.doc["updated_at"]
+    assert tracker.depth == 0
+
+
+def test_execute_task_preserves_partial_result_status(monkeypatch):
+    from api.services import project_task_runtime
+    from Sere1nGraph.graph import observability as graph_observability
+
+    db = _Db()
+    tracker = _Tracker()
+
+    async def dispatcher(_task_id, _project_id, _params):
+        return {
+            "status": "partial",
+            "incomplete_sources": ["website_documents"],
+        }
+
+    monkeypatch.setattr(project_task_runtime, "get_db", lambda: db)
+    monkeypatch.setattr(
+        project_task_runtime,
+        "_TASK_DISPATCHERS",
+        {"company_scan": dispatcher},
+    )
+    monkeypatch.setattr(graph_observability, "get_global_tracker", lambda: tracker)
+    monkeypatch.setattr(project_task_runtime, "obs_log", lambda *args, **kwargs: None)
+
+    asyncio.run(
+        project_task_runtime.execute_project_task(
+            "task-partial", "project-1", "company_scan", {}
+        )
+    )
+
+    assert db.tasks.doc["status"] == "completed"
+    assert db.tasks.doc["result_status"] == "partial"
+    assert db.tasks.doc["progress.stage"] == "partial"
+    assert db.tasks.doc["progress.message"] == "任务已结束，但部分数据源未完整采集"
+
+
+def test_execute_task_maps_returned_error_status_to_failed_task(monkeypatch):
+    from api.services import project_task_runtime
+    from Sere1nGraph.graph import observability as graph_observability
+
+    db = _Db()
+    tracker = _Tracker()
+
+    async def dispatcher(_task_id, _project_id, _params):
+        return {"status": "error", "error": "all providers unavailable"}
+
+    monkeypatch.setattr(project_task_runtime, "get_db", lambda: db)
+    monkeypatch.setattr(
+        project_task_runtime,
+        "_TASK_DISPATCHERS",
+        {"scholar_contact": dispatcher},
+    )
+    monkeypatch.setattr(graph_observability, "get_global_tracker", lambda: tracker)
+    monkeypatch.setattr(project_task_runtime, "obs_log", lambda *args, **kwargs: None)
+
+    asyncio.run(
+        project_task_runtime.execute_project_task(
+            "task-provider-error", "project-1", "scholar_contact", {}
+        )
+    )
+
+    assert db.tasks.doc["status"] == "error"
+    assert db.tasks.doc["result_status"] == "error"
+    assert db.tasks.doc["progress.stage"] == "error"
+    assert db.tasks.doc["error"] == "all providers unavailable"
     assert tracker.depth == 0
 
 

@@ -168,6 +168,14 @@ async def lifespan(app: FastAPI):
         await db["findings"].create_index("xhs_user_id", sparse=True)
         await db["findings"].create_index("note_id", sparse=True)
         await db["findings"].create_index("task_id")
+        await db["findings"].create_index("task_ids", sparse=True)
+        await db["findings"].create_index(
+            [("project_id", 1), ("task_id", 1), ("attention_score", -1)]
+        )
+        await db["findings"].create_index(
+            [("project_id", 1), ("task_ids", 1), ("attention_score", -1)],
+            sparse=True,
+        )
         await db["findings"].create_index("target_id", sparse=True)
         await db["findings"].create_index(
             [("target_id", 1), ("attention_score", -1)], sparse=True

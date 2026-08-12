@@ -1965,6 +1965,78 @@ def test_url_scan_probe_urls_uses_probe_tool(monkeypatch):
     asyncio.run(_run())
 
 
+def test_probe_candidates_try_requested_scheme_then_alternate():
+    from crawler_tools.hunter_tools import _probe_candidate_urls
+
+    assert _probe_candidate_urls("http://example.com/path?q=1") == [
+        "http://example.com/path?q=1",
+        "https://example.com/path?q=1",
+    ]
+    assert _probe_candidate_urls("example.com") == [
+        "https://example.com",
+        "http://example.com",
+    ]
+
+
+def test_probe_url_falls_back_scheme_and_bounds_title_read():
+    from crawler_tools.hunter_tools import probe_url
+
+    class _Content:
+        def __init__(self) -> None:
+            self.read_size = 0
+
+        async def read(self, size: int) -> bytes:
+            self.read_size = size
+            return b"<html><title>Recovered endpoint</title></html>"
+
+    class _Response:
+        def __init__(self, url: str) -> None:
+            self.url = url
+            self.status = 200
+            self.charset = "utf-8"
+            self.headers = {"Content-Length": "900000"}
+            self.content = _Content()
+
+    class _Context:
+        def __init__(self, url: str, response: _Response) -> None:
+            self.url = url
+            self.response = response
+
+        async def __aenter__(self) -> _Response:
+            if self.url.startswith("http://"):
+                raise asyncio.TimeoutError
+            return self.response
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class _Session:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.response = _Response("https://example.com/")
+
+        def get(self, url: str, **_kwargs):
+            self.calls.append(url)
+            return _Context(url, self.response)
+
+    async def _run() -> None:
+        session = _Session()
+        result = await probe_url(
+            "http://example.com/",
+            timeout=1,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert session.calls == ["http://example.com/", "https://example.com/"]
+        assert result.is_alive is True
+        assert result.url == "https://example.com/"
+        assert result.title == "Recovered endpoint"
+        assert result.content_length == 900000
+        assert session.response.content.read_size == 512 * 1024
+
+    asyncio.run(_run())
+
+
 def test_profile_copywriting_stage_uses_copywriting_tool_contract():
     async def _run():
         db = _FakeDB()

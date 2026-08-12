@@ -1693,6 +1693,62 @@ class _NotifyStage(Stage):
 
 # ── 编排入口 ────────────────────────────────────────────
 
+
+def _finalize_collection_keyword_resolution(
+    resolution: dict[str, Any],
+    *,
+    explicit_keywords: list[str],
+    target: dict[str, Any] | None,
+    task_def: dict[str, Any],
+) -> dict[str, Any]:
+    """Ensure target-scoped search never degrades into an unrelated empty query."""
+    finalized = dict(resolution or {})
+    keywords = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in (finalized.get("keywords") or explicit_keywords)
+            if str(value or "").strip()
+        )
+    )
+    if keywords:
+        finalized["keywords"] = keywords
+        return finalized
+
+    target_name = str(
+        (target or {}).get("canonical_name")
+        or task_def.get("target_name")
+        or ""
+    ).strip()
+    target_id = str(
+        (target or {}).get("target_id")
+        or task_def.get("target_id")
+        or ""
+    ).strip()
+    if not target_name:
+        finalized["keywords"] = [""]
+        return finalized
+
+    finalized["keywords"] = [target_name]
+    finalized["sources"] = list(
+        dict.fromkeys(
+            [*list(finalized.get("sources") or []), "target_name_fallback"]
+        )
+    )
+    if target_id:
+        finalized["target_ids"] = list(
+            dict.fromkeys(
+                [*list(finalized.get("target_ids") or []), target_id]
+            )
+        )
+        keyword_targets = dict(finalized.get("keyword_targets") or {})
+        keyword_targets[target_name] = {
+            "target_id": target_id,
+            "target_name": target_name,
+        }
+        finalized["keyword_targets"] = keyword_targets
+    return finalized
+
+
 async def run_collect_task(
     db: AsyncIOMotorDatabase,
     *,
@@ -1820,7 +1876,14 @@ async def run_collect_task(
                 keyword_resolution = resolved.as_dict()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[collect] 项目目标词解析失败，回退显式关键词: %s", exc)
-    keywords = list(keyword_resolution.get("keywords") or explicit_keywords) or [""]
+                keyword_resolution["error"] = str(exc)[:500]
+    keyword_resolution = _finalize_collection_keyword_resolution(
+        keyword_resolution,
+        explicit_keywords=explicit_keywords,
+        target=target,
+        task_def=task_def,
+    )
+    keywords = list(keyword_resolution.get("keywords") or [""])
     definition_fp = collect_dao.definition_fingerprint(task_def)
     keyword_targets = keyword_resolution.get("keyword_targets") or {}
     seed_specs: list[dict[str, Any]] = []

@@ -24,6 +24,61 @@ from core.logger import get_logger
 from api.services.scholar_contact_runtime import scholar_collection_slot
 
 logger = get_logger("scholar_contact")
+_MAX_SOURCE_ERROR_DETAILS = 100
+
+
+def _record_source_errors(summary: dict[str, Any], errors: list[str]) -> None:
+    normalized = [str(error).strip()[:500] for error in errors if str(error).strip()]
+    if not normalized:
+        return
+    summary["source_error_count"] = int(summary.get("source_error_count") or 0) + len(
+        normalized
+    )
+    details = summary.setdefault("source_errors", [])
+    remaining = max(0, _MAX_SOURCE_ERROR_DETAILS - len(details))
+    details.extend(normalized[:remaining])
+
+
+def _scholar_source_health(discover_out: dict[str, Any]) -> dict[str, list[str]]:
+    """Summarize provider health without coupling the pipeline to provider code."""
+    succeeded: list[str] = []
+    errors: list[str] = []
+
+    api_results = discover_out.get("api_results")
+    if isinstance(api_results, dict) and not api_results.get("error"):
+        succeeded.append("openalex")
+    else:
+        detail = (
+            str(api_results.get("error") or "未返回有效结果")
+            if isinstance(api_results, dict)
+            else "未返回有效结果"
+        )
+        errors.append(f"openalex: {detail}"[:500])
+
+    extraction = discover_out.get("email_extraction")
+    if not isinstance(extraction, dict):
+        errors.append("email_extractors: 未返回有效结果")
+        return {"succeeded": succeeded, "errors": errors}
+    if extraction.get("error"):
+        errors.append(f"email_extractors: {extraction['error']}"[:500])
+
+    sources = extraction.get("sources")
+    if not isinstance(sources, dict) or not sources:
+        if not extraction.get("error"):
+            errors.append("email_extractors: 未返回数据源状态")
+        return {"succeeded": succeeded, "errors": errors}
+    for source_name, payload in sources.items():
+        name = str(source_name or "unknown")
+        if isinstance(payload, dict) and not payload.get("error"):
+            succeeded.append(name)
+            continue
+        detail = (
+            str(payload.get("error") or "未返回有效结果")
+            if isinstance(payload, dict)
+            else "未返回有效结果"
+        )
+        errors.append(f"{name}: {detail}"[:500])
+    return {"succeeded": succeeded, "errors": errors}
 
 
 async def _chrome_pmc_enrich(
@@ -152,6 +207,7 @@ async def _run_scholar_contact_collect(
         "articles_inserted": 0, "articles_updated": 0,
         "contacts_inserted": 0, "contacts_updated": 0,
         "corresponding_count": 0, "dry_run": dry_run,
+        "sources_succeeded": [], "source_errors": [], "source_error_count": 0,
         "status": "running", "error": None,
     }
     obs_log(
@@ -174,8 +230,16 @@ async def _run_scholar_contact_collect(
                 inst_cands = await asyncio.to_thread(scholar_tools._resolve_institution, unit)
                 if inst_cands:
                     summary["matched_institution"] = inst_cands[0].get("name", "")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                _record_source_errors(
+                    summary,
+                    [f"openalex institution resolver: {exc}"],
+                )
+                logger.warning(
+                    "[scholar_contact] 机构解析失败 unit=%s: %s",
+                    unit,
+                    exc,
+                )
 
             pages = scholar_tools.europepmc_bulk_pages(ue, max_articles=max_articles, page_size=100)
             it = iter(pages)
@@ -184,6 +248,13 @@ async def _run_scholar_contact_collect(
                 page = await asyncio.to_thread(lambda: next(it, None))
                 if page is None:
                     break
+                _record_source_errors(
+                    summary,
+                    [
+                        f"europepmc full text: {error}"
+                        for error in page.get("errors") or []
+                    ],
+                )
                 hit_total = page.get("hit_count")
                 art_docs, con_docs = scholar_tools.normalize_bulk_batch(unit, page["articles"])
                 summary["articles_total"] += len(art_docs)
@@ -225,11 +296,20 @@ async def _run_scholar_contact_collect(
                     level="info", event="bulk_progress",
                     data={"fetched": page["fetched"], "total": hit_total},
                 )
+            summary["sources_succeeded"] = ["europepmc"]
         else:
             # 单位+方向：多源聚合（同步网络调用卸载到线程池）
             discover_out = await asyncio.to_thread(
                 scholar_tools.discover, unit, direction, unit_en, limit,
             )
+            source_health = _scholar_source_health(discover_out)
+            summary["sources_succeeded"] = source_health["succeeded"]
+            _record_source_errors(summary, source_health["errors"])
+            if not source_health["succeeded"]:
+                raise RuntimeError(
+                    "学者公开数据源全部不可用: "
+                    + "; ".join(source_health["errors"][:3])
+                )
             api = discover_out.get("api_results", {}) or {}
             inst = api.get("unit") or {}
             summary["matched_institution"] = inst.get("name", "")
@@ -314,23 +394,36 @@ async def _run_scholar_contact_collect(
                 summary["contacts_inserted"] = con_res["inserted"]
                 summary["contacts_updated"] = con_res["updated"]
 
-        summary["status"] = "completed"
+        summary["status"] = (
+            "partial" if summary["source_error_count"] else "completed"
+        )
         obs_log(
-            "学者联系采集完成", task_id=task_id, project_id=project_id,
-            source="scholar_contact", level="notice", event="pipeline_done",
+            (
+                "学者联系采集部分完成"
+                if summary["status"] == "partial"
+                else "学者联系采集完成"
+            ),
+            task_id=task_id, project_id=project_id,
+            source="scholar_contact",
+            level="warning" if summary["status"] == "partial" else "notice",
+            event="pipeline_done",
             data={
+                "status": summary["status"],
                 "matched_institution": summary["matched_institution"],
                 "articles_total": summary["articles_total"],
                 "verified_articles_total": summary["verified_articles_total"],
                 "contacts_total": summary["contacts_total"],
                 "corresponding_count": summary["corresponding_count"],
+                "sources_succeeded": summary["sources_succeeded"],
+                "source_error_count": summary["source_error_count"],
                 "dry_run": dry_run,
             },
         )
         logger.info(
-            f"[scholar_contact] task={task_id} 完成 ✓ unit={unit} "
+            f"[scholar_contact] task={task_id} status={summary['status']} unit={unit} "
             f"articles={summary['articles_total']} contacts={summary['contacts_total']} "
-            f"corr={summary['corresponding_count']} dry_run={dry_run}"
+            f"corr={summary['corresponding_count']} "
+            f"source_errors={summary['source_error_count']} dry_run={dry_run}"
         )
         if (
             not dry_run

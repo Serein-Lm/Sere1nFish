@@ -1034,6 +1034,7 @@ def europepmc_bulk_pages(unit_en: str, max_articles: int = 2000,
         if not results:
             break
         batch: list[dict[str, Any]] = []
+        page_errors: list[str] = []
         for r in results:
             pmcid = r.get("pmcid")
             item: dict[str, Any] = {
@@ -1045,11 +1046,18 @@ def europepmc_bulk_pages(unit_en: str, max_articles: int = 2000,
                     xml = _get_text(
                         f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML")
                     item.update(_parse_europepmc_full_text(xml, unit=unit_en))
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     item["emails"] = []
+                    item["full_text_error"] = str(exc)[:500]
+                    page_errors.append(f"{pmcid}: {exc}"[:500])
             batch.append(item)
         fetched += len(results)
-        yield {"articles": batch, "fetched": fetched, "hit_count": hit_count}
+        yield {
+            "articles": batch,
+            "fetched": fetched,
+            "hit_count": hit_count,
+            "errors": page_errors,
+        }
         next_cursor = d.get("nextCursorMark")
         if not next_cursor or next_cursor == cursor:
             break

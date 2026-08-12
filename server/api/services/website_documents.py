@@ -15,10 +15,11 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.dao import findings as findings_dao
 from api.dao import website_crawl as crawl_dao
 from api.services.company_url import normalize_url
+from api.services.site_relevance import classify_candidate_surface
 from api.services.source_documents.resources import (
-    ATTACHMENT_EXTENSIONS,
     fetch_resource_with_retry,
     html_text_and_links,
+    is_attachment_link,
 )
 from api.services.source_documents.service import ingest_source_url
 from api.services.source_documents.urls import canonicalize_source_url
@@ -30,6 +31,7 @@ from core.mobile.collect.contacts import build_contact_findings
 logger = get_logger("website_documents")
 
 _MAX_HTML_BYTES = 8 * 1024 * 1024
+_DISCOVERY_POLICY_VERSION = 2
 _DOCUMENT_PATH_RE = re.compile(
     r"/(?:19|20)\d{2}(?:\d{2})?/t(?:19|20)\d{6}_[^/]+\.s?html?$",
     re.I,
@@ -139,6 +141,7 @@ class WebsiteCollectionPolicy:
     archive_concurrency: int = 4
     request_timeout_seconds: int = 120
     max_page_attempts: int = 3
+    broad_official_discovery: bool = False
 
     def bounded(self) -> "WebsiteCollectionPolicy":
         return WebsiteCollectionPolicy(
@@ -152,7 +155,38 @@ class WebsiteCollectionPolicy:
                 min(int(self.request_timeout_seconds), 600),
             ),
             max_page_attempts=max(1, min(int(self.max_page_attempts), 6)),
+            broad_official_discovery=bool(self.broad_official_discovery),
         )
+
+
+def resolve_website_collection_policy(
+    tuning: Any,
+    *,
+    mode: str = "standard",
+) -> WebsiteCollectionPolicy:
+    """Map the task-level collection intent to one bounded crawl policy."""
+    normalized_mode = str(mode or "standard").strip().casefold()
+    if normalized_mode not in {"standard", "deep"}:
+        raise ValueError("官网归档模式必须为 standard 或 deep")
+    policy = WebsiteCollectionPolicy(
+        max_pages=int(tuning.website_crawl_max_pages),
+        max_documents=int(tuning.website_crawl_max_documents),
+        max_depth=int(tuning.website_crawl_max_depth),
+        discovery_concurrency=int(tuning.website_crawl_concurrency),
+        archive_concurrency=int(tuning.website_archive_concurrency),
+    )
+    if normalized_mode == "deep":
+        policy = WebsiteCollectionPolicy(
+            max_pages=max(policy.max_pages, 6_000),
+            max_documents=max(policy.max_documents, 3_000),
+            max_depth=max(policy.max_depth, 8),
+            discovery_concurrency=max(policy.discovery_concurrency, 24),
+            archive_concurrency=max(policy.archive_concurrency, 8),
+            request_timeout_seconds=policy.request_timeout_seconds,
+            max_page_attempts=policy.max_page_attempts,
+            broad_official_discovery=True,
+        )
+    return policy.bounded()
 
 
 def _host_in_roots(host: str, root_domains: list[str]) -> bool:
@@ -245,9 +279,9 @@ def _is_document_url(url: str, label: str = "") -> bool:
 
 
 def _link_kind(url: str, label: str = "") -> str:
-    suffix = PurePosixPath(urlsplit(url).path).suffix.casefold()
-    if suffix in ATTACHMENT_EXTENSIONS:
+    if is_attachment_link({"url": url, "label": label}):
         return "attachment"
+    suffix = PurePosixPath(urlsplit(url).path).suffix.casefold()
     if suffix in _SKIP_EXTENSIONS:
         return "asset"
     return "document" if _is_document_url(url, label) else "index"
@@ -266,12 +300,15 @@ def classify_discovered_link(
     parent_relevant: bool,
     depth: int,
     max_depth: int,
+    broad_official_discovery: bool = False,
 ) -> dict[str, Any] | None:
     """Return a crawl candidate only when it belongs to a document-rich scope."""
     if depth > max_depth:
         return None
+    if classify_candidate_surface(url=url, title=label):
+        return None
     kind = _link_kind(url, label)
-    if kind in {"asset", "attachment"}:
+    if kind == "asset":
         return None
     path = urlsplit(url).path
     parent_parts = urlsplit(parent_url)
@@ -287,10 +324,19 @@ def classify_discovered_link(
     )
     pagination = _is_pagination_link(url, label)
     hinted = _has_hint(url, label)
-    if kind == "document":
-        relevant = hinted or (parent_relevant and same_scope)
+    if kind == "attachment":
+        relevant = broad_official_discovery or hinted or (
+            parent_relevant and same_scope
+        )
+        kind = "document"
+    elif kind == "document":
+        relevant = broad_official_discovery or hinted or (
+            parent_relevant and same_scope
+        )
     else:
-        relevant = hinted or (parent_relevant and pagination)
+        relevant = broad_official_discovery or hinted or (
+            parent_relevant and pagination
+        )
     if not relevant:
         return None
     priority = 100 if kind == "document" else 80 if pagination else 70
@@ -367,6 +413,7 @@ class WebsiteDocumentCollectionService:
 
         crawl_task_id = f"{parent_task_id}_webdocs"
         config = {
+            "discovery_policy_version": _DISCOVERY_POLICY_VERSION,
             "max_pages": self.policy.max_pages,
             "max_documents": self.policy.max_documents,
             "max_depth": self.policy.max_depth,
@@ -374,6 +421,7 @@ class WebsiteDocumentCollectionService:
             "archive_concurrency": self.policy.archive_concurrency,
             "request_timeout_seconds": self.policy.request_timeout_seconds,
             "max_page_attempts": self.policy.max_page_attempts,
+            "broad_official_discovery": self.policy.broad_official_discovery,
         }
         if not dry_run:
             await crawl_dao.begin_task(
@@ -393,6 +441,8 @@ class WebsiteDocumentCollectionService:
         )
         sequence = itertools.count()
         seen: set[str] = set()
+        reservations: set[str] = set()
+        reserved_documents = 0
         state_lock = asyncio.Lock()
         counters: dict[str, int] = {
             "total_pages": 0,
@@ -411,51 +461,76 @@ class WebsiteDocumentCollectionService:
         truncated = False
 
         async def _queue_items(items: list[dict[str, Any]]) -> None:
-            nonlocal truncated
+            nonlocal reserved_documents, truncated
             accepted: list[dict[str, Any]] = []
             async with state_lock:
+                pending_urls: set[str] = set()
+                pending_documents = 0
+                reached_limit = False
                 for item in items:
                     url = str(item.get("canonical_url") or "")
-                    if not url or url in seen:
+                    if (
+                        not url
+                        or url in seen
+                        or url in reservations
+                        or url in pending_urls
+                    ):
                         continue
-                    if len(seen) >= self.policy.max_pages:
-                        truncated = True
+                    if len(seen) + len(reservations) >= self.policy.max_pages:
+                        reached_limit = True
                         break
                     if (
                         item.get("kind") == "document"
                         and counters["documents_scheduled"]
+                        + reserved_documents
+                        + pending_documents
                         >= self.policy.max_documents
                     ):
-                        truncated = True
+                        reached_limit = True
                         continue
-                    seen.add(url)
+                    pending_urls.add(url)
                     if item.get("kind") == "document":
-                        counters["documents_scheduled"] += 1
+                        pending_documents += 1
                     accepted.append(item)
+                if not accepted:
+                    truncated = truncated or reached_limit
+                    return
+                reservations.update(pending_urls)
+                reserved_documents += pending_documents
+            try:
+                if dry_run:
+                    inserted = accepted
+                else:
+                    inserted_ids = set(
+                        await crawl_dao.enqueue_pages(
+                            self.db,
+                            crawl_task_id=crawl_task_id,
+                            project_id=project_id,
+                            target_id=target_id,
+                            pages=accepted,
+                        )
+                    )
+                    inserted = [
+                        item
+                        for item in accepted
+                        if crawl_dao.page_id_for_url(
+                            crawl_task_id,
+                            item["canonical_url"],
+                        )
+                        in inserted_ids
+                    ]
+            except BaseException:
+                async with state_lock:
+                    reservations.difference_update(pending_urls)
+                    reserved_documents -= pending_documents
+                raise
+            async with state_lock:
+                reservations.difference_update(pending_urls)
+                reserved_documents -= pending_documents
+                seen.update(pending_urls)
+                counters["documents_scheduled"] += pending_documents
                 counters["total_pages"] = len(seen)
-            if not accepted:
-                return
-            if dry_run:
-                inserted = accepted
-            else:
-                inserted_ids = set(
-                    await crawl_dao.enqueue_pages(
-                        self.db,
-                        crawl_task_id=crawl_task_id,
-                        project_id=project_id,
-                        target_id=target_id,
-                        pages=accepted,
-                    )
-                )
-                inserted = [
-                    item
-                    for item in accepted
-                    if crawl_dao.page_id_for_url(
-                        crawl_task_id,
-                        item["canonical_url"],
-                    )
-                    in inserted_ids
-                ]
+                truncated = truncated or reached_limit
             for item in inserted:
                 item = dict(item)
                 item["page_id"] = crawl_dao.page_id_for_url(
@@ -697,7 +772,11 @@ class WebsiteDocumentCollectionService:
                 (b"<!DOCTYPE", b"<html", b"<HTML")
             ):
                 raise RuntimeError(f"目录入口不是 HTML: {fetched.content_type}")
-            text, links = html_text_and_links(fetched.data, fetched.url)
+            text, links = html_text_and_links(
+                fetched.data,
+                fetched.url,
+                content_type=fetched.content_type,
+            )
             candidates: list[dict[str, Any]] = []
             for link in links:
                 try:
@@ -714,6 +793,9 @@ class WebsiteDocumentCollectionService:
                     parent_relevant=bool(item.get("scope_relevant")),
                     depth=int(item.get("depth") or 0) + 1,
                     max_depth=self.policy.max_depth,
+                    broad_official_discovery=(
+                        self.policy.broad_official_discovery
+                    ),
                 )
                 if candidate:
                     candidates.append(candidate)
@@ -857,6 +939,9 @@ class WebsiteDocumentCollectionService:
                         durable.get("attachments_archived") or 0
                     ),
                     "contacts_found": int(durable.get("contacts_found") or 0),
+                    "findings_upserted": int(
+                        durable.get("findings_upserted") or 0
+                    ),
                 }
             )
         status = "partial" if (
@@ -905,4 +990,40 @@ class WebsiteDocumentCollectionService:
                 f"附件 {counters['attachments_archived']} 个"
             ),
         )
+        try:
+            from api.services.company_scan_recovery import (
+                reconcile_terminal_company_website_result,
+            )
+
+            await reconcile_terminal_company_website_result(
+                self.db,
+                parent_task_id=parent_task_id,
+                website_summary=summary,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "官网文档终态投影同步失败 task=%s: %s",
+                crawl_task_id,
+                exc,
+            )
         return summary
+
+    async def run_until_stable(
+        self,
+        *,
+        max_passes: int = 2,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Retry durable partial/error pages without repeating completed pages."""
+        result: dict[str, Any] = {}
+        passes = max(1, min(int(max_passes or 1), 3))
+        for pass_index in range(passes):
+            result = await self.run(**kwargs)
+            result["retry_passes"] = pass_index
+            if (
+                result.get("status") != "partial"
+                or result.get("truncated")
+                or kwargs.get("dry_run")
+            ):
+                break
+        return result

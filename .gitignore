@@ -38,6 +38,7 @@ server/test_server/tests/*_data/
 .env.local
 .env.*.local
 server/config.json
+server/test_server/tests/xhs_cookie.txt
 
 # ===== Generated HTTPS certificates =====
 nginx/certs/

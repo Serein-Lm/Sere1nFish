@@ -4559,6 +4559,7 @@ export default function ProjectDetail() {
   const renderTargetDashboard = () => {
     const taskStatusMap: Record<string, { color: string; text: string }> = {
       completed: { color: 'success', text: '已完成' },
+      partial: { color: 'warning', text: '部分完成' },
       running: { color: 'processing', text: '运行中' },
       pending: { color: 'default', text: '等待中' },
       error: { color: 'error', text: '失败' },
@@ -5055,7 +5056,7 @@ export default function ProjectDetail() {
               dataIndex: 'status',
               key: 'status',
               width: 100,
-              render: (val: string) => {
+              render: (val: string, rec: Task) => {
                 const map: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
                   pending: { color: 'default', icon: <ClockCircleOutlined />, label: '等待中' },
                   probing: { color: 'processing', icon: <SyncOutlined spin />, label: '探活中' },
@@ -5064,12 +5065,16 @@ export default function ProjectDetail() {
                   running: { color: 'processing', icon: <SyncOutlined spin />, label: '执行中' },
                   pausing: { color: 'warning', icon: <SyncOutlined spin />, label: '暂停中' },
                   completed: { color: 'success', icon: <CheckCircleOutlined />, label: '已完成' },
+                  partial: { color: 'warning', icon: <ExclamationCircleOutlined />, label: '部分完成' },
                   error: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
                   failed: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
                   paused: { color: 'warning', icon: <ClockCircleOutlined />, label: '已暂停' },
                   cancelled: { color: 'default', icon: <ClockCircleOutlined />, label: '已取消' },
                 }
-                const info = map[val] || map.pending
+                const effectiveStatus = val === 'completed' && (
+                  rec.result_status === 'partial' || rec.result?.status === 'partial'
+                ) ? 'partial' : val
+                const info = map[effectiveStatus] || map.pending
                 return <Tag icon={info.icon} color={info.color}>{info.label}</Tag>
               },
             },
@@ -5612,6 +5617,7 @@ export default function ProjectDetail() {
                       if (urlList.length > 0) params.urls = urlList
                     }
                     params.enable_url_scan = values.enable_url_scan ?? true
+                    params.website_collection_mode = values.website_collection_mode ?? 'deep'
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? false
                     params.enable_subsidiary_xhs = Boolean(values.enable_xhs && values.enable_subsidiary_xhs)
@@ -5740,7 +5746,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', website_collection_mode: 'deep', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -5975,6 +5981,16 @@ export default function ProjectDetail() {
                           <Segmented block options={[
                             { label: '全量扫描', value: 'full' },
                             { label: '增量扫描', value: 'incremental' },
+                          ]} />
+                        </Form.Item>
+                        <Form.Item
+                          name="website_collection_mode"
+                          label="官网证据归档范围"
+                          extra="完整归档会扩大目录深度和文档预算；任务达到上限时保留断点，后续可继续。"
+                        >
+                          <Segmented block options={[
+                            { label: '完整归档', value: 'deep' },
+                            { label: '标准归档', value: 'standard' },
                           ]} />
                         </Form.Item>
                         <Row gutter={16}>

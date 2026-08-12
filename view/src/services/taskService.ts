@@ -85,6 +85,7 @@ export interface WechatTargetSelectionResult {
 
 export interface TaskResult {
   [key: string]: unknown
+  status?: string
   xhs?: {
     enabled?: boolean
     root_selected?: boolean
@@ -113,6 +114,7 @@ export interface Task {
   batch_index?: number
   batch_total?: number
   status: TaskStatus
+  result_status?: string
   progress: TaskProgress
   result?: TaskResult
   elapsed_ms?: number
@@ -574,6 +576,7 @@ export async function listProjectFindings(projectId: string, params?: {
   min_score?: number
   sort?: 'score_desc' | 'score_asc' | 'time_desc'
   include_safe?: boolean
+  summary_only?: boolean
 }): Promise<FindingsListResponse> {
   return apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/findings`, {
     method: 'POST',
@@ -588,6 +591,7 @@ export async function listProjectFindings(projectId: string, params?: {
       min_score: params?.min_score ?? 0,
       sort: params?.sort ?? 'score_desc',
       include_safe: params?.include_safe ?? false,
+      summary_only: params?.summary_only ?? true,
     }),
   })
 }

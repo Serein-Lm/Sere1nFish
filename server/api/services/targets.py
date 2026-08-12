@@ -76,6 +76,20 @@ def _empty_high_score_breakdown() -> dict[str, int]:
     return {key: 0 for key in _HIGH_SCORE_SOURCE_KEYS}
 
 
+def _task_collection_status(task: dict[str, Any]) -> str:
+    """Expose terminal tasks with incomplete collection as partial to dashboards."""
+    task_status = str(task.get("status") or "")
+    result = task.get("result")
+    result_status = str(
+        task.get("result_status")
+        or (result.get("status") if isinstance(result, dict) else "")
+        or ""
+    )
+    if task_status == "completed" and result_status == "partial":
+        return "partial"
+    return task_status
+
+
 def _parse_priority_level(value: str) -> int | None:
     if value.isdigit():
         level = int(value)
@@ -1076,7 +1090,15 @@ async def list_project_target_summaries(
     )
     task_docs_job = db[TASKS_COLLECTION].find(
         {"project_id": project_id, "task_id": {"$in": task_ids}},
-        {"_id": 0, "task_id": 1, "status": 1, "updated_at": 1, "created_at": 1},
+        {
+            "_id": 0,
+            "task_id": 1,
+            "status": 1,
+            "result_status": 1,
+            "result.status": 1,
+            "updated_at": 1,
+            "created_at": 1,
+        },
     ).to_list(max(1, len(task_ids)))
     (
         counts,
@@ -1229,7 +1251,7 @@ async def list_project_target_summaries(
             ),
             "latest_task_status": next(
                 (
-                    str(tasks_by_id[task_id].get("status") or "")
+                    _task_collection_status(tasks_by_id[task_id])
                     for task_id in reversed(
                         [str(value) for value in relation.get("run_task_ids") or []]
                     )

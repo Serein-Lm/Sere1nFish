@@ -308,16 +308,50 @@ async def _execute_project_task(
                 (current or {}).get("runtime_id"),
             )
             return result
+        result_status = (
+            str(result.get("status") or "completed").strip().lower()
+            if isinstance(result, dict)
+            else "completed"
+        )
+        if result_status in {"error", "failed"}:
+            error = str(result.get("error") or "任务返回失败状态")
+            obs_log(
+                f"任务失败: {error}",
+                task_id=task_id,
+                project_id=project_id,
+                source="task_runner",
+                level="error",
+                event="task_error",
+                data={
+                    "task_type": task_type,
+                    "error": error,
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+            logger.error("任务返回失败状态 | task=%s: %s", task_id, error)
+            return result
+        partial = result_status == "partial"
         obs_log(
-            f"任务完成 ({elapsed_ms / 1000:.1f}s)",
+            (
+                f"任务部分完成 ({elapsed_ms / 1000:.1f}s)"
+                if partial
+                else f"任务完成 ({elapsed_ms / 1000:.1f}s)"
+            ),
             task_id=task_id,
             project_id=project_id,
             source="task_runner",
-            level="notice",
-            event="task_done",
+            level="warning" if partial else "notice",
+            event="task_partial" if partial else "task_done",
             data={"task_type": task_type, "elapsed_ms": elapsed_ms},
         )
-        logger.notice("任务完成 | task=%s (%.1fs)", task_id, elapsed_ms / 1000)
+        if partial:
+            logger.warning(
+                "任务部分完成 | task=%s (%.1fs)",
+                task_id,
+                elapsed_ms / 1000,
+            )
+        else:
+            logger.notice("任务完成 | task=%s (%.1fs)", task_id, elapsed_ms / 1000)
         return result
     except asyncio.CancelledError:
         if await tasks_dao.is_pause_requested(

@@ -98,6 +98,7 @@ def test_hub_routes_explicit_public_web_queries_to_browser_payload() -> None:
         _PUBLIC_WEB_AGENT_TIMEOUT_SECONDS,
         _PUBLIC_WEB_MCP_TOOL_LIMIT,
         _has_public_web_intent,
+        _osint_classifications,
         _public_web_classifications,
     )
 
@@ -110,6 +111,11 @@ def test_hub_routes_explicit_public_web_queries_to_browser_payload() -> None:
     ]
     assert _public_web_classifications(domain_query) == [
         {"source": "payload", "query": domain_query, "requires_tools": True}
+    ]
+    organization_query = "请从公网检索中国疾控中心官网公开联系方式"
+    assert _osint_classifications(organization_query) is None
+    assert _public_web_classifications(organization_query) == [
+        {"source": "payload", "query": organization_query, "requires_tools": True}
     ]
     assert _public_web_classifications("查询当前项目已有 Finding") is None
     assert _public_web_classifications(

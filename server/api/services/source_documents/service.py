@@ -44,7 +44,7 @@ from .urls import canonicalize_source_url
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
 _CONTEXT_ANALYSIS_SCHEMA_VERSION = 7
-_MEDIA_POLICY_VERSION = 3
+_MEDIA_POLICY_VERSION = 4
 _CONTACT_POLICY_VERSION = 4
 _SOURCE_FIELD_KEYS = {
     "title",
@@ -305,7 +305,7 @@ def _archive_completeness(
         errors.append(f"附件因安全上限截断 {attachments_truncated} 个")
     images_truncated = int(capture_metadata.get("images_truncated") or 0)
     if images_truncated:
-        warnings.append(f"页面图片按上限截断 {images_truncated} 张")
+        errors.append(f"页面图片因安全上限截断 {images_truncated} 张")
     screenshot_error = str(
         capture_metadata.get("screenshot_capture_error") or ""
     ).strip()
@@ -1427,6 +1427,7 @@ async def ingest_source_url(
                             capture.images,
                             project_id=project_id,
                             task_id=run_task_id,
+                            source_type=capture.source_type,
                         )
                     )
                     (
@@ -1496,6 +1497,7 @@ async def ingest_source_url(
                         capture.images,
                         project_id=project_id,
                         task_id=run_task_id,
+                        source_type=capture.source_type,
                     )
                 )
                 (

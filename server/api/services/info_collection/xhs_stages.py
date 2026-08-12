@@ -117,6 +117,7 @@ class XhsTaggingStage(Stage):
     async def on_setup(self, state: dict[str, Any]) -> None:
         state.setdefault("tagging_count", 0)
         state.setdefault("all_suspicious_count", 0)
+        state.setdefault("tagging_errors", 0)
 
     async def handle(self, item: Item, ctx) -> None:
         from api.dao import xhs as xhs_dao
@@ -163,6 +164,7 @@ class XhsTaggingStage(Stage):
                     "reason": "打标解析失败",
                 }, project_id=note.get("project_id", ""), task_id=note.get("_sub_task_id", note.get("task_id", "")))
         except Exception as exc:
+            ctx.state["tagging_errors"] = ctx.state.get("tagging_errors", 0) + 1
             ctx.logger.warning(f"[xhs-stream] 打标失败 note={note_id}: {exc}")
             await xhs_dao.update_note_tagging(self.db, note_id, {
                 "is_suspicious": False,
@@ -310,6 +312,7 @@ class XhsPrefetchedDetailTaggingStage(Stage):
     async def on_setup(self, state: dict[str, Any]) -> None:
         state.setdefault("detail_count", 0)
         state.setdefault("detail_findings_count", 0)
+        state.setdefault("archive_errors", 0)
 
     async def handle(self, item: Item, ctx) -> None:
         from api.dao import xhs as xhs_dao
@@ -341,6 +344,7 @@ class XhsPrefetchedDetailTaggingStage(Stage):
                 )
             except Exception as exc:
                 archive_error = str(exc)
+                ctx.state["archive_errors"] = ctx.state.get("archive_errors", 0) + 1
                 ctx.logger.warning(f"[xhs-stream] 预取详情原始响应归档失败 note={note_id}: {exc}")
 
         await xhs_dao.create_note_detail(
@@ -422,6 +426,8 @@ class XhsDetailStage(Stage):
         state.setdefault("detail_findings_count", 0)
         state.setdefault("comments_count", 0)
         state.setdefault("images_count", 0)
+        state.setdefault("detail_errors", 0)
+        state.setdefault("archive_errors", 0)
 
     async def handle(self, item: Item, ctx) -> None:
         from api.dao import xhs as xhs_dao
@@ -455,6 +461,7 @@ class XhsDetailStage(Stage):
                 )
             )
             if not detail_result.ok:
+                ctx.state["detail_errors"] = ctx.state.get("detail_errors", 0) + 1
                 ctx.logger.warning(f"[xhs-stream] 详情获取失败 note={note_id}")
                 return
 
@@ -471,6 +478,7 @@ class XhsDetailStage(Stage):
                 )
             except Exception as exc:
                 archive_error = str(exc)
+                ctx.state["archive_errors"] = ctx.state.get("archive_errors", 0) + 1
                 ctx.logger.warning(f"[xhs-stream] 详情原始响应归档失败 note={note_id}: {exc}")
 
             await xhs_dao.create_note_detail(
@@ -518,6 +526,7 @@ class XhsDetailStage(Stage):
                 ctx.state["detail_findings_count"] = ctx.state.get("detail_findings_count", 0) + inserted
             ctx.logger.info(f"[xhs-stream] 详情+打标完成 note={note_id}")
         except Exception as exc:
+            ctx.state["detail_errors"] = ctx.state.get("detail_errors", 0) + 1
             ctx.logger.warning(f"[xhs-stream] 详情处理失败 note={note_id}: {exc}")
 
     async def _insert_detail_findings(

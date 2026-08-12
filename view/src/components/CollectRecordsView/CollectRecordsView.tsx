@@ -66,7 +66,7 @@ function renderContacts(record: CollectRecord) {
   return (
     <Space orientation="vertical" size={2}>
       {contacts.slice(0, 4).map((c, i) => (
-        <span key={`${c.channel}-${c.value}-${i}`}>{renderFindingValue(c.value, { copyable: true, maxWidth: 150 })}</span>
+        <span key={`${c.channel}-${c.value}-${i}`}>{renderFindingValue(c.value, { copyable: true, maxWidth: 150, linkify: false })}</span>
       ))}
     </Space>
   )
@@ -197,7 +197,7 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
               <div key={`${contact.channel}-${contact.value}-${index}`} className="collect-contact-evidence">
                 <div className="collect-contact-row">
                   <Tag color="blue" className="collect-contact-channel">{contact.channel}</Tag>
-                  {renderFindingValue(contact.value, { copyable: true, maxWidth: 420 })}
+                  {renderFindingValue(contact.value, { copyable: true, maxWidth: 420, linkify: false })}
                   {contact.source === 'image' || contact.sources?.includes('image') ? <Tag>图片识别</Tag> : null}
                 </div>
                 {(contact.context || contact.contexts?.[0]) && (

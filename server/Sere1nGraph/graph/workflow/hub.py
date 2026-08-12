@@ -44,12 +44,21 @@ _OSINT_INTENT_RE = re.compile(
     r"(?:公网|互联网|网上|公开).{0,12}(?:信息|资料|检索|搜索|调研|研究|调查))",
     re.IGNORECASE,
 )
+_PERSON_OSINT_SCOPE_RE = re.compile(
+    r"(?:人物|个人|自然人|姓名|履历|任职|身份|负责人|联系人|老师|教授|"
+    r"导师|主任|经理|院长|校长|研究员|作者|专家)",
+    re.IGNORECASE,
+)
+_LATIN_PERSON_NAME_RE = re.compile(
+    r"(?<![\w-])[A-Z][A-Za-z'’-]{1,30}\s+[A-Z][A-Za-z'’-]{1,30}(?![\w-])"
+)
 _PUBLIC_WEB_SCOPE_RE = re.compile(
     r"(?:公网|外网|互联网|网上|网页|网站|官网|搜索引擎|Bing|百度|公开来源|公开资料)",
     re.IGNORECASE,
 )
 _PUBLIC_WEB_ACTION_RE = re.compile(
-    r"(?:搜索|检索|查找|找一下|搜一下|查询|收集|搜集|核验|调研|研究|看看)",
+    r"(?:搜索|检索|查找|找一下|搜一下|查询|收集|搜集|核验|调研|研究|"
+    r"调查|深入了解|仔细了解|看看)",
     re.IGNORECASE,
 )
 _PUBLIC_CONTACT_RE = re.compile(
@@ -175,11 +184,17 @@ def _has_direct_public_url(query: str) -> bool:
 
 
 def _has_osint_intent(query: str) -> bool:
-    """识别本轮明确的公网研究意图，不受历史消息中的措辞干扰。"""
+    """Recognize person OSINT without hijacking organization web research."""
     text = str(query or "")
     if _CURRENT_REQUEST_MARKER in text:
         text = text.rpartition(_CURRENT_REQUEST_MARKER)[2]
-    return bool(_OSINT_INTENT_RE.search(text))
+    return bool(
+        _OSINT_INTENT_RE.search(text)
+        and (
+            _PERSON_OSINT_SCOPE_RE.search(text)
+            or _LATIN_PERSON_NAME_RE.search(text)
+        )
+    )
 
 
 def _has_public_web_intent(query: str) -> bool:

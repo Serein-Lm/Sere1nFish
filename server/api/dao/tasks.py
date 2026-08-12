@@ -548,16 +548,36 @@ async def complete_task(
     result: Any = None,
 ) -> bool:
     now = datetime.now(timezone.utc)
+    result_status = (
+        str(result.get("status") or "completed").strip().lower()
+        if isinstance(result, dict)
+        else "completed"
+    )
+    partial_result = result_status == "partial"
+    failed_result = result_status in {"error", "failed"}
     fields: dict[str, Any] = {
-        "status": "completed",
-        "progress.stage": "completed",
-        "progress.message": "任务已完成",
+        "status": "error" if failed_result else "completed",
+        "result_status": result_status,
+        "progress.stage": (
+            "error" if failed_result else "partial" if partial_result else "completed"
+        ),
+        "progress.message": (
+            str(result.get("error") or "任务执行失败")
+            if failed_result and isinstance(result, dict)
+            else (
+                "任务已结束，但部分数据源未完整采集"
+                if partial_result
+                else "任务已完成"
+            )
+        ),
         "progress.last_activity_at": now,
         "elapsed_ms": elapsed_ms,
         "updated_at": now,
         "completed_at": now,
         "heartbeat_at": now,
     }
+    if failed_result and isinstance(result, dict):
+        fields["error"] = str(result.get("error") or "任务执行失败")
     if result is not None:
         fields["result"] = result
     updated = await db[TASKS_COLLECTION].update_one(

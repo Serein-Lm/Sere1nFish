@@ -9,6 +9,25 @@ import asyncio
 import pytest
 
 
+def test_target_scoped_collection_never_falls_back_to_empty_keyword():
+    from core.mobile.collect.pipeline import _finalize_collection_keyword_resolution
+
+    resolved = _finalize_collection_keyword_resolution(
+        {"channel": "wechat", "keywords": [], "sources": []},
+        explicit_keywords=[],
+        target={"target_id": "target-1", "canonical_name": "目标单位"},
+        task_def={"target_id": "target-1", "target_name": "旧名称"},
+    )
+
+    assert resolved["keywords"] == ["目标单位"]
+    assert resolved["sources"] == ["target_name_fallback"]
+    assert resolved["target_ids"] == ["target-1"]
+    assert resolved["keyword_targets"]["目标单位"] == {
+        "target_id": "target-1",
+        "target_name": "目标单位",
+    }
+
+
 def test_dynamic_vision_schema_coerces_malformed_fields_without_losing_screen():
     from api.models.mobile_collect import ExtractField
     from core.mobile.collect.analysis import _build_records_model

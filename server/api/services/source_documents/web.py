@@ -38,11 +38,13 @@ from .urls import canonicalize_source_url
 logger = get_logger("source_document.web")
 
 _MAX_HTML_BYTES = 8 * 1024 * 1024
-_MAX_IMAGE_BYTES = 12 * 1024 * 1024
-_MAX_IMAGES = 24
-_MAX_ATTACHMENT_BYTES = 30 * 1024 * 1024
-_MAX_TOTAL_ATTACHMENT_BYTES = 160 * 1024 * 1024
-_MAX_ATTACHMENTS = 30
+_MAX_IMAGE_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_IMAGE_BYTES = 512 * 1024 * 1024
+_MAX_IMAGES = 160
+_IMAGE_DOWNLOAD_CONCURRENCY = 8
+_MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_ATTACHMENT_BYTES = 512 * 1024 * 1024
+_MAX_ATTACHMENTS = 120
 _ATTACHMENT_DOWNLOAD_CONCURRENCY = 4
 _MAIN_XPATHS = (
     "//article",
@@ -68,6 +70,60 @@ _NOISE_XPATH = (
     ".//*[contains(concat(' ', normalize-space(@class), ' '), ' share ')]"
 )
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+_ATTACHMENT_ENDPOINT_RE = re.compile(
+    r"(?:^|[/_?&=-])(?:attachment|download|file)(?:$|[/_?&=-])|"
+    r"(?:file|attach)(?:id|name|path)=",
+    re.I,
+)
+_ATTACHMENT_CONTENT_TYPES = {
+    "application/msword",
+    "application/octet-stream",
+    "application/pdf",
+    "application/rtf",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/zip",
+    "text/csv",
+    "text/plain",
+}
+
+
+def _is_public_http_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+
+def _looks_like_attachment_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return bool(
+        PurePosixPath(parsed.path).suffix.lower() in ATTACHMENT_EXTENSIONS
+        or _ATTACHMENT_ENDPOINT_RE.search(f"{parsed.path}?{parsed.query}")
+    )
+
+
+def _looks_like_attachment_response(
+    *,
+    requested_url: str,
+    final_url: str,
+    filename: str,
+    content_type: str,
+) -> bool:
+    media_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    return bool(
+        _looks_like_attachment_url(requested_url)
+        or _looks_like_attachment_url(final_url)
+        or is_attachment_link({"url": final_url, "label": filename})
+        or media_type in _ATTACHMENT_CONTENT_TYPES
+    )
 
 
 def _decode_html(data: bytes, content_type: str = "") -> str:
@@ -140,6 +196,7 @@ def parse_official_html(
         )
         if (
             not link_url
+            or not _is_public_http_url(link_url)
             or link_url in attachment_urls
             or not is_attachment_link(link)
             or (link_url not in main_link_urls and not explicit_attachment)
@@ -159,7 +216,7 @@ def parse_official_html(
         if not raw or raw.startswith(("data:", "javascript:")):
             continue
         absolute = urljoin(url, raw)
-        if absolute not in image_urls:
+        if _is_public_http_url(absolute) and absolute not in image_urls:
             image_urls.append(absolute)
 
     for node in main.xpath(_NOISE_XPATH):
@@ -227,6 +284,11 @@ class OfficialWebDocumentProvider:
 
     async def capture(self, url: str, *, task_id: str = "") -> CapturedDocument:
         canonical_url = canonicalize_source_url(url)
+        fetch_limit = (
+            _MAX_ATTACHMENT_BYTES
+            if _looks_like_attachment_url(canonical_url)
+            else _MAX_HTML_BYTES
+        )
         timeout = aiohttp.ClientTimeout(total=120, connect=20, sock_read=90)
         connector = aiohttp.TCPConnector(
             limit=16,
@@ -249,13 +311,67 @@ class OfficialWebDocumentProvider:
                 page = await fetch_resource_with_retry(
                     session,
                     canonical_url,
-                    max_bytes=_MAX_HTML_BYTES,
+                    max_bytes=fetch_limit,
                 )
             except Exception as exc:  # noqa: BLE001
                 raise SourceDocumentError(f"官网正文读取失败: {exc}") from exc
-            if "html" not in page.content_type.lower() and not page.data.lstrip().startswith(
+            is_html = "html" in page.content_type.lower() or page.data.lstrip().startswith(
                 (b"<!DOCTYPE", b"<html", b"<HTML")
+            )
+            if not is_html and _looks_like_attachment_response(
+                requested_url=canonical_url,
+                final_url=page.url,
+                filename=page.filename,
+                content_type=page.content_type,
             ):
+                extracted_text, text_error, text_format = await asyncio.to_thread(
+                    extract_attachment_text,
+                    page.data,
+                    filename=page.filename,
+                    content_type=page.content_type,
+                )
+                attachment = CapturedAttachment(
+                    index=0,
+                    source_url=page.url,
+                    filename=page.filename,
+                    data=page.data,
+                    content_type=page.content_type,
+                    label=page.filename,
+                    sha256=hashlib.sha256(page.data).hexdigest(),
+                    extracted_text=extracted_text,
+                    text_format=text_format,
+                    text_error=text_error,
+                )
+                return CapturedDocument(
+                    source_type=self.source_type,
+                    canonical_url=canonicalize_source_url(page.url),
+                    requested_url=url,
+                    title=page.filename,
+                    account=str(urlsplit(page.url).hostname or ""),
+                    publish_time="",
+                    text=extracted_text or page.filename,
+                    raw_html=b"",
+                    rendered_html=b"",
+                    attachments=[attachment],
+                    metadata={
+                        "http_status": 200,
+                        "final_url": page.url,
+                        "article_text": extracted_text,
+                        "direct_attachment": True,
+                        "image_urls": [],
+                        "image_download_errors": [],
+                        "image_download_warnings": [],
+                        "images_truncated": 0,
+                        "attachment_urls": [page.url],
+                        "attachment_download_errors": [],
+                        "attachment_download_warnings": [],
+                        "attachment_text_errors": [text_error] if text_error else [],
+                        "attachment_text_warnings": [],
+                        "attachments_truncated": 0,
+                        "discovered_links": 0,
+                    },
+                )
+            if not is_html:
                 raise SourceDocumentError(
                     f"来源不是 HTML 页面: {page.content_type}"
                 )
@@ -321,63 +437,72 @@ class OfficialWebDocumentProvider:
         session: aiohttp.ClientSession,
         urls: list[str],
     ) -> tuple[list[CapturedImage], list[str], list[str]]:
-        semaphore = asyncio.Semaphore(8)
-
         async def _download(index: int, image_url: str):
-            async with semaphore:
-                try:
-                    fetched = await fetch_resource_with_retry(
-                        session,
-                        image_url,
-                        max_bytes=_MAX_IMAGE_BYTES,
-                        attempts=2,
-                    )
-                    suffix = PurePosixPath(urlsplit(fetched.url).path).suffix.lower()
-                    if (
-                        not fetched.content_type.lower().startswith("image/")
-                        and suffix not in _IMAGE_EXTENSIONS
-                    ):
-                        raise ValueError(f"非图片内容: {fetched.content_type}")
-                    width, height = _image_dimensions(fetched.data)
-                    if width and height and width < 160 and height < 160:
-                        return None
-                    return CapturedImage(
-                        index=index,
-                        source_url=fetched.url,
-                        data=fetched.data,
-                        content_type=fetched.content_type.split(";", 1)[0],
-                        width=width,
-                        height=height,
-                        sha256=hashlib.sha256(fetched.data).hexdigest(),
-                    )
-                except aiohttp.ClientResponseError as exc:
-                    level = "warning" if exc.status in {404, 410} else "error"
-                    return (
-                        level,
-                        f"{image_url}: HTTP {exc.status} {exc.message}"[:800],
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    return ("error", f"{image_url}: {exc}"[:800])
+            try:
+                fetched = await fetch_resource_with_retry(
+                    session,
+                    image_url,
+                    max_bytes=_MAX_IMAGE_BYTES,
+                    attempts=2,
+                )
+                suffix = PurePosixPath(urlsplit(fetched.url).path).suffix.lower()
+                if (
+                    not fetched.content_type.lower().startswith("image/")
+                    and suffix not in _IMAGE_EXTENSIONS
+                ):
+                    raise ValueError(f"非图片内容: {fetched.content_type}")
+                width, height = _image_dimensions(fetched.data)
+                if width and height and width < 160 and height < 160:
+                    return None
+                return CapturedImage(
+                    index=index,
+                    source_url=fetched.url,
+                    data=fetched.data,
+                    content_type=fetched.content_type.split(";", 1)[0],
+                    width=width,
+                    height=height,
+                    sha256=hashlib.sha256(fetched.data).hexdigest(),
+                )
+            except aiohttp.ClientResponseError as exc:
+                level = "warning" if exc.status in {404, 410} else "error"
+                return (
+                    level,
+                    f"{image_url}: HTTP {exc.status} {exc.message}"[:800],
+                )
+            except Exception as exc:  # noqa: BLE001
+                return ("error", f"{image_url}: {exc}"[:800])
 
-        results = await asyncio.gather(
-            *(
-                _download(index, image_url)
-                for index, image_url in enumerate(urls[:_MAX_IMAGES])
+        images: list[CapturedImage] = []
+        errors: list[str] = []
+        warnings: list[str] = []
+        remaining = _MAX_TOTAL_IMAGE_BYTES
+        indexed_urls = list(enumerate(urls[:_MAX_IMAGES]))
+        for offset in range(0, len(indexed_urls), _IMAGE_DOWNLOAD_CONCURRENCY):
+            if remaining <= 0:
+                errors.append(
+                    f"单篇文档原图累计超过 "
+                    f"{_MAX_TOTAL_IMAGE_BYTES // 1024 // 1024} MiB 安全上限"
+                )
+                break
+            chunk = indexed_urls[offset : offset + _IMAGE_DOWNLOAD_CONCURRENCY]
+            downloaded = await asyncio.gather(
+                *(_download(index, image_url) for index, image_url in chunk)
             )
-        )
-        return (
-            [item for item in results if isinstance(item, CapturedImage)],
-            [
-                item[1]
-                for item in results
-                if isinstance(item, tuple) and item[0] == "error"
-            ],
-            [
-                item[1]
-                for item in results
-                if isinstance(item, tuple) and item[0] == "warning"
-            ],
-        )
+            for item in downloaded:
+                if isinstance(item, tuple):
+                    (warnings if item[0] == "warning" else errors).append(item[1])
+                    continue
+                if not isinstance(item, CapturedImage):
+                    continue
+                if len(item.data) > remaining:
+                    errors.append(
+                        f"{item.source_url}: 单篇文档原图累计超过 "
+                        f"{_MAX_TOTAL_IMAGE_BYTES // 1024 // 1024} MiB 安全上限"
+                    )
+                    continue
+                remaining -= len(item.data)
+                images.append(item)
+        return images, errors, warnings
 
     @staticmethod
     async def _download_attachments(
@@ -408,7 +533,10 @@ class OfficialWebDocumentProvider:
 
         for offset in range(0, len(indexed_links), _ATTACHMENT_DOWNLOAD_CONCURRENCY):
             if remaining <= 0:
-                errors.append("单篇文档附件累计超过 160 MiB 安全上限")
+                errors.append(
+                    f"单篇文档附件累计超过 "
+                    f"{_MAX_TOTAL_ATTACHMENT_BYTES // 1024 // 1024} MiB 安全上限"
+                )
                 break
             chunk = indexed_links[
                 offset : offset + _ATTACHMENT_DOWNLOAD_CONCURRENCY
@@ -423,7 +551,8 @@ class OfficialWebDocumentProvider:
                     continue
                 if len(fetched.data) > remaining:
                     errors.append(
-                        f"{link['url']}: 单篇文档附件累计超过 160 MiB 安全上限"
+                        f"{link['url']}: 单篇文档附件累计超过 "
+                        f"{_MAX_TOTAL_ATTACHMENT_BYTES // 1024 // 1024} MiB 安全上限"
                     )
                     continue
                 remaining -= len(fetched.data)

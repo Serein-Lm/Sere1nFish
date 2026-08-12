@@ -60,16 +60,103 @@ def related_entity_task_id(
 
 
 def should_checkpoint_module(kind: str, outcome: Any) -> bool:
-    """Only cache follow-up modules when every selected entity is complete."""
-    if not isinstance(outcome, dict) or outcome.get("status") == "error":
+    """Only cache modules whose enabled work reached a complete terminal state."""
+    if not isinstance(outcome, dict):
         return False
-    if kind in {"wholly_owned_entities", "scholar_entities"}:
-        return outcome.get("status") == "completed"
     if kind == "asset_url":
         from api.services.target_scan_profile import coverage_status_from_result
 
-        return coverage_status_from_result("website", outcome) == "completed"
-    return True
+        assets = dict(outcome.get("assets") or {})
+        providers = assets.get("providers")
+        provider_results = [
+            provider
+            for provider in (
+                providers.values() if isinstance(providers, dict) else []
+            )
+            if isinstance(provider, dict)
+        ]
+        providers_failed = bool(provider_results) and all(
+            provider.get("errors") for provider in provider_results
+        )
+        return (
+            not providers_failed
+            and coverage_status_from_result("website", outcome) == "completed"
+        )
+    payload = (
+        dict(outcome.get("result") or {})
+        if kind == "control_structure"
+        else outcome
+    )
+    status = str(payload.get("status") or "").strip().lower()
+    return status in {"completed", "skipped", "disabled"}
+
+
+def incomplete_collection_sources(result: dict[str, Any]) -> list[str]:
+    """Return enabled collection sources that did not finish completely."""
+    incomplete: list[str] = []
+    terminal_statuses = {"completed", "skipped", "disabled"}
+
+    for source in (
+        "control_structure",
+        "url_scan",
+        "website_documents",
+        "bidding",
+        "wechat",
+        "scholar",
+    ):
+        section = result.get(source)
+        if not isinstance(section, dict) or section.get("enabled") is False:
+            continue
+        status = str(section.get("status") or "pending").strip().lower()
+        if status not in terminal_statuses:
+            incomplete.append(source)
+
+    xhs = result.get("xhs")
+    if (
+        isinstance(xhs, dict)
+        and xhs.get("enabled") is not False
+        and xhs.get("root_selected")
+    ):
+        status = str(xhs.get("status") or "pending").strip().lower()
+        if status not in terminal_statuses:
+            incomplete.append("xhs")
+
+    control = result.get("control_structure")
+    if (
+        isinstance(control, dict)
+        and control.get("enabled") is not False
+        and control.get("errors")
+    ):
+        incomplete.append("control_structure")
+    if isinstance(control, dict):
+        control_scan_summary = dict(control.get("scan_summary") or {})
+        if int(control_scan_summary.get("partial") or 0) or int(
+            control_scan_summary.get("failed") or 0
+        ):
+            incomplete.append("control_structure")
+
+    scholar = result.get("scholar")
+    if isinstance(scholar, dict) and scholar.get("descendant_status"):
+        descendant_status = str(scholar.get("descendant_status") or "").lower()
+        if descendant_status not in terminal_statuses:
+            incomplete.append("scholar")
+
+    assets = result.get("assets")
+    if isinstance(assets, dict) and assets.get("enabled") is not False:
+        providers = assets.get("providers")
+        provider_results = [
+            provider
+            for provider in (providers.values() if isinstance(providers, dict) else [])
+            if isinstance(provider, dict)
+        ]
+        if provider_results and all(
+            provider.get("errors") for provider in provider_results
+        ):
+            incomplete.append("asset_intelligence")
+
+    if result.get("sub_errors"):
+        incomplete.append("subtasks")
+    return list(dict.fromkeys(incomplete))
 
 
 class _ProfileCopywritingStage(Stage):
@@ -251,6 +338,7 @@ class CompanyScanPipeline:
         subsidiary_scan_limit: int = 12,
         skip_completed_subsidiaries: bool = True,
         company_core_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY,
+        website_collection_mode: str = "deep",
         requested_by: str = "",
     ) -> dict[str, Any]:
         """
@@ -311,7 +399,12 @@ class CompanyScanPipeline:
                 "scan_candidates": 0,
                 "providers": {},
             },
-            "url_scan": {"enabled": enable_url_scan, "findings_count": 0, "copywritings_count": 0},
+            "url_scan": {
+                "enabled": enable_url_scan,
+                "status": "pending" if enable_url_scan else "disabled",
+                "findings_count": 0,
+                "copywritings_count": 0,
+            },
             "website_documents": {
                 "enabled": enable_url_scan,
                 "status": "pending" if enable_url_scan else "disabled",
@@ -321,6 +414,7 @@ class CompanyScanPipeline:
             },
             "xhs": {
                 "enabled": enable_xhs,
+                "status": "pending" if enable_xhs else "disabled",
                 "subsidiaries_enabled": subsidiary_xhs_enabled,
                 "keywords_used": [],
                 "notes_count": 0,
@@ -412,21 +506,51 @@ class CompanyScanPipeline:
 
         recovery_state = await load_recovery_state(self.db, task_id=task_id)
         resume_flags = dict(recovery_state.get("resume") or {})
-        checkpoint_results = {
+        previous_result = dict(recovery_state.get("result") or {})
+        enabled_core_modules = {
+            "control_structure": enable_control_structure,
+            "asset_url": enable_asset_discovery or enable_url_scan,
+            "xhs": enable_xhs,
+            "bidding": enable_bidding,
+            "scholar": enable_scholar,
+        }
+        raw_checkpoint_results = {
             str(module): dict(entry.get("result") or {})
             for module, entry in dict(recovery_state.get("modules") or {}).items()
             if isinstance(entry, dict)
             and entry.get("status") == "completed"
             and isinstance(entry.get("result"), dict)
         }
+        checkpoint_results = {
+            module: module_result
+            for module, module_result in raw_checkpoint_results.items()
+            if should_checkpoint_module(module, module_result)
+        }
+        invalid_checkpoint_modules = set(raw_checkpoint_results).difference(
+            checkpoint_results
+        )
         from api.services.company_scan_recovery import (
             find_incompatible_core_modules,
             find_retryable_core_modules,
+            recovery_modules_for_incomplete_sources,
         )
 
         retryable_core_modules = await find_retryable_core_modules(
             self.db,
             task_id=task_id,
+        )
+        retryable_core_modules.update(
+            module
+            for module in invalid_checkpoint_modules
+            if enabled_core_modules.get(module)
+        )
+        previous_incomplete_modules = recovery_modules_for_incomplete_sources(
+            previous_result
+        )
+        retryable_core_modules.update(
+            module
+            for module in previous_incomplete_modules
+            if module != "wechat" and enabled_core_modules.get(module)
         )
         incompatible_core_modules = find_incompatible_core_modules(
             checkpoint_results
@@ -444,7 +568,19 @@ class CompanyScanPipeline:
                 task_id,
                 ", ".join(sorted(retryable_core_modules)),
             )
-        resume_mobile_completed = bool(resume_flags.get("mobile_completed"))
+        resume_mobile_completed = bool(
+            resume_flags.get("mobile_completed")
+            and "wechat" not in invalid_checkpoint_modules
+            and "wechat" not in previous_incomplete_modules
+            and (
+                not enable_wechat
+                or "wechat" in checkpoint_results
+                or should_checkpoint_module(
+                    "wechat",
+                    dict(previous_result.get("wechat") or {}),
+                )
+            )
+        )
         restored_identity = (
             await restore_identity(
                 self.db,
@@ -798,6 +934,8 @@ class CompanyScanPipeline:
                         root_decision and root_decision.should_collect_xhs
                     )
                     result["xhs"]["root_selected"] = root_xhs_enabled
+                    if not root_xhs_enabled:
+                        result["xhs"]["status"] = "skipped"
                     logger.info(
                         "[company_scan] task=%s XHS 根目标选择 mode=%s "
                         "selected=%s reason=%s",
@@ -918,14 +1056,7 @@ class CompanyScanPipeline:
             restored_primary_modules: set[str] = set()
             xhs_succeeded = False
             if not resume_core_completed:
-                enabled_checkpoint_modules = {
-                    "control_structure": enable_control_structure,
-                    "asset_url": enable_asset_discovery or enable_url_scan,
-                    "xhs": enable_xhs,
-                    "bidding": enable_bidding,
-                    "scholar": enable_scholar,
-                }
-                for module, enabled in enabled_checkpoint_modules.items():
+                for module, enabled in enabled_core_modules.items():
                     if enabled and module in checkpoint_results:
                         primary_jobs.append((
                             module,
@@ -961,6 +1092,8 @@ class CompanyScanPipeline:
                             project_id=project_id,
                             target_id=target_id,
                             incremental_scan=incremental_scan,
+                            enable_asset_discovery=enable_asset_discovery,
+                            enable_url_scan=enable_url_scan,
                         ),
                     ))
                 if enable_bidding:
@@ -1007,9 +1140,11 @@ class CompanyScanPipeline:
                         icp_concurrency=control_icp_concurrency,
                     ),
                 ))
-            if not resume_core_completed and (
-                enable_asset_discovery or (enable_url_scan and (url_text or urls))
-            ) and "asset_url" not in checkpoint_results:
+            if (
+                not resume_core_completed
+                and (enable_asset_discovery or enable_url_scan)
+                and "asset_url" not in checkpoint_results
+            ):
                 primary_jobs.append((
                     "asset_url",
                     self._run_asset_and_url_scan(
@@ -1029,6 +1164,7 @@ class CompanyScanPipeline:
                         url_probe_concurrency=url_probe_concurrency,
                         url_scan_concurrency=url_scan_concurrency,
                         copywriting_concurrency=copywriting_concurrency,
+                        website_collection_mode=website_collection_mode,
                     ),
                 ))
 
@@ -1269,7 +1405,7 @@ class CompanyScanPipeline:
                     core_jobs,
                     on_completed=_checkpoint_module,
                 )
-                if self._jobs_completed_successfully(core_results):
+                if self._jobs_completed_successfully(core_jobs, core_results):
                     from api.services.task_progress import mark_resume_phases
 
                     completed_phases = ["core_completed"]
@@ -1490,6 +1626,7 @@ class CompanyScanPipeline:
                         bidding_page_size=bidding_page_size,
                         bidding_max_records=bidding_max_records,
                         xhs_decisions=child_xhs_decisions,
+                        website_collection_mode=website_collection_mode,
                     ),
                 ))
             if "scholar_entities" in checkpoint_results:
@@ -1691,7 +1828,9 @@ class CompanyScanPipeline:
                 )
 
             # ── 保存综合结果 ──
-            result["status"] = "completed"
+            incomplete_sources = incomplete_collection_sources(result)
+            result["incomplete_sources"] = incomplete_sources
+            result["status"] = "partial" if incomplete_sources else "completed"
             await self.db[COMPANY_SCAN_COLLECTION].update_one(
                 {"task_id": task_id},
                 {"$set": {
@@ -1730,6 +1869,7 @@ class CompanyScanPipeline:
                     target_id=target_id,
                     target_name=normalized_name,
                     source="company_scan_pipeline",
+                    status=result["status"],
                     summary={
                         "enabled_modules": enabled_modules,
                         "assets_alive": result["assets"].get("alive", 0),
@@ -1751,10 +1891,18 @@ class CompanyScanPipeline:
                         "scholar_contacts": result["scholar"].get("contacts_total", 0),
                     },
                 )
-            await self._update_progress(task_id, "completed", "综合公司扫描完成")
+            completion_message = (
+                "综合公司扫描完成"
+                if result["status"] == "completed"
+                else "综合公司扫描部分完成，未完整渠道："
+                + "、".join(incomplete_sources)
+            )
+            await self._update_progress(task_id, result["status"], completion_message)
             obs_log(
-                "综合公司扫描流水线完成", task_id=task_id, project_id=project_id,
-                source="company_scan_pipeline", level="notice", event="pipeline_done",
+                completion_message, task_id=task_id, project_id=project_id,
+                source="company_scan_pipeline",
+                level="notice" if result["status"] == "completed" else "warning",
+                event="pipeline_done",
                 data={
                     "url_findings": result["url_scan"].get("findings_count", 0),
                     "assets": result["assets"].get("discovered", 0),
@@ -2058,6 +2206,7 @@ class CompanyScanPipeline:
         bidding_page_size: int = 20,
         bidding_max_records: int = 20,
         xhs_decisions: dict[str, dict[str, Any]] | None = None,
+        website_collection_mode: str = "deep",
     ) -> dict[str, Any]:
         """关联单位限流采集；招投标固定单通道，资产和社媒沿用资源池。"""
         from api.services.search_terms import build_channel_terms
@@ -2198,6 +2347,7 @@ class CompanyScanPipeline:
                                 progress_source=(
                                     f"entity_{entity_progress_key}_url_scan"
                                 ),
+                                website_collection_mode=website_collection_mode,
                             ),
                         )
                     )
@@ -2327,18 +2477,17 @@ class CompanyScanPipeline:
                         )
                     except Exception as exc:  # noqa: BLE001
                         scan_result["errors"].append(f"画像话术生成失败: {exc}")
-                completed_channels = sum(
-                    status == "completed"
-                    for status in scan_result["channel_statuses"].values()
-                )
-                if scan_result["errors"]:
-                    scan_result["status"] = (
-                        "partial" if completed_channels else "error"
-                    )
-                elif subtasks:
-                    scan_result["status"] = "completed"
-                else:
+                channel_statuses = set(scan_result["channel_statuses"].values())
+                if not subtasks:
                     scan_result["status"] = "skipped"
+                elif channel_statuses.issubset({"completed", "skipped"}):
+                    scan_result["status"] = "completed"
+                elif channel_statuses.intersection(
+                    {"completed", "partial", "skipped"}
+                ):
+                    scan_result["status"] = "partial"
+                else:
+                    scan_result["status"] = "error"
                 return {**entity, "scan": scan_result}
 
         async def _scan_with_progress(
@@ -2378,6 +2527,8 @@ class CompanyScanPipeline:
         summary = {
             "entities": len(entities),
             "completed": 0,
+            "partial": 0,
+            "failed": 0,
             "assets_discovered": 0,
             "assets_alive": 0,
             "url_findings": 0,
@@ -2395,6 +2546,7 @@ class CompanyScanPipeline:
                 error_message = str(item)
                 errors.append(f"{entity_name}: {error_message}")
                 output_entities.append({**entity, "scan": {"errors": [error_message]}})
+                summary["failed"] += 1
                 continue
             output_entities.append(item)
             scan = item.get("scan") or {}
@@ -2403,7 +2555,13 @@ class CompanyScanPipeline:
             xhs = scan.get("xhs") or {}
             profile_copywritings = scan.get("profile_copywritings") or {}
             bidding = scan.get("bidding") or {}
-            summary["completed"] += int(not scan.get("errors"))
+            scan_status = str(scan.get("status") or "error").lower()
+            if scan_status in {"completed", "skipped"}:
+                summary["completed"] += 1
+            elif scan_status == "partial":
+                summary["partial"] += 1
+            else:
+                summary["failed"] += 1
             summary["assets_discovered"] += int(assets.get("discovered") or 0)
             summary["assets_alive"] += int(assets.get("alive") or 0)
             summary["url_findings"] += int(url_scan.get("findings_count") or 0)
@@ -2418,10 +2576,10 @@ class CompanyScanPipeline:
             )
         status = (
             "completed"
-            if not errors
-            else "partial"
-            if summary["completed"]
+            if summary["completed"] == len(entities)
             else "error"
+            if summary["failed"] == len(entities)
+            else "partial"
         )
         await update_source_progress(
             self.db,
@@ -2430,9 +2588,13 @@ class CompanyScanPipeline:
             total=total_entities,
             processed=total_entities,
             succeeded=summary["completed"],
-            failed=max(0, total_entities - summary["completed"]),
+            failed=summary["failed"],
             status=status,
-            message=f"全资关联单位采集完成 {summary['completed']}/{total_entities}",
+            message=(
+                "全资关联单位采集结束 "
+                f"完成 {summary['completed']}、部分完成 {summary['partial']}"
+                f"、失败 {summary['failed']}"
+            ),
         )
         return {
             "kind": "wholly_owned_entities",
@@ -2582,6 +2744,8 @@ class CompanyScanPipeline:
         summary = {
             "entities": total,
             "completed": 0,
+            "partial": 0,
+            "failed": 0,
             "articles_total": 0,
             "verified_articles_total": 0,
             "unverified_articles_total": 0,
@@ -2592,10 +2756,17 @@ class CompanyScanPipeline:
             if isinstance(outcome, BaseException):
                 entity_name = str(entities[index].get("name") or index)
                 errors.append(f"{entity_name}: {outcome}")
+                summary["failed"] += 1
                 continue
             collected.append(outcome)
             scholar = dict(outcome.get("scholar") or {})
-            summary["completed"] += int(scholar.get("status") == "completed")
+            scholar_status = str(scholar.get("status") or "completed").lower()
+            if scholar_status == "completed":
+                summary["completed"] += 1
+            elif scholar_status == "partial":
+                summary["partial"] += 1
+            else:
+                summary["failed"] += 1
             for field in (
                 "articles_total",
                 "verified_articles_total",
@@ -2605,7 +2776,13 @@ class CompanyScanPipeline:
             ):
                 summary[field] += int(scholar.get(field) or 0)
 
-        status = "completed" if not errors else "partial"
+        status = (
+            "completed"
+            if summary["completed"] == total
+            else "error"
+            if summary["failed"] == total
+            else "partial"
+        )
         await update_source_progress(
             self.db,
             task_id=task_id,
@@ -2613,9 +2790,13 @@ class CompanyScanPipeline:
             total=total,
             processed=total,
             succeeded=summary["completed"],
-            failed=max(0, total - summary["completed"]),
+            failed=summary["failed"],
             status=status,
-            message=f"子、孙单位学者联系采集完成 {summary['completed']}/{total}",
+            message=(
+                "子、孙单位学者联系采集结束 "
+                f"完成 {summary['completed']}、部分完成 {summary['partial']}"
+                f"、失败 {summary['failed']}"
+            ),
         )
         return {
             "kind": "scholar_entities",
@@ -2650,6 +2831,7 @@ class CompanyScanPipeline:
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         progress_task_id: str = "",
         progress_source: str = "",
+        website_collection_mode: str = "deep",
     ) -> dict[str, Any]:
         from api.services.asset_intelligence import AssetIdentity, AssetIntelligenceService
 
@@ -2763,8 +2945,8 @@ class CompanyScanPipeline:
                     get_collection_runtime_tuning,
                 )
                 from api.services.website_documents import (
-                    WebsiteCollectionPolicy,
                     WebsiteDocumentCollectionService,
+                    resolve_website_collection_policy,
                 )
 
                 tuning = await get_collection_runtime_tuning(self.db)
@@ -2772,14 +2954,11 @@ class CompanyScanPipeline:
                     "website_documents",
                     WebsiteDocumentCollectionService(
                         self.db,
-                        policy=WebsiteCollectionPolicy(
-                            max_pages=tuning.website_crawl_max_pages,
-                            max_documents=tuning.website_crawl_max_documents,
-                            max_depth=tuning.website_crawl_max_depth,
-                            discovery_concurrency=tuning.website_crawl_concurrency,
-                            archive_concurrency=tuning.website_archive_concurrency,
+                        policy=resolve_website_collection_policy(
+                            tuning,
+                            mode=website_collection_mode,
                         ),
-                    ).run(
+                    ).run_until_stable(
                         parent_task_id=task_id,
                         project_id=project_id,
                         target={
@@ -2989,6 +3168,7 @@ class CompanyScanPipeline:
         all_notes_count = pipe.state.get("all_notes_count", 0)
         all_suspicious_count = pipe.state.get("all_suspicious_count", 0)
         all_profiles_count = 0
+        profile_error = ""
         logger.info(
             f"[xhs-stream] 流式三阶段完成 | notes={all_notes_count} suspicious={all_suspicious_count}"
         )
@@ -3013,6 +3193,7 @@ class CompanyScanPipeline:
             all_profiles_count = profile_result.count
             logger.info("[xhs-stream] 画像完成 profiles=%s", all_profiles_count)
         except Exception as exc:
+            profile_error = str(exc)[:1000]
             logger.error("[xhs-stream] 画像失败: %s", exc)
         finally:
             await toolset.close()
@@ -3023,9 +3204,31 @@ class CompanyScanPipeline:
             f"suspicious={all_suspicious_count} | {elapsed:.1f}s"
         )
 
+        stage_metrics = pipe.metrics_summary()
+        stage_failures = sum(
+            int(metrics.get("failed") or 0)
+            for metrics in stage_metrics.values()
+        )
+        quality_failures = sum(
+            int(pipe.state.get(key) or 0)
+            for key in (
+                "tagging_errors",
+                "detail_errors",
+                "archive_errors",
+            )
+        )
+        errors = [
+            *([f"流水线失败 {stage_failures} 项"] if stage_failures else []),
+            *([f"内容处理不完整 {quality_failures} 项"] if quality_failures else []),
+            *([f"画像生成失败: {profile_error}"] if profile_error else []),
+        ]
         return {
+            "kind": "xhs",
+            "status": "partial" if errors else "completed",
             "notes_count": all_notes_count,
             "profiles_count": all_profiles_count,
+            "stage_metrics": stage_metrics,
+            "errors": errors,
         }
 
     # ══════════════════════════════════════
@@ -3101,13 +3304,14 @@ class CompanyScanPipeline:
         return dict(result)
 
     @staticmethod
-    def _jobs_completed_successfully(results: list[Any]) -> bool:
-        return all(
-            not isinstance(item, BaseException)
-            and not (
-                isinstance(item, dict) and item.get("status") == "error"
-            )
-            for item in results
+    def _jobs_completed_successfully(
+        jobs: list[tuple[str, Any]],
+        results: list[Any],
+    ) -> bool:
+        return len(jobs) == len(results) and all(
+            not isinstance(outcome, BaseException)
+            and should_checkpoint_module(kind, outcome)
+            for (kind, _operation), outcome in zip(jobs, results)
         )
 
     async def _run_mobile_jobs(
@@ -3122,7 +3326,7 @@ class CompanyScanPipeline:
             jobs,
             on_completed=on_completed,
         )
-        if self._jobs_completed_successfully(results):
+        if self._jobs_completed_successfully(jobs, results):
             from api.services.task_progress import mark_resume_phase
 
             await mark_resume_phase(

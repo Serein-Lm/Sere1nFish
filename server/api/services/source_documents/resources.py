@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ ATTACHMENT_EXTENSIONS = {
     ".pdf",
     ".doc",
     ".docx",
+    ".dps",
     ".et",
     ".xls",
     ".xlsx",
@@ -55,13 +57,24 @@ ATTACHMENT_LABEL_MARKERS = (
 )
 _WHITESPACE_RE = re.compile(r"\s+")
 _QUOTED_LINK_RE = re.compile(r"['\"]([^'\"<>]+)['\"]")
+_HTML_CHARSET_RE = re.compile(
+    rb"(?:charset\s*=|encoding\s*=)\s*['\"]?\s*([A-Za-z0-9._-]+)",
+    re.I,
+)
 _LINKISH_SUFFIX_RE = re.compile(
-    r"\.(?:s?html?|pdf|docx?|xlsx?|pptx?|txt|csv|rtf|zip|rar|7z)"
+    r"\.(?:s?html?|pdf|docx?|xlsx?|pptx?|wps|et|dps|txt|csv|rtf|zip|rar|7z)"
     r"(?:[?#].*)?$",
     re.I,
 )
 _PDF_MAX_PAGES = 200
 _PDF_OCR_DEADLINE_SECONDS = 900
+_PDF_MIN_TEXT_CHARS_PER_PAGE = 24
+_DOCX_OCR_MAX_IMAGES = 80
+_DOCX_OCR_MAX_IMAGE_BYTES = 32 * 1024 * 1024
+_DOCX_OCR_DEADLINE_SECONDS = 900
+_DOCX_RASTER_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+_OFFICE_CONVERSION_TIMEOUT_SECONDS = 300
+_OFFICE_CONVERSION_SLOTS = threading.BoundedSemaphore(2)
 
 
 @dataclass(slots=True)
@@ -75,16 +88,19 @@ class FetchedResource:
 def html_text_and_links(
     content: str | bytes,
     base_url: str,
+    *,
+    content_type: str = "",
 ) -> tuple[str, list[dict[str, str]]]:
     if not content:
         return "", []
+    decoded = _decode_html_content(content, content_type)
     try:
-        root = lxml_html.fromstring(content, base_url=base_url)
+        root = lxml_html.fromstring(decoded, base_url=base_url)
     except (TypeError, ValueError):
         try:
-            root = lxml_html.fragment_fromstring(content, create_parent=True)
+            root = lxml_html.fragment_fromstring(decoded, create_parent=True)
         except (TypeError, ValueError):
-            text = _WHITESPACE_RE.sub(" ", str(content)).strip()
+            text = _WHITESPACE_RE.sub(" ", decoded).strip()
             return text, []
     links = extract_html_links(root, base_url)
     for node in root.xpath("//script|//style|//noscript|//template"):
@@ -94,11 +110,41 @@ def html_text_and_links(
     return _WHITESPACE_RE.sub(" ", root.text_content()).strip(), links
 
 
+def _decode_html_content(content: str | bytes, content_type: str = "") -> str:
+    """Decode public HTML without letting lxml default UTF-8 bytes to Latin-1."""
+    if isinstance(content, str):
+        return content
+    encodings: list[str] = []
+    header_match = re.search(r"charset\s*=\s*['\"]?\s*([\w.-]+)", content_type, re.I)
+    if header_match:
+        encodings.append(header_match.group(1))
+    declared_match = _HTML_CHARSET_RE.search(content[:16_384])
+    if declared_match:
+        encodings.append(declared_match.group(1).decode("ascii", errors="ignore"))
+    encodings.extend(("utf-8-sig", "gb18030"))
+    for encoding in dict.fromkeys(value for value in encodings if value):
+        try:
+            decoded = content.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+        return re.sub(
+            r"^\ufeff?\s*<\?xml[^>]*\?>",
+            "",
+            decoded,
+            count=1,
+            flags=re.I,
+        )
+    return content.decode("utf-8", errors="replace")
+
+
 def extract_html_links(root, base_url: str) -> list[dict[str, str]]:
     """Extract navigable and embedded resources through one shared policy."""
     links: list[dict[str, str]] = []
     seen: set[str] = set()
     nodes = root.xpath(
+        "self::a[@href or @data-href or @data-url or @onclick] | "
+        "self::iframe[@src or @data-src] | self::embed[@src] | "
+        "self::object[@data] | "
         ".//a[@href or @data-href or @data-url or @onclick] | "
         ".//iframe[@src or @data-src] | .//embed[@src] | .//object[@data]"
     )
@@ -394,13 +440,22 @@ def _extract_pdf_text(data: bytes, limit: int) -> tuple[str, str]:
             extracted = _WHITESPACE_RE.sub(
                 " ", (page.extract_text() or "")
             ).strip()
-            if extracted:
+            if len(extracted) >= _PDF_MIN_TEXT_CHARS_PER_PAGE:
                 page_text[index] = extracted
             else:
+                if extracted:
+                    page_text[index] = extracted
                 blank_pages.append(index)
         if blank_pages:
             ocr_text, ocr_errors = _ocr_pdf_pages(data, blank_pages)
-            page_text.update(ocr_text)
+            for page_number, recognized in ocr_text.items():
+                original = page_text.get(page_number, "")
+                page_text[page_number] = _WHITESPACE_RE.sub(
+                    " ",
+                    "\n".join(
+                        value for value in (original, recognized) if value
+                    ),
+                ).strip()
             errors.extend(ocr_errors)
         if page_count > _PDF_MAX_PAGES:
             errors.append(
@@ -440,9 +495,230 @@ def _extract_docx_text(data: bytes, limit: int) -> tuple[str, str]:
             _WHITESPACE_RE.sub(" ", "\n".join(item for item in values if item))
             .strip()[:limit]
         )
-        return text, "" if text else "DOCX 未提取到可读文本"
+        has_embedded_media = False
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                has_embedded_media = any(
+                    not item.is_dir()
+                    and item.filename.startswith("word/media/")
+                    for item in archive.infolist()
+                )
+        except (OSError, zipfile.BadZipFile):
+            pass
+        if text and (len(text) >= 80 or not has_embedded_media):
+            return text, ""
+        image_text, image_error = _ocr_docx_images(data, limit)
+        if image_text:
+            combined = _WHITESPACE_RE.sub(
+                " ",
+                "\n".join(value for value in (text, image_text) if value),
+            ).strip()[:limit]
+            return combined, image_error
+        converted_text, converted_error = _extract_office_via_pdf(
+            data,
+            suffix=".docx",
+            limit=limit,
+        )
+        if converted_text:
+            combined = _WHITESPACE_RE.sub(
+                " ",
+                "\n".join(value for value in (text, converted_text) if value),
+            ).strip()[:limit]
+            return combined, converted_error
+        if text:
+            return text, "; ".join(
+                value for value in (image_error, converted_error) if value
+            )[:2_000]
+        return "", "; ".join(
+            value for value in (image_error, converted_error) if value
+        )[:2_000]
     except Exception as exc:  # noqa: BLE001
         return "", str(exc)
+
+
+def _ocr_docx_images(data: bytes, limit: int) -> tuple[str, str]:
+    """OCR image-only DOCX files while keeping conversion bounded."""
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return "", "运行环境缺少 tesseract，扫描版 DOCX 已归档但未 OCR"
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            media = [
+                item
+                for item in archive.infolist()
+                if not item.is_dir() and item.filename.startswith("word/media/")
+            ]
+            raster = [
+                item
+                for item in media
+                if PurePosixPath(item.filename).suffix.lower()
+                in _DOCX_RASTER_EXTENSIONS
+                and 0 < item.file_size <= _DOCX_OCR_MAX_IMAGE_BYTES
+            ]
+            unsupported = sorted(
+                {
+                    PurePosixPath(item.filename).suffix.lower().removeprefix(".")
+                    or "unknown"
+                    for item in media
+                    if item not in raster
+                }
+            )
+            selected = raster[:_DOCX_OCR_MAX_IMAGES]
+            if not selected:
+                suffixes = ", ".join(unsupported)
+                detail = f"（内嵌格式: {suffixes}）" if suffixes else ""
+                return "", f"DOCX 未提取到可读文本且无可 OCR 位图{detail}"
+
+            texts: list[str] = []
+            errors: list[str] = []
+            deadline = time.monotonic() + _DOCX_OCR_DEADLINE_SECONDS
+            with tempfile.TemporaryDirectory(prefix="sere1nfish-docx-") as directory:
+                for index, item in enumerate(selected, start=1):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        errors.append(
+                            f"DOCX OCR 超过 {_DOCX_OCR_DEADLINE_SECONDS} 秒上限，"
+                            f"从第 {index} 张图片起未处理"
+                        )
+                        break
+                    suffix = PurePosixPath(item.filename).suffix.lower() or ".img"
+                    image_path = os.path.join(directory, f"image-{index}{suffix}")
+                    with open(image_path, "wb") as handle:
+                        handle.write(archive.read(item))
+                    try:
+                        recognized = subprocess.run(
+                            [
+                                tesseract,
+                                image_path,
+                                "stdout",
+                                "-l",
+                                "chi_sim+eng",
+                                "--psm",
+                                "6",
+                            ],
+                            check=False,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=max(1, min(90, int(remaining))),
+                        )
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        errors.append(f"DOCX 第 {index} 张图片 OCR 失败: {exc}")
+                        continue
+                    text = _WHITESPACE_RE.sub(
+                        " ", _decode_command_output(recognized.stdout)
+                    ).strip()
+                    if recognized.returncode:
+                        detail = _decode_command_output(recognized.stderr).strip()
+                        errors.append(
+                            f"DOCX 第 {index} 张图片 OCR 失败: "
+                            f"{detail or f'退出码 {recognized.returncode}'}"
+                        )
+                    elif text:
+                        texts.append(text)
+                    if sum(len(value) for value in texts) >= limit:
+                        break
+            if len(raster) > _DOCX_OCR_MAX_IMAGES:
+                errors.append(
+                    f"DOCX 内嵌图片超过 {_DOCX_OCR_MAX_IMAGES} 张安全上限"
+                )
+            if unsupported:
+                errors.append("未处理内嵌格式: " + ", ".join(unsupported))
+            joined = "\n".join(texts)[:limit]
+            if not joined and not errors:
+                errors.append("DOCX 内嵌图片 OCR 未识别到可读文本")
+            return joined, "; ".join(errors)[:2_000]
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        return "", str(exc)
+
+
+def _extract_office_via_pdf(
+    data: bytes,
+    *,
+    suffix: str,
+    limit: int,
+) -> tuple[str, str]:
+    """Render image/vector-only Office files to PDF, then reuse bounded OCR."""
+    converter = shutil.which("soffice") or shutil.which("libreoffice")
+    if not converter:
+        return "", "运行环境缺少 LibreOffice，Office 扫描件已归档但未 OCR"
+    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    with _OFFICE_CONVERSION_SLOTS:
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="sere1nfish-office-"
+            ) as directory:
+                source_path = os.path.join(directory, f"source{safe_suffix}")
+                pdf_path = os.path.join(directory, "source.pdf")
+                profile_path = os.path.join(directory, "profile")
+                with open(source_path, "wb") as handle:
+                    handle.write(data)
+                converted = subprocess.run(
+                    [
+                        converter,
+                        "--headless",
+                        "--nologo",
+                        "--nodefault",
+                        "--nofirststartwizard",
+                        f"-env:UserInstallation=file://{profile_path}",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        directory,
+                        source_path,
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=_OFFICE_CONVERSION_TIMEOUT_SECONDS,
+                    env={**os.environ, "HOME": directory},
+                )
+                if converted.returncode or not os.path.exists(pdf_path):
+                    detail = _decode_command_output(
+                        converted.stderr or converted.stdout
+                    ).strip()
+                    return "", (
+                        "Office 转 PDF 失败: "
+                        f"{detail or f'退出码 {converted.returncode}'}"
+                    )[:2_000]
+                with open(pdf_path, "rb") as handle:
+                    pdf_data = handle.read()
+                if len(pdf_data) > 200 * 1024 * 1024:
+                    return "", "Office 转换后的 PDF 超过 200 MiB 安全上限"
+                return _extract_pdf_text(pdf_data, limit)
+        except subprocess.TimeoutExpired:
+            return "", (
+                f"Office 转 PDF 超过 {_OFFICE_CONVERSION_TIMEOUT_SECONDS} 秒上限"
+            )
+        except OSError as exc:
+            return "", f"Office 转 PDF 失败: {exc}"
+
+
+def _with_office_render_fallback(
+    data: bytes,
+    *,
+    suffix: str,
+    limit: int,
+    native_text: str,
+    native_error: str,
+) -> tuple[str, str]:
+    """Use LibreOffice rendering when native parsing reports sparse/no content."""
+    if native_text and not native_error:
+        return native_text, ""
+    rendered_text, rendered_error = _extract_office_via_pdf(
+        data,
+        suffix=suffix,
+        limit=limit,
+    )
+    if rendered_text:
+        combined = _WHITESPACE_RE.sub(
+            " ",
+            "\n".join(value for value in (native_text, rendered_text) if value),
+        ).strip()[:limit]
+        return combined, rendered_error
+    return native_text, "; ".join(
+        value for value in (native_error, rendered_error) if value
+    )[:2_000]
 
 
 def _extract_xlsx_text(data: bytes, limit: int) -> tuple[str, str]:
@@ -529,6 +805,7 @@ def _extract_legacy_xls_text(data: bytes, limit: int) -> tuple[str, str]:
         workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
         values: list[str] = []
         size = 0
+        has_cell_text = False
         for sheet in workbook.sheets()[:30]:
             values.append(f"工作表: {sheet.name}")
             for row_index in range(min(sheet.nrows, 3_000)):
@@ -540,13 +817,14 @@ def _extract_legacy_xls_text(data: bytes, limit: int) -> tuple[str, str]:
                 if line:
                     values.append(line)
                     size += len(line)
+                    has_cell_text = True
                 if size >= limit:
                     break
             if size >= limit:
                 break
         workbook.release_resources()
         text = _WHITESPACE_RE.sub(" ", "\n".join(values)).strip()[:limit]
-        return text, "" if text else "旧版 XLS 未提取到可读文本"
+        return text, "" if has_cell_text else "旧版 XLS 未提取到可读单元格内容"
     except Exception as exc:  # noqa: BLE001
         return "", str(exc)
 
@@ -737,6 +1015,13 @@ def extract_attachment_text(
         or "spreadsheetml" in normalized_type
     ):
         text, error = _extract_xlsx_text(data, limit)
+        text, error = _with_office_render_fallback(
+            data,
+            suffix=".xlsx",
+            limit=limit,
+            native_text=text,
+            native_error=error,
+        )
         return text, error, "xlsx"
     if (
         openxml_kind == "pptx"
@@ -744,16 +1029,51 @@ def extract_attachment_text(
         or "presentationml" in normalized_type
     ):
         text, error = _extract_pptx_text(data, limit)
+        text, error = _with_office_render_fallback(
+            data,
+            suffix=".pptx",
+            limit=limit,
+            native_text=text,
+            native_error=error,
+        )
         return text, error, "pptx"
     if suffix == ".doc" or "msword" in normalized_type:
         text, error = _extract_legacy_doc_text(data, limit)
+        text, error = _with_office_render_fallback(
+            data,
+            suffix=".doc",
+            limit=limit,
+            native_text=text,
+            native_error=error,
+        )
         return text, error, "doc"
     if suffix == ".xls" or "ms-excel" in normalized_type:
         text, error = _extract_legacy_xls_text(data, limit)
+        text, error = _with_office_render_fallback(
+            data,
+            suffix=".xls",
+            limit=limit,
+            native_text=text,
+            native_error=error,
+        )
         return text, error, "xls"
     if suffix == ".ppt" or "ms-powerpoint" in normalized_type:
         text, error = _extract_legacy_ppt_text(data, limit)
+        text, error = _with_office_render_fallback(
+            data,
+            suffix=".ppt",
+            limit=limit,
+            native_text=text,
+            native_error=error,
+        )
         return text, error, "ppt"
+    if suffix in {".wps", ".et", ".dps"}:
+        text, error = _extract_office_via_pdf(
+            data,
+            suffix=suffix,
+            limit=limit,
+        )
+        return text, error, suffix.removeprefix(".")
     if suffix in {".txt", ".csv"} or normalized_type.startswith("text/plain"):
         text, error = _extract_plain_text(data, limit)
         return text, error, suffix.removeprefix(".") or "text"

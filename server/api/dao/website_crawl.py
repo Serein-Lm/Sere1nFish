@@ -14,13 +14,63 @@ from api.db.collections import (
 )
 
 
+_COUNTER_FIELDS = (
+    "total_pages",
+    "processed_pages",
+    "listing_pages",
+    "documents_scheduled",
+    "documents_archived",
+    "documents_partial",
+    "documents_rejected",
+    "failed_pages",
+    "attachments_archived",
+    "contacts_found",
+    "findings_upserted",
+)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def counters_from_summary(summary: dict[str, Any]) -> dict[str, int]:
+    """Build the authoritative final counter snapshot from a task summary."""
+    return {field: int(summary.get(field) or 0) for field in _COUNTER_FIELDS}
 
 
 def page_id_for_url(crawl_task_id: str, canonical_url: str) -> str:
     raw = f"{crawl_task_id}:{canonical_url}".encode("utf-8")
     return "wcp_" + hashlib.sha256(raw).hexdigest()[:24]
+
+
+def resumable_page_statuses(
+    previous_task: dict[str, Any] | None,
+    current_config: dict[str, Any] | None = None,
+) -> list[str]:
+    statuses = ["fetching", "archiving", "error", "partial"]
+    previous_config = dict((previous_task or {}).get("config") or {})
+    next_config = dict(current_config or {})
+    previous_version = int(
+        previous_config.get("discovery_policy_version") or 0
+    )
+    current_version = int(
+        next_config.get("discovery_policy_version") or 0
+    )
+    expanded_discovery = bool(
+        (
+            next_config.get("broad_official_discovery")
+            and not previous_config.get("broad_official_discovery")
+        )
+        or int(next_config.get("max_depth") or 0)
+        > int(previous_config.get("max_depth") or 0)
+    )
+    if (
+        bool(((previous_task or {}).get("summary") or {}).get("truncated"))
+        or current_version > previous_version
+        or expanded_discovery
+    ):
+        statuses.append("discovered")
+    return statuses
 
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
@@ -51,6 +101,7 @@ async def begin_task(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     now = _now()
+    previous = await get_task(db, crawl_task_id)
     await db[WEBSITE_CRAWL_TASKS_COLLECTION].update_one(
         {"crawl_task_id": crawl_task_id},
         {
@@ -80,12 +131,14 @@ async def begin_task(
         {"crawl_task_id": crawl_task_id},
         {"$set": {"attempts_in_run": 0}},
     )
+    # A capped run persisted its directory pages but could not enqueue every
+    # document. Revisit those indexes so a larger retry budget can continue
+    # from the durable crawl graph instead of starting another parallel run.
+    statuses = resumable_page_statuses(previous, config)
     await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
         {
             "crawl_task_id": crawl_task_id,
-            "status": {
-                "$in": ["fetching", "archiving", "error", "partial"]
-            },
+            "status": {"$in": statuses},
         },
         {
             "$set": {
@@ -289,6 +342,7 @@ async def finish_task(
             "$set": {
                 "status": status,
                 "summary": summary,
+                "counters": counters_from_summary(summary),
                 "error": str(error or "")[:4_000],
                 "updated_at": now,
                 "completed_at": now,
@@ -313,6 +367,7 @@ async def summarize_task(
                     "count": {"$sum": 1},
                     "attachments": {"$sum": {"$ifNull": ["$attachment_count", 0]}},
                     "contacts": {"$sum": {"$ifNull": ["$contact_count", 0]}},
+                    "findings": {"$sum": {"$ifNull": ["$finding_count", 0]}},
                 }
             },
         ]
@@ -321,6 +376,7 @@ async def summarize_task(
     by_kind: dict[str, int] = {}
     attachments = 0
     contacts = 0
+    findings = 0
     for row in rows:
         key = dict(row.get("_id") or {})
         status = str(key.get("status") or "unknown")
@@ -330,6 +386,7 @@ async def summarize_task(
         by_kind[kind] = by_kind.get(kind, 0) + count
         attachments += int(row.get("attachments") or 0)
         contacts += int(row.get("contacts") or 0)
+        findings += int(row.get("findings") or 0)
     total = sum(by_status.values())
     pending = sum(
         by_status.get(status, 0)
@@ -348,6 +405,7 @@ async def summarize_task(
         "rejected_documents": by_status.get("rejected", 0),
         "attachments_archived": attachments,
         "contacts_found": contacts,
+        "findings_upserted": findings,
         "by_status": by_status,
         "by_kind": by_kind,
         "truncated": bool((task.get("summary") or {}).get("truncated")),

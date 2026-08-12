@@ -9,12 +9,25 @@ from api.services.targets import (
     _merge_target_dashboard_contacts,
     _select_target_relation_page,
     _summarize_finding_counts,
+    _task_collection_status,
     _target_batch_priority,
     _target_scan_coverage_summary,
     _target_summary_sort_key,
     assign_project_target_batches,
     list_project_target_summary_page,
 )
+
+
+def test_task_collection_status_exposes_partial_terminal_result() -> None:
+    assert _task_collection_status(
+        {"status": "completed", "result": {"status": "partial"}}
+    ) == "partial"
+    assert _task_collection_status(
+        {"status": "completed", "result_status": "partial"}
+    ) == "partial"
+    assert _task_collection_status(
+        {"status": "completed", "result": {"status": "completed"}}
+    ) == "completed"
 
 
 def test_target_collection_complete_requires_current_core_channel_coverage() -> None:
@@ -117,6 +130,28 @@ def test_target_batch_tags_are_normalized_and_deduplicated() -> None:
 
 def test_finding_target_ids_accepts_legacy_scalar_value() -> None:
     assert findings_dao._finding_target_ids({"target_ids": "child"}) == ["child"]
+
+
+def test_task_finding_scope_includes_child_tasks_and_history() -> None:
+    scope = findings_dao.task_finding_scope("task.1")
+
+    primary_pattern = scope["$or"][0]["task_id"]
+    history_pattern = scope["$or"][1]["task_ids"]
+    assert primary_pattern.pattern == r"^task\.1(?:_|$)"
+    assert history_pattern.pattern == primary_pattern.pattern
+    assert primary_pattern.match("task.1")
+    assert primary_pattern.match("task.1_webdocs")
+    assert not primary_pattern.match("task.10_webdocs")
+
+
+def test_finding_summary_projection_excludes_heavy_evidence_fields() -> None:
+    projection = findings_dao._FINDING_SUMMARY_PROJECTION
+
+    assert projection["finding_id"] == 1
+    assert projection["attention_reason"] == 1
+    assert "article_context" not in projection
+    assert "evidence" not in projection
+    assert "evidence_refs" not in projection
 
 
 @pytest.mark.asyncio

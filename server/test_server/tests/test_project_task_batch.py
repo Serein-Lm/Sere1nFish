@@ -222,3 +222,18 @@ def test_company_scan_validates_control_relation_depth() -> None:
         _validate_company_scan_params(
             {"enable_control_structure": True, "control_max_depth": 3}
         )
+
+
+def test_company_scan_validates_website_collection_mode() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    params: dict = {}
+    _validate_company_scan_params(params)
+    assert params["website_collection_mode"] == "deep"
+
+    params = {"website_collection_mode": " DEEP "}
+    _validate_company_scan_params(params)
+    assert params["website_collection_mode"] == "deep"
+
+    with pytest.raises(ValueError, match="standard 或 deep"):
+        _validate_company_scan_params({"website_collection_mode": "unbounded"})

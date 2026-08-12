@@ -46,11 +46,11 @@ def _company_wechat_defaults() -> dict[str, Any]:
             "max_related_targets": 6,
             "skip_completed_related_targets": True,
             "max_resolved_keywords": 36,
-            "swipe_times": 4,
-            "detail_max_items": 2,
-            "detail_max_total_items": 12,
-            "detail_review_max_items": 3,
-            "detail_review_max_total_items": 24,
+            "swipe_times": 6,
+            "detail_max_items": 4,
+            "detail_max_total_items": 36,
+            "detail_review_max_items": 6,
+            "detail_review_max_total_items": 72,
             "detail_max_swipes": 6,
             "max_runtime_seconds": 14400,
         }
@@ -332,13 +332,20 @@ async def run_company_wechat_collection(
         on_started=on_started,
     )
     keyword_resolution = dict(result.get("keyword_resolution") or {})
+    keywords_completed = int(result.get("keywords_completed") or 0)
+    keyword_total = int(result.get("keyword_total") or 0)
+    failed_keywords = int(result.get("failed") or 0)
+    persist_failed = int(result.get("persist_failed") or 0)
+    partial = bool(
+        result.get("timed_out")
+        or result.get("stopped")
+        or (keyword_total and keywords_completed < keyword_total)
+        or failed_keywords
+        or persist_failed
+    )
     return {
         "kind": "wechat",
-        "status": (
-            "partial"
-            if result.get("timed_out") or result.get("stopped")
-            else "completed"
-        ),
+        "status": "partial" if partial else "completed",
         "task_def_id": task_def_id,
         "device_id": str(task_def.get("device_id") or ""),
         "total": int(result.get("total") or 0),
@@ -352,8 +359,10 @@ async def run_company_wechat_collection(
         "keywords_used": list(result.get("keywords_used") or []),
         "target_ids": list(keyword_resolution.get("target_ids") or []),
         "keyword_resolution": keyword_resolution,
-        "keywords_completed": int(result.get("keywords_completed") or 0),
-        "keyword_total": int(result.get("keyword_total") or 0),
+        "keywords_completed": keywords_completed,
+        "keyword_total": keyword_total,
+        "failed_keywords": failed_keywords,
+        "persist_failed": persist_failed,
         "stopped": bool(result.get("stopped")),
         "timed_out": bool(result.get("timed_out")),
     }

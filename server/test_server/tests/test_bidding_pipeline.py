@@ -11,10 +11,13 @@ from api.services import bidding_pipeline as bidding_module
 from api.services.company_url import normalize_url
 from api.services.bidding_pipeline import (
     BiddingPipeline,
-    _extract_attachment_text,
     _extract_contact_candidates,
-    _filename_from_response,
-    _html_text_and_links,
+)
+from api.services.source_documents.resources import (
+    FetchedResource,
+    extract_attachment_text,
+    filename_from_response,
+    html_text_and_links,
 )
 from crawler_tools.tianyancha_tools import BiddingRecord, BiddingSearchResult
 
@@ -111,7 +114,7 @@ def test_archive_merge_does_not_replace_ready_evidence_with_transient_errors() -
 
 
 def test_html_reader_extracts_text_and_attachment_links() -> None:
-    text, links = _html_text_and_links(
+    text, links = html_text_and_links(
         """
         <html><body>
           <script>ignore()</script>
@@ -132,7 +135,7 @@ def test_remote_filename_recovers_gb18030_header_bytes() -> None:
     expected = "招标文件正文.pdf"
     surrogate_name = expected.encode("gb18030").decode("utf-8", errors="surrogateescape")
 
-    filename = _filename_from_response(
+    filename = filename_from_response(
         "https://example.com/download?id=1",
         {"Content-Disposition": f'attachment; filename="{surrogate_name}"'},
         "application/pdf",
@@ -167,7 +170,7 @@ def test_docx_attachment_text_is_available_to_contact_analysis() -> None:
     output = io.BytesIO()
     document.save(output)
 
-    text, error, text_format = _extract_attachment_text(
+    text, error, text_format = extract_attachment_text(
         output.getvalue(),
         filename="采购文件.docx",
         content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -176,6 +179,66 @@ def test_docx_attachment_text_is_available_to_contact_analysis() -> None:
     assert error == ""
     assert text_format == "docx"
     assert "0551-87654321" in text
+
+
+@pytest.mark.asyncio
+async def test_archive_uses_full_attachment_text_for_contacts_and_reports_ocr_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = BiddingRecord(
+        record_id="bid-full-attachment",
+        title="采购公告",
+        content_html=(
+            '<a href="https://example.com/files/spec.pdf">下载采购文件</a>'
+        ),
+    )
+    attachment_text = "正文" * 4_000 + " 联系人王老师，电话 0551-87654321"
+
+    async def _fetch(_session: Any, url: str, **_kwargs: Any) -> FetchedResource:
+        return FetchedResource(
+            url=url,
+            data=b"attachment",
+            content_type="application/pdf",
+            filename="采购文件.pdf",
+        )
+
+    async def _store(_data: bytes, **kwargs: Any) -> dict[str, Any]:
+        suffix = str(kwargs["suffix"])
+        return {
+            "storage_object_id": f"obj-{suffix}",
+            "url": f"/objects/obj-{suffix}",
+            "sha256": "digest",
+            "size": len(_data),
+            "content_type": kwargs["content_type"],
+        }
+
+    monkeypatch.setattr(bidding_module, "fetch_resource_with_retry", _fetch)
+    monkeypatch.setattr(
+        bidding_module,
+        "extract_attachment_text",
+        lambda *_args, **_kwargs: (
+            attachment_text,
+            "PDF 第 2 页 OCR 失败",
+            "pdf",
+        ),
+    )
+    service = bidding_module.BiddingArchiveService()
+    monkeypatch.setattr(service, "_store", _store)
+
+    result = await service._archive_record(
+        object(),
+        record,
+        project_id="project-1",
+        target_id="target-1",
+    )
+
+    assert len(result["_context_text"]) < len(attachment_text)
+    assert any(
+        item["value"] == "0551-87654321"
+        for item in result["contact_candidates"]
+    )
+    assert result["attachments"][0]["text_error"] == "PDF 第 2 页 OCR 失败"
+    assert any("附件正文提取不完整" in item for item in result["archive_errors"])
 
 
 def test_scan_context_keeps_query_target_and_announcement_parties_distinct() -> None:
@@ -275,7 +338,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     async def _run_visual(_self: Any, **kwargs: Any) -> dict[str, Any]:
         scan_call.update(kwargs)
         return {
-            "status": "completed",
+            "status": "partial",
             "scanned_urls": 1,
             "total_findings": 2,
             "total_copywritings": 1,
@@ -331,6 +394,7 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert "设备采购联系人：张老师" in evidence
     assert result["visual_analysis"]["findings_count"] == 2
     assert result["visual_analysis"]["copywritings_count"] == 1
+    assert result["status"] == "partial"
     assert result["pages_fetched"] == 1
     assert result["raw_records_fetched"] == 1
     assert result["duplicates_discarded"] == 0
@@ -419,6 +483,80 @@ async def test_pipeline_falls_back_from_relative_detail_to_provider_url(
     assert scan_call["url_content"] == record.provider_url
     assert scan_call["known_alive_urls"] == []
     assert "https:///html" not in scan_call["url_content"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_is_partial_when_records_have_no_reviewable_detail_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import tianyancha_runtime
+    from api.services.url_scan_pipeline import UrlScanPipeline
+
+    record = BiddingRecord(
+        record_id="bid-without-url",
+        title="采购公告",
+        content_html="<p>采购联系人：张老师</p>",
+    )
+
+    async def _policy(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            enabled=True,
+            disabled_reason="",
+            bidding_lookback_days=30,
+            bidding_max_records_per_type=20,
+        )
+
+    class _Client:
+        async def search_all_bid_types(
+            self, *_args: Any, **_kwargs: Any
+        ) -> BiddingSearchResult:
+            return BiddingSearchResult(records=[record], total_reported=1)
+
+    async def _configured_client() -> _Client:
+        return _Client()
+
+    async def _archive_records(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "record_id": record.record_id,
+                "resolved_detail_url": "",
+                "archive_errors": [],
+                "attachments": [],
+                "attachment_urls": [],
+                "_context_text": "采购联系人：张老师",
+            }
+        ]
+
+    async def _upsert(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        return {"inserted": 1, "updated": 0, "unchanged": 0, "total": 1}
+
+    async def _unexpected_visual(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("缺少绝对详情链接时不应启动 URL 扫描")
+
+    monkeypatch.setattr(tianyancha_runtime, "get_tianyancha_runtime_policy", _policy)
+    monkeypatch.setattr(
+        bidding_module.TianyanchaClient,
+        "from_runtime_config",
+        _configured_client,
+    )
+    monkeypatch.setattr(
+        bidding_module.BiddingArchiveService,
+        "archive_records",
+        _archive_records,
+    )
+    monkeypatch.setattr(bidding_module.bidding_dao, "upsert_records_batch", _upsert)
+    monkeypatch.setattr(UrlScanPipeline, "run_pipeline", _unexpected_visual)
+
+    result = await BiddingPipeline(object(), object()).run_pipeline(
+        task_id="task-without-url",
+        project_id="project-1",
+        target_id="target-1",
+        company_name="目标单位",
+    )
+
+    assert result["status"] == "partial"
+    assert result["visual_analysis"]["status"] == "partial"
+    assert "缺少可供浏览器复核" in result["visual_analysis"]["error"]
 
 
 @pytest.mark.asyncio

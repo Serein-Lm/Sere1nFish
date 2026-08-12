@@ -40,6 +40,7 @@ const STATUS_MAP: Record<string, { color: string; icon: React.ReactNode; label: 
   running: { color: 'processing', icon: <SyncOutlined spin />, label: '执行中' },
   pausing: { color: 'warning', icon: <SyncOutlined spin />, label: '暂停中' },
   completed: { color: 'success', icon: <CheckCircleOutlined />, label: '已完成' },
+  partial: { color: 'warning', icon: <ExclamationCircleOutlined />, label: '部分完成' },
   error: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
   failed: { color: 'error', icon: <ExclamationCircleOutlined />, label: '失败' },
   paused: { color: 'warning', icon: <ClockCircleOutlined />, label: '已暂停' },
@@ -114,6 +115,10 @@ export default function TaskDetail() {
   const [loading, setLoading] = useState(true)
   const [task, setTask] = useState<Task | null>(null)
   const [findings, setFindings] = useState<UnifiedFinding[]>([])
+  const [findingsTotal, setFindingsTotal] = useState(0)
+  const [findingsPage, setFindingsPage] = useState(1)
+  const [findingsPageSize, setFindingsPageSize] = useState(50)
+  const [findingsLoading, setFindingsLoading] = useState(false)
   const [taskStats, setTaskStats] = useState<TaskStatsResponse | null>(null)
   const [activeTab, setActiveTab] = useState('findings')
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -124,17 +129,15 @@ export default function TaskDetail() {
   // projectId 优先从路由取，否则从 task 数据取
   const projectId = routeProjectId || task?.project_id
 
-  const fetchData = useCallback(async () => {
+  const fetchTaskData = useCallback(async () => {
     if (!taskId || !projectId) return
     setLoading(true)
     try {
-      const [taskData, findingsData, statsData] = await Promise.allSettled([
+      const [taskData, statsData] = await Promise.allSettled([
         getTask(projectId, taskId),
-        listProjectFindings(projectId, { task_id: taskId, page: 1, page_size: 100 }),
         getTaskStats(taskId),
       ])
       if (taskData.status === 'fulfilled') setTask(taskData.value)
-      if (findingsData.status === 'fulfilled') setFindings(findingsData.value.items)
       if (statsData.status === 'fulfilled') setTaskStats(statsData.value)
     } catch (e) {
       console.error(e)
@@ -144,7 +147,30 @@ export default function TaskDetail() {
     }
   }, [taskId, projectId])
 
-  useEffect(() => { fetchData() }, [fetchData])
+  const fetchFindings = useCallback(async () => {
+    if (!taskId || !projectId) return
+    setFindingsLoading(true)
+    try {
+      const data = await listProjectFindings(projectId, {
+        task_id: taskId,
+        page: findingsPage,
+        page_size: findingsPageSize,
+      })
+      setFindings(data.items)
+      setFindingsTotal(data.total)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '加载 Findings 失败')
+    } finally {
+      setFindingsLoading(false)
+    }
+  }, [taskId, projectId, findingsPage, findingsPageSize])
+
+  useEffect(() => { void fetchTaskData() }, [fetchTaskData])
+  useEffect(() => { void fetchFindings() }, [fetchFindings])
+
+  const refreshData = useCallback(async () => {
+    await Promise.all([fetchTaskData(), fetchFindings()])
+  }, [fetchTaskData, fetchFindings])
 
   // 轮询非终态任务
   useEffect(() => {
@@ -156,12 +182,12 @@ export default function TaskDetail() {
         setTask(updated)
         if (TERMINAL_TASK_STATUSES.has(updated.status)) {
           clearInterval(timer)
-          fetchData()
+          void refreshData()
         }
       } catch { /* ignore */ }
     }, 3000)
     return () => clearInterval(timer)
-  }, [task?.status, taskId, fetchData])
+  }, [task?.status, taskId, projectId, refreshData])
 
   const handleDelete = () => {
     if (!taskId || !projectId) return
@@ -241,7 +267,7 @@ export default function TaskDetail() {
     },
     { title: '类型', dataIndex: 'type', key: 'type', width: 120, render: (v: string) => <Tag color="volcano">{FINDING_TYPE_ICONS[v] || '📌'} {v}</Tag> },
     { title: '标签', dataIndex: 'label', key: 'label', width: 160, render: (v: string | null) => <Text strong>{v || '-'}</Text> },
-    { title: '值', dataIndex: 'value', key: 'value', width: 200, render: (v: string | null) => renderFindingValue(v, { copyable: true, maxWidth: 180 }) },
+    { title: '值', dataIndex: 'value', key: 'value', width: 200, render: (v: string | null) => renderFindingValue(v, { copyable: true, maxWidth: 180, linkify: false }) },
     { title: '关注度', dataIndex: 'attention_score', key: 'score', width: 80, align: 'center', render: (v: number) => <Tag color={v >= 70 ? 'error' : v >= 40 ? 'warning' : 'processing'}>{v}</Tag> },
     { title: '操作', key: 'action', width: 100, render: (_, r) => (
       <Button type="link" size="small" icon={<EyeOutlined />} onClick={async () => {
@@ -463,7 +489,10 @@ export default function TaskDetail() {
     )
   }
 
-  const statusInfo = task ? STATUS_MAP[task.status] || STATUS_MAP.pending : STATUS_MAP.pending
+  const effectiveStatus = task?.status === 'completed' && (
+    task.result_status === 'partial' || task.result?.status === 'partial'
+  ) ? 'partial' : task?.status
+  const statusInfo = effectiveStatus ? STATUS_MAP[effectiveStatus] || STATUS_MAP.pending : STATUS_MAP.pending
 
   return (
     <div className="task-detail page-container fade-in">
@@ -474,7 +503,7 @@ export default function TaskDetail() {
         </div>
         <Space wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(-1)} className="hover-float">返回</Button>
-          <Button icon={<ReloadOutlined />} onClick={fetchData} className="hover-float">刷新</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => void refreshData()} className="hover-float">刷新</Button>
           {task?.status === 'paused' ? (
             <Button
               icon={<PlayCircleOutlined />}
@@ -513,7 +542,7 @@ export default function TaskDetail() {
             <Row gutter={16}>
               <Col xs={12} sm={8} md={4}><Statistic title="任务类型" value={TASK_TYPE_LABELS[task.task_type] || task.task_type} /></Col>
               <Col xs={12} sm={8} md={4}><Statistic title="状态" valueRender={() => <Tag icon={statusInfo.icon} color={statusInfo.color}>{statusInfo.label}</Tag>} /></Col>
-              <Col xs={12} sm={8} md={4}><Statistic title="Findings" value={findings.length} /></Col>
+              <Col xs={12} sm={8} md={4}><Statistic title="Findings" value={findingsTotal} /></Col>
               <Col xs={12} sm={8} md={4}><Statistic title="耗时" value={task.elapsed_ms ? `${(task.elapsed_ms / 1000).toFixed(1)}s` : '-'} /></Col>
             </Row>
             {(progress.stage || progress.message) && (
@@ -591,8 +620,26 @@ export default function TaskDetail() {
               }] : []),
               {
                 key: 'findings',
-                label: <Space><EyeOutlined /> Findings <Tag color="blue">{findings.length}</Tag></Space>,
-                children: <Table dataSource={findings} rowKey="finding_id" columns={findingsColumns} pagination={{ pageSize: 10, showTotal: t => `共 ${t} 条` }} size="small" />,
+                label: <Space><EyeOutlined /> Findings <Tag color="blue">{findingsTotal}</Tag></Space>,
+                children: <Table
+                  dataSource={findings}
+                  loading={findingsLoading}
+                  rowKey="finding_id"
+                  columns={findingsColumns}
+                  pagination={{
+                    current: findingsPage,
+                    pageSize: findingsPageSize,
+                    total: findingsTotal,
+                    showSizeChanger: true,
+                    pageSizeOptions: [20, 50, 100],
+                    showTotal: total => `共 ${total} 条`,
+                    onChange: (page, pageSize) => {
+                      setFindingsPage(page)
+                      setFindingsPageSize(pageSize)
+                    },
+                  }}
+                  size="small"
+                />,
               },
               {
                 key: 'stats',

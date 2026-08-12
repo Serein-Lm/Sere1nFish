@@ -3,6 +3,183 @@
 import pytest
 
 
+def test_docx_embedded_raster_images_use_bounded_ocr(monkeypatch):
+    import io
+    import zipfile
+    from types import SimpleNamespace
+
+    from api.services.source_documents import resources
+
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("word/media/image1.jpeg", b"jpeg-payload")
+
+    monkeypatch.setattr(resources.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        resources.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="联系人 010-12345678".encode(),
+            stderr=b"",
+        ),
+    )
+
+    text, error = resources._ocr_docx_images(payload.getvalue(), 10_000)
+
+    assert "010-12345678" in text
+    assert error == ""
+
+
+def test_docx_unsupported_vector_images_remain_explicitly_partial(monkeypatch):
+    import io
+    import zipfile
+
+    from api.services.source_documents import resources
+
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("word/media/image1.emf", b"emf-payload")
+
+    monkeypatch.setattr(resources.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    text, error = resources._ocr_docx_images(payload.getvalue(), 10_000)
+
+    assert text == ""
+    assert "emf" in error
+
+
+def test_docx_vector_scan_falls_back_to_office_pdf(monkeypatch):
+    from api.services.source_documents import resources
+
+    monkeypatch.setattr(
+        resources,
+        "_ocr_docx_images",
+        lambda _data, _limit: ("", "unsupported emf"),
+    )
+    monkeypatch.setattr(
+        resources,
+        "_extract_office_via_pdf",
+        lambda _data, *, suffix, limit: (
+            f"converted {suffix} {limit}",
+            "",
+        ),
+    )
+
+    import io
+    import zipfile
+
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+              <Default Extension="xml" ContentType="application/xml"/>
+              <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+            </Types>""",
+        )
+        archive.writestr(
+            "_rels/.rels",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+            </Relationships>""",
+        )
+        archive.writestr(
+            "word/document.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>""",
+        )
+
+    text, error = resources._extract_docx_text(payload.getvalue(), 12_345)
+
+    assert text == "converted .docx 12345"
+    assert error == ""
+
+
+def test_image_only_legacy_xls_falls_back_to_office_pdf(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from api.services.source_documents import resources
+
+    class _Workbook:
+        def sheets(self):
+            return [
+                SimpleNamespace(
+                    name="Sheet1",
+                    nrows=0,
+                    ncols=0,
+                    cell_value=lambda *_args: "",
+                )
+            ]
+
+        def release_resources(self):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "xlrd",
+        SimpleNamespace(open_workbook=lambda **_kwargs: _Workbook()),
+    )
+    monkeypatch.setattr(
+        resources,
+        "_extract_office_via_pdf",
+        lambda _data, *, suffix, limit: (
+            f"OCR 后正文 {suffix} {limit}",
+            "",
+        ),
+    )
+
+    text, error, text_format = resources.extract_attachment_text(
+        b"legacy-xls",
+        filename="扫描表格.xls",
+        content_type="application/vnd.ms-excel",
+        max_chars=12_345,
+    )
+
+    assert text == "工作表: Sheet1 OCR 后正文 .xls 12345"
+    assert error == ""
+    assert text_format == "xls"
+
+
+def test_docx_short_caption_does_not_hide_embedded_scan(monkeypatch):
+    import io
+
+    from docx import Document
+
+    from api.services.source_documents import resources
+
+    document = Document()
+    document.add_paragraph("附件一")
+    document.add_picture(io.BytesIO(_one_pixel_png()))
+    payload = io.BytesIO()
+    document.save(payload)
+
+    monkeypatch.setattr(
+        resources,
+        "_ocr_docx_images",
+        lambda _data, _limit: ("联系人 010-12345678", ""),
+    )
+
+    text, error = resources._extract_docx_text(payload.getvalue(), 10_000)
+
+    assert "附件一" in text
+    assert "010-12345678" in text
+    assert error == ""
+
+
+def _one_pixel_png() -> bytes:
+    import base64
+
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
+        "AScY42YAAAAASUVORK5CYII="
+    )
+
+
 def _capture(*, raw_html: bytes, rendered_html: bytes):
     from api.services.source_documents.contracts import (
         CapturedDocument,
@@ -679,6 +856,154 @@ def test_contact_attribution_retries_incomplete_batch(monkeypatch):
     assert error == ""
 
 
+def test_contact_attribution_splits_a_persistently_incomplete_batch(monkeypatch):
+    import asyncio
+    import json
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from api.services.source_documents import analysis
+
+    reviewed_batches: list[list[str]] = []
+
+    class Structured:
+        async def ainvoke(self, messages):
+            payload = messages[-1].content.split("候选联系方式：\n", 1)[1]
+            candidates = json.loads(payload)
+            reviewed_batches.append([item["candidate_id"] for item in candidates])
+            returned = candidates[:-1] if len(candidates) > 1 else candidates
+            return analysis.ContactAttributionBatch(
+                items=[
+                    analysis.ContactAttributionDecision(
+                        candidate_id=item["candidate_id"],
+                        belongs_to_target=True,
+                        confidence=95,
+                        reason="正文明确归属目标",
+                    )
+                    for item in returned
+                ]
+            )
+
+    class Llm:
+        def with_structured_output(self, _schema):
+            return Structured()
+
+    async def _config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(models=SimpleNamespace(default="test-model"))
+        )
+
+    async def _sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_BATCH_SIZE", 24)
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_CONCURRENCY", 2)
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_ATTEMPTS", 2)
+    monkeypatch.setattr(analysis, "get_runtime_app_config", _config)
+    monkeypatch.setattr(analysis, "create_llm", lambda *_args, **_kwargs: Llm())
+    monkeypatch.setattr(analysis, "load_prompt", lambda _slug: "{{target_name}}")
+    monkeypatch.setattr(analysis, "observation_context", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(analysis.asyncio, "sleep", _sleep)
+    contacts = [
+        {
+            "channel": "email",
+            "value": f"person{index}@example.gov.cn",
+            "context": "目标单位联系人",
+            "source": "text",
+        }
+        for index in range(4)
+    ]
+
+    selected, error = asyncio.run(
+        analysis.attribute_target_contacts(
+            target_name="目标单位",
+            target_aliases=[],
+            title="联系方式公告",
+            account="目标单位",
+            summary="目标单位联系人名单",
+            contacts=contacts,
+            image_analysis=[],
+        )
+    )
+
+    assert len(selected) == 4
+    assert error == ""
+    assert ["contact_0"] in reviewed_batches
+    assert ["contact_3"] in reviewed_batches
+
+
+def test_contact_attribution_uses_single_object_schema_for_one_candidate(
+    monkeypatch,
+):
+    import asyncio
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from api.services.source_documents import analysis
+
+    invoked: list[type] = []
+
+    class Structured:
+        def __init__(self, schema):
+            self.schema = schema
+
+        async def ainvoke(self, _messages):
+            invoked.append(self.schema)
+            if self.schema is analysis.ContactAttributionBatch:
+                return analysis.ContactAttributionBatch(items=[])
+            return analysis.ContactAttributionDecision(
+                candidate_id="contact_0",
+                belongs_to_target=True,
+                confidence=96,
+                reason="正文明确归属目标",
+            )
+
+    class Llm:
+        def with_structured_output(self, schema):
+            return Structured(schema)
+
+    async def _config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(models=SimpleNamespace(default="test-model"))
+        )
+
+    async def _sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_ATTEMPTS", 2)
+    monkeypatch.setattr(analysis, "get_runtime_app_config", _config)
+    monkeypatch.setattr(analysis, "create_llm", lambda *_args, **_kwargs: Llm())
+    monkeypatch.setattr(analysis, "load_prompt", lambda _slug: "{{target_name}}")
+    monkeypatch.setattr(analysis, "observation_context", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(analysis.asyncio, "sleep", _sleep)
+
+    selected, error = asyncio.run(
+        analysis.attribute_target_contacts(
+            target_name="目标单位",
+            target_aliases=[],
+            title="联系方式公告",
+            account="目标单位",
+            summary="目标单位联系人",
+            contacts=[
+                {
+                    "channel": "email",
+                    "value": "person@example.gov.cn",
+                    "context": "目标单位联系人",
+                    "source": "text",
+                }
+            ],
+            image_analysis=[],
+        )
+    )
+
+    assert invoked == [
+        analysis.ContactAttributionBatch,
+        analysis.ContactAttributionDecision,
+    ]
+    assert len(selected) == 1
+    assert error == ""
+
+
 def test_article_scope_caps_prevent_single_roundup_item_from_passing():
     from api.services.source_documents.analysis import apply_article_scope_cap
 
@@ -1332,6 +1657,19 @@ def test_archive_completeness_treats_partial_screenshots_as_warning():
     assert messages == ["页面截图部分完成: 截图超时，已保留前 3 张"]
 
 
+def test_archive_completeness_marks_truncated_images_partial():
+    from api.services.source_documents import service
+
+    status, messages = service._archive_completeness(
+        capture_metadata={"images_truncated": 3},
+        image_analysis_error="",
+        image_analysis_warning="",
+    )
+
+    assert status == "partial"
+    assert messages == ["页面图片因安全上限截断 3 张"]
+
+
 def test_archive_completeness_reports_missing_evidence_as_partial():
     from api.services.source_documents import service
 
@@ -1506,6 +1844,71 @@ def test_image_analysis_retries_transient_structured_output(monkeypatch):
     assert calls == 2
     assert errors == []
     assert items[0]["visible_text"] == "联系电话 010-12345678"
+
+
+def test_image_analysis_accepts_top_level_array_fallback(monkeypatch):
+    import asyncio
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from api.services.source_documents import analysis
+    from api.services.source_documents.contracts import CapturedImage
+
+    output = BytesIO()
+    Image.new("RGB", (320, 180), "white").save(output, format="PNG")
+    schemas: list[type] = []
+
+    class _Structured:
+        def __init__(self, schema):
+            self.schema = schema
+
+        async def ainvoke(self, _messages):
+            if self.schema is analysis.ImageUnderstandingBatch:
+                raise ValueError("Input should be an object; model returned list")
+            return analysis.ImageUnderstandingList(
+                [analysis.ImageUnderstanding(index=0, visible_text="目标证据")]
+            )
+
+    class _Llm:
+        def with_structured_output(self, schema):
+            schemas.append(schema)
+            return _Structured(schema)
+
+    async def _config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(models=SimpleNamespace(vision="v"))
+        )
+
+    async def _sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(analysis, "get_runtime_app_config", _config)
+    monkeypatch.setattr(analysis, "create_llm", lambda *_args, **_kwargs: _Llm())
+    monkeypatch.setattr(analysis.asyncio, "sleep", _sleep)
+    items, errors = asyncio.run(
+        analysis._analyze_image_batch(
+            [
+                CapturedImage(
+                    index=0,
+                    source_url="https://example.gov.cn/evidence.png",
+                    data=output.getvalue(),
+                    content_type="image/png",
+                )
+            ],
+            project_id="project-1",
+            task_id="task-1",
+            source_type="official_website_document",
+        )
+    )
+
+    assert schemas == [
+        analysis.ImageUnderstandingBatch,
+        analysis.ImageUnderstandingList,
+    ]
+    assert errors == []
+    assert items[0]["visible_text"] == "目标证据"
 
 
 def test_rejected_review_refreshes_an_existing_discovery_link(monkeypatch):
@@ -1683,6 +2086,44 @@ def test_article_image_analysis_normalizes_model_importance(monkeypatch):
     assert error == ""
     assert result[0]["importance_score"] == 89
     assert result[0]["is_key_evidence"] is True
+
+
+def test_article_image_analysis_uses_bounded_batch_concurrency(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import analysis
+    from api.services.source_documents.contracts import CapturedImage
+
+    active = 0
+    max_active = 0
+
+    async def _analyze(images, **_kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return ([{"index": images[0].index, "description": "证据"}], [])
+
+    monkeypatch.setattr(analysis, "_IMAGE_ANALYSIS_CONCURRENCY", 4)
+    monkeypatch.setattr(analysis, "_analyze_image_batch", _analyze)
+    images = [
+        CapturedImage(
+            index=index,
+            source_url=f"https://example.gov.cn/{index}.jpg",
+            data=b"image",
+            content_type="image/jpeg",
+        )
+        for index in range(10)
+    ]
+
+    result, error = asyncio.run(
+        analysis.analyze_article_images(images, batch_size=1)
+    )
+
+    assert 1 < max_active <= 4
+    assert len(result) == 10
+    assert error == ""
 
 
 def test_article_image_preflight_isolates_unsupported_svg():

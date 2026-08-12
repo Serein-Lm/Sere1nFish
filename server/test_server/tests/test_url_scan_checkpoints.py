@@ -7,6 +7,12 @@ from api.db.collections import (
     URL_SCAN_RESULTS_COLLECTION,
     URL_SCAN_TASKS_COLLECTION,
 )
+from api.services.url_scan_pipeline import terminal_url_scan_status
+
+
+def test_terminal_url_scan_with_failures_is_partial() -> None:
+    assert terminal_url_scan_status(0) == "completed"
+    assert terminal_url_scan_status(1) == "partial"
 
 
 class _Cursor:

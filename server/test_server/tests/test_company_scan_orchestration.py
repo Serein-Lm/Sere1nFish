@@ -9,6 +9,7 @@ import pytest
 
 from api.services.company_scan_pipeline import (
     CompanyScanPipeline,
+    incomplete_collection_sources,
     related_entity_task_id,
     should_checkpoint_module,
 )
@@ -59,7 +60,136 @@ def test_partial_followup_module_is_not_cached_as_complete() -> None:
     assert should_checkpoint_module(
         "bidding",
         {"status": "partial"},
+    ) is False
+    assert should_checkpoint_module(
+        "control_structure",
+        {"result": {"enabled": True, "status": "partial"}},
+    ) is False
+    assert should_checkpoint_module(
+        "bidding",
+        {"status": "completed"},
     ) is True
+
+
+def test_failed_asset_providers_do_not_complete_resume_phase() -> None:
+    outcome = {
+        "status": "completed",
+        "assets": {
+            "providers": {
+                "fofa": {"errors": ["quota"]},
+                "hunter": {"errors": ["key"]},
+            },
+        },
+        "url_scan": {"enabled": False, "status": "disabled"},
+        "website_documents": {"enabled": False, "status": "disabled"},
+    }
+
+    assert should_checkpoint_module("asset_url", outcome) is False
+    assert CompanyScanPipeline._jobs_completed_successfully(
+        [("asset_url", None)],
+        [outcome],
+    ) is False
+
+
+def test_company_scan_completion_detects_incomplete_enabled_sources() -> None:
+    result = {
+        "control_structure": {"enabled": False, "status": "disabled"},
+        "assets": {
+            "enabled": True,
+            "providers": {
+                "fofa": {"errors": []},
+                "hunter": {"errors": ["optional provider is not configured"]},
+            },
+        },
+        "url_scan": {"enabled": True, "status": "completed"},
+        "website_documents": {
+            "enabled": True,
+            "status": "partial",
+            "documents_partial": 2,
+        },
+        "bidding": {"enabled": True, "status": "completed"},
+        "wechat": {"enabled": True, "status": "skipped"},
+        "scholar": {"enabled": True, "status": "completed"},
+        "xhs": {"enabled": True, "root_selected": False, "status": "skipped"},
+        "sub_errors": [],
+    }
+
+    assert incomplete_collection_sources(result) == ["website_documents"]
+
+
+def test_company_scan_completion_detects_provider_and_control_errors() -> None:
+    result = {
+        "control_structure": {
+            "enabled": True,
+            "status": "partial",
+            "errors": ["provider unavailable"],
+        },
+        "assets": {
+            "enabled": True,
+            "providers": {
+                "fofa": {"errors": ["quota exhausted"]},
+                "hunter": {"errors": ["key missing"]},
+            },
+        },
+        "url_scan": {"enabled": False, "status": "disabled"},
+        "website_documents": {"enabled": False, "status": "disabled"},
+        "bidding": {"enabled": False, "status": "disabled"},
+        "wechat": {"enabled": False, "status": "disabled"},
+        "scholar": {"enabled": False, "status": "disabled"},
+        "xhs": {"enabled": False, "root_selected": False, "status": "disabled"},
+        "sub_errors": [],
+    }
+
+    assert incomplete_collection_sources(result) == [
+        "control_structure",
+        "asset_intelligence",
+    ]
+
+
+def test_disabled_control_provider_does_not_make_scan_partial() -> None:
+    result = {
+        "control_structure": {
+            "enabled": False,
+            "status": "disabled",
+            "errors": ["quota insufficient"],
+        },
+        "url_scan": {"enabled": False, "status": "disabled"},
+        "website_documents": {"enabled": False, "status": "disabled"},
+        "bidding": {"enabled": False, "status": "disabled"},
+        "wechat": {"enabled": False, "status": "disabled"},
+        "scholar": {"enabled": False, "status": "disabled"},
+        "xhs": {"enabled": False, "root_selected": False, "status": "disabled"},
+        "sub_errors": [],
+    }
+
+    assert incomplete_collection_sources(result) == []
+
+
+def test_incomplete_descendant_channels_keep_parent_partial() -> None:
+    result = {
+        "control_structure": {
+            "enabled": True,
+            "status": "completed",
+            "errors": [],
+            "scan_summary": {"completed": 2, "partial": 1, "failed": 0},
+        },
+        "url_scan": {"enabled": False, "status": "disabled"},
+        "website_documents": {"enabled": False, "status": "disabled"},
+        "bidding": {"enabled": False, "status": "disabled"},
+        "wechat": {"enabled": False, "status": "disabled"},
+        "scholar": {
+            "enabled": True,
+            "status": "completed",
+            "descendant_status": "partial",
+        },
+        "xhs": {"enabled": False, "root_selected": False, "status": "disabled"},
+        "sub_errors": [],
+    }
+
+    assert incomplete_collection_sources(result) == [
+        "control_structure",
+        "scholar",
+    ]
 
 
 def test_wechat_target_selection_is_automatic_by_default() -> None:
@@ -245,6 +375,8 @@ async def test_related_entity_scholar_collection_is_serial_and_target_scoped(
     assert result["summary"] == {
         "entities": 2,
         "completed": 2,
+        "partial": 0,
+        "failed": 0,
         "articles_total": 4,
         "verified_articles_total": 2,
         "unverified_articles_total": 2,
@@ -252,6 +384,51 @@ async def test_related_entity_scholar_collection_is_serial_and_target_scoped(
         "corresponding_count": 2,
     }
     assert [item["relation_depth"] for item in result["entities"]] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_related_entity_scholar_partial_source_is_not_reported_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import task_progress
+
+    pipeline = CompanyScanPipeline(object(), object())
+
+    async def collect(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "kind": "scholar",
+            "status": "partial",
+            "articles_total": 3,
+            "verified_articles_total": 2,
+            "unverified_articles_total": 1,
+            "contacts_total": 1,
+            "corresponding_count": 1,
+            "source_errors": ["europepmc: rate limited"],
+        }
+
+    async def progress(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def coverage(*_args: Any, **_kwargs: Any) -> None:
+        assert kwargs["status"] == "partial"
+
+    monkeypatch.setattr(pipeline, "_run_scholar_collection", collect)
+    monkeypatch.setattr(task_progress, "update_source_progress", progress)
+    from api.services import target_scan_profile
+
+    monkeypatch.setattr(target_scan_profile, "record_target_scan_coverage", coverage)
+
+    result = await pipeline._scan_scholar_entities(
+        task_id="task-1",
+        project_id="project-1",
+        entities=[{"name": "目标子单位", "target_id": "target-child"}],
+        manual_direction="公共卫生",
+    )
+
+    assert result["status"] == "partial"
+    assert result["summary"]["completed"] == 0
+    assert result["summary"]["partial"] == 1
+    assert result["summary"]["failed"] == 0
 
 
 class _TargetCollection:
@@ -485,6 +662,18 @@ async def test_company_scan_keeps_a_pinned_related_target_identity(
     async def noop(*_args: Any, **_kwargs: Any) -> None:
         return None
 
+    website_calls: list[dict[str, Any]] = []
+
+    async def run_assets(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        website_calls.append(kwargs)
+        return {
+            "kind": "asset_url",
+            "status": "completed",
+            "assets": {"enabled": False},
+            "url_scan": {"enabled": True, "status": "completed"},
+            "website_documents": {"enabled": True, "status": "completed"},
+        }
+
     monkeypatch.setattr(targets_dao, "get_target", get_target)
     monkeypatch.setattr(company_normalize, "normalize_company", normalize)
     monkeypatch.setattr(targets_service, "attach_normalized_company", attach)
@@ -492,6 +681,7 @@ async def test_company_scan_keeps_a_pinned_related_target_identity(
     monkeypatch.setattr(targets_dao, "link_project_target", noop)
     monkeypatch.setattr(targets_dao, "touch_project_target_collection", noop)
     monkeypatch.setattr(pipeline, "_run_company_router", route)
+    monkeypatch.setattr(pipeline, "_run_asset_and_url_scan", run_assets)
     monkeypatch.setattr(pipeline, "_update_progress", noop)
 
     result = await pipeline.run_pipeline(
@@ -499,7 +689,7 @@ async def test_company_scan_keeps_a_pinned_related_target_identity(
         project_id="project-1",
         company_name="目标子公司",
         target_id="target-child",
-        enable_url_scan=False,
+        enable_url_scan=True,
         enable_asset_discovery=False,
         enable_xhs=False,
         enable_bidding=False,
@@ -518,6 +708,8 @@ async def test_company_scan_keeps_a_pinned_related_target_identity(
     assert stored_meta["normalized_name"] == "目标子公司"
     assert result["identity"]["target_id"] == "target-child"
     assert result["identity"]["normalization_error"] is None
+    assert len(website_calls) == 1
+    assert website_calls[0]["identity"]["root_domain"] == "child.example"
 
 
 @pytest.mark.asyncio
@@ -846,12 +1038,17 @@ async def test_retryable_url_child_reopens_only_asset_module_checkpoint(
         asset_runs += 1
         return {
             "kind": "asset_url",
+            "status": "completed",
             "assets": {"enabled": True, "alive": 2},
             "url_scan": {
                 "enabled": True,
                 "status": "completed",
                 "scanned_urls": 2,
                 "failed_urls": 0,
+            },
+            "website_documents": {
+                "enabled": True,
+                "status": "completed",
             },
         }
 
@@ -1334,8 +1531,10 @@ async def test_wholly_owned_url_scan_reports_progress_to_parent_task(
         calls.append(kwargs)
         return {
             "kind": "asset_url",
-            "assets": {"alive": 0},
-            "url_scan": {"status": "completed"},
+            "status": "completed",
+            "assets": {"enabled": True, "alive": 0, "providers": {}},
+            "url_scan": {"enabled": True, "status": "completed"},
+            "website_documents": {"enabled": True, "status": "completed"},
         }
 
     monkeypatch.setattr(pipeline, "_run_asset_and_url_scan", run_assets)
@@ -1424,6 +1623,52 @@ async def test_wholly_owned_entity_runs_profile_copywriting_after_xhs(
     assert result["summary"]["completed"] == 1
     assert result["summary"]["profile_copywritings"] == 2
     assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_wholly_owned_entity_keeps_partial_channel_in_parent_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = CompanyScanPipeline(_PipelineDb(), object())  # type: ignore[arg-type]
+
+    async def run_xhs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "kind": "xhs",
+            "status": "partial",
+            "notes_count": 3,
+            "profiles_count": 0,
+            "errors": ["详情获取失败 1 项"],
+        }
+
+    monkeypatch.setattr(pipeline, "_run_xhs_search", run_xhs)
+
+    result = await pipeline._scan_wholly_owned_entities(
+        task_id="task-1",
+        project_id="project-1",
+        entities=[{"name": "子公司", "target_id": "target-child"}],
+        enable_asset_discovery=False,
+        enable_url_scan=False,
+        enable_copywriting=False,
+        enable_xhs=True,
+        xhs_max_notes=20,
+        xhs_attention_threshold=60,
+        min_attention_score=40,
+        profile_copywriting_threshold=60,
+        fofa_size=200,
+        hunter_size=200,
+        asset_probe_concurrency=48,
+        incremental_scan=False,
+        url_probe_concurrency=64,
+        url_scan_concurrency=10,
+        copywriting_concurrency=6,
+        xhs_search_concurrency=1,
+        entity_concurrency=1,
+    )
+
+    assert result["status"] == "partial"
+    assert result["summary"]["completed"] == 0
+    assert result["summary"]["partial"] == 1
+    assert result["entities"][0]["scan"]["status"] == "partial"
 
 
 @pytest.mark.asyncio

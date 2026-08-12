@@ -79,11 +79,11 @@ def test_company_wechat_definition_enforces_phone_work_limits() -> None:
     assert patch["max_related_targets"] == 6
     assert patch["skip_completed_related_targets"] is True
     assert patch["max_resolved_keywords"] == 36
-    assert patch["detail_max_items"] == 2
-    assert patch["detail_max_total_items"] == 12
-    assert patch["detail_review_max_items"] == 3
-    assert patch["detail_review_max_total_items"] == 24
-    assert patch["swipe_times"] == 4
+    assert patch["detail_max_items"] == 4
+    assert patch["detail_max_total_items"] == 36
+    assert patch["detail_review_max_items"] == 6
+    assert patch["detail_review_max_total_items"] == 72
+    assert patch["swipe_times"] == 6
     assert patch["max_runtime_seconds"] == 14400
     assert patch["notify_on"] == "none"
 
@@ -129,7 +129,7 @@ async def test_ensure_wechat_configuration_creates_unbound_project_definition(
     assert captured["max_related_targets"] == 6
     assert captured["skip_completed_related_targets"] is True
     assert captured["max_resolved_keywords"] == 36
-    assert captured["detail_max_total_items"] == 12
+    assert captured["detail_max_total_items"] == 36
     assert captured["extract_fields"]
     assert captured["dedup_key_fields"] == ["title", "account"]
     assert captured["notify_on"] == "none"
@@ -415,10 +415,10 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["max_related_targets"] == 6
     assert overrides["skip_completed_related_targets"] is True
     assert overrides["max_resolved_keywords"] == 36
-    assert overrides["detail_max_items"] == 2
-    assert overrides["detail_max_total_items"] == 12
-    assert overrides["detail_review_max_items"] == 3
-    assert overrides["detail_review_max_total_items"] == 24
+    assert overrides["detail_max_items"] == 4
+    assert overrides["detail_max_total_items"] == 36
+    assert overrides["detail_review_max_items"] == 6
+    assert overrides["detail_review_max_total_items"] == 72
     assert overrides["max_runtime_seconds"] == 14400
     assert overrides["parent_task_id"] == "scan-1"
     assert overrides["target_id"] == "target-1"
@@ -460,6 +460,46 @@ async def test_company_wechat_collection_marks_stopped_run_partial(
 
     assert result["status"] == "partial"
     assert result["stopped"] is True
+
+
+@pytest.mark.asyncio
+async def test_company_wechat_collection_marks_incomplete_keywords_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import wechat_collection
+
+    async def resolve(*_args: Any, **_kwargs: Any):
+        return {"task_def_id": "wechat-a", "device_id": "device-a"}
+
+    async def run_definition(*_args: Any, **_kwargs: Any):
+        return {
+            "total": 2,
+            "new": 2,
+            "changed": 0,
+            "stopped": False,
+            "timed_out": False,
+            "keywords_used": ["目标公司 招标", "目标公司 联系方式"],
+            "keywords_completed": 1,
+            "keyword_total": 2,
+            "failed": 1,
+            "persist_failed": 0,
+        }
+
+    monkeypatch.setattr(wechat_collection, "resolve_wechat_task_definition", resolve)
+    monkeypatch.setattr(wechat_collection, "run_mobile_collect_definition", run_definition)
+
+    result = await wechat_collection.run_company_wechat_collection(
+        object(),
+        task_id="scan-1",
+        project_id="project-1",
+        target_id="target-1",
+        target_name="目标公司",
+        device_id="device-a",
+    )
+
+    assert result["status"] == "partial"
+    assert result["failed_keywords"] == 1
+    assert result["keywords_completed"] == 1
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,15 @@ from api.utils.url_identity import endpoint_identity, prefer_https_url
 from core.logger import get_logger
 from core.stream import Stage, Item, RetryPolicy, DeadLetter
 
-logger = get_logger("url_scan_pipeline")# ── 类型/角色中文标签（传给 agent 辅助理解）──
+logger = get_logger("url_scan_pipeline")
+
+
+def terminal_url_scan_status(failed_urls: int) -> str:
+    """Report terminal URL batches with any failed endpoint as partial."""
+    return "partial" if max(0, int(failed_urls or 0)) else "completed"
+
+
+# ── 类型/角色中文标签（传给 agent 辅助理解）──
 
 _TYPE_LABELS = {
     "hr_contact": "HR/招聘联系方式",
@@ -1437,7 +1445,8 @@ class UrlScanPipeline:
                 copywriting_count = pipe.state.get("copywriting_count", 0)
             task_result["total_copywritings"] = copywriting_count
             task_result["copywriting_errors"] = copywriting_errors[:20]
-            task_result["status"] = "completed"
+            final_status = terminal_url_scan_status(task_result["failed_urls"])
+            task_result["status"] = final_status
             await update_source_progress(
                 self.db,
                 task_id=progress_task_id,
@@ -1447,11 +1456,12 @@ class UrlScanPipeline:
                 succeeded=persisted_summary["succeeded"],
                 failed=persisted_summary["failed"],
                 skipped=len(completed_before),
-                status="completed",
+                status=final_status,
                 message=(
                     f"URL 深扫完成，覆盖 {len(completed_after)} 条，"
                     f"本轮处理 {persisted_summary['processed']} 条，"
-                    f"复用 {len(completed_before)} 条"
+                    f"复用 {len(completed_before)} 条，"
+                    f"失败 {task_result['failed_urls']} 条"
                 ),
                 extra={"remaining": task_result["remaining_urls"]},
             )

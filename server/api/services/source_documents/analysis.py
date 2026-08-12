@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from PIL import Image
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, RootModel, create_model
 
 from Sere1nGraph.graph.agents.runtime import create_llm
 from Sere1nGraph.graph.prompts.loader import load_prompt
@@ -31,6 +31,7 @@ _STRUCTURE_TIMEOUT_SECONDS = 120
 _RELEVANCE_REVIEW_TIMEOUT_SECONDS = 120
 _IMAGE_BATCH_TIMEOUT_SECONDS = 120
 _IMAGE_BATCH_ATTEMPTS = 3
+_IMAGE_ANALYSIS_CONCURRENCY = 4
 _CONTACT_ATTRIBUTION_BATCH_SIZE = 24
 _CONTACT_ATTRIBUTION_CONCURRENCY = 4
 _CONTACT_ATTRIBUTION_ATTEMPTS = 2
@@ -95,6 +96,10 @@ class ImageUnderstanding(BaseModel):
 
 class ImageUnderstandingBatch(BaseModel):
     items: list[ImageUnderstanding] = Field(default_factory=list)
+
+
+class ImageUnderstandingList(RootModel[list[ImageUnderstanding]]):
+    """Fallback schema for providers that return a top-level JSON array."""
 
 
 class ArticleRelevanceReview(BaseModel):
@@ -729,6 +734,7 @@ async def attribute_target_contacts(
         model_name = app_config.runtime.models.default
         llm = create_llm(app_config, model_name=model_name, streaming=False)
         structured = llm.with_structured_output(ContactAttributionBatch)
+        single_structured = llm.with_structured_output(ContactAttributionDecision)
         system = load_prompt(CONTACT_ATTRIBUTION_PROMPT_SLUG)
         for placeholder, value in {
             "{{target_name}}": target_name or "未指定",
@@ -742,8 +748,8 @@ async def attribute_target_contacts(
         ]
         semaphore = asyncio.Semaphore(_CONTACT_ATTRIBUTION_CONCURRENCY)
 
-        async def _review_batch(
-            batch_index: int,
+        async def _invoke_review_batch(
+            batch_index: str,
             batch: list[dict[str, Any]],
         ) -> tuple[list[dict[str, Any]], str]:
             expected_ids = {str(item["candidate_id"]) for item in batch}
@@ -769,17 +775,27 @@ async def attribute_target_contacts(
                             agent="source_document_contact_reviewer",
                             task_type=source_type or "source_document",
                         ):
+                            reviewer = (
+                                single_structured
+                                if len(batch) == 1 and attempt > 0
+                                else structured
+                            )
                             result = await asyncio.wait_for(
-                                structured.ainvoke(
+                                reviewer.ainvoke(
                                     [SystemMessage(content=system), message]
                                 ),
                                 timeout=_RELEVANCE_REVIEW_TIMEOUT_SECONDS,
                             )
+                        result_items = (
+                            [result]
+                            if isinstance(result, ContactAttributionDecision)
+                            else getattr(result, "items", []) or []
+                        )
                         decisions = [
                             item.model_dump()
                             if hasattr(item, "model_dump")
                             else dict(item)
-                            for item in getattr(result, "items", []) or []
+                            for item in result_items
                         ]
                         decision_ids = [
                             str(item.get("candidate_id") or "")
@@ -802,9 +818,30 @@ async def attribute_target_contacts(
                             await asyncio.sleep(0.5 * (2**attempt))
             return [], str(last_error or "联系方式审核失败")[:1000]
 
+        async def _review_batch(
+            batch_index: str,
+            batch: list[dict[str, Any]],
+        ) -> tuple[list[dict[str, Any]], str]:
+            decisions, error = await _invoke_review_batch(batch_index, batch)
+            if not error or len(batch) <= 1:
+                return decisions, error
+
+            midpoint = len(batch) // 2
+            parts = await asyncio.gather(
+                _review_batch(f"{batch_index}.1", batch[:midpoint]),
+                _review_batch(f"{batch_index}.2", batch[midpoint:]),
+            )
+            merged: list[dict[str, Any]] = []
+            errors: list[str] = []
+            for part_decisions, part_error in parts:
+                merged.extend(part_decisions)
+                if part_error:
+                    errors.append(part_error)
+            return merged, "; ".join(errors)[:1000]
+
         results = await asyncio.gather(
             *(
-                _review_batch(index, batch)
+                _review_batch(str(index), batch)
                 for index, batch in enumerate(batches)
             )
         )
@@ -814,7 +851,6 @@ async def attribute_target_contacts(
         for decisions, error in results:
             if error:
                 errors.append(error)
-                continue
             for decision in decisions:
                 candidate_id = str(decision.get("candidate_id") or "")
                 candidate = candidate_by_id.get(candidate_id)
@@ -845,11 +881,13 @@ def _vision_payload(image: CapturedImage) -> tuple[str, str]:
     """把任意原图（含 GIF）转为适合视觉模型的受限尺寸 JPEG。"""
     with Image.open(io.BytesIO(image.data)) as source:
         source.seek(0)
-        source.load()
         if source.width < 11 or source.height < 11:
             raise ImagePreflightSkip(
                 f"图片尺寸过小: {source.width}x{source.height}"
             )
+        if str(source.format or "").upper() in {"JPEG", "MPO"}:
+            source.draft("RGB", (1600, 1600))
+        source.load()
         if source.mode in {"RGBA", "LA"} or (
             source.mode == "P" and "transparency" in source.info
         ):
@@ -890,6 +928,7 @@ async def _analyze_image_batch(
     *,
     project_id: str,
     task_id: str,
+    source_type: str = "source_document",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     prepared, errors = _prepare_image_inputs(images)
     if not prepared:
@@ -897,7 +936,10 @@ async def _analyze_image_batch(
     app_config = await get_runtime_app_config()
     model_name = app_config.runtime.models.vision
     llm = create_llm(app_config, model_name=model_name, streaming=False)
-    structured = llm.with_structured_output(ImageUnderstandingBatch)
+    structured_outputs = (
+        llm.with_structured_output(ImageUnderstandingBatch),
+        llm.with_structured_output(ImageUnderstandingList),
+    )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -928,10 +970,12 @@ async def _analyze_image_batch(
                 task_id=task_id or None,
                 phase="source_document_image_recognition",
                 agent="source_document",
-                task_type="wechat_article",
+                task_type=source_type or "source_document",
             ):
                 result = await asyncio.wait_for(
-                    structured.ainvoke([HumanMessage(content=content)]),
+                    structured_outputs[min(attempt, 1)].ainvoke(
+                        [HumanMessage(content=content)]
+                    ),
                     timeout=_IMAGE_BATCH_TIMEOUT_SECONDS,
                 )
             break
@@ -942,7 +986,18 @@ async def _analyze_image_batch(
             await asyncio.sleep(0.5 * (2**attempt))
     else:  # pragma: no cover - the loop either succeeds or raises
         raise last_error or RuntimeError("图片识别失败")
-    items = getattr(result, "items", []) or []
+    if isinstance(result, ImageUnderstandingList):
+        items = result.root
+    elif isinstance(result, list):
+        items = result
+    elif isinstance(result, dict):
+        items = result.get("items") or result.get("root") or []
+    else:
+        items = (
+            getattr(result, "items", None)
+            or getattr(result, "root", None)
+            or []
+        )
     return (
         [
             item.model_dump() if hasattr(item, "model_dump") else dict(item)
@@ -957,21 +1012,26 @@ async def analyze_article_images(
     *,
     project_id: str = "",
     task_id: str = "",
+    source_type: str = "source_document",
     batch_size: int = 4,
 ) -> tuple[list[dict[str, Any]], str]:
     """识别全部文章原图；调用侧据识别结果只归档关键证据图片。"""
     if not images:
         return [], ""
     batches = [images[index : index + batch_size] for index in range(0, len(images), batch_size)]
-    results = await asyncio.gather(
-        *(
-            _analyze_image_batch(
+    semaphore = asyncio.Semaphore(_IMAGE_ANALYSIS_CONCURRENCY)
+
+    async def _analyze(index: int, batch: list[CapturedImage]):
+        async with semaphore:
+            return await _analyze_image_batch(
                 batch,
                 project_id=project_id,
                 task_id=f"{task_id}:image:{index}",
+                source_type=source_type,
             )
-            for index, batch in enumerate(batches)
-        ),
+
+    results = await asyncio.gather(
+        *(_analyze(index, batch) for index, batch in enumerate(batches)),
         return_exceptions=True,
     )
     merged: list[dict[str, Any]] = []

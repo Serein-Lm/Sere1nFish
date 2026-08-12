@@ -12,12 +12,33 @@ import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
 from core.logger import get_logger
 
 logger = get_logger("hunter_tools")
+_PROBE_BODY_LIMIT_BYTES = 512 * 1024
+
+
+def _probe_candidate_urls(url: str) -> list[str]:
+    """Return one endpoint's requested and alternate HTTP schemes in order."""
+    value = str(url or "").strip()
+    if not value:
+        return []
+    if not value.startswith(("http://", "https://")):
+        value = f"https://{value}"
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return []
+    alternate = "http" if parsed.scheme == "https" else "https"
+    alternate_url = urlunsplit(
+        (alternate, parsed.netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+    return list(dict.fromkeys([value, alternate_url]))
+
+
 @dataclass
 class HunterResult:
     """Hunter 查询结果"""
@@ -284,9 +305,9 @@ async def probe_url(
     
     start_time = time.time()
     
-    # 确保 URL 有协议
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
+    candidates = _probe_candidate_urls(url)
+    if not candidates:
+        return ProbeResult(url=str(url or ""), is_alive=False, error="invalid_url")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -298,53 +319,60 @@ async def probe_url(
         session = aiohttp.ClientSession()
         close_session = True
     
+    errors: list[str] = []
     try:
-        async with session.get(
-            url,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            ssl=False,  # 忽略 SSL 证书验证
-            allow_redirects=True,
-        ) as resp:
-            response_time = time.time() - start_time
-            
-            # 读取部分内容获取标题
-            content = await resp.text(errors="ignore")
-            content_length = len(content)
-            
-            # 提取标题
-            title = None
-            title_match = re.search(r"<title[^>]*>([^<]+)</title>", content, re.IGNORECASE)
-            if title_match:
-                title = title_match.group(1).strip()[:200]
-            
-            return ProbeResult(
-                url=url,
-                is_alive=True,
-                status_code=resp.status,
-                title=title,
-                content_length=content_length,
-                response_time=round(response_time, 3),
-            )
-            
-    except asyncio.TimeoutError:
+        for candidate in candidates:
+            try:
+                async with session.get(
+                    candidate,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    ssl=False,  # 公开资产探活不以证书链作为存活条件
+                    allow_redirects=True,
+                ) as resp:
+                    response_time = time.time() - start_time
+                    try:
+                        body = await resp.content.read(_PROBE_BODY_LIMIT_BYTES)
+                    except (asyncio.TimeoutError, aiohttp.ClientError):
+                        # Response headers already prove endpoint reachability.
+                        body = b""
+                    charset = resp.charset or "utf-8"
+                    try:
+                        content = body.decode(charset, errors="ignore")
+                    except LookupError:
+                        content = body.decode("utf-8", errors="ignore")
+                    title = None
+                    title_match = re.search(
+                        r"<title[^>]*>([^<]+)</title>",
+                        content,
+                        re.IGNORECASE,
+                    )
+                    if title_match:
+                        title = title_match.group(1).strip()[:200]
+                    declared_length = resp.headers.get("Content-Length")
+                    try:
+                        content_length = int(declared_length or len(body))
+                    except (TypeError, ValueError):
+                        content_length = len(body)
+                    return ProbeResult(
+                        url=str(resp.url or candidate),
+                        is_alive=True,
+                        status_code=resp.status,
+                        title=title,
+                        content_length=content_length,
+                        response_time=round(response_time, 3),
+                    )
+            except asyncio.TimeoutError:
+                errors.append(f"{candidate}: timeout")
+            except aiohttp.ClientError as exc:
+                errors.append(f"{candidate}: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{candidate}: {exc}")
         return ProbeResult(
-            url=url,
+            url=candidates[0],
             is_alive=False,
-            error="timeout",
-            response_time=timeout,
-        )
-    except aiohttp.ClientError as e:
-        return ProbeResult(
-            url=url,
-            is_alive=False,
-            error=str(e)[:100],
-        )
-    except Exception as e:
-        return ProbeResult(
-            url=url,
-            is_alive=False,
-            error=str(e)[:100],
+            error="; ".join(errors)[:200] or "unreachable",
+            response_time=round(time.time() - start_time, 3),
         )
     finally:
         if close_session:

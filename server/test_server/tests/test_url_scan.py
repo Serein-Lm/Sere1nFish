@@ -15,6 +15,11 @@ URL Scan Pipeline 链路测试
   python test_server/tests/test_url_scan.py
 """
 
+# This file is an opt-in integration script (see the command above), not a
+# pytest module. Its network, Docker and live API checks are orchestrated by
+# the async main function at the bottom.
+__test__ = False
+
 import asyncio
 import json
 import sys

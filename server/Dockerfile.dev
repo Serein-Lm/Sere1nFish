@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
+    libreoffice-calc-nogui \
+    libreoffice-impress-nogui \
+    libreoffice-writer-nogui \
     poppler-utils \
     tesseract-ocr \
     tesseract-ocr-chi-sim \

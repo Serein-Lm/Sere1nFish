@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,8 +19,46 @@ from api.db.collections import FINDINGS_COLLECTION, COPYWRITINGS_COLLECTION, PRO
 from api.utils.url_identity import endpoint_identity
 
 
+_FINDING_SUMMARY_PROJECTION = {
+    "_id": 0,
+    "finding_id": 1,
+    "project_id": 1,
+    "task_id": 1,
+    "task_ids": 1,
+    "source": 1,
+    "type": 1,
+    "channel": 1,
+    "label": 1,
+    "value": 1,
+    "url": 1,
+    "attention_score": 1,
+    "attention_reason": 1,
+    "target_id": 1,
+    "target_ids": 1,
+    "target_name": 1,
+    "has_profile": 1,
+    "notes_count": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def task_finding_scope(task_id: str) -> dict[str, Any]:
+    """匹配一个任务及其持久化子任务产生的 Finding。"""
+    normalized = str(task_id or "").strip()
+    if not normalized:
+        return {}
+    pattern = re.compile(rf"^{re.escape(normalized)}(?:_|$)")
+    return {
+        "$or": [
+            {"task_id": pattern},
+            {"task_ids": pattern},
+        ]
+    }
 
 
 # ── Findings CRUD ──
@@ -176,6 +215,7 @@ async def query_findings(
     sort: str = "score_desc",
     limit: int = 20,
     skip: int = 0,
+    summary_only: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     分页查询 findings，返回 (findings, total)
@@ -184,7 +224,7 @@ async def query_findings(
     if source:
         query["source"] = source
     if task_id:
-        query["task_id"] = task_id
+        query.update(task_finding_scope(task_id))
     if target_id:
         query["target_id"] = target_id
     if finding_type:
@@ -200,7 +240,8 @@ async def query_findings(
     sort_spec = sort_map.get(sort, [("attention_score", -1)])
 
     total = await db[FINDINGS_COLLECTION].count_documents(query)
-    cursor = db[FINDINGS_COLLECTION].find(query, {"_id": 0}).sort(sort_spec).skip(skip).limit(limit)
+    projection = _FINDING_SUMMARY_PROJECTION if summary_only else {"_id": 0}
+    cursor = db[FINDINGS_COLLECTION].find(query, projection).sort(sort_spec).skip(skip).limit(limit)
     findings = await cursor.to_list(limit)
 
     return await enrich_with_target_relations(

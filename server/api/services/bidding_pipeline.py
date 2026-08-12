@@ -3,18 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
-import mimetypes
 import re
-import zipfile
-from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import unquote, urljoin, urlsplit
 
 import aiohttp
-from lxml import html as lxml_html
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import bidding as bidding_dao
@@ -29,7 +22,6 @@ from api.services.source_documents.resources import (
     html_text_and_links,
     is_attachment_link,
 )
-from api.services.url_security import assert_public_http_url
 from api.storage import get_object_storage
 from core.logger import get_logger
 
@@ -46,34 +38,16 @@ from crawler_tools.tianyancha_tools import (
 logger = get_logger("bidding_pipeline")
 
 _MAX_HTML_BYTES = 5 * 1024 * 1024
-_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
-_MAX_TOTAL_ATTACHMENT_BYTES_PER_RECORD = 100 * 1024 * 1024
-_MAX_ATTACHMENTS_PER_RECORD = 20
-_MAX_ATTACHMENT_TEXT_CHARS = 60_000
+_MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_ATTACHMENT_BYTES_PER_RECORD = 512 * 1024 * 1024
+_MAX_ATTACHMENTS_PER_RECORD = 50
 BIDDING_LOOKBACK_DAYS = 30
-_ATTACHMENT_EXTENSIONS = {
-    ".pdf",
-    ".doc",
-    ".docx",
-    ".xls",
-    ".xlsx",
-    ".zip",
-}
-_ATTACHMENT_LABEL_MARKERS = ("附件", "下载", "采购文件", "招标文件", "投标文件")
 _WHITESPACE_RE = re.compile(r"\s+")
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _PHONE_RE = re.compile(
     r"(?<!\d)(?:(?:\+?86[-\s]?)?1[3-9]\d{9}|"
     r"0\d{2,3}[-—\s]?\d{7,8}(?:[-转]\d{1,6})?)(?!\d)"
 )
-
-
-@dataclass(slots=True)
-class _FetchedResource:
-    url: str
-    data: bytes
-    content_type: str
-    filename: str
 
 
 def _object_url(object_id: str) -> str:
@@ -90,271 +64,6 @@ def _first_absolute_http_url(*values: str) -> str:
         if normalized := normalize_url(str(value or "")):
             return normalized
     return ""
-
-
-def _html_text_and_links(content: str | bytes, base_url: str) -> tuple[str, list[dict[str, str]]]:
-    if not content:
-        return "", []
-    try:
-        root = lxml_html.fromstring(content)
-    except (TypeError, ValueError):
-        try:
-            root = lxml_html.fragment_fromstring(content, create_parent=True)
-        except (TypeError, ValueError):
-            text = _WHITESPACE_RE.sub(" ", str(content)).strip()
-            return text, []
-    for node in root.xpath("//script|//style|//noscript|//template"):
-        parent = node.getparent()
-        if parent is not None:
-            parent.remove(node)
-    text = _WHITESPACE_RE.sub(" ", root.text_content()).strip()
-    links: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for anchor in root.xpath("//a[@href]"):
-        href = str(anchor.get("href") or "").strip()
-        if not href or href.lower().startswith(("javascript:", "data:", "mailto:", "tel:")):
-            continue
-        absolute = urljoin(base_url, href)
-        try:
-            parsed = urlsplit(absolute)
-        except ValueError:
-            continue
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            continue
-        if absolute in seen:
-            continue
-        seen.add(absolute)
-        links.append(
-            {
-                "url": absolute,
-                "label": _WHITESPACE_RE.sub(" ", anchor.text_content()).strip()[:200],
-            }
-        )
-    return text, links
-
-
-def _is_attachment_link(link: dict[str, str]) -> bool:
-    url = str(link.get("url") or "")
-    label = str(link.get("label") or "")
-    url_suffix = PurePosixPath(urlsplit(url).path).suffix.lower()
-    label_suffix = PurePosixPath(label).suffix.lower()
-    return (
-        url_suffix in _ATTACHMENT_EXTENSIONS
-        or label_suffix in _ATTACHMENT_EXTENSIONS
-        or any(marker in label for marker in _ATTACHMENT_LABEL_MARKERS)
-    )
-
-
-def _safe_remote_filename(value: str) -> str:
-    raw = str(value or "").encode("utf-8", errors="surrogateescape")
-    decoded = ""
-    for encoding in ("utf-8", "gb18030"):
-        try:
-            decoded = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    if not decoded:
-        decoded = raw.decode("utf-8", errors="replace")
-    decoded = PurePosixPath(decoded.replace("\\", "/")).name
-    decoded = re.sub(r"[\x00-\x1f\x7f]+", "_", decoded).strip(" .")
-    return decoded[-180:]
-
-
-def _filename_from_response(url: str, headers: aiohttp.typedefs.LooseHeaders, content_type: str) -> str:
-    disposition = str(headers.get("Content-Disposition") or "")
-    filename_match = re.search(r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disposition, re.I)
-    if filename_match:
-        name = unquote(filename_match.group(1).strip().strip('"'))
-    else:
-        name = unquote(PurePosixPath(urlsplit(url).path).name)
-    name = _safe_remote_filename(name)
-    if not name:
-        extension = mimetypes.guess_extension(content_type.split(";", 1)[0]) or ".bin"
-        name = "attachment" + extension
-    return name
-
-
-async def _fetch_resource(
-    session: aiohttp.ClientSession,
-    url: str,
-    *,
-    max_bytes: int,
-    redirects: int = 3,
-) -> _FetchedResource:
-    current = url
-    for _ in range(redirects + 1):
-        await assert_public_http_url(current)
-        async with session.get(current, allow_redirects=False) as response:
-            if response.status in {301, 302, 303, 307, 308}:
-                location = response.headers.get("Location")
-                if not location:
-                    raise RuntimeError(f"HTTP {response.status} 缺少跳转地址")
-                current = urljoin(current, location)
-                continue
-            response.raise_for_status()
-            declared_size = int(response.headers.get("Content-Length") or 0)
-            if declared_size > max_bytes:
-                raise ValueError(f"远程文件超过 {max_bytes // 1024 // 1024} MiB 限制")
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.content.iter_chunked(128 * 1024):
-                size += len(chunk)
-                if size > max_bytes:
-                    raise ValueError(f"远程文件超过 {max_bytes // 1024 // 1024} MiB 限制")
-                chunks.append(chunk)
-            content_type = str(response.headers.get("Content-Type") or "application/octet-stream")
-            return _FetchedResource(
-                url=str(response.url),
-                data=b"".join(chunks),
-                content_type=content_type,
-                filename=_filename_from_response(str(response.url), response.headers, content_type),
-            )
-    raise RuntimeError("远程地址跳转次数过多")
-
-
-async def _fetch_resource_with_retry(
-    session: aiohttp.ClientSession,
-    url: str,
-    *,
-    max_bytes: int,
-    attempts: int = 3,
-) -> _FetchedResource:
-    """只重试超时、限流和供应商临时 5xx，确定性 4xx 立即返回。"""
-    last_error: Exception | None = None
-    for attempt in range(max(1, attempts)):
-        try:
-            return await _fetch_resource(session, url, max_bytes=max_bytes)
-        except aiohttp.ClientResponseError as exc:
-            last_error = exc
-            if exc.status not in {408, 425, 429} and exc.status < 500:
-                raise
-        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-            last_error = exc
-        if attempt + 1 < attempts:
-            await asyncio.sleep(0.5 * (2**attempt))
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("远程资源读取失败")
-
-
-def _extract_pdf_text(data: bytes) -> tuple[str, str]:
-    try:
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(data), strict=False)
-        pages: list[str] = []
-        for page in reader.pages[:40]:
-            text = page.extract_text() or ""
-            if text.strip():
-                pages.append(text.strip())
-            if sum(len(item) for item in pages) >= _MAX_ATTACHMENT_TEXT_CHARS:
-                break
-        return (
-            _WHITESPACE_RE.sub(" ", "\n".join(pages)).strip()[
-                :_MAX_ATTACHMENT_TEXT_CHARS
-            ],
-            "",
-        )
-    except Exception as exc:  # noqa: BLE001
-        return "", str(exc)
-
-
-def _extract_docx_text(data: bytes) -> tuple[str, str]:
-    try:
-        from docx import Document
-
-        document = Document(io.BytesIO(data))
-        values = [paragraph.text.strip() for paragraph in document.paragraphs]
-        for table in document.tables:
-            for row in table.rows:
-                values.append(" | ".join(cell.text.strip() for cell in row.cells))
-                if sum(len(item) for item in values) >= _MAX_ATTACHMENT_TEXT_CHARS:
-                    break
-        return (
-            _WHITESPACE_RE.sub(" ", "\n".join(item for item in values if item))
-            .strip()[:_MAX_ATTACHMENT_TEXT_CHARS],
-            "",
-        )
-    except Exception as exc:  # noqa: BLE001
-        return "", str(exc)
-
-
-def _extract_xlsx_text(data: bytes) -> tuple[str, str]:
-    try:
-        from openpyxl import load_workbook
-
-        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        values: list[str] = []
-        for worksheet in workbook.worksheets[:20]:
-            values.append(f"工作表: {worksheet.title}")
-            for row_index, row in enumerate(
-                worksheet.iter_rows(values_only=True),
-                start=1,
-            ):
-                if row_index > 2_000:
-                    break
-                line = " | ".join(
-                    str(cell).strip() for cell in row[:80] if cell is not None
-                )
-                if line:
-                    values.append(line)
-                if sum(len(item) for item in values) >= _MAX_ATTACHMENT_TEXT_CHARS:
-                    break
-        workbook.close()
-        return (
-            _WHITESPACE_RE.sub(" ", "\n".join(values)).strip()[
-                :_MAX_ATTACHMENT_TEXT_CHARS
-            ],
-            "",
-        )
-    except Exception as exc:  # noqa: BLE001
-        return "", str(exc)
-
-
-def _openxml_kind(data: bytes) -> str:
-    if not data.startswith(b"PK"):
-        return ""
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            entries = archive.infolist()
-            if len(entries) > 5_000:
-                raise ValueError("Office 附件压缩条目过多")
-            expanded_size = sum(item.file_size for item in entries)
-            if expanded_size > 100 * 1024 * 1024:
-                raise ValueError("Office 附件解压后超过 100 MiB 安全上限")
-            names = {item.filename for item in entries}
-    except (OSError, zipfile.BadZipFile):
-        return ""
-    if "word/document.xml" in names:
-        return "docx"
-    if "xl/workbook.xml" in names:
-        return "xlsx"
-    return ""
-
-
-def _extract_attachment_text(
-    data: bytes,
-    *,
-    filename: str,
-    content_type: str,
-) -> tuple[str, str, str]:
-    suffix = PurePosixPath(str(filename or "")).suffix.lower()
-    normalized_type = str(content_type or "").lower()
-    if data.startswith(b"%PDF") or "pdf" in normalized_type or suffix == ".pdf":
-        text, error = _extract_pdf_text(data)
-        return text, error, "pdf"
-    try:
-        openxml_kind = _openxml_kind(data)
-    except ValueError as exc:
-        return "", str(exc), suffix.removeprefix(".") or "openxml"
-    if openxml_kind == "docx" or suffix == ".docx" or "wordprocessingml" in normalized_type:
-        text, error = _extract_docx_text(data)
-        return text, error, "docx"
-    if openxml_kind == "xlsx" or suffix == ".xlsx" or "spreadsheetml" in normalized_type:
-        text, error = _extract_xlsx_text(data)
-        return text, error, "xlsx"
-    return "", "当前格式仅归档，未提取正文", suffix.removeprefix(".") or "binary"
 
 
 def _extract_contact_candidates(text: str, *, limit: int = 100) -> list[dict[str, str]]:
@@ -383,6 +92,26 @@ def _extract_contact_candidates(text: str, *, limit: int = 100) -> list[dict[str
     return candidates
 
 
+def _merge_contact_candidates(
+    *groups: list[dict[str, str]],
+    limit: int = 500,
+) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        for item in group:
+            channel = str(item.get("channel") or "")
+            value = str(item.get("value") or "")
+            key = (channel, value.casefold())
+            if not channel or not value or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
 class BiddingArchiveService:
     """读取公告详情和附件并写入统一对象存储。"""
 
@@ -406,7 +135,7 @@ class BiddingArchiveService:
         project_id: str,
         target_id: str,
     ) -> list[dict[str, Any]]:
-        timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=90)
+        timeout = aiohttp.ClientTimeout(total=600, connect=30, sock_read=300)
         connector = aiohttp.TCPConnector(limit=self.concurrency * 2, ttl_dns_cache=120)
         semaphore = asyncio.Semaphore(self.concurrency)
         async with aiohttp.ClientSession(
@@ -561,7 +290,11 @@ class BiddingArchiveService:
                     resolved_detail_url,
                     max_bytes=_MAX_HTML_BYTES,
                 )
-                detail_text, detail_links = html_text_and_links(detail.data, detail.url)
+                detail_text, detail_links = html_text_and_links(
+                    detail.data,
+                    detail.url,
+                    content_type=detail.content_type,
+                )
                 artifact = await self._store(
                     detail.data,
                     record=record,
@@ -593,8 +326,14 @@ class BiddingArchiveService:
             0,
             len(candidate_links) - _MAX_ATTACHMENTS_PER_RECORD,
         )
+        if result["attachments_truncated"]:
+            result["archive_errors"].append(
+                f"附件数量超过 {_MAX_ATTACHMENTS_PER_RECORD} 个归档上限，"
+                f"仍有 {result['attachments_truncated']} 个未处理"
+            )
 
         attachment_context: list[str] = []
+        attachment_contact_candidates: list[dict[str, str]] = []
         remaining_attachment_bytes = _MAX_TOTAL_ATTACHMENT_BYTES_PER_RECORD
         for index, link in enumerate(candidate_links[:_MAX_ATTACHMENTS_PER_RECORD]):
             attachment: dict[str, Any] = {
@@ -605,9 +344,17 @@ class BiddingArchiveService:
             }
             try:
                 if remaining_attachment_bytes <= 0:
+                    error = (
+                        "本公告附件累计超过 "
+                        f"{_MAX_TOTAL_ATTACHMENT_BYTES_PER_RECORD // 1024 // 1024} MiB "
+                        "归档上限"
+                    )
                     attachment.update(
                         status="skipped",
-                        error="本公告附件累计超过 100 MiB 安全上限",
+                        error=error,
+                    )
+                    result["archive_errors"].append(
+                        f"附件读取失败 {link['url']}: {error}"
                     )
                     result["attachments"].append(attachment)
                     continue
@@ -650,8 +397,15 @@ class BiddingArchiveService:
                     **({"text_error": text_error} if text_error else {}),
                 )
                 if extracted_text:
+                    attachment_contact_candidates.extend(
+                        _extract_contact_candidates(extracted_text, limit=200)
+                    )
                     attachment_context.append(
                         f"附件 {fetched.filename}: {_bounded(extracted_text, 6000)}"
+                    )
+                if text_error:
+                    result["archive_errors"].append(
+                        f"附件正文提取不完整 {fetched.filename}: {text_error}"
                     )
             except Exception as exc:  # noqa: BLE001
                 attachment["error"] = str(exc)
@@ -663,8 +417,9 @@ class BiddingArchiveService:
             context_parts.append(detail_text)
         context_parts.extend(attachment_context)
         result["_context_text"] = "\n\n".join(part for part in context_parts if part)
-        result["contact_candidates"] = _extract_contact_candidates(
-            result["_context_text"]
+        result["contact_candidates"] = _merge_contact_candidates(
+            _extract_contact_candidates(result["_context_text"], limit=300),
+            attachment_contact_candidates,
         )
         result["contact_candidate_count"] = len(result["contact_candidates"])
         return result
@@ -727,7 +482,7 @@ class BiddingPipeline:
                 value=item.get("value") or "",
                 context=_bounded(str(item.get("context") or ""), 220),
             )
-            for item in (archive.get("contact_candidates") or [])[:12]
+            for item in (archive.get("contact_candidates") or [])[:60]
         ]
         parts = [
             "来源类型：招投标",
@@ -963,6 +718,11 @@ class BiddingPipeline:
                 findings_count=url_result.get("total_findings", 0),
                 copywritings_count=url_result.get("total_copywritings", 0),
             )
+        elif enable_visual_analysis and search.records:
+            scan_result.update(
+                status="partial",
+                error="公告记录缺少可供浏览器复核的绝对详情链接",
+            )
 
         result = {
             "kind": "bidding",
@@ -973,7 +733,7 @@ class BiddingPipeline:
                 or not search.coverage_complete
                 or search.truncated
                 or archive_errors
-                or scan_result.get("status") == "error"
+                or scan_result.get("status") in {"partial", "error"}
                 else "completed"
             ),
             "query_name": company_name,

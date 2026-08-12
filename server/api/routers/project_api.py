@@ -89,6 +89,13 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
             params.get("target_batch_tags")
         )
 
+    website_collection_mode = str(
+        params.get("website_collection_mode") or "deep"
+    ).strip().casefold()
+    if website_collection_mode not in {"standard", "deep"}:
+        raise ValueError("官网归档模式必须为 standard 或 deep")
+    params["website_collection_mode"] = website_collection_mode
+
     if params.get("enable_control_structure", False) or any(
         key in params
         for key in (
@@ -285,6 +292,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
             "skip_completed_subsidiaries", True
         ),
         company_core_concurrency=tuning.company_scan_concurrency,
+        website_collection_mode=params.get("website_collection_mode", "deep"),
         requested_by=str(params.get("_requested_by") or ""),
     )
     if result.get("status") == "error":
@@ -967,6 +975,7 @@ async def query_findings(project_id: str, body: FindingsQueryRequest | None = No
         source=body.source, task_id=body.task_id, target_id=body.target_id,
         finding_type=body.type,
         min_score=body.min_score, sort=body.sort, limit=body.limit, skip=body.skip,
+        summary_only=body.summary_only,
     )
 
     response = PageResponse.build(
