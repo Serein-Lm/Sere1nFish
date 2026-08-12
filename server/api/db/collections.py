@@ -93,6 +93,10 @@ SOURCE_DOCUMENTS_COLLECTION = "source_documents"
 SOURCE_DOCUMENT_VERSIONS_COLLECTION = "source_document_versions"
 SOURCE_DOCUMENT_LINKS_COLLECTION = "source_document_links"
 
+# 官方网站公告/正文发现队列。Task 保存一次可恢复运行；Page 保存逐 URL 终态。
+WEBSITE_CRAWL_TASKS_COLLECTION = "website_crawl_tasks"
+WEBSITE_CRAWL_PAGES_COLLECTION = "website_crawl_pages"
+
 # FOFA 资产情报（按稳定 asset_id 增量入库）
 FOFA_ASSETS_COLLECTION = "fofa_assets"
 

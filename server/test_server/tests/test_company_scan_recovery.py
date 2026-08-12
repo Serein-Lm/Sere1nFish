@@ -95,6 +95,7 @@ async def test_retryable_child_scans_invalidate_only_their_parent_modules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.dao import url_scan as url_scan_dao
+    from api.dao import website_crawl as website_crawl_dao
     from api.services.company_scan_recovery import find_retryable_core_modules
 
     captured: set[str] = set()
@@ -104,7 +105,19 @@ async def test_retryable_child_scans_invalidate_only_their_parent_modules(
         captured = set(kwargs["task_ids"])
         return {"company-task_url"}
 
+    async def get_task(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def task_requires_retry(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
     monkeypatch.setattr(url_scan_dao, "retryable_task_ids", retryable_task_ids)
+    monkeypatch.setattr(url_scan_dao, "get_task", get_task)
+    monkeypatch.setattr(
+        website_crawl_dao,
+        "task_requires_retry",
+        task_requires_retry,
+    )
 
     modules = await find_retryable_core_modules(
         object(),  # type: ignore[arg-type]
@@ -116,6 +129,26 @@ async def test_retryable_child_scans_invalidate_only_their_parent_modules(
         "company-task_bidding_visual",
     }
     assert modules == {"asset_url"}
+
+
+def test_legacy_website_checkpoint_requires_document_crawl() -> None:
+    from api.services.company_scan_recovery import find_incompatible_core_modules
+
+    assert find_incompatible_core_modules(
+        {
+            "asset_url": {
+                "url_scan": {"enabled": True, "status": "completed"},
+            }
+        }
+    ) == {"asset_url"}
+    assert find_incompatible_core_modules(
+        {
+            "asset_url": {
+                "url_scan": {"enabled": True, "status": "completed"},
+                "website_documents": {"enabled": True, "status": "completed"},
+            }
+        }
+    ) == set()
 
 
 def test_bidding_checkpoint_reuses_equal_or_wider_windows() -> None:

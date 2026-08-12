@@ -26,6 +26,21 @@ class CapturedScreenshot:
 
 
 @dataclass(slots=True)
+class CapturedAttachment:
+    index: int
+    source_url: str
+    filename: str
+    data: bytes
+    content_type: str
+    label: str = ""
+    sha256: str = ""
+    extracted_text: str = ""
+    text_format: str = ""
+    text_error: str = ""
+    error: str = ""
+
+
+@dataclass(slots=True)
 class CapturedDocument:
     source_type: str
     canonical_url: str
@@ -38,6 +53,7 @@ class CapturedDocument:
     rendered_html: bytes
     images: list[CapturedImage] = field(default_factory=list)
     screenshots: list[CapturedScreenshot] = field(default_factory=list)
+    attachments: list[CapturedAttachment] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
 

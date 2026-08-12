@@ -134,6 +134,39 @@ def test_website_coverage_is_partial_when_any_url_failed() -> None:
     assert status == "partial"
 
 
+def test_website_coverage_requires_completed_url_and_document_stages() -> None:
+    legacy = coverage_status_from_result(
+        "website",
+        {
+            "assets": {"status": "completed"},
+            "url_scan": {"enabled": True, "status": "completed"},
+        },
+    )
+    complete = coverage_status_from_result(
+        "website",
+        {
+            "status": "completed",
+            "assets": {"status": "completed"},
+            "url_scan": {
+                "enabled": True,
+                "status": "completed",
+                "remaining_urls": 0,
+                "failed_urls": 0,
+            },
+            "website_documents": {
+                "enabled": True,
+                "status": "completed",
+                "pending_pages": 0,
+                "failed_pages": 0,
+                "documents_partial": 0,
+            },
+        },
+    )
+
+    assert legacy == "partial"
+    assert complete == "completed"
+
+
 @pytest.mark.asyncio
 async def test_loads_persisted_descendants_as_scan_entities(
     monkeypatch: pytest.MonkeyPatch,

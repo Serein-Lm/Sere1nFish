@@ -8,9 +8,11 @@ _providers: list[SourceDocumentProvider] | None = None
 
 
 def _load_defaults() -> list[SourceDocumentProvider]:
+    from .web import OfficialWebDocumentProvider
     from .wechat import WechatArticleProvider
 
-    return [WechatArticleProvider()]
+    # Specific providers must precede the generic HTTP provider.
+    return [WechatArticleProvider(), OfficialWebDocumentProvider()]
 
 
 def list_source_document_providers() -> list[SourceDocumentProvider]:

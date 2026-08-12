@@ -251,6 +251,20 @@ async def retryable_task_ids(
     return {str(value) for value in values if str(value or "").strip()}
 
 
+async def get_task(
+    db: AsyncIOMotorDatabase,
+    *,
+    task_id: str,
+) -> dict[str, Any] | None:
+    """Return the durable task summary written by ``UrlScanPipeline``."""
+    if not str(task_id or "").strip():
+        return None
+    return await db[URL_SCAN_TASKS_COLLECTION].find_one(
+        {"task_id": task_id},
+        {"_id": 0},
+    )
+
+
 async def task_requires_full_scan(
     db: AsyncIOMotorDatabase,
     *,

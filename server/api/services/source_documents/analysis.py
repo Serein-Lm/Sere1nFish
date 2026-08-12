@@ -122,14 +122,20 @@ def stable_content_hash(capture: CapturedDocument) -> str:
     image_urls = list(capture.metadata.get("image_urls") or []) or [
         image.source_url for image in capture.images
     ]
+    attachment_urls = list(capture.metadata.get("attachment_urls") or []) or [
+        item.source_url for item in capture.attachments
+    ]
     payload = {
         "source_type": capture.source_type,
         "canonical_url": capture.canonical_url,
         "title": capture.title,
         "account": capture.account,
         "publish_time": capture.publish_time,
-        "text": capture.text,
+        "text": capture.metadata.get("article_text") or capture.text,
         "images": image_urls,
+        # Declared attachment identity belongs to the page version; download
+        # success and extracted text are repairable evidence, not version identity.
+        "attachments": sorted(str(value) for value in attachment_urls if value),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()

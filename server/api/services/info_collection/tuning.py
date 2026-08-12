@@ -20,6 +20,11 @@ DEFAULT_COMPANY_SCAN_CONCURRENCY = 6
 DEFAULT_SCHOLAR_CONCURRENCY = 2
 DEFAULT_LLM_CONCURRENCY = 12
 DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS = 900
+DEFAULT_WEBSITE_CRAWL_CONCURRENCY = 12
+DEFAULT_WEBSITE_ARCHIVE_CONCURRENCY = 4
+DEFAULT_WEBSITE_CRAWL_MAX_PAGES = 1200
+DEFAULT_WEBSITE_CRAWL_MAX_DOCUMENTS = 400
+DEFAULT_WEBSITE_CRAWL_MAX_DEPTH = 5
 DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS = 120
 DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS = 900
 
@@ -32,6 +37,11 @@ MAX_COMPANY_SCAN_CONCURRENCY = 12
 MAX_SCHOLAR_CONCURRENCY = 4
 MAX_LLM_CONCURRENCY = 32
 MAX_URL_SCAN_AGENT_TIMEOUT_SECONDS = 1500
+MAX_WEBSITE_CRAWL_CONCURRENCY = 48
+MAX_WEBSITE_ARCHIVE_CONCURRENCY = 16
+MAX_WEBSITE_CRAWL_MAX_PAGES = 10_000
+MAX_WEBSITE_CRAWL_MAX_DOCUMENTS = 3_000
+MAX_WEBSITE_CRAWL_MAX_DEPTH = 10
 MAX_LLM_QUOTA_COOLDOWN_SECONDS = 1800
 
 
@@ -70,6 +80,11 @@ class CollectionRuntimeTuning:
     scholar_concurrency: int = DEFAULT_SCHOLAR_CONCURRENCY
     llm_concurrency: int = DEFAULT_LLM_CONCURRENCY
     url_scan_agent_timeout_seconds: int = DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS
+    website_crawl_concurrency: int = DEFAULT_WEBSITE_CRAWL_CONCURRENCY
+    website_archive_concurrency: int = DEFAULT_WEBSITE_ARCHIVE_CONCURRENCY
+    website_crawl_max_pages: int = DEFAULT_WEBSITE_CRAWL_MAX_PAGES
+    website_crawl_max_documents: int = DEFAULT_WEBSITE_CRAWL_MAX_DOCUMENTS
+    website_crawl_max_depth: int = DEFAULT_WEBSITE_CRAWL_MAX_DEPTH
     llm_quota_cooldown_seconds: int = DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS
     llm_quota_max_cooldown_seconds: int = DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS
 
@@ -122,6 +137,31 @@ class CollectionRuntimeTuning:
                 default=DEFAULT_URL_SCAN_AGENT_TIMEOUT_SECONDS,
                 minimum=60,
                 maximum=MAX_URL_SCAN_AGENT_TIMEOUT_SECONDS,
+            ),
+            website_crawl_concurrency=_bounded(
+                data.get("website_crawl_concurrency"),
+                default=DEFAULT_WEBSITE_CRAWL_CONCURRENCY,
+                maximum=MAX_WEBSITE_CRAWL_CONCURRENCY,
+            ),
+            website_archive_concurrency=_bounded(
+                data.get("website_archive_concurrency"),
+                default=DEFAULT_WEBSITE_ARCHIVE_CONCURRENCY,
+                maximum=MAX_WEBSITE_ARCHIVE_CONCURRENCY,
+            ),
+            website_crawl_max_pages=_bounded(
+                data.get("website_crawl_max_pages"),
+                default=DEFAULT_WEBSITE_CRAWL_MAX_PAGES,
+                maximum=MAX_WEBSITE_CRAWL_MAX_PAGES,
+            ),
+            website_crawl_max_documents=_bounded(
+                data.get("website_crawl_max_documents"),
+                default=DEFAULT_WEBSITE_CRAWL_MAX_DOCUMENTS,
+                maximum=MAX_WEBSITE_CRAWL_MAX_DOCUMENTS,
+            ),
+            website_crawl_max_depth=_bounded(
+                data.get("website_crawl_max_depth"),
+                default=DEFAULT_WEBSITE_CRAWL_MAX_DEPTH,
+                maximum=MAX_WEBSITE_CRAWL_MAX_DEPTH,
             ),
             llm_quota_cooldown_seconds=_bounded(
                 data.get("llm_quota_cooldown_seconds"),

@@ -5,6 +5,15 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 _WECHAT_IDENTITY_QUERY_KEYS = {"__biz", "mid", "idx", "sn"}
+_TRACKING_QUERY_KEYS = {
+    "from",
+    "spm",
+    "src",
+    "source",
+    "scene",
+    "share_token",
+    "timestamp",
+}
 
 
 def canonicalize_source_url(url: str) -> str:
@@ -29,4 +38,12 @@ def canonicalize_source_url(url: str) -> str:
                 if key in _WECHAT_IDENTITY_QUERY_KEYS
             ]
             query = urlencode(sorted(identity))
+    elif query:
+        stable_query = [
+            (key, item)
+            for key, item in parse_qsl(query, keep_blank_values=True)
+            if not key.casefold().startswith("utm_")
+            and key.casefold() not in _TRACKING_QUERY_KEYS
+        ]
+        query = urlencode(sorted(stable_query))
     return urlunsplit((scheme, host, path, query, ""))

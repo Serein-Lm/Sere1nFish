@@ -69,6 +69,49 @@ def test_stable_hash_uses_declared_images_when_a_download_is_partial():
     assert stable_content_hash(complete) == stable_content_hash(partial)
 
 
+def test_stable_hash_uses_declared_attachments_when_download_is_partial():
+    from api.services.source_documents.analysis import stable_content_hash
+    from api.services.source_documents.contracts import CapturedAttachment
+
+    complete = _capture(raw_html=b"raw-one", rendered_html=b"dom-one")
+    complete.metadata.update(
+        {
+            "article_text": complete.text,
+            "attachment_urls": ["https://example.com/files/contact.xlsx"],
+        }
+    )
+    complete.text += "\n附件提取出的动态文本"
+    complete.attachments = [
+        CapturedAttachment(
+            index=0,
+            source_url="https://example.com/files/contact.xlsx",
+            filename="contact.xlsx",
+            data=b"xlsx",
+            content_type="application/octet-stream",
+            sha256="downloaded",
+            extracted_text="附件提取出的动态文本",
+        )
+    ]
+    partial = _capture(raw_html=b"raw-two", rendered_html=b"dom-two")
+    partial.metadata.update(
+        {
+            "article_text": partial.text,
+            "attachment_urls": ["https://example.com/files/contact.xlsx"],
+        }
+    )
+    partial.attachments = []
+
+    assert stable_content_hash(complete) == stable_content_hash(partial)
+
+
+def test_generic_source_url_discards_tracking_parameters():
+    from api.services.source_documents.urls import canonicalize_source_url
+
+    assert canonicalize_source_url(
+        "https://Example.com/notice?id=7&utm_source=feed&from=share#top"
+    ) == "https://example.com/notice?id=7"
+
+
 def test_source_document_identity_prevents_field_change_duplicates():
     from api.dao.mobile_collect import stable_record_id
 

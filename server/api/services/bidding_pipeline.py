@@ -23,6 +23,12 @@ from api.services.info_collection.tuning import (
     DEFAULT_COPYWRITING_CONCURRENCY,
     DEFAULT_URL_SCAN_CONCURRENCY,
 )
+from api.services.source_documents.resources import (
+    extract_attachment_text,
+    fetch_resource_with_retry,
+    html_text_and_links,
+    is_attachment_link,
+)
 from api.services.url_security import assert_public_http_url
 from api.storage import get_object_storage
 from core.logger import get_logger
@@ -474,7 +480,7 @@ class BiddingArchiveService:
             absolute_detail_url,
             record.provider_url,
         )
-        api_text, api_links = _html_text_and_links(
+        api_text, api_links = html_text_and_links(
             record.content_html,
             absolute_detail_url,
         )
@@ -550,12 +556,12 @@ class BiddingArchiveService:
         detail_text = ""
         if resolved_detail_url:
             try:
-                detail = await _fetch_resource_with_retry(
+                detail = await fetch_resource_with_retry(
                     session,
                     resolved_detail_url,
                     max_bytes=_MAX_HTML_BYTES,
                 )
-                detail_text, detail_links = _html_text_and_links(detail.data, detail.url)
+                detail_text, detail_links = html_text_and_links(detail.data, detail.url)
                 artifact = await self._store(
                     detail.data,
                     record=record,
@@ -579,7 +585,7 @@ class BiddingArchiveService:
         candidate_links: list[dict[str, str]] = []
         seen_urls: set[str] = set()
         for link in [*api_links, *detail_links]:
-            if _is_attachment_link(link) and link["url"] not in seen_urls:
+            if is_attachment_link(link) and link["url"] not in seen_urls:
                 seen_urls.add(link["url"])
                 candidate_links.append(link)
         result["attachment_urls"] = [link["url"] for link in candidate_links]
@@ -605,7 +611,7 @@ class BiddingArchiveService:
                     )
                     result["attachments"].append(attachment)
                     continue
-                fetched = await _fetch_resource_with_retry(
+                fetched = await fetch_resource_with_retry(
                     session,
                     link["url"],
                     max_bytes=min(
@@ -632,7 +638,7 @@ class BiddingArchiveService:
                     source_url=fetched.url,
                 )
                 extracted_text, text_error, text_format = await asyncio.to_thread(
-                    _extract_attachment_text,
+                    extract_attachment_text,
                     fetched.data,
                     filename=fetched.filename,
                     content_type=fetched.content_type,

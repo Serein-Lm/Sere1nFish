@@ -30,6 +30,7 @@ from .analysis import (
     stable_content_hash,
 )
 from .contracts import (
+    CapturedAttachment,
     CapturedDocument,
     CapturedImage,
     CapturedScreenshot,
@@ -90,6 +91,7 @@ def _analysis_fingerprint(
     target_name: str,
     keyword: str,
     fields: list[ExtractField],
+    analysis_mode: str = "full",
 ) -> str:
     payload = {
         "schema_version": _CONTEXT_ANALYSIS_SCHEMA_VERSION,
@@ -100,6 +102,7 @@ def _analysis_fingerprint(
         "target_name": target_name,
         "keyword": keyword,
         "fields": [field.model_dump(mode="json") for field in fields],
+        "analysis_mode": str(analysis_mode or "full"),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -258,6 +261,24 @@ def _archive_completeness(
     )
     if image_download_errors:
         errors.append(f"原图下载失败 {len(image_download_errors)} 张")
+    attachment_download_errors = list(
+        capture_metadata.get("attachment_download_errors") or []
+    )
+    if attachment_download_errors:
+        errors.append(f"附件下载失败 {len(attachment_download_errors)} 个")
+    attachment_text_errors = list(
+        capture_metadata.get("attachment_text_errors") or []
+    )
+    if attachment_text_errors:
+        errors.append(f"附件正文提取不完整 {len(attachment_text_errors)} 个")
+    attachments_truncated = int(
+        capture_metadata.get("attachments_truncated") or 0
+    )
+    if attachments_truncated:
+        errors.append(f"附件因安全上限截断 {attachments_truncated} 个")
+    images_truncated = int(capture_metadata.get("images_truncated") or 0)
+    if images_truncated:
+        warnings.append(f"页面图片按上限截断 {images_truncated} 张")
     screenshot_error = str(
         capture_metadata.get("screenshot_capture_error") or ""
     ).strip()
@@ -362,7 +383,65 @@ def _capture_has_more_complete_images(
         and len(capture.screenshots) >= len(version.get("screenshots") or [])
     ):
         return True
+    existing_attachment_urls = set(
+        existing_metadata.get("archived_attachment_urls") or []
+    ) or {
+        str(item.get("source_url") or "")
+        for item in version.get("attachments") or []
+        if item.get("source_url")
+    }
+    captured_attachment_urls = {
+        item.source_url for item in capture.attachments if item.source_url
+    }
+    declared_attachment_urls = set(
+        current_metadata.get("attachment_urls") or []
+    )
+    if captured_attachment_urls - existing_attachment_urls:
+        return True
+    if (
+        existing_metadata.get("attachment_download_errors")
+        and not current_metadata.get("attachment_download_errors")
+        and declared_attachment_urls.issubset(captured_attachment_urls)
+    ):
+        return True
     return False
+
+
+def _trusted_official_analysis(
+    capture: CapturedDocument,
+    *,
+    target_name: str,
+    keyword: str,
+) -> dict[str, Any]:
+    """Use verified official-domain provenance instead of a redundant LLM review."""
+    has_high_value_evidence = bool(
+        capture.attachments or extract_contacts(capture.text)
+    )
+    summary = str(capture.text or "").strip()[:1_200]
+    return {
+        "fields": {
+            "summary": summary,
+            "keyword_hit": keyword,
+        },
+        "score": 75 if has_high_value_evidence else 60,
+        "subject_match": 100,
+        "score_reason": "来源位于已核验 Target 官方根域名，正文按官方来源直接归档",
+        "review_decision": "accept",
+        "article_scope": "target_focused",
+        "target_contact_values": [],
+        "target_contacts": [],
+        "relevance_review": {
+            "decision": "accept",
+            "article_scope": "target_focused",
+            "subject_match": 100,
+            "score": 75 if has_high_value_evidence else 60,
+            "summary": summary,
+            "target_contact_values": [],
+            "reason": f"已核验为 {target_name or '目标主体'} 官方来源",
+            "review_model": "trusted_official_source",
+        },
+        "analysis_model": "trusted_official_source",
+    }
 
 
 def _source_analysis(
@@ -594,6 +673,7 @@ def _rejected_source_result(
         "browser_screenshot_urls": [],
         "image_count": 0,
         "screenshot_count": 0,
+        "attachment_count": 0,
     }
 
 
@@ -605,7 +685,12 @@ async def _store_capture_artifacts(
     target_id: str,
     project_id: str,
     images_to_archive: list[CapturedImage] | None = None,
-) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    dict[str, str],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     storage = await get_object_storage()
     relative_path = f"{capture.source_type}/{document_id}/{version_id}"
 
@@ -708,6 +793,49 @@ async def _store_capture_artifacts(
             "size": len(data),
         }
 
+    async def _store_attachment(
+        attachment: CapturedAttachment,
+    ) -> dict[str, Any]:
+        data = attachment.data
+        object_id = _artifact_object_id(
+            version_id,
+            f"attachment_{attachment.index:04d}",
+            data,
+        )
+        stored = await storage.store_bytes(
+            data,
+            kind="source_document_attachment",
+            filename=attachment.filename or f"attachment-{attachment.index:04d}.bin",
+            object_id=object_id,
+            content_type=attachment.content_type or "application/octet-stream",
+            project_id=project_id,
+            subject_id=target_id,
+            source=capture.source_type,
+            source_id=document_id,
+            relative_path=relative_path,
+            meta={
+                "document_id": document_id,
+                "version_id": version_id,
+                "index": attachment.index,
+                "source_url": attachment.source_url,
+            },
+        )
+        return {
+            "index": attachment.index,
+            "source_url": attachment.source_url,
+            "filename": attachment.filename,
+            "label": attachment.label,
+            "storage_object_id": stored["object_id"],
+            "url": _object_url(stored["object_id"]),
+            "content_type": attachment.content_type,
+            "sha256": attachment.sha256,
+            "size": len(data),
+            "text_format": attachment.text_format,
+            "text_length": len(attachment.extracted_text),
+            "text_preview": attachment.extracted_text[:4_000],
+            "text_error": attachment.text_error,
+        }
+
     upload_semaphore = asyncio.Semaphore(12)
 
     async def _bounded_upload(awaitable):
@@ -725,6 +853,11 @@ async def _store_capture_artifacts(
                     _store_screenshot(screenshot)
                     for screenshot in capture.screenshots
                 ),
+                *(
+                    _store_attachment(attachment)
+                    for attachment in capture.attachments
+                    if attachment.data
+                ),
             )
         )
     )
@@ -732,7 +865,10 @@ async def _store_capture_artifacts(
     dom = results[1]
     image_count = len(images_to_archive or [])
     images = list(results[2 : 2 + image_count])
-    screenshots = list(results[2 + image_count :])
+    screenshot_start = 2 + image_count
+    screenshot_end = screenshot_start + len(capture.screenshots)
+    screenshots = list(results[screenshot_start:screenshot_end])
+    attachments = list(results[screenshot_end:])
     return (
         {
             "raw_html_object_id": raw["object_id"],
@@ -742,6 +878,7 @@ async def _store_capture_artifacts(
         },
         images,
         screenshots,
+        attachments,
     )
 
 
@@ -848,6 +985,7 @@ async def _refresh_cached_source_contacts(
                 "archive_status": archive_status,
                 "archive_warnings": archive_warnings,
             },
+            "attachments": list(version.get("attachments") or []),
         },
         "provenance": {
             "capture_metadata": dict(version.get("capture_metadata") or {}),
@@ -923,6 +1061,7 @@ def _result_from_version(
         "browser_screenshot_urls": [item.get("url") for item in screenshots if item.get("url")],
         "image_count": len(version.get("images") or []),
         "screenshot_count": len(screenshots),
+        "attachment_count": len(version.get("attachments") or []),
         "archive_status": version.get("archive_status") or "unknown",
         "archive_warnings": list(version.get("archive_warnings") or []),
     }
@@ -966,6 +1105,7 @@ async def ingest_source_url(
     discovery_context: dict[str, Any] | None = None,
     persist: bool = True,
     min_subject_match: int = 0,
+    analysis_mode: str = "full",
 ) -> dict[str, Any]:
     """读取、结构化并永久保存一个来源 URL；同内容版本不会重复上传。"""
     canonical_url = canonicalize_source_url(url)
@@ -982,6 +1122,9 @@ async def ingest_source_url(
     if target_aliases:
         target_analysis_name += f"（可靠别名：{'、'.join(target_aliases)}）"
     task_fields = list(extract_fields or [])
+    normalized_analysis_mode = str(analysis_mode or "full").strip().lower()
+    if normalized_analysis_mode not in {"full", "trusted_official"}:
+        raise ValueError(f"不支持的来源分析模式: {analysis_mode}")
 
     async with _hold_document_lock(document_id):
         capture = await provider.capture(
@@ -996,6 +1139,7 @@ async def ingest_source_url(
             target_name=target_name,
             keyword=keyword,
             fields=task_fields,
+            analysis_mode=normalized_analysis_mode,
         )
         previous_ready_version: dict[str, Any] | None = None
         if persist:
@@ -1062,15 +1206,22 @@ async def ingest_source_url(
                         existing_link.get("latest_analysis") or {}
                     )
                 if contextual_analysis is None:
-                    contextual_analysis = await analyze_and_review_article(
-                        capture,
-                        fields=task_fields,
-                        target_name=target_analysis_name,
-                        keyword=keyword,
-                        required_subject_match=required_subject_match,
-                        project_id=project_id,
-                        task_id=run_task_id,
-                    )
+                    if normalized_analysis_mode == "trusted_official":
+                        contextual_analysis = _trusted_official_analysis(
+                            capture,
+                            target_name=target_name,
+                            keyword=keyword,
+                        )
+                    else:
+                        contextual_analysis = await analyze_and_review_article(
+                            capture,
+                            fields=task_fields,
+                            target_name=target_analysis_name,
+                            keyword=keyword,
+                            required_subject_match=required_subject_match,
+                            project_id=project_id,
+                            task_id=run_task_id,
+                        )
                 _raise_on_analysis_failure(contextual_analysis)
                 if not _passes_target_review(
                     contextual_analysis,
@@ -1170,15 +1321,22 @@ async def ingest_source_url(
             image_analysis_error = ""
             image_analysis_warning = ""
             images_analyzed = False
-            analysis = await analyze_and_review_article(
-                capture,
-                fields=task_fields,
-                target_name=target_analysis_name,
-                keyword=keyword,
-                required_subject_match=required_subject_match,
-                project_id=project_id,
-                task_id=run_task_id,
-            )
+            if normalized_analysis_mode == "trusted_official":
+                analysis = _trusted_official_analysis(
+                    capture,
+                    target_name=target_name,
+                    keyword=keyword,
+                )
+            else:
+                analysis = await analyze_and_review_article(
+                    capture,
+                    fields=task_fields,
+                    target_name=target_analysis_name,
+                    keyword=keyword,
+                    required_subject_match=required_subject_match,
+                    project_id=project_id,
+                    task_id=run_task_id,
+                )
             _raise_on_analysis_failure(analysis)
             if not _passes_target_review(analysis, required_subject_match):
                 if capture.images:
@@ -1269,7 +1427,7 @@ async def ingest_source_url(
                 image_analysis,
             )
             if persist:
-                artifacts, images, screenshots = await _store_capture_artifacts(
+                artifacts, images, screenshots, attachments = await _store_capture_artifacts(
                     capture,
                     document_id=document_id,
                     version_id=version_id,
@@ -1278,7 +1436,7 @@ async def ingest_source_url(
                     images_to_archive=images_to_archive,
                 )
             else:
-                artifacts, images, screenshots = {}, [], []
+                artifacts, images, screenshots, attachments = {}, [], [], []
 
             analysis_by_index = {
                 int(item.get("index", -1)): item for item in image_analysis
@@ -1315,8 +1473,16 @@ async def ingest_source_url(
                 contacts=contacts,
                 image_analysis=image_analysis,
             )
+            capture_metadata = {
+                **dict(capture.metadata or {}),
+                "attachment_text_errors": [
+                    item.text_error
+                    for item in capture.attachments
+                    if item.text_error
+                ],
+            }
             archive_status, archive_warnings = _archive_completeness(
-                capture_metadata=dict(capture.metadata or {}),
+                capture_metadata=capture_metadata,
                 image_analysis_error=image_analysis_error,
                 image_analysis_warning=image_analysis_warning,
             )
@@ -1343,10 +1509,11 @@ async def ingest_source_url(
                         "archive_status": archive_status,
                         "archive_warnings": archive_warnings,
                     },
+                    "attachments": attachments,
                 },
                 "provenance": {
                     "capture_metadata": {
-                        **capture.metadata,
+                        **capture_metadata,
                         "analyzed_image_urls": [
                             image.source_url for image in capture.images if image.source_url
                         ],
@@ -1371,6 +1538,7 @@ async def ingest_source_url(
                     "contact_policy_version": _CONTACT_POLICY_VERSION,
                     "images": image_analysis,
                     "screenshots": [],
+                    "attachments": [],
                     "archive_status": archive_status,
                     "archive_warnings": archive_warnings,
                 }
@@ -1393,7 +1561,7 @@ async def ingest_source_url(
                 if key.endswith("_object_id") and value
             ] + [
                 item["storage_object_id"]
-                for item in [*images, *screenshots]
+                for item in [*images, *screenshots, *attachments]
                 if item.get("storage_object_id")
             ]
             version_payload = {
@@ -1411,12 +1579,18 @@ async def ingest_source_url(
                 "image_analysis": image_analysis,
                 "media_policy_version": _MEDIA_POLICY_VERSION,
                 "screenshots": screenshots,
+                "attachments": attachments,
                 "artifacts": artifacts,
                 "storage_object_ids": storage_object_ids,
                 "capture_metadata": {
-                    **capture.metadata,
+                    **capture_metadata,
                     "analyzed_image_urls": [
                         image.source_url for image in capture.images if image.source_url
+                    ],
+                    "archived_attachment_urls": [
+                        item.source_url
+                        for item in capture.attachments
+                        if item.source_url and item.data
                     ],
                 },
                 "image_analysis_error": image_analysis_error,

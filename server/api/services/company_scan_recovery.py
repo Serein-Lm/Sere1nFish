@@ -49,6 +49,19 @@ def find_incompatible_core_modules(
         )
         if window_incomplete or types_incomplete:
             incompatible.add("bidding")
+    asset_url = checkpoint_results.get("asset_url")
+    if isinstance(asset_url, dict):
+        url_scan = dict(asset_url.get("url_scan") or {})
+        website_documents = dict(asset_url.get("website_documents") or {})
+        if (
+            url_scan.get("enabled") is not False
+            and (
+                not website_documents
+                or str(website_documents.get("status") or "").lower()
+                not in {"completed", "skipped", "disabled"}
+            )
+        ):
+            incompatible.add("asset_url")
     return incompatible
 
 
@@ -75,6 +88,7 @@ async def find_retryable_core_modules(
 ) -> set[str]:
     """Map unfinished URL child tasks back to company module checkpoints."""
     from api.dao import url_scan as url_scan_dao
+    from api.dao import website_crawl as website_crawl_dao
 
     child_tasks = {
         "asset_url": f"{task_id}_url",
@@ -84,11 +98,24 @@ async def find_retryable_core_modules(
         db,
         task_ids=set(child_tasks.values()),
     )
-    return {
+    modules = {
         module
         for module, child_task_id in child_tasks.items()
         if child_task_id in retryable
     }
+    url_task = await url_scan_dao.get_task(db, task_id=f"{task_id}_url")
+    if url_task and (
+        int(url_task.get("remaining_urls") or 0) > 0
+        or str(url_task.get("status") or "").lower()
+        in {"pending", "running", "probing", "scanning", "waiting_model", "error"}
+    ):
+        modules.add("asset_url")
+    if await website_crawl_dao.task_requires_retry(
+        db,
+        crawl_task_id=f"{task_id}_webdocs",
+    ):
+        modules.add("asset_url")
+    return modules
 
 
 async def restore_identity(
@@ -133,6 +160,7 @@ async def restore_asset_url(
     incremental_scan: bool,
 ) -> dict[str, Any]:
     from api.dao import url_scan as url_scan_dao
+    from api.dao import website_crawl as website_crawl_dao
 
     asset_query: dict[str, Any] = {"project_id": project_id, "task_ids": task_id}
     if target_id:
@@ -142,13 +170,42 @@ async def restore_asset_url(
     alive = await assets.count_documents({**asset_query, "is_alive": True})
     url_task_id = f"{task_id}_url"
     url_summary = await url_scan_dao.summarize_task(db, task_id=url_task_id)
+    durable_url_task = await url_scan_dao.get_task(db, task_id=url_task_id) or {}
     findings = await db[FINDINGS_COLLECTION].count_documents(
         {"task_id": url_task_id, "source": "web_tagging"}
     )
     copywritings = await db[COPYWRITINGS_COLLECTION].count_documents(
         {"task_id": url_task_id}
     )
-    return {
+    website_task_id = f"{task_id}_webdocs"
+    website_task = await website_crawl_dao.get_task(db, website_task_id)
+    if website_task:
+        website_documents = await website_crawl_dao.summarize_task(
+            db,
+            crawl_task_id=website_task_id,
+        )
+        website_documents.update(
+            {
+                "enabled": True,
+                "status": str(website_task.get("status") or "pending"),
+                "documents_scheduled": int(
+                    (website_documents.get("by_kind") or {}).get("document") or 0
+                ),
+                "documents_archived": int(
+                    website_documents.get("archived_documents") or 0
+                ),
+            }
+        )
+    else:
+        website_documents = {
+            "enabled": True,
+            "status": "pending",
+            "legacy_missing": True,
+        }
+    url_status = str(durable_url_task.get("status") or "").lower()
+    if not url_status:
+        url_status = "completed" if url_summary["processed"] else "pending"
+    result = {
         "kind": "asset_url",
         "assets": {
             "enabled": True,
@@ -164,14 +221,22 @@ async def restore_asset_url(
         },
         "url_scan": {
             "enabled": True,
-            "status": "completed",
+            "status": url_status,
             "findings_count": findings,
             "copywritings_count": copywritings,
+            "total_urls": int(durable_url_task.get("total_urls") or 0),
             "scanned_urls": url_summary["succeeded"],
             "failed_urls": url_summary["failed"],
+            "remaining_urls": int(durable_url_task.get("remaining_urls") or 0),
+            "error": str(durable_url_task.get("error") or ""),
             "restored": True,
         },
+        "website_documents": website_documents,
     }
+    from api.services.target_scan_profile import coverage_status_from_result
+
+    result["status"] = coverage_status_from_result("website", result)
+    return result
 
 
 async def restore_bidding(

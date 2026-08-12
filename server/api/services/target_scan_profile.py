@@ -490,14 +490,37 @@ def coverage_status_from_result(
     """把各 runtime 的返回状态收敛成稳定的渠道覆盖状态。"""
     if channel == "website":
         url_scan = dict(outcome.get("url_scan") or {})
+        website_documents = dict(outcome.get("website_documents") or {})
+        if not url_scan or (
+            url_scan.get("enabled") is not False and not website_documents
+        ):
+            return "partial"
         if int(url_scan.get("failed_urls") or 0) > 0 or int(
             url_scan.get("remaining_urls") or 0
         ) > 0:
             return "partial"
+        if (
+            int(website_documents.get("failed_pages") or 0) > 0
+            or int(website_documents.get("documents_partial") or 0) > 0
+            or int(website_documents.get("pending_pages") or 0) > 0
+            or bool(website_documents.get("truncated"))
+        ):
+            return "partial"
         nested = [
             dict(outcome.get("assets") or {}),
             url_scan,
+            website_documents,
         ]
+        required = [
+            item
+            for item in (url_scan, website_documents)
+            if item and item.get("enabled") is not False
+        ]
+        # A website run is complete only when every enabled content stage
+        # explicitly reports a terminal status. Legacy summaries without this
+        # evidence are partial, never implicitly complete.
+        if any(not str(item.get("status") or "").strip() for item in required):
+            return "partial"
         statuses = {
             str(item.get("status") or "").strip().lower()
             for item in nested
@@ -505,7 +528,24 @@ def coverage_status_from_result(
         }
         if "error" in statuses:
             return "partial" if len(statuses - {"error"}) else "error"
-        if statuses.intersection({"partial", "timed_out", "stopped"}):
+        if statuses.intersection(
+            {
+                "pending",
+                "running",
+                "probing",
+                "scanning",
+                "waiting_model",
+                "partial",
+                "timed_out",
+                "stopped",
+            }
+        ):
+            return "partial"
+        if str(outcome.get("status") or "").lower() in {
+            "partial",
+            "timed_out",
+            "stopped",
+        }:
             return "partial"
         return "completed"
     raw_status = str(outcome.get("status") or "completed").strip().lower()
@@ -525,6 +565,10 @@ async def backfill_target_scan_coverage(
     from api.dao import targets as targets_dao
     from api.dao import tasks as tasks_dao
     from api.dao.targets import is_safe_identity_alias
+    from api.db.collections import (
+        URL_SCAN_TASKS_COLLECTION,
+        WEBSITE_CRAWL_TASKS_COLLECTION,
+    )
 
     relations = await targets_dao.list_project_target_scan_state(db)
     relations_by_key = {
@@ -532,6 +576,36 @@ async def backfill_target_scan_coverage(
         for item in relations
     }
     tasks = await tasks_dao.list_completed_company_scans_for_coverage(db)
+    tasks_by_id = {
+        str(item.get("task_id") or ""): item
+        for item in tasks
+        if str(item.get("task_id") or "")
+    }
+    company_task_ids = [
+        str(item.get("task_id") or "")
+        for item in tasks
+        if str(item.get("task_id") or "")
+    ]
+    url_task_rows = await db[URL_SCAN_TASKS_COLLECTION].find(
+        {"task_id": {"$in": [f"{task_id}_url" for task_id in company_task_ids]}},
+        {"_id": 0},
+    ).to_list(None)
+    url_tasks = {
+        str(item.get("task_id") or "").removesuffix("_url"): item
+        for item in url_task_rows
+    }
+    website_task_rows = await db[WEBSITE_CRAWL_TASKS_COLLECTION].find(
+        {
+            "crawl_task_id": {
+                "$in": [f"{task_id}_webdocs" for task_id in company_task_ids]
+            }
+        },
+        {"_id": 0},
+    ).to_list(None)
+    website_tasks = {
+        str(item.get("crawl_task_id") or "").removesuffix("_webdocs"): item
+        for item in website_task_rows
+    }
     channel_map = {
         "asset_url": "website",
         "wechat": "wechat",
@@ -612,6 +686,56 @@ async def backfill_target_scan_coverage(
                         "assets": assets,
                         "url_scan": url_scan,
                     }
+            if module == "asset_url" and outcome:
+                durable_url = dict(url_tasks.get(str(task.get("task_id") or "")) or {})
+                url_scan = dict(outcome.get("url_scan") or {})
+                if durable_url:
+                    url_scan.update(
+                        {
+                            key: durable_url.get(key)
+                            for key in (
+                                "status",
+                                "total_urls",
+                                "alive_urls",
+                                "eligible_urls",
+                                "scanned_urls",
+                                "failed_urls",
+                                "remaining_urls",
+                                "error",
+                            )
+                            if durable_url.get(key) is not None
+                        }
+                    )
+                    url_scan["enabled"] = True
+                outcome["url_scan"] = url_scan
+
+                durable_website = dict(
+                    website_tasks.get(str(task.get("task_id") or "")) or {}
+                )
+                website_documents = dict(outcome.get("website_documents") or {})
+                if durable_website:
+                    website_documents.update(
+                        dict(durable_website.get("summary") or {})
+                    )
+                    website_documents.update(
+                        {
+                            "enabled": True,
+                            "status": str(durable_website.get("status") or "pending"),
+                            "error": str(durable_website.get("error") or ""),
+                        }
+                    )
+                elif url_scan.get("enabled") is not False:
+                    website_documents = {
+                        "enabled": True,
+                        "status": "pending",
+                        "legacy_missing": True,
+                    }
+                outcome["website_documents"] = website_documents
+                if (
+                    dict(outcome.get("assets") or {}).get("enabled") is False
+                    and url_scan.get("enabled") is False
+                ):
+                    continue
             if module == "control_structure" and outcome.get("result"):
                 outcome = dict(outcome.get("result") or {})
             if not outcome or outcome.get("enabled") is False:
@@ -640,7 +764,27 @@ async def backfill_target_scan_coverage(
             persisted = dict(
                 (relation.get("scan_coverage") or {}).get(channel) or {}
             )
-            if is_at_least_as_new(persisted.get("updated_at"), completed_at):
+            persisted_task = dict(
+                tasks_by_id.get(str(persisted.get("task_id") or "")) or {}
+            )
+            persisted_params = dict(persisted_task.get("params") or {})
+            persisted_channel_invalid = bool(
+                channel == "website"
+                and persisted_task
+                and not persisted_params.get("enable_asset_discovery", True)
+                and not persisted_params.get("enable_url_scan", True)
+            )
+            correcting_same_task = bool(
+                str(persisted.get("task_id") or "")
+                == str(task.get("task_id") or "")
+                and str(persisted.get("status") or "") == "completed"
+                and status != "completed"
+            )
+            if (
+                is_at_least_as_new(persisted.get("updated_at"), completed_at)
+                and not correcting_same_task
+                and not persisted_channel_invalid
+            ):
                 continue
             existing = events.setdefault(key, {}).get(channel)
             if not existing or not is_at_least_as_new(

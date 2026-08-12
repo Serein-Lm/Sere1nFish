@@ -98,6 +98,8 @@ async def list_completed_company_scans_for_coverage(
             "project_id": 1,
             "completed_at": 1,
             "updated_at": 1,
+            "params.enable_asset_discovery": 1,
+            "params.enable_url_scan": 1,
             "checkpoint.modules": 1,
             "result.identity": 1,
             "result.assets": 1,

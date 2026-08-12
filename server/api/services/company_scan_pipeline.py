@@ -65,6 +65,10 @@ def should_checkpoint_module(kind: str, outcome: Any) -> bool:
         return False
     if kind in {"wholly_owned_entities", "scholar_entities"}:
         return outcome.get("status") == "completed"
+    if kind == "asset_url":
+        from api.services.target_scan_profile import coverage_status_from_result
+
+        return coverage_status_from_result("website", outcome) == "completed"
     return True
 
 
@@ -308,6 +312,13 @@ class CompanyScanPipeline:
                 "providers": {},
             },
             "url_scan": {"enabled": enable_url_scan, "findings_count": 0, "copywritings_count": 0},
+            "website_documents": {
+                "enabled": enable_url_scan,
+                "status": "pending" if enable_url_scan else "disabled",
+                "documents_archived": 0,
+                "attachments_archived": 0,
+                "failed_pages": 0,
+            },
             "xhs": {
                 "enabled": enable_xhs,
                 "subsidiaries_enabled": subsidiary_xhs_enabled,
@@ -1144,6 +1155,41 @@ class CompanyScanPipeline:
                         if isinstance(value, (str, int, float, bool))
                         and key not in {"error"}
                     }
+                    if kind == "asset_url":
+                        url_summary = dict(coverage_outcome.get("url_scan") or {})
+                        document_summary = dict(
+                            coverage_outcome.get("website_documents") or {}
+                        )
+                        coverage_summary.update(
+                            {
+                                "url_status": str(url_summary.get("status") or ""),
+                                "url_total": int(url_summary.get("total_urls") or 0),
+                                "url_scanned": int(url_summary.get("scanned_urls") or 0),
+                                "url_failed": int(url_summary.get("failed_urls") or 0),
+                                "url_remaining": int(url_summary.get("remaining_urls") or 0),
+                                "document_status": str(
+                                    document_summary.get("status") or ""
+                                ),
+                                "documents_discovered": int(
+                                    document_summary.get("documents_scheduled") or 0
+                                ),
+                                "documents_archived": int(
+                                    document_summary.get("documents_archived") or 0
+                                ),
+                                "document_pages_failed": int(
+                                    document_summary.get("failed_pages") or 0
+                                ),
+                                "documents_partial": int(
+                                    document_summary.get("documents_partial") or 0
+                                ),
+                                "attachments_archived": int(
+                                    document_summary.get("attachments_archived") or 0
+                                ),
+                                "document_truncated": bool(
+                                    document_summary.get("truncated")
+                                ),
+                            }
+                        )
                     await record_target_scan_coverage(
                         self.db,
                         project_id=project_id,
@@ -2667,6 +2713,14 @@ class CompanyScanPipeline:
             "enabled": enable_url_scan,
             "findings_count": 0,
             "copywritings_count": 0,
+            "status": "disabled" if not enable_url_scan else "pending",
+        }
+        document_result: dict[str, Any] = {
+            "enabled": enable_url_scan,
+            "status": "disabled" if not enable_url_scan else "pending",
+            "documents_archived": 0,
+            "attachments_archived": 0,
+            "failed_pages": 0,
         }
         if enable_url_scan:
             root_domains = self._dedupe_text(
@@ -2677,9 +2731,11 @@ class CompanyScanPipeline:
             )[:6]
             root_urls = [normalize_url(domain) for domain in root_domains if domain]
             merged_urls = self._dedupe_text([*root_urls, *urls, *discovered_urls])
+            operations: list[tuple[str, Any]] = []
             if merged_urls or url_text.strip():
-                url_result.update(
-                    await self._run_url_scan(
+                operations.append((
+                    "url_scan",
+                    self._run_url_scan(
                         task_id,
                         project_id,
                         url_text,
@@ -2700,17 +2756,102 @@ class CompanyScanPipeline:
                             "aliases": list(identity.get("aliases") or [])[:12],
                             "root_domains": root_domains,
                         },
-                    )
+                    ),
+                ))
+            if root_urls and identity.get("target_id"):
+                from api.services.info_collection.tuning import (
+                    get_collection_runtime_tuning,
                 )
+                from api.services.website_documents import (
+                    WebsiteCollectionPolicy,
+                    WebsiteDocumentCollectionService,
+                )
+
+                tuning = await get_collection_runtime_tuning(self.db)
+                operations.append((
+                    "website_documents",
+                    WebsiteDocumentCollectionService(
+                        self.db,
+                        policy=WebsiteCollectionPolicy(
+                            max_pages=tuning.website_crawl_max_pages,
+                            max_documents=tuning.website_crawl_max_documents,
+                            max_depth=tuning.website_crawl_max_depth,
+                            discovery_concurrency=tuning.website_crawl_concurrency,
+                            archive_concurrency=tuning.website_archive_concurrency,
+                        ),
+                    ).run(
+                        parent_task_id=task_id,
+                        project_id=project_id,
+                        target={
+                            "target_id": str(identity.get("target_id") or ""),
+                            "canonical_name": str(
+                                identity.get("normalized_name") or ""
+                            ),
+                            "aliases": list(identity.get("aliases") or [])[:12],
+                            "root_domain": str(identity.get("root_domain") or ""),
+                            "root_domains": root_domains,
+                        },
+                        seed_urls=root_urls,
+                    ),
+                ))
+            else:
+                document_result.update(
+                    enabled=False,
+                    status="skipped",
+                    reason="目标缺少已核验根域名，官网文档阶段未启动",
+                )
+            if operations:
+                outcomes = await asyncio.gather(
+                    *(operation for _kind, operation in operations),
+                    return_exceptions=True,
+                )
+                for (kind, _operation), outcome in zip(operations, outcomes):
+                    if isinstance(outcome, BaseException):
+                        failed = {
+                            "enabled": True,
+                            "status": "error",
+                            "error": str(outcome),
+                        }
+                        if kind == "url_scan":
+                            url_result.update(failed)
+                        else:
+                            document_result.update(failed)
+                        logger.error(
+                            "[company_scan] 官网子流水线失败 task=%s kind=%s: %s",
+                            task_id,
+                            kind,
+                            outcome,
+                        )
+                    elif kind == "url_scan":
+                        url_result.update(dict(outcome))
+                    else:
+                        document_result.update(dict(outcome))
         durable_asset_result = {
             key: value
             for key, value in asset_result.items()
             if key not in {"alive_urls", "scan_urls", "probe_metadata_by_url"}
         }
+        enabled_statuses = [
+            str(item.get("status") or "pending")
+            for item in (url_result, document_result)
+            if item.get("enabled") is not False
+        ]
+        status = (
+            "completed"
+            if enabled_statuses
+            and all(value in {"completed", "skipped"} for value in enabled_statuses)
+            else "error"
+            if enabled_statuses and all(value == "error" for value in enabled_statuses)
+            else "partial"
+            if enabled_statuses
+            else "skipped"
+        )
         return {
             "kind": "asset_url",
+            "status": status,
             "assets": durable_asset_result,
             "url_scan": url_result,
+            "website_documents": document_result,
         }
 
     async def _run_url_scan(
@@ -3014,6 +3155,21 @@ class CompanyScanPipeline:
             if kind == "asset_url":
                 result["assets"].update(outcome.get("assets") or {})
                 result["url_scan"].update(outcome.get("url_scan") or {})
+                result["website_documents"].update(
+                    outcome.get("website_documents") or {}
+                )
+                if outcome.get("status") == "error":
+                    failed_jobs.add(kind)
+                if outcome.get("status") in {"partial", "error"}:
+                    messages = [
+                        str(section.get("error") or "")
+                        for section in (
+                            outcome.get("url_scan") or {},
+                            outcome.get("website_documents") or {},
+                        )
+                        if str(section.get("error") or "").strip()
+                    ]
+                    result["sub_errors"].extend(messages)
             elif kind == "control_structure":
                 result["control_structure"].update(outcome.get("result") or {})
             elif kind == "bidding":

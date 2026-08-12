@@ -278,6 +278,7 @@ async def lifespan(app: FastAPI):
         from api.dao import project_groups as project_groups_dao
         from api.dao import target_research as target_research_dao
         from api.dao import source_documents as source_documents_dao
+        from api.dao import website_crawl as website_crawl_dao
         await targets_dao.ensure_indexes(db)
         await projects_dao.ensure_indexes(db)
         await project_groups_dao.ensure_indexes(db)
@@ -311,6 +312,7 @@ async def lifespan(app: FastAPI):
             )
         await target_research_dao.ensure_indexes(db)
         await source_documents_dao.ensure_indexes(db)
+        await website_crawl_dao.ensure_indexes(db)
         # 学者学术联系发现索引
         from api.dao import scholar_contact as scholar_contact_dao
         await scholar_contact_dao.ensure_indexes(db)
