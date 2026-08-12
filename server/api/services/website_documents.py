@@ -87,8 +87,21 @@ _DOCUMENT_HINTS = (
     "名单",
     "项目",
     "课题",
+    "研究",
+    "学术",
+    "专家",
+    "导师",
     "政策",
     "科研",
+    "合作",
+    "会议",
+    "培训",
+    "标准",
+    "指南",
+    "成果",
+    "动态",
+    "要闻",
+    "工作",
     "竞价",
     "比选",
     "咨询",
@@ -292,6 +305,17 @@ def classify_discovered_link(
         "depth": depth,
         "priority": priority,
     }
+
+
+def archive_page_status(source_result: dict[str, Any]) -> str:
+    if source_result.get("rejected"):
+        return "rejected"
+    if (
+        source_result.get("archive_status") == "partial"
+        or source_result.get("contact_attribution_error")
+    ):
+        return "partial"
+    return "archived"
 
 
 class WebsiteDocumentCollectionService:
@@ -589,16 +613,14 @@ class WebsiteDocumentCollectionService:
                     min_subject_match=80,
                     analysis_mode="trusted_official",
                 )
-            if source_result.get("rejected"):
+            status = archive_page_status(source_result)
+            attribution_error = str(
+                source_result.get("contact_attribution_error") or ""
+            )
+            if status == "rejected":
                 counters["documents_rejected"] += 1
-                status = "rejected"
             else:
                 counters["documents_archived"] += 1
-                status = (
-                    "partial"
-                    if source_result.get("archive_status") == "partial"
-                    else "archived"
-                )
                 if status == "partial":
                     counters["documents_partial"] += 1
             attachments = int(source_result.get("attachment_count") or 0)
@@ -625,8 +647,19 @@ class WebsiteDocumentCollectionService:
                 },
                 contacts=contacts,
             )
-            for finding in findings:
-                await findings_dao.upsert_contact_finding(self.db, finding)
+            await findings_dao.upsert_contact_findings_batch(self.db, findings)
+            if not attribution_error:
+                await findings_dao.reconcile_contact_findings_for_record(
+                    self.db,
+                    project_id=project_id,
+                    record_id=(
+                        f"website:{source_result.get('document_id') or page_id}"
+                    ),
+                    keep_finding_ids=[
+                        str(finding.get("finding_id") or "")
+                        for finding in findings
+                    ],
+                )
             counters["findings_upserted"] += len(findings)
             await crawl_dao.mark_page_terminal(
                 self.db,
@@ -639,6 +672,7 @@ class WebsiteDocumentCollectionService:
                     "attachment_count": attachments,
                     "contact_count": len(contacts),
                     "finding_count": len(findings),
+                    "contact_attribution_error": attribution_error,
                 },
             )
 

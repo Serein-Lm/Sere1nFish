@@ -104,6 +104,37 @@ def test_stable_hash_uses_declared_attachments_when_download_is_partial():
     assert stable_content_hash(complete) == stable_content_hash(partial)
 
 
+def test_cached_refresh_preserves_complete_archived_attachment_text():
+    from dataclasses import replace
+
+    from api.services.source_documents import service
+
+    capture = replace(
+        _capture(raw_html=b"raw", rendered_html=b"dom"),
+        text="公告正文",
+        attachments=[],
+        metadata={
+            "attachment_urls": ["https://example.gov.cn/contact.pdf"],
+            "attachment_download_errors": ["timeout"],
+        },
+    )
+    archived_text = "公告正文\n附件联系人：archive@example.gov.cn"
+    preserved = service._preserve_cached_evidence_text(
+        {
+            "content": {"text": archived_text},
+            "attachments": [
+                {
+                    "source_url": "https://example.gov.cn/contact.pdf",
+                    "text_length": len(archived_text),
+                }
+            ],
+        },
+        capture,
+    )
+
+    assert preserved.text == archived_text
+
+
 def test_generic_source_url_discards_tracking_parameters():
     from api.services.source_documents.urls import canonicalize_source_url
 
@@ -411,6 +442,7 @@ def test_finding_context_prompt_is_runtime_critical():
     from api.services.library_runtime import CORE_PROMPT_SLUGS
 
     assert "finding_context/organizer" in CORE_PROMPT_SLUGS
+    assert "source_document/contact_attribution" in CORE_PROMPT_SLUGS
 
 
 def test_finding_context_worker_wakes_for_incremental_enqueue(monkeypatch):
@@ -474,6 +506,177 @@ def test_source_document_prompts_reject_multi_entity_roundups():
     assert "独立相关性审核员" in review_prompt
     assert "不得依据常识" in contact_prompt
     assert "第三方公众号" in contact_prompt
+    assert "必须逐项返回本批全部候选" in contact_prompt
+
+
+def test_contact_attribution_batches_candidates_with_bounded_concurrency(
+    monkeypatch,
+):
+    import asyncio
+    import json
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from api.services.source_documents import analysis
+
+    active = 0
+    max_active = 0
+    batches: list[list[str]] = []
+
+    class Structured:
+        async def ainvoke(self, messages):
+            nonlocal active, max_active
+            payload = messages[-1].content.split("候选联系方式：\n", 1)[1]
+            candidates = json.loads(payload)
+            batches.append([item["candidate_id"] for item in candidates])
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return analysis.ContactAttributionBatch(
+                items=[
+                    analysis.ContactAttributionDecision(
+                        candidate_id=item["candidate_id"],
+                        belongs_to_target=item["candidate_id"] != "contact_4",
+                        confidence=95,
+                        reason="正文明确归属目标",
+                    )
+                    for item in candidates
+                ]
+            )
+
+    class Llm:
+        def with_structured_output(self, _schema):
+            return Structured()
+
+    async def _config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(models=SimpleNamespace(default="test-model"))
+        )
+
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_BATCH_SIZE", 2)
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_CONCURRENCY", 2)
+    monkeypatch.setattr(analysis, "get_runtime_app_config", _config)
+    monkeypatch.setattr(analysis, "create_llm", lambda *_args, **_kwargs: Llm())
+    monkeypatch.setattr(analysis, "load_prompt", lambda _slug: "{{target_name}}")
+    monkeypatch.setattr(
+        analysis,
+        "observation_context",
+        lambda **_kwargs: nullcontext(),
+    )
+    contacts = [
+        {
+            "channel": "telephone",
+            "value": f"010-1234567{index}",
+            "label": f"座机: 010-1234567{index}",
+            "context": "目标单位联系人",
+            "source": "text",
+        }
+        for index in range(5)
+    ]
+
+    selected, error = asyncio.run(
+        analysis.attribute_target_contacts(
+            target_name="目标单位",
+            target_aliases=[],
+            title="联系方式公告",
+            account="目标单位",
+            summary="目标单位联系人名单",
+            contacts=contacts,
+            image_analysis=[],
+        )
+    )
+
+    assert batches == [
+        ["contact_0", "contact_1"],
+        ["contact_2", "contact_3"],
+        ["contact_4"],
+    ]
+    assert max_active == 2
+    assert [item["value"] for item in selected] == [
+        item["value"] for item in contacts[:4]
+    ]
+    assert error == ""
+
+
+def test_contact_attribution_retries_incomplete_batch(monkeypatch):
+    import asyncio
+    import json
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from api.services.source_documents import analysis
+
+    calls = 0
+
+    class Structured:
+        async def ainvoke(self, messages):
+            nonlocal calls
+            calls += 1
+            payload = messages[-1].content.split("候选联系方式：\n", 1)[1]
+            candidates = json.loads(payload)
+            if calls == 1:
+                candidates = candidates[:1]
+            return analysis.ContactAttributionBatch(
+                items=[
+                    analysis.ContactAttributionDecision(
+                        candidate_id=item["candidate_id"],
+                        belongs_to_target=True,
+                        confidence=95,
+                        reason="正文明确归属目标",
+                    )
+                    for item in candidates
+                ]
+            )
+
+    class Llm:
+        def with_structured_output(self, _schema):
+            return Structured()
+
+    async def _config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(models=SimpleNamespace(default="test-model"))
+        )
+
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_BATCH_SIZE", 24)
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_CONCURRENCY", 1)
+    monkeypatch.setattr(analysis, "_CONTACT_ATTRIBUTION_ATTEMPTS", 2)
+    monkeypatch.setattr(analysis, "get_runtime_app_config", _config)
+    monkeypatch.setattr(analysis, "create_llm", lambda *_args, **_kwargs: Llm())
+    monkeypatch.setattr(analysis, "load_prompt", lambda _slug: "{{target_name}}")
+    monkeypatch.setattr(
+        analysis,
+        "observation_context",
+        lambda **_kwargs: nullcontext(),
+    )
+    contacts = [
+        {
+            "channel": "email",
+            "value": f"person{index}@example.gov.cn",
+            "label": f"邮箱: person{index}@example.gov.cn",
+            "context": "目标单位联系人",
+            "source": "text",
+        }
+        for index in range(2)
+    ]
+
+    selected, error = asyncio.run(
+        analysis.attribute_target_contacts(
+            target_name="目标单位",
+            target_aliases=[],
+            title="联系方式公告",
+            account="目标单位",
+            summary="目标单位联系人名单",
+            contacts=contacts,
+            image_analysis=[],
+        )
+    )
+
+    assert calls == 2
+    assert [item["value"] for item in selected] == [
+        item["value"] for item in contacts
+    ]
+    assert error == ""
 
 
 def test_article_scope_caps_prevent_single_roundup_item_from_passing():
@@ -690,6 +893,53 @@ def test_contextual_completion_falls_back_to_review_on_auditor_error(monkeypatch
 
     assert result["target_contacts"][0]["value"] == "010-68377160"
     assert result["contact_attribution_error"] == "模型暂不可用"
+
+
+def test_contextual_completion_keeps_successful_contact_batches(monkeypatch):
+    import asyncio
+
+    from api.services.source_documents import service
+
+    reviewed = {
+        "channel": "telephone",
+        "value": "010-68377160",
+        "label": "座机: 010-68377160",
+        "context": "招聘电话：010-68377160",
+        "source": "text",
+    }
+    attributed = {
+        "channel": "email",
+        "value": "hr@example.gov.cn",
+        "label": "邮箱: hr@example.gov.cn",
+        "context": "招聘邮箱：hr@example.gov.cn",
+        "source": "text",
+        "attribution": "contact_review_agent",
+    }
+
+    async def attribute(**_kwargs):
+        return [attributed], "另一个审核批次超时"
+
+    monkeypatch.setattr(service, "attribute_target_contacts", attribute)
+    result = asyncio.run(
+        service._complete_contextual_analysis(
+            {
+                "fields": {"summary": "目标招聘"},
+                "relevance_review": {
+                    "target_contact_values": ["联系电话：010-68377160"]
+                },
+            },
+            capture=_capture(raw_html=b"raw", rendered_html=b"dom"),
+            contacts=[reviewed, attributed],
+            image_analysis=[],
+            target_name="目标研究院",
+            target_aliases=[],
+            project_id="project-1",
+            task_id="task-1",
+        )
+    )
+
+    assert result["target_contacts"] == [attributed]
+    assert result["contact_attribution_error"] == "另一个审核批次超时"
 
 
 def test_relevance_review_conservatively_merges_two_agents():
@@ -1064,7 +1314,22 @@ def test_archive_completeness_treats_unsupported_svg_as_warning():
     assert error == ""
     assert "image/svg+xml" in warning
     assert status == "complete_with_warnings"
-    assert messages and "SVG" in messages[0]
+    assert messages and "无效或不受支持" in messages[0]
+
+
+def test_archive_completeness_treats_partial_screenshots_as_warning():
+    from api.services.source_documents import service
+
+    status, messages = service._archive_completeness(
+        capture_metadata={
+            "screenshot_capture_error": "截图超时，已保留前 3 张"
+        },
+        image_analysis_error="",
+        image_analysis_warning="",
+    )
+
+    assert status == "complete_with_warnings"
+    assert messages == ["页面截图部分完成: 截图超时，已保留前 3 张"]
 
 
 def test_archive_completeness_reports_missing_evidence_as_partial():
@@ -1452,6 +1717,48 @@ def test_article_image_preflight_isolates_unsupported_svg():
     assert "index=0" in errors[0]
 
 
+def test_article_image_preflight_skips_tracking_pixels():
+    from io import BytesIO
+
+    from PIL import Image
+
+    from api.services.source_documents.analysis import _prepare_image_inputs
+    from api.services.source_documents.contracts import CapturedImage
+
+    output = BytesIO()
+    Image.new("RGB", (1, 100), "white").save(output, format="PNG")
+    prepared, errors = _prepare_image_inputs(
+        [
+            CapturedImage(
+                index=0,
+                source_url="https://example.com/tracking.png",
+                data=output.getvalue(),
+                content_type="image/png",
+            )
+        ]
+    )
+
+    assert prepared == []
+    assert len(errors) == 1
+    assert "prepare_failed=ImagePreflightSkip" in errors[0]
+
+
+def test_visual_contact_schema_tolerates_unsupported_model_channel():
+    from api.services.source_documents.analysis import (
+        ImageUnderstanding,
+        VisualContact,
+    )
+
+    item = ImageUnderstanding(
+        index=0,
+        contacts=[
+            VisualContact(channel="bilibili", value="example", context="主页")
+        ],
+    )
+
+    assert item.contacts[0].channel == "bilibili"
+
+
 def test_wechat_screenshots_use_bounded_cdp_viewport_capture():
     import asyncio
     import base64
@@ -1792,6 +2099,67 @@ def test_image_archive_policy_rejects_invalid_model_contact():
     )
 
     assert selected == []
+
+
+def test_contact_findings_batch_uses_one_ordered_false_bulk_write():
+    import asyncio
+    from types import SimpleNamespace
+
+    from api.dao import findings as findings_dao
+    from api.db.collections import FINDINGS_COLLECTION
+
+    class _Collection:
+        def __init__(self):
+            self.operations = []
+            self.ordered = None
+
+        async def bulk_write(self, operations, *, ordered):
+            self.operations = operations
+            self.ordered = ordered
+            return SimpleNamespace()
+
+    class _DB:
+        def __init__(self):
+            self.collection = _Collection()
+
+        def __getitem__(self, name):
+            assert name == FINDINGS_COLLECTION
+            return self.collection
+
+    db = _DB()
+    count = asyncio.run(
+        findings_dao.upsert_contact_findings_batch(
+            db,
+            [
+                {
+                    "finding_id": "contact-1",
+                    "project_id": "project-1",
+                    "task_id": "task-1",
+                    "target_id": "target-1",
+                    "source_document_id": "document-1",
+                    "evidence_ref": {"record_id": "website:document-1"},
+                },
+                {
+                    "finding_id": "contact-2",
+                    "project_id": "project-1",
+                    "task_id": "task-1",
+                    "target_id": "target-1",
+                    "source_document_id": "document-1",
+                    "evidence_ref": {"record_id": "website:document-1"},
+                },
+            ],
+        )
+    )
+
+    assert count == 2
+    assert db.collection.ordered is False
+    assert len(db.collection.operations) == 2
+    first = db.collection.operations[0]
+    assert first._filter == {"finding_id": "contact-1"}
+    assert first._doc["$addToSet"]["task_ids"] == "task-1"
+    assert first._doc["$addToSet"]["evidence_refs"] == {
+        "record_id": "website:document-1"
+    }
 
 
 def test_contact_finding_reconciliation_removes_only_stale_record_evidence():

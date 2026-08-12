@@ -85,6 +85,7 @@ CORE_PROMPT_SLUGS = {
     "mobile_agent/profile_extract",
     "mobile_agent/executor_general",
     "router/classify",
+    "source_document/contact_attribution",
     "source_document/relevance_review",
     "source_document/source_document",
     "finding_context/organizer",

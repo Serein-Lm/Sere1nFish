@@ -26,6 +26,7 @@ from .contracts import (
     SourceDocumentError,
 )
 from .resources import (
+    ATTACHMENT_EXTENSIONS,
     extract_html_links,
     extract_attachment_text,
     fetch_resource_with_retry,
@@ -42,6 +43,7 @@ _MAX_IMAGES = 24
 _MAX_ATTACHMENT_BYTES = 30 * 1024 * 1024
 _MAX_TOTAL_ATTACHMENT_BYTES = 160 * 1024 * 1024
 _MAX_ATTACHMENTS = 30
+_ATTACHMENT_DOWNLOAD_CONCURRENCY = 4
 _MAIN_XPATHS = (
     "//article",
     "//*[contains(concat(' ', normalize-space(@class), ' '), ' left ') "
@@ -125,6 +127,26 @@ def parse_official_html(
 
     main = _select_main(root)
     links = extract_html_links(main, url)
+    attachment_links: list[dict[str, str]] = []
+    attachment_urls: set[str] = set()
+    main_link_urls = {str(link.get("url") or "") for link in links}
+    for link in [*links, *extract_html_links(root, url)]:
+        link_url = str(link.get("url") or "")
+        explicit_attachment = bool(
+            PurePosixPath(urlsplit(link_url).path).suffix.lower()
+            in ATTACHMENT_EXTENSIONS
+            or PurePosixPath(str(link.get("label") or "")).suffix.lower()
+            in ATTACHMENT_EXTENSIONS
+        )
+        if (
+            not link_url
+            or link_url in attachment_urls
+            or not is_attachment_link(link)
+            or (link_url not in main_link_urls and not explicit_attachment)
+        ):
+            continue
+        attachment_urls.add(link_url)
+        attachment_links.append(link)
 
     image_urls: list[str] = []
     for image in main.xpath(".//img"):
@@ -181,7 +203,7 @@ def parse_official_html(
         "text": text,
         "links": links,
         "image_urls": image_urls,
-        "attachment_links": [link for link in links if is_attachment_link(link)],
+        "attachment_links": attachment_links,
     }
 
 
@@ -367,28 +389,87 @@ class OfficialWebDocumentProvider:
         warnings: list[str] = []
         extracted_by_hash: dict[str, tuple[str, str, str]] = {}
         remaining = _MAX_TOTAL_ATTACHMENT_BYTES
-        for index, link in enumerate(links[:_MAX_ATTACHMENTS]):
-            if remaining <= 0:
-                errors.append("单篇文档附件累计超过 160 MiB 安全上限")
-                break
+        indexed_links = list(enumerate(links[:_MAX_ATTACHMENTS]))
+
+        async def _download(index: int, link: dict[str, str]):
             try:
                 fetched = await fetch_resource_with_retry(
                     session,
                     link["url"],
-                    max_bytes=min(_MAX_ATTACHMENT_BYTES, remaining),
+                    max_bytes=_MAX_ATTACHMENT_BYTES,
                 )
-                remaining -= len(fetched.data)
-                digest = hashlib.sha256(fetched.data).hexdigest()
-                extracted = extracted_by_hash.get(digest)
-                if extracted is None:
-                    extracted = await asyncio.to_thread(
-                        extract_attachment_text,
-                        fetched.data,
-                        filename=fetched.filename,
-                        content_type=fetched.content_type,
+                return index, link, fetched, "", ""
+            except aiohttp.ClientResponseError as exc:
+                message = f"{link['url']}: HTTP {exc.status} {exc.message}"[:1000]
+                level = "warning" if exc.status in {404, 410} else "error"
+                return index, link, None, level, message
+            except Exception as exc:  # noqa: BLE001
+                return index, link, None, "error", f"{link['url']}: {exc}"[:1000]
+
+        for offset in range(0, len(indexed_links), _ATTACHMENT_DOWNLOAD_CONCURRENCY):
+            if remaining <= 0:
+                errors.append("单篇文档附件累计超过 160 MiB 安全上限")
+                break
+            chunk = indexed_links[
+                offset : offset + _ATTACHMENT_DOWNLOAD_CONCURRENCY
+            ]
+            downloaded = await asyncio.gather(
+                *(_download(index, link) for index, link in chunk)
+            )
+            accepted = []
+            for index, link, fetched, level, message in downloaded:
+                if fetched is None:
+                    (warnings if level == "warning" else errors).append(message)
+                    continue
+                if len(fetched.data) > remaining:
+                    errors.append(
+                        f"{link['url']}: 单篇文档附件累计超过 160 MiB 安全上限"
                     )
-                    extracted_by_hash[digest] = extracted
-                text, text_error, text_format = extracted
+                    continue
+                remaining -= len(fetched.data)
+                accepted.append(
+                    (
+                        index,
+                        link,
+                        fetched,
+                        hashlib.sha256(fetched.data).hexdigest(),
+                    )
+                )
+
+            pending_extracts: dict[str, tuple[bytes, str, str]] = {}
+            for _index, _link, fetched, digest in accepted:
+                if digest not in extracted_by_hash and digest not in pending_extracts:
+                    pending_extracts[digest] = (
+                        fetched.data,
+                        fetched.filename,
+                        fetched.content_type,
+                    )
+            if pending_extracts:
+                digests = list(pending_extracts)
+                extracted_values = await asyncio.gather(
+                    *(
+                        asyncio.to_thread(
+                            extract_attachment_text,
+                            pending_extracts[digest][0],
+                            filename=pending_extracts[digest][1],
+                            content_type=pending_extracts[digest][2],
+                        )
+                        for digest in digests
+                    ),
+                    return_exceptions=True,
+                )
+                for digest, extracted in zip(digests, extracted_values, strict=True):
+                    if isinstance(extracted, Exception):
+                        extracted_by_hash[digest] = (
+                            "",
+                            str(extracted)[:1000],
+                            "",
+                        )
+                    else:
+                        extracted_by_hash[digest] = extracted
+
+            for index, link, fetched, digest in accepted:
+                text, text_error, text_format = extracted_by_hash[digest]
                 attachments.append(
                     CapturedAttachment(
                         index=index,
@@ -403,12 +484,4 @@ class OfficialWebDocumentProvider:
                         text_error=text_error,
                     )
                 )
-            except aiohttp.ClientResponseError as exc:
-                message = f"{link['url']}: HTTP {exc.status} {exc.message}"[:1000]
-                if exc.status in {404, 410}:
-                    warnings.append(message)
-                else:
-                    errors.append(message)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{link['url']}: {exc}"[:1000])
         return attachments, errors, warnings

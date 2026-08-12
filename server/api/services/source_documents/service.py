@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -44,7 +45,7 @@ _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
 _CONTEXT_ANALYSIS_SCHEMA_VERSION = 7
 _MEDIA_POLICY_VERSION = 3
-_CONTACT_POLICY_VERSION = 3
+_CONTACT_POLICY_VERSION = 4
 _SOURCE_FIELD_KEYS = {
     "title",
     "account",
@@ -180,8 +181,9 @@ async def _complete_contextual_analysis(
             image_analysis=image_analysis,
             project_id=project_id,
             task_id=task_id,
+            source_type=capture.source_type,
         )
-        if not attribution_error:
+        if attributed or not attribution_error:
             target_contacts = attributed
     fields.update(
         {
@@ -241,8 +243,14 @@ def _split_image_analysis_diagnostics(value: Any) -> tuple[str, str]:
     warnings = [
         part
         for part in parts
-        if "content_type=image/svg+xml" in part
-        and "prepare_failed=UnidentifiedImageError" in part
+        if "prepare_failed=ImagePreflightSkip" in part
+        or (
+            "prepare_failed=UnidentifiedImageError" in part
+            and (
+                "content_type=image/svg+xml" in part
+                or "content_type=text/html" in part
+            )
+        )
     ]
     errors = [part for part in parts if part not in warnings]
     return "; ".join(errors)[:2000], "; ".join(warnings)[:2000]
@@ -302,12 +310,16 @@ def _archive_completeness(
         capture_metadata.get("screenshot_capture_error") or ""
     ).strip()
     if screenshot_error:
-        errors.append(f"页面截图不完整: {screenshot_error[:300]}")
+        preserved = re.search(r"已保留前\s*(\d+)\s*张", screenshot_error)
+        if preserved and int(preserved.group(1)) > 0:
+            warnings.append(f"页面截图部分完成: {screenshot_error[:300]}")
+        else:
+            errors.append(f"页面截图不完整: {screenshot_error[:300]}")
     if image_analysis_error:
         errors.append(f"图片识别失败: {image_analysis_error[:500]}")
     if image_analysis_warning:
         warnings.append(
-            "已跳过视觉模型不支持的 SVG 图片: "
+            "已跳过无效或不受支持的图片: "
             f"{image_analysis_warning[:500]}"
         )
     if errors:
@@ -436,6 +448,33 @@ def _capture_has_more_complete_images(
     if image_error and capture.images:
         return True
     return False
+
+
+def _preserve_cached_evidence_text(
+    version: dict[str, Any],
+    capture: CapturedDocument,
+) -> CapturedDocument:
+    """Keep archived attachment text when a refresh capture is degraded."""
+    archived_text = str((version.get("content") or {}).get("text") or "")
+    if not archived_text:
+        return capture
+    archived_attachments = list(version.get("attachments") or [])
+    archived_text_length = sum(
+        int(item.get("text_length") or 0) for item in archived_attachments
+    )
+    captured_text_length = sum(
+        len(item.extracted_text or "") for item in capture.attachments
+    )
+    metadata = dict(capture.metadata or {})
+    degraded = bool(
+        len(capture.attachments) < len(archived_attachments)
+        or captured_text_length < archived_text_length
+        or metadata.get("attachment_download_errors")
+        or metadata.get("attachments_truncated")
+    )
+    if degraded and len(archived_text) > len(capture.text or ""):
+        return replace(capture, text=archived_text)
+    return capture
 
 
 def _trusted_official_analysis(
@@ -695,6 +734,9 @@ def _rejected_source_result(
         "score_reason": analysis.get("score_reason") or "",
         "review_decision": analysis.get("review_decision") or "reject",
         "article_scope": analysis.get("article_scope") or "uncertain",
+        "contact_attribution_error": str(
+            analysis.get("contact_attribution_error") or ""
+        ),
         "image_evidence_used": bool(analysis.get("image_evidence_used")),
         "image_evidence_indices": list(
             analysis.get("image_evidence_indices") or []
@@ -1081,6 +1123,9 @@ def _result_from_version(
         "score_reason": analysis.get("score_reason") or "",
         "review_decision": analysis.get("review_decision") or "",
         "article_scope": analysis.get("article_scope") or "uncertain",
+        "contact_attribution_error": str(
+            analysis.get("contact_attribution_error") or ""
+        ),
         "image_evidence_used": bool(analysis.get("image_evidence_used")),
         "image_evidence_indices": list(
             analysis.get("image_evidence_indices") or []
@@ -1187,6 +1232,7 @@ async def ingest_source_url(
                 and existing.get("status") == "ready"
                 and not _capture_has_more_complete_images(existing, capture)
             ):
+                capture = _preserve_cached_evidence_text(existing, capture)
                 required_subject_match = max(
                     0, min(100, int(min_subject_match or 0))
                 )

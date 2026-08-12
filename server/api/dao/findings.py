@@ -505,6 +505,60 @@ async def upsert_contact_finding(
     return await get_finding(db, finding_id) or set_fields
 
 
+async def upsert_contact_findings_batch(
+    db: AsyncIOMotorDatabase,
+    findings: list[dict[str, Any]],
+) -> int:
+    """Bulk-upsert contact findings while preserving evidence history."""
+    if not findings:
+        return 0
+    now = _now()
+    operations: list[UpdateOne] = []
+    seen: set[str] = set()
+    for finding in findings:
+        finding_id = str(finding.get("finding_id") or "")
+        if not finding_id or finding_id in seen:
+            continue
+        seen.add(finding_id)
+        task_id = str(finding.get("task_id") or "")
+        set_fields = {
+            key: value
+            for key, value in finding.items()
+            if key != "created_at"
+        }
+        evidence_ref = set_fields.pop("evidence_ref", None)
+        if evidence_ref:
+            set_fields["latest_evidence_ref"] = evidence_ref
+        set_fields["updated_at"] = now
+        update: dict[str, Any] = {
+            "$set": set_fields,
+            "$setOnInsert": {"created_at": now},
+        }
+        additions: dict[str, Any] = {}
+        if task_id:
+            additions["task_ids"] = task_id
+        if evidence_ref:
+            additions["evidence_refs"] = evidence_ref
+        if finding.get("source_document_id"):
+            additions["source_document_ids"] = finding["source_document_id"]
+        if finding.get("target_id"):
+            additions["target_ids"] = finding["target_id"]
+        if additions:
+            update["$addToSet"] = additions
+        operations.append(
+            UpdateOne({"finding_id": finding_id}, update, upsert=True)
+        )
+    if not operations:
+        return 0
+    collection = db[FINDINGS_COLLECTION]
+    if not hasattr(collection, "bulk_write"):
+        for finding in findings:
+            await upsert_contact_finding(db, finding)
+        return len(operations)
+    await collection.bulk_write(operations, ordered=False)
+    return len(operations)
+
+
 async def reconcile_contact_findings_for_record(
     db: AsyncIOMotorDatabase,
     *,

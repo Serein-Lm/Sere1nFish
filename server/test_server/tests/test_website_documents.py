@@ -15,6 +15,7 @@ from api.services.source_documents.web import (
     parse_official_html,
 )
 from api.services.website_documents import (
+    archive_page_status,
     classify_discovered_link,
     select_official_seed_urls,
 )
@@ -60,6 +61,25 @@ def test_official_html_extracts_embedded_and_data_attachments() -> None:
     assert [item["url"] for item in parsed["attachment_links"]] == [
         "https://example.gov.cn/notices/files/evidence.pdf",
         "https://example.gov.cn/notices/files/list.csv",
+    ]
+
+
+def test_official_html_keeps_attachment_sibling_outside_selected_article() -> None:
+    parsed = parse_official_html(
+        b"""
+        <html><body>
+          <article><h1>Notice</h1><p>Stable article body content.</p></article>
+          <div class="attachment"><a href="files/contact.docx">Attachment</a></div>
+        </body></html>
+        """,
+        url="https://example.gov.cn/notices/1.html",
+    )
+
+    assert parsed["attachment_links"] == [
+        {
+            "url": "https://example.gov.cn/notices/files/contact.docx",
+            "label": "Attachment",
+        }
     ]
 
 
@@ -149,6 +169,38 @@ def test_crawl_link_classifier_recognizes_query_and_path_pagination() -> None:
     assert query_page and query_page["kind"] == "index"
     assert path_page and path_page["kind"] == "index"
     assert article and article["kind"] == "document"
+
+
+def test_crawl_link_classifier_enters_research_and_cooperation_sections() -> None:
+    research = classify_discovered_link(
+        url="https://example.gov.cn/research/",
+        label="科研与学术动态",
+        parent_url="https://example.gov.cn/",
+        parent_relevant=False,
+        depth=1,
+        max_depth=5,
+    )
+    cooperation = classify_discovered_link(
+        url="https://example.gov.cn/cooperation/",
+        label="交流合作",
+        parent_url="https://example.gov.cn/",
+        parent_relevant=False,
+        depth=1,
+        max_depth=5,
+    )
+
+    assert research and research["kind"] == "index"
+    assert cooperation and cooperation["kind"] == "index"
+
+
+def test_contact_attribution_failure_keeps_page_retryable() -> None:
+    assert archive_page_status(
+        {
+            "archive_status": "complete",
+            "contact_attribution_error": "审核批次超时",
+        }
+    ) == "partial"
+    assert archive_page_status({"archive_status": "complete"}) == "archived"
 
 
 def test_official_seed_selection_prefers_probed_www_origin() -> None:
@@ -281,6 +333,53 @@ def test_permanent_missing_attachment_is_warning(monkeypatch) -> None:
     assert attachments == []
     assert errors == []
     assert warnings and "HTTP 404" in warnings[0]
+
+
+def test_attachment_downloads_run_concurrently_and_keep_source_order(
+    monkeypatch,
+) -> None:
+    from api.services.source_documents import web
+    from api.services.source_documents.resources import FetchedResource
+
+    active = 0
+    max_active = 0
+
+    async def _download(_session, url, **_kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        name = url.rsplit("/", 1)[-1]
+        return FetchedResource(
+            url=url,
+            data=f"body-{name}".encode(),
+            content_type="text/plain",
+            filename=name,
+        )
+
+    monkeypatch.setattr(web, "fetch_resource_with_retry", _download)
+    monkeypatch.setattr(
+        web,
+        "extract_attachment_text",
+        lambda data, **_kwargs: (data.decode(), "", "txt"),
+    )
+    links = [
+        {"url": f"https://example.gov.cn/{index}.txt", "label": str(index)}
+        for index in range(6)
+    ]
+
+    attachments, errors, warnings = asyncio.run(
+        OfficialWebDocumentProvider._download_attachments(object(), links)
+    )
+
+    assert 1 < max_active <= web._ATTACHMENT_DOWNLOAD_CONCURRENCY
+    assert [item.index for item in attachments] == list(range(6))
+    assert [item.filename for item in attachments] == [
+        f"{index}.txt" for index in range(6)
+    ]
+    assert errors == []
+    assert warnings == []
 
 
 def test_permanent_missing_image_is_warning(monkeypatch) -> None:

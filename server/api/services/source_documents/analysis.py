@@ -31,6 +31,9 @@ _STRUCTURE_TIMEOUT_SECONDS = 120
 _RELEVANCE_REVIEW_TIMEOUT_SECONDS = 120
 _IMAGE_BATCH_TIMEOUT_SECONDS = 120
 _IMAGE_BATCH_ATTEMPTS = 3
+_CONTACT_ATTRIBUTION_BATCH_SIZE = 24
+_CONTACT_ATTRIBUTION_CONCURRENCY = 4
+_CONTACT_ATTRIBUTION_ATTEMPTS = 2
 ARTICLE_ANALYSIS_PROMPT_SLUG = "source_document/source_document"
 RELEVANCE_REVIEW_PROMPT_SLUG = "source_document/relevance_review"
 CONTACT_ATTRIBUTION_PROMPT_SLUG = "source_document/contact_attribution"
@@ -73,7 +76,9 @@ def _safe_index(value: Any) -> int:
 
 
 class VisualContact(BaseModel):
-    channel: Literal["phone", "telephone", "email", "wechat", "qq"]
+    # Keep model schema tolerant; normalize_contact_candidate is the strict
+    # trust boundary and drops unsupported channels without failing the batch.
+    channel: str
     value: str
     context: str = ""
 
@@ -116,6 +121,10 @@ class ContactAttributionDecision(BaseModel):
 
 class ContactAttributionBatch(BaseModel):
     items: list[ContactAttributionDecision] = Field(default_factory=list)
+
+
+class ImagePreflightSkip(ValueError):
+    """An image is intentionally excluded before the vision-model call."""
 
 
 def stable_content_hash(capture: CapturedDocument) -> str:
@@ -690,6 +699,7 @@ async def attribute_target_contacts(
     image_analysis: list[dict[str, Any]],
     project_id: str = "",
     task_id: str = "",
+    source_type: str = "source_document",
 ) -> tuple[list[dict[str, Any]], str]:
     """Audit source-level contact candidates before exposing Target findings."""
     if not contacts:
@@ -725,49 +735,108 @@ async def attribute_target_contacts(
             "{{target_aliases}}": "、".join(target_aliases) or "无",
         }.items():
             system = system.replace(placeholder, value)
-        message = HumanMessage(
-            content=(
-                f"文章标题：{title}\n"
-                f"公众号：{account}\n"
-                f"目标摘要：{summary}\n\n"
-                "候选联系方式（只能按 candidate_id 审核，不得新增）：\n"
-                f"{json.dumps(candidates, ensure_ascii=False)}"
+
+        batches = [
+            candidates[index : index + _CONTACT_ATTRIBUTION_BATCH_SIZE]
+            for index in range(0, len(candidates), _CONTACT_ATTRIBUTION_BATCH_SIZE)
+        ]
+        semaphore = asyncio.Semaphore(_CONTACT_ATTRIBUTION_CONCURRENCY)
+
+        async def _review_batch(
+            batch_index: int,
+            batch: list[dict[str, Any]],
+        ) -> tuple[list[dict[str, Any]], str]:
+            expected_ids = {str(item["candidate_id"]) for item in batch}
+            message = HumanMessage(
+                content=(
+                    f"文章标题：{title}\n"
+                    f"公众号：{account}\n"
+                    f"目标摘要：{summary}\n\n"
+                    f"本批共有 {len(batch)} 个候选；必须逐项返回全部 candidate_id，"
+                    "包括拒绝项，不得新增或遗漏。\n"
+                    "候选联系方式：\n"
+                    f"{json.dumps(batch, ensure_ascii=False)}"
+                )
+            )
+            last_error: Exception | None = None
+            async with semaphore:
+                for attempt in range(_CONTACT_ATTRIBUTION_ATTEMPTS):
+                    try:
+                        with observation_context(
+                            project_id=project_id or None,
+                            task_id=task_id or None,
+                            phase="source_document_contact_attribution",
+                            agent="source_document_contact_reviewer",
+                            task_type=source_type or "source_document",
+                        ):
+                            result = await asyncio.wait_for(
+                                structured.ainvoke(
+                                    [SystemMessage(content=system), message]
+                                ),
+                                timeout=_RELEVANCE_REVIEW_TIMEOUT_SECONDS,
+                            )
+                        decisions = [
+                            item.model_dump()
+                            if hasattr(item, "model_dump")
+                            else dict(item)
+                            for item in getattr(result, "items", []) or []
+                        ]
+                        decision_ids = [
+                            str(item.get("candidate_id") or "")
+                            for item in decisions
+                        ]
+                        returned_ids = set(decision_ids)
+                        missing = expected_ids - returned_ids
+                        unexpected = returned_ids - expected_ids
+                        duplicate_count = len(decision_ids) - len(returned_ids)
+                        if missing or unexpected or duplicate_count:
+                            raise ValueError(
+                                f"联系方式审核批次 {batch_index} 响应不完整："
+                                f"遗漏 {len(missing)}，越界 {len(unexpected)}，"
+                                f"重复 {duplicate_count}"
+                            )
+                        return decisions, ""
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
+                        if attempt + 1 < _CONTACT_ATTRIBUTION_ATTEMPTS:
+                            await asyncio.sleep(0.5 * (2**attempt))
+            return [], str(last_error or "联系方式审核失败")[:1000]
+
+        results = await asyncio.gather(
+            *(
+                _review_batch(index, batch)
+                for index, batch in enumerate(batches)
             )
         )
-        with observation_context(
-            project_id=project_id or None,
-            task_id=task_id or None,
-            phase="source_document_contact_attribution",
-            agent="source_document_contact_reviewer",
-            task_type="wechat_article",
-        ):
-            result = await asyncio.wait_for(
-                structured.ainvoke([SystemMessage(content=system), message]),
-                timeout=_RELEVANCE_REVIEW_TIMEOUT_SECONDS,
-            )
         selected: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for item in getattr(result, "items", []) or []:
-            decision = item.model_dump() if hasattr(item, "model_dump") else dict(item)
-            candidate_id = str(decision.get("candidate_id") or "")
-            candidate = candidate_by_id.get(candidate_id)
-            if (
-                candidate is None
-                or candidate_id in seen
-                or not decision.get("belongs_to_target")
-                or clamp_score(decision.get("confidence")) < 80
-            ):
+        errors: list[str] = []
+        for decisions, error in results:
+            if error:
+                errors.append(error)
                 continue
-            seen.add(candidate_id)
-            selected.append(
-                {
-                    **candidate,
-                    "attribution": "contact_review_agent",
-                    "attribution_confidence": clamp_score(decision.get("confidence")),
-                    "attribution_reason": str(decision.get("reason") or ""),
-                }
-            )
-        return selected, ""
+            for decision in decisions:
+                candidate_id = str(decision.get("candidate_id") or "")
+                candidate = candidate_by_id.get(candidate_id)
+                if (
+                    candidate is None
+                    or candidate_id in seen
+                    or not decision.get("belongs_to_target")
+                    or clamp_score(decision.get("confidence")) < 80
+                ):
+                    continue
+                seen.add(candidate_id)
+                selected.append(
+                    {
+                        **candidate,
+                        "attribution": "contact_review_agent",
+                        "attribution_confidence": clamp_score(
+                            decision.get("confidence")
+                        ),
+                        "attribution_reason": str(decision.get("reason") or ""),
+                    }
+                )
+        return selected, "; ".join(errors)[:2000]
     except Exception as exc:  # noqa: BLE001
         return [], str(exc)[:2000]
 
@@ -777,6 +846,10 @@ def _vision_payload(image: CapturedImage) -> tuple[str, str]:
     with Image.open(io.BytesIO(image.data)) as source:
         source.seek(0)
         source.load()
+        if source.width < 11 or source.height < 11:
+            raise ImagePreflightSkip(
+                f"图片尺寸过小: {source.width}x{source.height}"
+            )
         if source.mode in {"RGBA", "LA"} or (
             source.mode == "P" and "transparency" in source.info
         ):
@@ -806,7 +879,8 @@ def _prepare_image_inputs(
         except Exception as exc:  # noqa: BLE001
             errors.append(
                 f"image index={image.index} content_type={image.content_type or 'unknown'} "
-                f"url={image.source_url[:300]} prepare_failed={type(exc).__name__}"
+                f"url={image.source_url[:300]} prepare_failed={type(exc).__name__} "
+                f"reason={str(exc)[:160]}"
             )
     return prepared, errors
 
