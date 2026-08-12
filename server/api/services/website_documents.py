@@ -111,6 +111,58 @@ def _host_in_roots(host: str, root_domains: list[str]) -> bool:
     )
 
 
+def select_official_seed_urls(
+    *,
+    fallback_urls: list[str],
+    known_alive_urls: list[str],
+    root_domains: list[str],
+) -> list[str]:
+    """Prefer already-probed primary website origins over guessed apex URLs."""
+    roots = {
+        str(value or "").casefold().strip(".").removeprefix("www.")
+        for value in root_domains
+        if str(value or "").strip()
+    }
+
+    def _normalized_primary(values: list[str]) -> list[str]:
+        candidates: list[tuple[tuple[int, int, str], str]] = []
+        seen: set[str] = set()
+        for raw in values:
+            normalized = normalize_url(raw)
+            if not normalized:
+                continue
+            try:
+                canonical = canonicalize_source_url(normalized)
+                parsed = urlsplit(canonical)
+                host = str(parsed.hostname or "").casefold().strip(".")
+                port = parsed.port
+            except (TypeError, ValueError):
+                continue
+            primary_root = host.removeprefix("www.")
+            if (
+                primary_root not in roots
+                or host not in {primary_root, f"www.{primary_root}"}
+                or port not in {None, 80, 443}
+                or (parsed.path or "/") != "/"
+                or parsed.query
+                or canonical in seen
+            ):
+                continue
+            seen.add(canonical)
+            rank = (
+                0 if parsed.scheme == "https" else 1,
+                0 if host.startswith("www.") else 1,
+                canonical,
+            )
+            candidates.append((rank, canonical))
+        return [url for _rank, url in sorted(candidates)]
+
+    alive_primary = _normalized_primary(known_alive_urls)
+    if alive_primary:
+        return alive_primary
+    return _normalized_primary(fallback_urls)
+
+
 def _is_document_url(url: str) -> bool:
     path = urlsplit(url).path
     if _PAGINATION_RE.search(path):
@@ -207,6 +259,7 @@ class WebsiteDocumentCollectionService:
         project_id: str,
         target: dict[str, Any],
         seed_urls: list[str],
+        known_alive_urls: list[str] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         target_id = str(target.get("target_id") or "").strip()
@@ -222,15 +275,11 @@ class WebsiteDocumentCollectionService:
             root = str(target.get("root_domain") or "").casefold().strip()
             if root:
                 root_domains = [root.removeprefix("www.")]
-        seeds = []
-        for raw in seed_urls:
-            normalized = normalize_url(raw)
-            if not normalized:
-                continue
-            canonical = canonicalize_source_url(normalized)
-            host = str(urlsplit(canonical).hostname or "")
-            if _host_in_roots(host, root_domains) and canonical not in seeds:
-                seeds.append(canonical)
+        seeds = select_official_seed_urls(
+            fallback_urls=seed_urls,
+            known_alive_urls=list(known_alive_urls or []),
+            root_domains=root_domains,
+        )
         if not target_id or not project_id or not root_domains or not seeds:
             return {
                 "enabled": False,
@@ -364,7 +413,7 @@ class WebsiteDocumentCollectionService:
             counters["total_pages"] = len(seen)
             counters["processed_pages"] = sum(
                 str(item.get("status") or "")
-                in {"discovered", "archived", "rejected", "error"}
+                in {"discovered", "archived", "rejected", "error", "superseded"}
                 for item in existing
             )
             counters["listing_pages"] = sum(
@@ -393,26 +442,24 @@ class WebsiteDocumentCollectionService:
                 int(item.get("finding_count") or 0) for item in existing
             )
             pending = [item for item in existing if item.get("status") == "pending"]
-            if not existing:
-                await _queue_items(
-                    [
-                        {
-                            "canonical_url": seed,
-                            "parent_url": "",
-                            "anchor_text": target_name,
-                            "kind": "index",
-                            "scope_relevant": False,
-                            "depth": 0,
-                            "priority": 60,
-                        }
-                        for seed in seeds
-                    ]
+            for item in pending:
+                await queue.put(
+                    (-int(item.get("priority") or 0), next(sequence), item)
                 )
-            else:
-                for item in pending:
-                    await queue.put(
-                        (-int(item.get("priority") or 0), next(sequence), item)
-                    )
+            await _queue_items(
+                [
+                    {
+                        "canonical_url": seed,
+                        "parent_url": "",
+                        "anchor_text": target_name,
+                        "kind": "index",
+                        "scope_relevant": False,
+                        "depth": 0,
+                        "priority": 60,
+                    }
+                    for seed in seeds
+                ]
+            )
 
         timeout = aiohttp.ClientTimeout(
             total=self.policy.request_timeout_seconds,

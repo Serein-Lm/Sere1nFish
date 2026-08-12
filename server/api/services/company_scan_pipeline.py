@@ -2792,6 +2792,7 @@ class CompanyScanPipeline:
                             "root_domains": root_domains,
                         },
                         seed_urls=root_urls,
+                        known_alive_urls=discovered_urls,
                     ),
                 ))
             else:

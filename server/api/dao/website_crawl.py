@@ -95,6 +95,22 @@ async def begin_task(
             }
         },
     )
+    await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
+        {
+            "crawl_task_id": crawl_task_id,
+            "depth": 0,
+            "parent_url": "",
+            "canonical_url": {"$nin": seeds},
+            "status": {"$nin": ["archived", "discovered", "rejected"]},
+        },
+        {
+            "$set": {
+                "status": "superseded",
+                "completed_at": now,
+                "updated_at": now,
+            }
+        },
+    )
     return await get_task(db, crawl_task_id) or {}
 
 

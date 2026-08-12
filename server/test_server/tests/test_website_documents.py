@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from api.services.source_documents.resources import extract_attachment_text
 from api.services.source_documents.web import parse_official_html
-from api.services.website_documents import classify_discovered_link
+from api.services.website_documents import (
+    classify_discovered_link,
+    select_official_seed_urls,
+)
 
 
 def test_official_html_extracts_article_and_attachment() -> None:
@@ -68,6 +71,30 @@ def test_crawl_link_classifier_ignores_navigation_but_keeps_notice_scope() -> No
     assert pagination and pagination["kind"] == "index"
     assert document and document["kind"] == "document"
     assert cross_scope_document is None
+
+
+def test_official_seed_selection_prefers_probed_www_origin() -> None:
+    seeds = select_official_seed_urls(
+        fallback_urls=["https://example.gov.cn/"],
+        known_alive_urls=[
+            "http://portal.example.gov.cn:9999/",
+            "https://www.example.gov.cn/",
+            "https://mail.example.gov.cn/",
+        ],
+        root_domains=["example.gov.cn"],
+    )
+
+    assert seeds == ["https://www.example.gov.cn/"]
+
+
+def test_official_seed_selection_falls_back_to_apex() -> None:
+    seeds = select_official_seed_urls(
+        fallback_urls=["example.gov.cn"],
+        known_alive_urls=[],
+        root_domains=["example.gov.cn"],
+    )
+
+    assert seeds == ["https://example.gov.cn/"]
 
 
 def test_xlsx_attachment_text_is_extracted() -> None:

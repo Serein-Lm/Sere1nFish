@@ -44,6 +44,22 @@ _OSINT_INTENT_RE = re.compile(
     r"(?:公网|互联网|网上|公开).{0,12}(?:信息|资料|检索|搜索|调研|研究|调查))",
     re.IGNORECASE,
 )
+_PUBLIC_WEB_SCOPE_RE = re.compile(
+    r"(?:公网|外网|互联网|网上|网页|网站|官网|搜索引擎|Bing|百度|公开来源|公开资料)",
+    re.IGNORECASE,
+)
+_PUBLIC_WEB_ACTION_RE = re.compile(
+    r"(?:搜索|检索|查找|找一下|搜一下|查询|收集|搜集|核验|调研|研究|看看)",
+    re.IGNORECASE,
+)
+_PUBLIC_CONTACT_RE = re.compile(
+    r"(?:邮箱|邮件地址|电子邮件|电话|座机|联系方式)",
+    re.IGNORECASE,
+)
+_PUBLIC_DOMAIN_RE = re.compile(
+    r"(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?![\w])",
+    re.IGNORECASE,
+)
 _PERSONA_COLLECTION_INTENT_RE = re.compile(
     r"(?:(?:主动|联网|公网|网上|持续|重新|补充|新增|创建|生成|采集|收集|爬取|研究)"
     r".{0,32}(?:人设|虚构画像)|(?:人设|虚构画像).{0,32}"
@@ -74,6 +90,8 @@ _SOCIAL_DISCOVERY_RE = re.compile(
 _CURRENT_REQUEST_MARKER = "【本轮用户请求】"
 _DIRECT_URL_AGENT_TIMEOUT_SECONDS = 90
 _DIRECT_URL_MCP_TOOL_LIMIT = 4
+_PUBLIC_WEB_AGENT_TIMEOUT_SECONDS = 360
+_PUBLIC_WEB_MCP_TOOL_LIMIT = 16
 _OSINT_AGENT_TIMEOUT_SECONDS = 420
 _OSINT_MCP_TOOL_LIMIT = 20
 _OSINT_SUMMARY_PROMPT = """你正在压缩一项尚未完成的人物公开情报研究。必须保留后续 Agent 完成任务所需的全部状态，不得改写任务目标。
@@ -164,6 +182,19 @@ def _has_osint_intent(query: str) -> bool:
     return bool(_OSINT_INTENT_RE.search(text))
 
 
+def _has_public_web_intent(query: str) -> bool:
+    """Detect explicit web research without inheriting stale conversation intent."""
+    text = str(query or "")
+    if _CURRENT_REQUEST_MARKER in text:
+        text = text.rpartition(_CURRENT_REQUEST_MARKER)[2]
+    has_action = bool(_PUBLIC_WEB_ACTION_RE.search(text))
+    if not has_action:
+        return False
+    if _PUBLIC_WEB_SCOPE_RE.search(text):
+        return True
+    return bool(_PUBLIC_CONTACT_RE.search(text) and _PUBLIC_DOMAIN_RE.search(text))
+
+
 def _has_persona_collection_intent(query: str) -> bool:
     """识别本轮主动采集或持续升级虚构人设的请求。"""
     text = str(query or "")
@@ -224,6 +255,13 @@ def _osint_classifications(query: str) -> list[Classification] | None:
     if not _has_osint_intent(query):
         return None
     return [{"source": "osint", "query": query, "requires_tools": True}]
+
+
+def _public_web_classifications(query: str) -> list[Classification] | None:
+    """Route generic public-web lookup to the browser-backed payload specialist."""
+    if not _has_public_web_intent(query):
+        return None
+    return [{"source": "payload", "query": query, "requires_tools": True}]
 
 
 def _persona_collection_classifications(
@@ -313,6 +351,8 @@ async def build_hub_graph(app_config: Any):
             classifications = _persona_collection_classifications(state["query"])
         if classifications is None:
             classifications = _osint_classifications(state["query"])
+        if classifications is None:
+            classifications = _public_web_classifications(state["query"])
         if classifications is None:
             structured_llm = router_llm.with_structured_output(ClassificationResult)
             with observation_context(phase="hub_classify", agent="hub_classify"):
@@ -439,8 +479,16 @@ async def build_hub_graph(app_config: Any):
             purpose="hub_payload",
             prompt_name="hub/payload",
             query=state["query"],
-            timeout=_DIRECT_URL_AGENT_TIMEOUT_SECONDS if direct_url_request else 300,
-            mcp_tool_limit=_DIRECT_URL_MCP_TOOL_LIMIT if direct_url_request else 12,
+            timeout=(
+                _DIRECT_URL_AGENT_TIMEOUT_SECONDS
+                if direct_url_request
+                else _PUBLIC_WEB_AGENT_TIMEOUT_SECONDS
+            ),
+            mcp_tool_limit=(
+                _DIRECT_URL_MCP_TOOL_LIMIT
+                if direct_url_request
+                else _PUBLIC_WEB_MCP_TOOL_LIMIT
+            ),
         )
 
     async def query_osint(state: AgentInput) -> dict:

@@ -93,6 +93,32 @@ def test_hub_direct_url_requests_use_the_bounded_research_path() -> None:
     assert _DIRECT_URL_AGENT_TIMEOUT_SECONDS == 90
 
 
+def test_hub_routes_explicit_public_web_queries_to_browser_payload() -> None:
+    from Sere1nGraph.graph.workflow.hub import (
+        _PUBLIC_WEB_AGENT_TIMEOUT_SECONDS,
+        _PUBLIC_WEB_MCP_TOOL_LIMIT,
+        _has_public_web_intent,
+        _public_web_classifications,
+    )
+
+    external_query = "给我找一下外网有关教育部门的邮箱信息"
+    domain_query = "查找 moe.edu.cn 这个后缀的公开邮箱"
+    assert _has_public_web_intent(external_query)
+    assert _has_public_web_intent(domain_query)
+    assert _public_web_classifications(external_query) == [
+        {"source": "payload", "query": external_query, "requires_tools": True}
+    ]
+    assert _public_web_classifications(domain_query) == [
+        {"source": "payload", "query": domain_query, "requires_tools": True}
+    ]
+    assert _public_web_classifications("查询当前项目已有 Finding") is None
+    assert _public_web_classifications(
+        "历史消息：在外网搜索邮箱\n【本轮用户请求】\n只查询现有项目数量"
+    ) is None
+    assert _PUBLIC_WEB_MCP_TOOL_LIMIT == 16
+    assert _PUBLIC_WEB_AGENT_TIMEOUT_SECONDS == 360
+
+
 def test_persona_profile_sources_are_kept_as_public_evidence() -> None:
     from api.dao.persons import _normalize_profile_sources
 
@@ -1410,6 +1436,8 @@ def test_payload_prompt_has_bounded_research_recovery() -> None:
     assert "检索预算与失败恢复" in content
     assert "生成 Word" in content
     assert "next_offset" in content
+    assert "一个首页、单一搜索词或单个入口不可访问" in content
+    assert "3-6 个互补查询式" in content
 
 
 def test_hub_prompts_route_and_ground_copywriting_requests() -> None:
