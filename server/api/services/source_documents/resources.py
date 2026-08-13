@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -75,6 +76,9 @@ _DOCX_OCR_DEADLINE_SECONDS = 900
 _DOCX_RASTER_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 _OFFICE_CONVERSION_TIMEOUT_SECONDS = 300
 _OFFICE_CONVERSION_SLOTS = threading.BoundedSemaphore(2)
+_OPENSSL_LEGACY_SERVER_CONNECT = int(
+    getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00000004)
+)
 
 
 @dataclass(slots=True)
@@ -83,6 +87,17 @@ class FetchedResource:
     data: bytes
     content_type: str
     filename: str
+
+
+def create_public_fetch_ssl_context() -> ssl.SSLContext:
+    """Create the relaxed TLS context used only for public evidence downloads."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    # OpenSSL 3 disables legacy server renegotiation by default. Some public
+    # institution CDNs still require it before any HTTP response is available.
+    context.options |= _OPENSSL_LEGACY_SERVER_CONNECT
+    return context
 
 
 def html_text_and_links(

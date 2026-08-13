@@ -190,6 +190,191 @@ async def probe_cdp_page_access(
         }
 
 
+async def capture_cdp_rendered_links(
+    cdp_url: str,
+    preferred_url: str,
+    *,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Render one public page and return its final DOM links without an LLM."""
+    import websockets
+
+    created_target_id = ""
+    async with asyncio.timeout(max(8.0, float(timeout_seconds))):
+        async with websockets.connect(
+            cdp_url,
+            open_timeout=5,
+            close_timeout=2,
+            max_size=16 * 1024 * 1024,
+        ) as websocket:
+            command_id = 0
+
+            async def _command(
+                method: str,
+                *,
+                params: dict[str, Any] | None = None,
+                session_id: str = "",
+            ) -> dict[str, Any]:
+                nonlocal command_id
+                command_id += 1
+                return await _cdp_command(
+                    websocket,
+                    command_id,
+                    method,
+                    params=params,
+                    session_id=session_id,
+                )
+
+            await _ignore_certificate_errors(_command)
+            created = await _command(
+                "Target.createTarget",
+                params={"url": "about:blank"},
+            )
+            created_target_id = str(created.get("targetId") or "")
+            if not created_target_id:
+                raise RuntimeError("无法创建浏览器渲染页面")
+            attached = await _command(
+                "Target.attachToTarget",
+                params={"targetId": created_target_id, "flatten": True},
+            )
+            session_id = str(attached.get("sessionId") or "")
+            if not session_id:
+                raise RuntimeError("无法附加浏览器渲染页面")
+            try:
+                await _command("Page.enable", session_id=session_id)
+                navigated = await _command(
+                    "Page.navigate",
+                    params={"url": preferred_url},
+                    session_id=session_id,
+                )
+                if navigated.get("errorText"):
+                    raise RuntimeError(str(navigated["errorText"]))
+
+                page: dict[str, Any] = {}
+                stable_polls = 0
+                previous_signature: tuple[int, int] | None = None
+                for poll_index in range(30):
+                    await asyncio.sleep(0.5)
+                    evaluated = await _command(
+                        "Runtime.evaluate",
+                        params={
+                            "expression": """
+                                (() => {
+                                  const rows = [];
+                                  const seen = new Set();
+                                  const nodes = document.querySelectorAll(
+                                    'a[href],iframe[src],embed[src],object[data]'
+                                  );
+                                  for (const node of nodes) {
+                                    const raw = node.href || node.src || node.data || '';
+                                    let url = '';
+                                    try { url = new URL(raw, document.baseURI).href; }
+                                    catch (_) { continue; }
+                                    if (!/^https?:/i.test(url) || seen.has(url)) continue;
+                                    seen.add(url);
+                                    const label = (
+                                      node.innerText || node.textContent ||
+                                      node.getAttribute('aria-label') ||
+                                      node.getAttribute('title') || ''
+                                    ).replace(/\\s+/g, ' ').trim().slice(0, 500);
+                                    rows.push({url, label});
+                                    if (rows.length >= 5000) break;
+                                  }
+                                  return {
+                                    href: location.href,
+                                    title: document.title,
+                                    readyState: document.readyState,
+                                    contentLength: (document.body?.innerText || '').length,
+                                    html: document.documentElement.outerHTML.slice(0, 8000000),
+                                    links: rows
+                                  };
+                                })()
+                            """,
+                            "returnByValue": True,
+                        },
+                        session_id=session_id,
+                    )
+                    page = dict(
+                        ((evaluated.get("result") or {}).get("value") or {})
+                    )
+                    links = list(page.get("links") or [])
+                    signature = (
+                        int(page.get("contentLength") or 0),
+                        len(links),
+                    )
+                    if signature == previous_signature:
+                        stable_polls += 1
+                    else:
+                        stable_polls = 0
+                        previous_signature = signature
+                    if (
+                        poll_index >= 3
+                        and page.get("readyState") == "complete"
+                        and stable_polls >= 2
+                    ):
+                        break
+            finally:
+                try:
+                    await _command(
+                        "Target.closeTarget",
+                        params={"targetId": created_target_id},
+                    )
+                except Exception:
+                    pass
+
+    final_url = str(page.get("href") or preferred_url)
+    if not final_url.startswith(("http://", "https://")):
+        raise RuntimeError(f"浏览器落入错误页: {final_url[:200]}")
+    return {
+        "url": preferred_url,
+        "final_url": final_url,
+        "title": str(page.get("title") or "")[:500],
+        "content_length": max(0, int(page.get("contentLength") or 0)),
+        "html": str(page.get("html") or ""),
+        "links": list(page.get("links") or []),
+    }
+
+
+async def discover_managed_rendered_links(
+    url: str,
+    *,
+    task_id: str,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Use the managed Chrome provider for one bounded rendered discovery."""
+    from api.services.url_security import assert_public_http_url
+    from browser_manager.provider import get_browser_provider
+
+    public_url = str(url or "").strip()
+    await assert_public_http_url(public_url)
+    provider = get_browser_provider()
+    lease_id = f"{task_id}_{hashlib.sha1(public_url.encode()).hexdigest()[:12]}"
+    cdp_url = ""
+    try:
+        cdp_url = str(
+            await provider.get_cdp_endpoint(
+                task_id=lease_id,
+                purpose="url_scan",
+            )
+            or ""
+        )
+        if not cdp_url:
+            raise RuntimeError("无法获取 Chrome 容器")
+        rendered = await capture_cdp_rendered_links(
+            cdp_url,
+            public_url,
+            timeout_seconds=timeout_seconds,
+        )
+        await assert_public_http_url(str(rendered.get("final_url") or ""))
+        return rendered
+    finally:
+        if cdp_url:
+            try:
+                await provider.release_cdp_endpoint(task_id=lease_id)
+            except Exception:
+                pass
+
+
 async def capture_cdp_page_screenshot(
     cdp_url: str,
     preferred_url: str,

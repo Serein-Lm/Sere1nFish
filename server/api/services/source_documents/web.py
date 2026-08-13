@@ -27,6 +27,7 @@ from .contracts import (
 )
 from .resources import (
     ATTACHMENT_EXTENSIONS,
+    create_public_fetch_ssl_context,
     extract_html_links,
     extract_attachment_text,
     fetch_resource_with_retry,
@@ -293,7 +294,7 @@ class OfficialWebDocumentProvider:
         connector = aiohttp.TCPConnector(
             limit=16,
             ttl_dns_cache=180,
-            ssl=False,
+            ssl=create_public_fetch_ssl_context(),
         )
         async with aiohttp.ClientSession(
             timeout=timeout,
@@ -380,6 +381,42 @@ class OfficialWebDocumentProvider:
                 url=page.url,
                 content_type=page.content_type,
             )
+            rendered_html = page.data
+            capture_mode = "static"
+            rendered_capture_error = ""
+            if len(str(parsed.get("text") or "").strip()) < 200:
+                try:
+                    from api.services.web_capture import (
+                        discover_managed_rendered_links,
+                    )
+
+                    rendered = await discover_managed_rendered_links(
+                        page.url,
+                        task_id=f"{task_id or 'source_document'}_render",
+                        timeout_seconds=60,
+                    )
+                    rendered_bytes = str(
+                        rendered.get("html") or ""
+                    ).encode("utf-8")
+                    rendered_parsed = parse_official_html(
+                        rendered_bytes,
+                        url=str(rendered.get("final_url") or page.url),
+                        content_type="text/html; charset=utf-8",
+                    )
+                    if len(str(rendered_parsed.get("text") or "")) > len(
+                        str(parsed.get("text") or "")
+                    ):
+                        parsed = rendered_parsed
+                        rendered_html = rendered_bytes
+                        capture_mode = "rendered"
+                except Exception as exc:  # noqa: BLE001
+                    rendered_capture_error = str(exc)[:1_000]
+                    logger.warning(
+                        "官网动态正文渲染失败 task=%s url=%s error=%s",
+                        task_id,
+                        page.url,
+                        exc,
+                    )
             images, image_errors, image_warnings = await self._download_images(
                 session, parsed["image_urls"]
             )
@@ -408,12 +445,14 @@ class OfficialWebDocumentProvider:
             publish_time=parsed["publish_time"],
             text=combined_text,
             raw_html=page.data,
-            rendered_html=page.data,
+            rendered_html=rendered_html,
             images=images,
             attachments=attachments,
             metadata={
                 "http_status": 200,
                 "final_url": page.url,
+                "capture_mode": capture_mode,
+                "rendered_capture_error": rendered_capture_error,
                 "article_text": parsed["text"],
                 "image_urls": parsed["image_urls"],
                 "image_download_errors": image_errors,

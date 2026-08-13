@@ -96,6 +96,17 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
         raise ValueError("官网归档模式必须为 standard 或 deep")
     params["website_collection_mode"] = website_collection_mode
 
+    if "website_required_path_segments" in params:
+        from api.services.website_documents import (
+            normalize_required_path_segments,
+        )
+
+        params["website_required_path_segments"] = (
+            normalize_required_path_segments(
+                params.get("website_required_path_segments")
+            )
+        )
+
     if params.get("enable_control_structure", False) or any(
         key in params
         for key in (
@@ -293,6 +304,9 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         ),
         company_core_concurrency=tuning.company_scan_concurrency,
         website_collection_mode=params.get("website_collection_mode", "deep"),
+        website_required_path_segments=params.get(
+            "website_required_path_segments", []
+        ),
         requested_by=str(params.get("_requested_by") or ""),
     )
     if result.get("status") == "error":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -9,9 +10,20 @@ import aiohttp
 from api.dao import website_crawl as website_crawl_dao
 from api.dao.website_crawl import counters_from_summary
 from api.services.source_documents.resources import (
+    create_public_fetch_ssl_context,
     extract_attachment_text,
     html_text_and_links,
 )
+
+
+def test_public_fetch_ssl_context_supports_legacy_public_sites() -> None:
+    context = create_public_fetch_ssl_context()
+
+    assert context.check_hostname is False
+    assert context.verify_mode == ssl.CERT_NONE
+    assert context.options & int(
+        getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00000004)
+    )
 
 
 def test_final_crawl_counters_are_derived_from_authoritative_summary() -> None:
@@ -76,6 +88,7 @@ from api.services.website_documents import (
     classify_discovered_link,
     resolve_website_collection_policy,
     select_official_seed_urls,
+    url_matches_required_path_segments,
 )
 
 
@@ -566,6 +579,73 @@ def test_official_seed_selection_falls_back_to_apex() -> None:
     )
 
     assert seeds == ["https://example.gov.cn/"]
+
+
+def test_official_seed_selection_isolates_shared_site_path() -> None:
+    seeds = select_official_seed_urls(
+        fallback_urls=[
+            "https://www.10086.cn/",
+            "https://www.10086.cn/aboutus/news/pannounce/ah/",
+            "https://www.10086.cn/zzxx/ah/",
+            "https://www.10086.cn/aboutus/news/pannounce/ha/",
+        ],
+        known_alive_urls=[
+            "https://www.10086.cn/",
+            "https://www.10086.cn/aboutus/culture/intro/ah/",
+        ],
+        root_domains=["10086.cn"],
+        required_path_segments=["ah"],
+    )
+
+    assert seeds == [
+        "https://www.10086.cn/aboutus/culture/intro/ah/",
+        "https://www.10086.cn/aboutus/news/pannounce/ah/",
+        "https://www.10086.cn/zzxx/ah/",
+    ]
+
+
+def test_required_path_segment_matching_is_exact() -> None:
+    assert url_matches_required_path_segments(
+        "https://www.10086.cn/aboutus/news/pannounce/ah/index.html",
+        ["ah"],
+    )
+    assert not url_matches_required_path_segments(
+        "https://www.10086.cn/aboutus/news/pannounce/ha/index.html",
+        ["ah"],
+    )
+
+
+def test_crawl_link_classifier_recognizes_detail_page_patterns() -> None:
+    announcement = classify_discovered_link(
+        url=(
+            "https://www.10086.cn/aboutus/news/pannounce/ah/"
+            "index_551_551_detail_55624.html"
+        ),
+        label="业务升级公告",
+        parent_url="https://www.10086.cn/aboutus/news/pannounce/ah/",
+        parent_relevant=True,
+        depth=1,
+        max_depth=5,
+        broad_official_discovery=True,
+    )
+    contact = classify_discovered_link(
+        url=(
+            "https://www.10086.cn/aboutus/culture/intro/"
+            "province_culture_intro_detail/ah/index.html?id=3"
+        ),
+        label="联系方式",
+        parent_url=(
+            "https://www.10086.cn/aboutus/culture/intro/"
+            "province_culture_intro/ah/"
+        ),
+        parent_relevant=True,
+        depth=1,
+        max_depth=5,
+        broad_official_discovery=True,
+    )
+
+    assert announcement and announcement["kind"] == "document"
+    assert contact and contact["kind"] == "document"
 
 
 def test_deep_website_collection_policy_expands_bounded_budget() -> None:

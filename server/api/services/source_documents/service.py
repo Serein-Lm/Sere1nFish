@@ -281,6 +281,11 @@ def _archive_completeness(
     )
     if attachment_download_errors:
         errors.append(f"附件下载失败 {len(attachment_download_errors)} 个")
+    rendered_capture_error = str(
+        capture_metadata.get("rendered_capture_error") or ""
+    ).strip()
+    if rendered_capture_error:
+        errors.append(f"动态正文渲染失败: {rendered_capture_error[:300]}")
     attachment_download_warnings = list(
         capture_metadata.get("attachment_download_warnings") or []
     )

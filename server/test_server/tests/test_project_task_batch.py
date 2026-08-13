@@ -237,3 +237,22 @@ def test_company_scan_validates_website_collection_mode() -> None:
 
     with pytest.raises(ValueError, match="standard 或 deep"):
         _validate_company_scan_params({"website_collection_mode": "unbounded"})
+
+
+def test_company_scan_normalizes_website_path_scope() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    params = {"website_required_path_segments": [" /AH/ ", "ah"]}
+
+    _validate_company_scan_params(params)
+
+    assert params["website_required_path_segments"] == ["ah"]
+
+
+def test_company_scan_rejects_invalid_website_path_scope() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    with pytest.raises(ValueError, match="无效的官网路径段"):
+        _validate_company_scan_params(
+            {"website_required_path_segments": ["ah/other"]}
+        )

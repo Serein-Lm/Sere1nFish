@@ -339,6 +339,7 @@ class CompanyScanPipeline:
         skip_completed_subsidiaries: bool = True,
         company_core_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY,
         website_collection_mode: str = "deep",
+        website_required_path_segments: list[str] | None = None,
         requested_by: str = "",
     ) -> dict[str, Any]:
         """
@@ -1165,6 +1166,9 @@ class CompanyScanPipeline:
                         url_scan_concurrency=url_scan_concurrency,
                         copywriting_concurrency=copywriting_concurrency,
                         website_collection_mode=website_collection_mode,
+                        website_required_path_segments=(
+                            website_required_path_segments
+                        ),
                     ),
                 ))
 
@@ -2832,6 +2836,7 @@ class CompanyScanPipeline:
         progress_task_id: str = "",
         progress_source: str = "",
         website_collection_mode: str = "deep",
+        website_required_path_segments: list[str] | None = None,
     ) -> dict[str, Any]:
         from api.services.asset_intelligence import AssetIdentity, AssetIntelligenceService
 
@@ -2912,7 +2917,13 @@ class CompanyScanPipeline:
                 ]
             )[:6]
             root_urls = [normalize_url(domain) for domain in root_domains if domain]
-            merged_urls = self._dedupe_text([*root_urls, *urls, *discovered_urls])
+            direct_root_urls = (
+                [] if website_required_path_segments else root_urls
+            )
+            merged_urls = self._dedupe_text(
+                [*direct_root_urls, *urls, *discovered_urls]
+            )
+            website_seed_urls = self._dedupe_text([*urls, *root_urls])
             operations: list[tuple[str, Any]] = []
             if merged_urls or url_text.strip():
                 operations.append((
@@ -2940,7 +2951,7 @@ class CompanyScanPipeline:
                         },
                     ),
                 ))
-            if root_urls and identity.get("target_id"):
+            if website_seed_urls and identity.get("target_id"):
                 from api.services.info_collection.tuning import (
                     get_collection_runtime_tuning,
                 )
@@ -2970,8 +2981,11 @@ class CompanyScanPipeline:
                             "root_domain": str(identity.get("root_domain") or ""),
                             "root_domains": root_domains,
                         },
-                        seed_urls=root_urls,
+                        seed_urls=website_seed_urls,
                         known_alive_urls=discovered_urls,
+                        required_path_segments=(
+                            website_required_path_segments
+                        ),
                     ),
                 ))
             else:

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -17,6 +17,7 @@ from api.dao import website_crawl as crawl_dao
 from api.services.company_url import normalize_url
 from api.services.site_relevance import classify_candidate_surface
 from api.services.source_documents.resources import (
+    create_public_fetch_ssl_context,
     fetch_resource_with_retry,
     html_text_and_links,
     is_attachment_link,
@@ -31,7 +32,11 @@ from core.mobile.collect.contacts import build_contact_findings
 logger = get_logger("website_documents")
 
 _MAX_HTML_BYTES = 8 * 1024 * 1024
-_DISCOVERY_POLICY_VERSION = 2
+_DISCOVERY_POLICY_VERSION = 5
+_DETAIL_DOCUMENT_PATH_RE = re.compile(
+    r"(?:^|[/_.-])detail(?:[/_.-]|$)",
+    re.I,
+)
 _DOCUMENT_PATH_RE = re.compile(
     r"/(?:19|20)\d{2}(?:\d{2})?/t(?:19|20)\d{6}_[^/]+\.s?html?$",
     re.I,
@@ -197,11 +202,62 @@ def _host_in_roots(host: str, root_domains: list[str]) -> bool:
     )
 
 
+def normalize_required_path_segments(values: Any) -> list[str]:
+    """Normalize exact URL path segments used to isolate shared official sites."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raise ValueError("官网路径范围必须为字符串列表")
+
+    normalized: list[str] = []
+    for raw in raw_values:
+        segment = unquote(str(raw or "")).strip().strip("/").casefold()
+        if not segment:
+            continue
+        if (
+            len(segment) > 128
+            or "/" in segment
+            or "?" in segment
+            or "#" in segment
+            or segment in {".", ".."}
+        ):
+            raise ValueError(f"无效的官网路径段: {raw}")
+        if segment not in normalized:
+            normalized.append(segment)
+    if len(normalized) > 32:
+        raise ValueError("官网路径范围最多允许 32 个路径段")
+    return normalized
+
+
+def url_matches_required_path_segments(
+    url: str,
+    required_path_segments: list[str] | tuple[str, ...] | set[str] | str | None,
+) -> bool:
+    """Match complete path segments so similar province codes cannot overlap."""
+    required = normalize_required_path_segments(required_path_segments)
+    if not required:
+        return True
+    try:
+        path_segments = {
+            unquote(segment).strip().casefold()
+            for segment in urlsplit(str(url or "")).path.split("/")
+            if unquote(segment).strip()
+        }
+    except (TypeError, ValueError):
+        return False
+    return any(segment in path_segments for segment in required)
+
+
 def select_official_seed_urls(
     *,
     fallback_urls: list[str],
     known_alive_urls: list[str],
     root_domains: list[str],
+    required_path_segments: list[str] | None = None,
 ) -> list[str]:
     """Prefer already-probed primary website origins over guessed apex URLs."""
     roots = {
@@ -209,6 +265,41 @@ def select_official_seed_urls(
         for value in root_domains
         if str(value or "").strip()
     }
+    required_segments = normalize_required_path_segments(required_path_segments)
+
+    def _normalized_scoped(values: list[str]) -> list[str]:
+        candidates: list[tuple[tuple[int, int, str], str]] = []
+        seen: set[str] = set()
+        for raw in values:
+            normalized = normalize_url(raw)
+            if not normalized:
+                continue
+            try:
+                canonical = canonicalize_source_url(normalized)
+                parsed = urlsplit(canonical)
+                host = str(parsed.hostname or "").casefold().strip(".")
+                port = parsed.port
+            except (TypeError, ValueError):
+                continue
+            if (
+                not _host_in_roots(host, list(roots))
+                or port not in {None, 80, 443}
+                or parsed.query
+                or not url_matches_required_path_segments(
+                    canonical,
+                    required_segments,
+                )
+                or canonical in seen
+            ):
+                continue
+            seen.add(canonical)
+            rank = (
+                0 if parsed.scheme == "https" else 1,
+                0 if host.startswith("www.") else 1,
+                canonical,
+            )
+            candidates.append((rank, canonical))
+        return [url for _rank, url in sorted(candidates)]
 
     def _normalized_primary(values: list[str]) -> list[str]:
         candidates: list[tuple[tuple[int, int, str], str]] = []
@@ -243,6 +334,11 @@ def select_official_seed_urls(
             candidates.append((rank, canonical))
         return [url for _rank, url in sorted(candidates)]
 
+    if required_segments:
+        scoped_alive = _normalized_scoped(known_alive_urls)
+        scoped_fallback = _normalized_scoped(fallback_urls)
+        return list(dict.fromkeys([*scoped_alive, *scoped_fallback]))
+
     alive_primary = _normalized_primary(known_alive_urls)
     if alive_primary:
         return alive_primary
@@ -266,6 +362,8 @@ def _is_pagination_link(url: str, label: str = "") -> bool:
 
 def _is_document_url(url: str, label: str = "") -> bool:
     path = urlsplit(url).path
+    if _DETAIL_DOCUMENT_PATH_RE.search(path):
+        return True
     if _is_pagination_link(url, label):
         return False
     if _DOCUMENT_PATH_RE.search(path) or _DATE_DOCUMENT_RE.search(path):
@@ -384,6 +482,7 @@ class WebsiteDocumentCollectionService:
         target: dict[str, Any],
         seed_urls: list[str],
         known_alive_urls: list[str] | None = None,
+        required_path_segments: list[str] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         target_id = str(target.get("target_id") or "").strip()
@@ -399,10 +498,14 @@ class WebsiteDocumentCollectionService:
             root = str(target.get("root_domain") or "").casefold().strip()
             if root:
                 root_domains = [root.removeprefix("www.")]
+        required_segments = normalize_required_path_segments(
+            required_path_segments
+        )
         seeds = select_official_seed_urls(
             fallback_urls=seed_urls,
             known_alive_urls=list(known_alive_urls or []),
             root_domains=root_domains,
+            required_path_segments=required_segments,
         )
         if not target_id or not project_id or not root_domains or not seeds:
             return {
@@ -422,6 +525,7 @@ class WebsiteDocumentCollectionService:
             "request_timeout_seconds": self.policy.request_timeout_seconds,
             "max_page_attempts": self.policy.max_page_attempts,
             "broad_official_discovery": self.policy.broad_official_discovery,
+            "required_path_segments": required_segments,
         }
         if not dry_run:
             await crawl_dao.begin_task(
@@ -456,6 +560,8 @@ class WebsiteDocumentCollectionService:
             "attachments_archived": 0,
             "contacts_found": 0,
             "findings_upserted": 0,
+            "rendered_discovery_pages": 0,
+            "rendered_discovery_failures": 0,
         }
         preview: list[dict[str, Any]] = []
         truncated = False
@@ -633,9 +739,12 @@ class WebsiteDocumentCollectionService:
         connector = aiohttp.TCPConnector(
             limit=self.policy.discovery_concurrency * 2,
             ttl_dns_cache=180,
-            ssl=False,
+            ssl=create_public_fetch_ssl_context(),
         )
         archive_semaphore = asyncio.Semaphore(self.policy.archive_concurrency)
+        rendered_discovery_semaphore = asyncio.Semaphore(
+            max(1, min(self.policy.archive_concurrency, 4))
+        )
 
         async def _record_progress() -> None:
             if dry_run:
@@ -747,6 +856,7 @@ class WebsiteDocumentCollectionService:
                     "attachment_count": attachments,
                     "contact_count": len(contacts),
                     "finding_count": len(findings),
+                    "kind": "document",
                     "contact_attribution_error": attribution_error,
                 },
             )
@@ -777,28 +887,88 @@ class WebsiteDocumentCollectionService:
                 fetched.url,
                 content_type=fetched.content_type,
             )
-            candidates: list[dict[str, Any]] = []
-            for link in links:
+            content_length = len(text)
+            discovery_mode = "static"
+
+            def _classify_links(
+                discovered_links: list[dict[str, Any]],
+                *,
+                parent_url: str,
+            ) -> list[dict[str, Any]]:
+                classified: list[dict[str, Any]] = []
+                for link in discovered_links:
+                    try:
+                        canonical = canonicalize_source_url(link["url"])
+                        host = str(urlsplit(canonical).hostname or "")
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not _host_in_roots(host, root_domains):
+                        continue
+                    if not url_matches_required_path_segments(
+                        canonical,
+                        required_segments,
+                    ):
+                        continue
+                    candidate = classify_discovered_link(
+                        url=canonical,
+                        label=str(link.get("label") or ""),
+                        parent_url=parent_url,
+                        parent_relevant=bool(item.get("scope_relevant")),
+                        depth=int(item.get("depth") or 0) + 1,
+                        max_depth=self.policy.max_depth,
+                        broad_official_discovery=(
+                            self.policy.broad_official_discovery
+                        ),
+                    )
+                    if candidate:
+                        classified.append(candidate)
+                return classified
+
+            candidates = _classify_links(
+                links,
+                parent_url=item["canonical_url"],
+            )
+            if not candidates and self.policy.broad_official_discovery:
                 try:
-                    canonical = canonicalize_source_url(link["url"])
-                    host = str(urlsplit(canonical).hostname or "")
-                except (TypeError, ValueError):
-                    continue
-                if not _host_in_roots(host, root_domains):
-                    continue
-                candidate = classify_discovered_link(
-                    url=canonical,
-                    label=str(link.get("label") or ""),
-                    parent_url=item["canonical_url"],
-                    parent_relevant=bool(item.get("scope_relevant")),
-                    depth=int(item.get("depth") or 0) + 1,
-                    max_depth=self.policy.max_depth,
-                    broad_official_discovery=(
-                        self.policy.broad_official_discovery
-                    ),
-                )
-                if candidate:
-                    candidates.append(candidate)
+                    from api.services.web_capture import (
+                        discover_managed_rendered_links,
+                    )
+
+                    async with rendered_discovery_semaphore:
+                        rendered = await discover_managed_rendered_links(
+                            item["canonical_url"],
+                            task_id=f"{crawl_task_id}_render",
+                            timeout_seconds=min(
+                                self.policy.request_timeout_seconds,
+                                60,
+                            ),
+                        )
+                    rendered_links = list(rendered.get("links") or [])
+                    candidates = _classify_links(
+                        rendered_links,
+                        parent_url=str(
+                            rendered.get("final_url")
+                            or item["canonical_url"]
+                        ),
+                    )
+                    links = rendered_links
+                    content_length = max(
+                        content_length,
+                        int(rendered.get("content_length") or 0),
+                    )
+                    discovery_mode = "rendered"
+                    counters["rendered_discovery_pages"] += 1
+                except Exception as exc:  # noqa: BLE001
+                    counters["rendered_discovery_failures"] += 1
+                    logger.warning(
+                        "官网动态目录渲染失败 task=%s url=%s error=%s",
+                        crawl_task_id,
+                        item.get("canonical_url"),
+                        exc,
+                    )
+                    raise RuntimeError(
+                        f"动态目录渲染失败: {exc}"
+                    ) from exc
             await _queue_items(candidates)
             counters["listing_pages"] += 1
             if not dry_run:
@@ -808,9 +978,10 @@ class WebsiteDocumentCollectionService:
                     status="discovered",
                     fields={
                         "final_url": fetched.url,
-                        "content_length": len(text),
+                        "content_length": content_length,
                         "links_discovered": len(links),
                         "links_enqueued": len(candidates),
+                        "discovery_mode": discovery_mode,
                     },
                 )
 
@@ -832,7 +1003,11 @@ class WebsiteDocumentCollectionService:
                     queued = await queue.get()
                     item = queued[2]
                     try:
-                        if item.get("kind") == "document":
+                        if item.get("kind") == "document" or _is_document_url(
+                            str(item.get("canonical_url") or ""),
+                            str(item.get("anchor_text") or ""),
+                        ):
+                            item["kind"] = "document"
                             await _archive(item)
                         else:
                             await _discover(session, item)
@@ -957,6 +1132,7 @@ class WebsiteDocumentCollectionService:
             **counters,
             "truncated": truncated,
             "dry_run": dry_run,
+            "required_path_segments": required_segments,
         }
         if dry_run:
             summary["preview"] = preview
