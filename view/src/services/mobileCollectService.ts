@@ -99,6 +99,11 @@ export interface CollectRecord {
   discovery_screenshot_urls?: string[]
   is_new?: boolean
   is_changed?: boolean
+  ranking_version?: number
+  value_tier?: number
+  contact_count?: number
+  published_at?: string
+  sort_time?: string
   first_seen?: string
   last_seen?: string
 }
@@ -245,6 +250,8 @@ export function listRecords(params: {
   target_id?: string
   only_incremental?: boolean
   archived_only?: boolean
+  min_score?: number
+  sort_by?: 'score_desc' | 'time_desc' | 'value_time'
   skip?: number
   limit?: number
 }) {

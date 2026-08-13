@@ -279,6 +279,7 @@ async def list_records(payload: RecordsListRequest):
         only_incremental=payload.only_incremental,
         archived_only=payload.archived_only,
         min_score=payload.min_score,
+        sort_by=payload.sort_by,
         skip=payload.skip,
         limit=payload.limit,
     )

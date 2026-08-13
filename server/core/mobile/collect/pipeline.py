@@ -1522,6 +1522,7 @@ class _PersistStage(Stage):
                 payload.get("discovery_screenshot_urls") or []
             ),
             discovery_fields=(payload.get("discovery_fields") or None),
+            contact_count=len(contacts),
         )
         counters["total"] += 1
         if result["is_new"]:

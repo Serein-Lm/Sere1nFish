@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import ReturnDocument
+from pymongo import ReturnDocument, UpdateOne
 
 from api.db.collections import (
     MOBILE_COLLECT_CHECKPOINTS_COLLECTION,
@@ -29,6 +32,200 @@ from api.dao.project_scope import project_scope_query
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+RECORD_RANKING_VERSION = 1
+RECORD_SORT_MODES = {"score_desc", "time_desc", "value_time"}
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_PUBLISH_TIME_KEYS = (
+    "publish_time",
+    "published_at",
+    "publish_date",
+    "published_time",
+    "发布时间",
+)
+
+
+def parse_record_publish_time(
+    value: Any,
+    *,
+    reference: datetime | None = None,
+) -> datetime | None:
+    """Normalize common article timestamps to a timezone-aware UTC datetime."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_SHANGHAI_TZ)
+        return parsed.astimezone(timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    text = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", str(value))
+        if unicodedata.category(character) != "Cf"
+    ).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{10,13}", text):
+        return parse_record_publish_time(int(text), reference=reference)
+
+    reference_utc = reference or _now()
+    if reference_utc.tzinfo is None:
+        reference_utc = reference_utc.replace(tzinfo=timezone.utc)
+    local_reference = reference_utc.astimezone(_SHANGHAI_TZ)
+    relative_match = re.fullmatch(r"(\d+)\s*(分钟|小时|天)前", text)
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2)
+        delta = {
+            "分钟": timedelta(minutes=amount),
+            "小时": timedelta(hours=amount),
+            "天": timedelta(days=amount),
+        }[unit]
+        return (local_reference - delta).astimezone(timezone.utc)
+    if text in {"刚刚", "现在"}:
+        return reference_utc.astimezone(timezone.utc)
+
+    day_match = re.fullmatch(
+        r"(今天|昨天|前天)(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?",
+        text,
+    )
+    if day_match:
+        day_offset = {"今天": 0, "昨天": 1, "前天": 2}[day_match.group(1)]
+        local_date = (local_reference - timedelta(days=day_offset)).date()
+        parsed = datetime(
+            local_date.year,
+            local_date.month,
+            local_date.day,
+            int(day_match.group(2) or 0),
+            int(day_match.group(3) or 0),
+            int(day_match.group(4) or 0),
+            tzinfo=_SHANGHAI_TZ,
+        )
+        return parsed.astimezone(timezone.utc)
+
+    normalized = re.sub(r"\s+", " ", text)
+    normalized = (
+        normalized.replace("年", "-")
+        .replace("月", "-")
+        .replace("日", " ")
+        .replace("时", ":")
+        .replace("分", ":")
+        .replace("秒", "")
+        .replace("/", "-")
+    ).strip().rstrip(":")
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        for pattern in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%Y.%m.%d %H:%M:%S",
+            "%Y.%m.%d %H:%M",
+            "%Y.%m.%d",
+        ):
+            try:
+                parsed = datetime.strptime(normalized, pattern)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_SHANGHAI_TZ)
+    return parsed.astimezone(timezone.utc)
+
+
+def build_record_ranking_fields(
+    fields: dict[str, Any],
+    *,
+    score: Any,
+    last_seen: datetime | None = None,
+    contact_count: int | None = None,
+) -> dict[str, Any]:
+    """Build the durable value-first, recency-second record ranking projection."""
+    if contact_count is None:
+        from core.mobile.collect.contacts import extract_contacts, record_text_blob
+
+        contact_count = len(extract_contacts(record_text_blob(fields)))
+    safe_contact_count = max(0, int(contact_count or 0))
+    try:
+        safe_score = max(0, min(100, int(score or 0)))
+    except (TypeError, ValueError):
+        safe_score = 0
+    if safe_contact_count:
+        value_tier = 3
+    elif safe_score >= 80:
+        value_tier = 2
+    elif safe_score >= 40:
+        value_tier = 1
+    else:
+        value_tier = 0
+
+    publish_value = next(
+        (
+            fields.get(key)
+            for key in _PUBLISH_TIME_KEYS
+            if fields.get(key) not in (None, "")
+        ),
+        None,
+    )
+    published_at = parse_record_publish_time(publish_value, reference=last_seen)
+    fallback_time = last_seen or _now()
+    if fallback_time.tzinfo is None:
+        fallback_time = fallback_time.replace(tzinfo=timezone.utc)
+    ranking = {
+        "ranking_version": RECORD_RANKING_VERSION,
+        "value_tier": value_tier,
+        "contact_count": safe_contact_count,
+        "sort_time": published_at or fallback_time.astimezone(timezone.utc),
+    }
+    if published_at is not None:
+        ranking["published_at"] = published_at
+    return ranking
+
+
+def normalize_record_sort_mode(value: str | None) -> str:
+    normalized = str(value or "score_desc").strip().casefold()
+    if normalized not in RECORD_SORT_MODES:
+        raise ValueError(f"不支持的采集记录排序方式: {normalized}")
+    return normalized
+
+
+def record_sort_spec(sort_by: str | None) -> list[tuple[str, int]]:
+    normalized = normalize_record_sort_mode(sort_by)
+    if normalized == "value_time":
+        return [
+            ("value_tier", -1),
+            ("sort_time", -1),
+            ("score", -1),
+            ("subject_match", -1),
+            ("last_seen", -1),
+            ("record_id", 1),
+        ]
+    if normalized == "time_desc":
+        return [
+            ("sort_time", -1),
+            ("value_tier", -1),
+            ("score", -1),
+            ("last_seen", -1),
+            ("record_id", 1),
+        ]
+    return [("score", -1), ("last_seen", -1), ("record_id", 1)]
 
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
@@ -48,6 +245,24 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await records.create_index(
         [("project_id", 1), ("target_id", 1), ("source_document_id", 1)]
     )
+    await records.create_index(
+        [
+            ("project_id", 1),
+            ("target_id", 1),
+            ("value_tier", -1),
+            ("sort_time", -1),
+            ("score", -1),
+        ]
+    )
+    await records.create_index(
+        [
+            ("project_ids", 1),
+            ("target_id", 1),
+            ("value_tier", -1),
+            ("sort_time", -1),
+            ("score", -1),
+        ]
+    )
 
     checkpoints = db[MOBILE_COLLECT_CHECKPOINTS_COLLECTION]
     await checkpoints.create_index(
@@ -57,6 +272,61 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await checkpoints.create_index(
         [("task_def_id", 1), ("definition_fingerprint", 1), ("status", 1)]
     )
+
+
+async def backfill_record_ranking_fields(
+    db: AsyncIOMotorDatabase,
+    *,
+    batch_size: int = 500,
+) -> int:
+    """Idempotently add ranking projections to records created by older versions."""
+    collection = db[MOBILE_COLLECT_RECORDS_COLLECTION]
+    safe_batch_size = max(1, min(int(batch_size), 2_000))
+    cursor = collection.find(
+        {
+            "superseded_by_record_id": {"$exists": False},
+            "$or": [
+                {"ranking_version": {"$ne": RECORD_RANKING_VERSION}},
+                {"sort_time": {"$exists": False}},
+            ],
+        },
+        {
+            "_id": 0,
+            "record_id": 1,
+            "fields": 1,
+            "score": 1,
+            "last_seen": 1,
+            "first_seen": 1,
+        },
+    ).batch_size(safe_batch_size)
+    operations: list[UpdateOne] = []
+    updated = 0
+
+    async def flush() -> None:
+        nonlocal updated
+        if not operations:
+            return
+        batch = list(operations)
+        operations.clear()
+        await collection.bulk_write(batch, ordered=False)
+        updated += len(batch)
+
+    async for record in cursor:
+        ranking = build_record_ranking_fields(
+            dict(record.get("fields") or {}),
+            score=record.get("score"),
+            last_seen=record.get("last_seen") or record.get("first_seen") or _now(),
+        )
+        update: dict[str, Any] = {"$set": ranking}
+        if "published_at" not in ranking:
+            update["$unset"] = {"published_at": ""}
+        operations.append(
+            UpdateOne({"record_id": record.get("record_id")}, update)
+        )
+        if len(operations) >= safe_batch_size:
+            await flush()
+    await flush()
+    return updated
 
 
 # ── 任务定义 CRUD ──────────────────────────────────────
@@ -431,6 +701,7 @@ async def _resolve_record_identity(
         "source_document_id": 1,
         "superseded_by_record_id": 1,
         "first_seen": 1,
+        "score": 1,
         **{field: 1 for field in _EVIDENCE_ARRAY_FIELDS},
     }
     if not source_document_id:
@@ -514,6 +785,7 @@ async def upsert_record(
     discovery_screenshot_ids: list[str] | None = None,
     discovery_screenshot_urls: list[str] | None = None,
     discovery_fields: dict[str, Any] | None = None,
+    contact_count: int | None = None,
 ) -> dict[str, Any]:
     """增量 upsert 一条采集记录。返回 {record_id, is_new, is_changed}。"""
     content_hash = _content_hash(fields, source_url)
@@ -579,10 +851,23 @@ async def upsert_record(
         set_fields["target_id"] = target_id
     if target_name:
         set_fields["target_name"] = target_name
+    ranking_unset: dict[str, str] = {}
+    if not preserve_source_detail:
+        ranking = build_record_ranking_fields(
+            fields,
+            score=score if score is not None else (existing or {}).get("score"),
+            last_seen=now,
+            contact_count=contact_count,
+        )
+        set_fields.update(ranking)
+        if "published_at" not in ranking:
+            ranking_unset["published_at"] = ""
     update: dict[str, Any] = {
         "$set": set_fields,
         "$setOnInsert": {"first_seen": now},
     }
+    if ranking_unset:
+        update["$unset"] = ranking_unset
     if project_id:
         update["$setOnInsert"]["project_id"] = project_id
     if legacy_duplicate and legacy_duplicate.get("first_seen"):
@@ -633,11 +918,13 @@ async def upsert_record(
     if add_to_set:
         update["$addToSet"] = add_to_set
     if source_document_id:
-        update["$unset"] = {
-            "superseded_by_record_id": "",
-            "superseded_reason": "",
-            "superseded_at": "",
-        }
+        update.setdefault("$unset", {}).update(
+            {
+                "superseded_by_record_id": "",
+                "superseded_reason": "",
+                "superseded_at": "",
+            }
+        )
 
     await coll.update_one({"record_id": record_id}, update, upsert=True)
     if legacy_duplicate:
@@ -737,6 +1024,7 @@ async def list_records(
     only_incremental: bool = False,
     archived_only: bool = False,
     min_score: int | None = None,
+    sort_by: str = "score_desc",
     skip: int = 0,
     limit: int = 50,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -757,7 +1045,7 @@ async def list_records(
     cursor = (
         db[MOBILE_COLLECT_RECORDS_COLLECTION]
         .find(query, {"_id": 0})
-        .sort([("score", -1), ("last_seen", -1)])
+        .sort(record_sort_spec(sort_by))
         .skip(max(0, skip))
         .limit(max(1, min(limit, 200)))
     )

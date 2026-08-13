@@ -197,7 +197,7 @@ async def _wechat_records(db, project_id, limit, _access):
     from api.dao import mobile_collect
 
     items, total = await mobile_collect.list_records(
-        db, project_id=project_id, limit=limit
+        db, project_id=project_id, sort_by="value_time", limit=limit
     )
     return ProjectDatasetResult(items, total)
 
@@ -457,6 +457,7 @@ async def _query_wechat_records(db, project_id, query, _access):
         target_id=query.target_id or None,
         archived_only=True,
         min_score=query.min_score if query.min_score > 0 else None,
+        sort_by="value_time",
         skip=query.offset,
         limit=query.limit,
     )

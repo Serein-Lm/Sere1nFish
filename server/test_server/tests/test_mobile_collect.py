@@ -147,6 +147,63 @@ def test_stable_record_id_without_dedup_keys_uses_full_content():
     assert a != c
 
 
+def test_parse_record_publish_time_supports_wechat_and_relative_values():
+    from api.dao import mobile_collect as dao
+
+    reference = datetime(2026, 8, 13, 4, 0, tzinfo=timezone.utc)
+
+    assert dao.parse_record_publish_time("\u202a2026年8月12日 18:30\u202c") == datetime(
+        2026, 8, 12, 10, 30, tzinfo=timezone.utc
+    )
+    assert dao.parse_record_publish_time("2小时前", reference=reference) == datetime(
+        2026, 8, 13, 2, 0, tzinfo=timezone.utc
+    )
+    assert dao.parse_record_publish_time("昨天 09:15", reference=reference) == datetime(
+        2026, 8, 12, 1, 15, tzinfo=timezone.utc
+    )
+
+
+def test_record_ranking_is_value_first_then_publish_time():
+    from api.dao import mobile_collect as dao
+
+    ranking = dao.build_record_ranking_fields(
+        {
+            "title": "重要文章",
+            "publish_time": "2026年8月12日 18:30",
+            "content": "联系邮箱 contact@example.com",
+        },
+        score=92,
+        last_seen=datetime(2026, 8, 13, 4, 0, tzinfo=timezone.utc),
+    )
+
+    assert ranking["value_tier"] == 3
+    assert ranking["contact_count"] == 1
+    assert ranking["published_at"] == datetime(
+        2026, 8, 12, 10, 30, tzinfo=timezone.utc
+    )
+    assert ranking["sort_time"] == ranking["published_at"]
+    assert dao.record_sort_spec("value_time")[:2] == [
+        ("value_tier", -1),
+        ("sort_time", -1),
+    ]
+
+
+def test_record_ranking_falls_back_to_collection_time():
+    from api.dao import mobile_collect as dao
+
+    last_seen = datetime(2026, 8, 13, 4, 0, tzinfo=timezone.utc)
+    ranking = dao.build_record_ranking_fields(
+        {"title": "未标注发布时间"},
+        score=45,
+        last_seen=last_seen,
+        contact_count=0,
+    )
+
+    assert ranking["value_tier"] == 1
+    assert ranking["sort_time"] == last_seen
+    assert "published_at" not in ranking
+
+
 def test_backfill_task_target_only_updates_unassigned_records():
     from api.dao import mobile_collect as dao
 
@@ -244,6 +301,35 @@ def test_upsert_record_incremental_semantics():
     assert r3["is_new"] is False and r3["is_changed"] is True
     # 三次操作命中同一稳定 record_id
     assert r1["record_id"] == r2["record_id"] == r3["record_id"]
+
+
+def test_upsert_record_persists_value_and_publish_time_projection():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+    result = _run(
+        dao.upsert_record(
+            db,
+            task_def_id="wechat-task",
+            project_id="project-1",
+            fields={
+                "title": "公众号文章",
+                "publish_time": "2026-08-12 18:30",
+                "content": "联系电话 010-12345678",
+            },
+            dedup_key_fields=["title"],
+            score=91,
+            contact_count=1,
+        )
+    )
+
+    record = db[dao.MOBILE_COLLECT_RECORDS_COLLECTION].docs[result["record_id"]]
+    assert record["ranking_version"] == dao.RECORD_RANKING_VERSION
+    assert record["value_tier"] == 3
+    assert record["contact_count"] == 1
+    assert record["published_at"] == datetime(
+        2026, 8, 12, 10, 30, tzinfo=timezone.utc
+    )
 
 
 def test_rejected_source_record_is_hidden_and_can_be_revived():

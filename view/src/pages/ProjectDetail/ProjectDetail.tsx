@@ -61,7 +61,6 @@ import {
   type CollectRecord,
 } from '../../services/mobileCollectService'
 import CollectRecordsView from '../../components/CollectRecordsView/CollectRecordsView'
-import { extractContactsFromFields } from '../../components/CollectRecordsView/collectRecordUtils'
 import AuthenticatedImage from '../../components/AuthenticatedImage'
 import CopyLinkButton, { CopyableLink, CopyableText } from '../../components/CopyLinkButton'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
@@ -967,16 +966,12 @@ export default function ProjectDetail() {
         target_id: selectedTargetId || undefined,
         only_incremental: onlyInc,
         archived_only: true,
+        sort_by: 'value_time',
         limit: 100,
       })
       const sorted = res.items.filter(
         (record) => Boolean(record.source_document_id && record.source_url),
-      ).sort((a, b) => {
-        const ca = extractContactsFromFields((a.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
-        const cb = extractContactsFromFields((b.fields || {}) as Record<string, unknown>).length > 0 ? 1 : 0
-        if (ca !== cb) return cb - ca
-        return (b.score ?? 0) - (a.score ?? 0)
-      })
+      )
       setWechatRecords(sorted)
       setWechatRecordsTotal(res.total)
       if (selectedTargetId) void syncProjectTargetSummary(pid, selectedTargetId)

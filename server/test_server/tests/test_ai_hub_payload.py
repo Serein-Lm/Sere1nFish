@@ -1550,6 +1550,7 @@ async def test_project_dataset_adapters_reuse_clean_project_read_models(monkeypa
     assert calls["scholar"]["only_verified"] is True
     assert calls["wechat"]["archived_only"] is True
     assert calls["wechat"]["min_score"] == 70
+    assert calls["wechat"]["sort_by"] == "value_time"
     assert calls["assets"] == {
         "project_id": "project_1",
         "target_id": "target_1",

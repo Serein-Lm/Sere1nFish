@@ -305,5 +305,9 @@ class RecordsListRequest(BaseModel):
     min_score: int | None = Field(
         default=None, ge=0, le=100, description="仅返回相关性分>=该值的记录"
     )
+    sort_by: Literal["score_desc", "time_desc", "value_time"] = Field(
+        default="score_desc",
+        description="排序方式：评分、发布时间或高价值优先且同档按时间倒序",
+    )
     skip: int = Field(default=0, ge=0)
     limit: int = Field(default=50, ge=1, le=200)

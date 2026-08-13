@@ -359,6 +359,14 @@ async def lifespan(app: FastAPI):
         from api.dao import mobile_collect as mobile_collect_dao
         from api.dao import schedules as schedules_dao
         await mobile_collect_dao.ensure_indexes(db)
+        backfilled_mobile_record_rankings = (
+            await mobile_collect_dao.backfill_record_ranking_fields(db)
+        )
+        if backfilled_mobile_record_rankings:
+            logger.info(
+                "已补齐手机采集记录价值与时间排序字段: %s",
+                backfilled_mobile_record_rankings,
+            )
         from api.dao import social_collection as social_collection_dao
         await social_collection_dao.ensure_indexes(db)
         await schedules_dao.ensure_indexes(db)
