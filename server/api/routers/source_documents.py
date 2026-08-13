@@ -142,6 +142,7 @@ async def create_target(payload: TargetCreateRequest):
             db,
             project_id=payload.project_id,
             target=target,
+            clear_relation=True,
         )
     return target
 
@@ -266,6 +267,7 @@ async def link_target_project(target_id: str, payload: ProjectTargetLinkRequest)
         search_terms=payload.search_terms,
         objectives=payload.objectives,
         task_def_id=payload.task_def_id,
+        clear_relation=True,
     )
 
 

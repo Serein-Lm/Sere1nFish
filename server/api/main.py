@@ -285,6 +285,7 @@ async def lifespan(app: FastAPI):
         from api.dao import projects as projects_dao
         from api.dao import project_groups as project_groups_dao
         from api.dao import target_research as target_research_dao
+        from api.dao import target_relationships as target_relationships_dao
         from api.dao import source_documents as source_documents_dao
         from api.dao import website_crawl as website_crawl_dao
         await targets_dao.ensure_indexes(db)
@@ -319,6 +320,7 @@ async def lifespan(app: FastAPI):
                 scan_coverage_backfill["stale_tasks"],
             )
         await target_research_dao.ensure_indexes(db)
+        await target_relationships_dao.ensure_indexes(db)
         await source_documents_dao.ensure_indexes(db)
         await website_crawl_dao.ensure_indexes(db)
         # 学者学术联系发现索引

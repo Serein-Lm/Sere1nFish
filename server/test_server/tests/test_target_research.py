@@ -16,6 +16,7 @@ from api.services.target_research import (
     _filter_scan_urls_by_domains,
     _normalize_payload,
     _prepare_payload_for_validation,
+    _relationship_direction,
     _schedule_company_scans,
     _unverified_navigation_domains,
     run_target_research,
@@ -390,6 +391,9 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
     async def enrich(*_args, **_kwargs):
         return dict(target)
 
+    async def sync_relationships(*_args, **_kwargs):
+        return []
+
     async def persist_scan_profile(_db, **kwargs):
         persisted_profile.update(kwargs)
         return {
@@ -412,6 +416,11 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
         persist_scan_profile,
     )
     monkeypatch.setattr(research_dao, "save_research", save)
+    monkeypatch.setattr(
+        target_research.relationships_dao,
+        "sync_research_relationships",
+        sync_relationships,
+    )
     monkeypatch.setattr(target_research, "update_task_stage", noop)
     monkeypatch.setattr(target_research, "observation_context", lambda **_kwargs: nullcontext())
     monkeypatch.setattr(target_research, "obs_log", lambda *_args, **_kwargs: None)
@@ -643,6 +652,22 @@ def test_auto_expansion_requires_first_party_evidence_and_control_relation() -> 
     )] == ["直属服务中心 B"]
 
     normalized["related_targets"].append({
+        "name": "主管部门 D",
+        "relation_type": "parent_organization",
+        "relationship_summary": "政府机构设置页确认直接主管",
+        "confidence": 0.98,
+        "source_urls": ["https://gov.example.cn/unit"],
+        "scan_priority": 95,
+        "should_scan": True,
+    })
+    assert [item["name"] for item in _eligible_related_targets(
+        normalized, current_name="教育机构 A", limit=8
+    )] == ["主管部门 D", "直属服务中心 B"]
+    assert _relationship_direction("parent_organization") == "upstream"
+    assert _relationship_direction("affiliated_unit") == "lateral"
+    assert _relationship_direction("service_unit") == "downstream"
+
+    normalized["related_targets"].append({
         "name": "第三方供应商 C",
         "relation_type": "vendor",
         "relationship_summary": "提供产品",
@@ -653,4 +678,4 @@ def test_auto_expansion_requires_first_party_evidence_and_control_relation() -> 
     })
     assert [item["name"] for item in _eligible_related_targets(
         normalized, current_name="教育机构 A", limit=8
-    )] == ["直属服务中心 B"]
+    )] == ["主管部门 D", "直属服务中心 B"]

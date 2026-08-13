@@ -12,6 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import projects as projects_dao
 from api.dao import target_research as research_dao
+from api.dao import target_relationships as relationships_dao
 from api.dao import targets as targets_dao
 from api.dao import tasks as tasks_dao
 from api.models.target_research import TargetResearchPayload
@@ -33,14 +34,22 @@ MAX_TARGET_RESEARCH_BATCH_SIZE = 100
 MAX_TARGET_RESEARCH_CONCURRENCY = 8
 TARGET_RESEARCH_BROWSER_ATTEMPTS = 3
 EXPANDED_TARGET_BATCH_TAG = "拓展目标"
-_AUTO_EXPAND_RELATIONS = {
+SUPERVISING_TARGET_BATCH_TAG = "上级单位"
+RELATED_TARGET_BATCH_TAG = "关联单位"
+_DOWNSTREAM_EXPAND_RELATIONS = {
     "subsidiary",
     "controlled_entity",
-    "affiliated_unit",
     "service_unit",
     "operating_entity",
     "platform_owner",
 }
+_UPSTREAM_EXPAND_RELATIONS = {"parent_organization"}
+_LATERAL_EXPAND_RELATIONS = {"affiliated_unit"}
+_AUTO_EXPAND_RELATIONS = (
+    _DOWNSTREAM_EXPAND_RELATIONS
+    | _UPSTREAM_EXPAND_RELATIONS
+    | _LATERAL_EXPAND_RELATIONS
+)
 _TRUSTED_SOURCE_TYPES = {
     "official",
     "government",
@@ -474,6 +483,29 @@ def _eligible_related_targets(
         )
     )
     return eligible[: max(1, min(int(limit or 1), 12))]
+
+
+def _relationship_direction(relation_type: str) -> str:
+    normalized = str(relation_type or "").strip()
+    if normalized in _UPSTREAM_EXPAND_RELATIONS:
+        return relationships_dao.UPSTREAM_DIRECTION
+    if normalized in _LATERAL_EXPAND_RELATIONS:
+        return relationships_dao.LATERAL_DIRECTION
+    return relationships_dao.DOWNSTREAM_DIRECTION
+
+
+def _expanded_batch_tags(
+    values: list[str] | None,
+    *required_tags: str,
+) -> list[str]:
+    required = targets_dao.normalize_batch_tags(list(required_tags))
+    existing = [
+        tag
+        for tag in targets_dao.normalize_batch_tags(values or [])
+        if tag not in required
+    ]
+    available = max(0, targets_dao.MAX_TARGET_BATCH_TAGS - len(required))
+    return [*existing[:available], *required]
 
 
 def _preserved_relation(relation: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -945,7 +977,9 @@ async def run_target_research(
         f"已有根域名: {target.get('root_domains') or []}\n"
         "目标：使用 Bing 结合机构全称、可信简称和已知根域名补全机构信息，"
         "实际打开并核验可进入网站深扫的自营业务页面；识别可继续扫描的明确隶属、"
-        "控制、直属服务或平台运营单位；"
+        "控制、直属服务或平台运营单位；必须额外尝试通过官网机构设置、直属单位名录"
+        "或权威政府页面核验一层直接主管单位。直接主管单位使用 parent_organization，"
+        "仅有行业监管、业务指导、地域归属或名称包含关系时不得认定为上级；"
         "合作方、供应商、媒体转载主体和同名第三方不得标记为自动扫描。"
         f"\n{REQUIRE_EVIDENCE_TOOL_MARKER}"
     )
@@ -1207,14 +1241,24 @@ async def run_target_research(
         data,
         current_name=str(enriched_target.get("canonical_name") or ""),
         limit=max_related_targets,
-    ) if current_depth < 2 else []
+    )
     expanded: list[dict[str, Any]] = []
+    relationship_edges: list[dict[str, Any]] = []
     expanded_target_ids: set[str] = set()
     root_target_id = str(relation.get("root_target_id") or target_id)
     root_target_name = str(
         relation.get("root_target_name") or enriched_target.get("canonical_name") or ""
     )
     for candidate in candidates:
+        relation_type = str(
+            candidate.get("relation_type") or "affiliated_unit"
+        ).strip()
+        direction = _relationship_direction(relation_type)
+        if (
+            direction == relationships_dao.DOWNSTREAM_DIRECTION
+            and current_depth >= 2
+        ):
+            continue
         domains = _clean_strings(
             [normalize_root_domain(value) for value in candidate.get("root_domains") or []],
             limit=12,
@@ -1232,6 +1276,14 @@ async def run_target_research(
             existing_related
             and str(existing_related.get("target_id") or "") == target_id
         ):
+            if direction != relationships_dao.DOWNSTREAM_DIRECTION:
+                logger.warning(
+                    "机构深研非下级关系与当前 Target 归并为同一身份，已拒绝关系 | "
+                    "target=%s candidate=%s",
+                    target_id,
+                    candidate_name,
+                )
+                continue
             enriched_target = await targets_dao.merge_target_research_identity(
                 db,
                 target_id=target_id,
@@ -1270,6 +1322,14 @@ async def run_target_research(
         )
         related_target_id = str(related.get("target_id") or "")
         if related_target_id == target_id:
+            if direction != relationships_dao.DOWNSTREAM_DIRECTION:
+                logger.warning(
+                    "机构深研非下级关系被错误归并到当前 Target，已拒绝关系 | "
+                    "target=%s candidate=%s",
+                    target_id,
+                    candidate_name,
+                )
+                continue
             enriched_target = await targets_dao.merge_target_research_identity(
                 db,
                 target_id=target_id,
@@ -1280,39 +1340,70 @@ async def run_target_research(
         if not related_target_id or related_target_id in expanded_target_ids:
             continue
         expanded_target_ids.add(related_target_id)
-        relation_depth = current_depth + 1
-        relation_doc = {
-            "root_target_id": root_target_id,
-            "root_target_name": root_target_name,
-            "parent_target_id": target_id,
-            "parent_target_name": enriched_target.get("canonical_name") or "",
-            "relation_type": candidate.get("relation_type") or "affiliated_unit",
-            "relation_depth": relation_depth,
-            "relation_source": "target_research",
-            "relation_summary": candidate.get("relationship_summary") or "",
-            "relation_source_urls": list(candidate.get("source_urls") or []),
-            "lineage_target_ids": list(
-                dict.fromkeys([*(relation.get("lineage_target_ids") or []), target_id])
-            ),
-            "lineage_target_names": list(
-                dict.fromkeys([
-                    *(relation.get("lineage_target_names") or []),
-                    str(enriched_target.get("canonical_name") or ""),
-                ])
-            ),
-        }
+        if direction in {
+            relationships_dao.UPSTREAM_DIRECTION,
+            relationships_dao.LATERAL_DIRECTION,
+        }:
+            existing_project_relation = await targets_dao.get_project_target(
+                db,
+                project_id=project_id,
+                target_id=related_target_id,
+            )
+            project_relation = _preserved_relation(existing_project_relation)
+            if direction == relationships_dao.UPSTREAM_DIRECTION:
+                objectives = ["机构深研发现并核验的直接主管单位"]
+                batch_tags = _expanded_batch_tags(
+                    list(relation.get("batch_tags") or []),
+                    EXPANDED_TARGET_BATCH_TAG,
+                    SUPERVISING_TARGET_BATCH_TAG,
+                )
+            else:
+                objectives = ["机构深研发现并核验的横向关联单位"]
+                batch_tags = _expanded_batch_tags(
+                    list(relation.get("batch_tags") or []),
+                    EXPANDED_TARGET_BATCH_TAG,
+                    RELATED_TARGET_BATCH_TAG,
+                )
+        else:
+            relation_depth = current_depth + 1
+            project_relation = {
+                "root_target_id": root_target_id,
+                "root_target_name": root_target_name,
+                "parent_target_id": target_id,
+                "parent_target_name": enriched_target.get("canonical_name") or "",
+                "relation_type": relation_type,
+                "relation_depth": relation_depth,
+                "relation_source": "target_research",
+                "relation_summary": candidate.get("relationship_summary") or "",
+                "relation_source_urls": list(candidate.get("source_urls") or []),
+                "lineage_target_ids": list(
+                    dict.fromkeys(
+                        [*(relation.get("lineage_target_ids") or []), target_id]
+                    )
+                ),
+                "lineage_target_names": list(
+                    dict.fromkeys(
+                        [
+                            *(relation.get("lineage_target_names") or []),
+                            str(enriched_target.get("canonical_name") or ""),
+                        ]
+                    )
+                ),
+            }
+            objectives = ["机构深研发现的高置信关联单位"]
+            batch_tags = _expanded_batch_tags(
+                list(relation.get("batch_tags") or []),
+                EXPANDED_TARGET_BATCH_TAG,
+            )
         await targets_dao.link_project_target(
             db,
             project_id=project_id,
             target=related,
             search_terms=[str(candidate.get("name") or ""), *(candidate.get("aliases") or [])],
-            objectives=["机构深研发现的高置信关联单位"],
+            objectives=objectives,
             task_def_id=task_id,
-            relation=relation_doc,
-            batch_tags=[
-                *(relation.get("batch_tags") or []),
-                EXPANDED_TARGET_BATCH_TAG,
-            ],
+            relation=project_relation,
+            batch_tags=batch_tags,
         )
         related_profile = build_target_scan_profile(
             canonical_name=str(related.get("canonical_name") or candidate_name),
@@ -1330,7 +1421,24 @@ async def run_target_research(
             target=related,
             profile=related_profile,
         )
-        expanded.append({**related, "research_relation": candidate})
+        research_relation = {
+            **candidate,
+            "relationship_direction": direction,
+        }
+        expanded.append({**related, "research_relation": research_relation})
+        relationship_edges.append(
+            {
+                "related_target_id": related_target_id,
+                "related_target_name": str(
+                    related.get("canonical_name") or candidate_name
+                ),
+                "relation_type": relation_type,
+                "direction": direction,
+                "summary": str(candidate.get("relationship_summary") or ""),
+                "confidence": float(candidate.get("confidence") or 0),
+                "source_urls": list(candidate.get("source_urls") or []),
+            }
+        )
 
     research = await research_dao.save_research(
         db,
@@ -1350,6 +1458,15 @@ async def run_target_research(
             ],
             "expanded_target_count": len(expanded),
         },
+    )
+    persisted_relationships = await relationships_dao.sync_research_relationships(
+        db,
+        project_id=project_id,
+        subject_target_id=target_id,
+        subject_target_name=str(enriched_target.get("canonical_name") or ""),
+        task_id=task_id,
+        research_id=str(research.get("research_id") or ""),
+        relationships=relationship_edges,
     )
     enriched_target = await targets_dao.enrich_target_from_research(
         db,
@@ -1390,6 +1507,15 @@ async def run_target_research(
         "evidence_count": len(data.get("evidence") or []),
         "web_scan_url_count": len(root_scan_urls),
         "expanded_target_count": len(expanded),
+        "relationship_count": len(persisted_relationships),
+        "supervising_unit_count": sum(
+            item.get("direction") == relationships_dao.UPSTREAM_DIRECTION
+            for item in persisted_relationships
+        ),
+        "related_unit_count": sum(
+            item.get("direction") == relationships_dao.LATERAL_DIRECTION
+            for item in persisted_relationships
+        ),
         "expanded_targets": research.get("expanded_targets") or [],
         "scan_task_ids": scan_task_ids,
         "skipped_scans": skipped_scans,

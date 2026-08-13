@@ -87,6 +87,10 @@ PROJECT_TARGETS_COLLECTION = "project_targets"
 # Target 机构公开情报深研。每次研究保留独立版本，Target 仅保存最新摘要引用。
 TARGET_RESEARCH_COLLECTION = "target_research"
 
+# 项目内 Target 关系边。用于保存主管单位等非控股方向关系，避免把上级单位
+# 反向写成 ProjectTarget 子节点；完整证据仍由对应 TargetResearch 版本保留。
+TARGET_RELATIONSHIPS_COLLECTION = "target_relationships"
+
 # 永久来源文档。文档按规范 URL 去重，版本按稳定内容哈希不可变保存；
 # link 记录文档被哪个项目/Target/任务/关键词发现。
 SOURCE_DOCUMENTS_COLLECTION = "source_documents"

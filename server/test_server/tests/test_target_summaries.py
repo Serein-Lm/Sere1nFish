@@ -271,6 +271,39 @@ async def test_child_project_target_inherits_parent_batch_tags() -> None:
 
 
 @pytest.mark.asyncio
+async def test_project_target_relation_is_only_cleared_explicitly() -> None:
+    class Collection:
+        updates = []
+
+        async def find_one_and_update(self, _query, update, **_kwargs):
+            self.updates.append(update)
+            return {"project_target_id": "pt-1"}
+
+    class Db:
+        collection = Collection()
+
+        def __getitem__(self, _name):
+            return self.collection
+
+    db = Db()
+    target = {"target_id": "target-1", "canonical_name": "目标机构"}
+    await targets_dao.link_project_target(
+        db,
+        project_id="project-1",
+        target=target,
+    )
+    await targets_dao.link_project_target(
+        db,
+        project_id="project-1",
+        target=target,
+        clear_relation=True,
+    )
+
+    assert "$unset" not in db.collection.updates[0]
+    assert "parent_target_id" in db.collection.updates[1]["$unset"]
+
+
+@pytest.mark.asyncio
 async def test_batch_assignment_propagates_only_to_selected_descendants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4637,6 +4637,32 @@ export default function ProjectDetail() {
                   {target.ownership_percent != null ? ` · 持股 ${target.ownership_percent}%` : ''}
                 </Text>
               ) : null}
+              {target.supervising_units?.length ? (
+                <Tooltip
+                  title={target.supervising_units
+                    .map((unit) => unit.summary || unit.target_name)
+                    .join('\n')}
+                >
+                  <Text type="secondary" className="target-company-meta-line">
+                    主管单位：{target.supervising_units
+                      .map((unit) => unit.target_name)
+                      .join(' · ')}
+                  </Text>
+                </Tooltip>
+              ) : null}
+              {target.related_units?.length ? (
+                <Tooltip
+                  title={target.related_units
+                    .map((unit) => unit.summary || unit.target_name)
+                    .join('\n')}
+                >
+                  <Text type="secondary" className="target-company-meta-line">
+                    关联单位：{target.related_units
+                      .map((unit) => unit.target_name)
+                      .join(' · ')}
+                  </Text>
+                </Tooltip>
+              ) : null}
               <div className="target-company-compact-summary">
                 <Tag color={Number(target.high_score_finding_count || 0) > 0 ? 'red' : 'default'}>
                   高分 {target.high_score_finding_count || 0}

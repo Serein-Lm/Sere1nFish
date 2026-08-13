@@ -103,6 +103,16 @@ export interface SourceDocumentDetail {
   }>
 }
 
+export interface TargetRelationshipUnit {
+  target_id: string
+  target_name: string
+  relation_type: string
+  summary?: string
+  confidence?: number
+  source_urls?: string[]
+  research_ids?: string[]
+}
+
 export interface ProjectTargetSummary {
   project_target_id: string
   project_id: string
@@ -140,6 +150,9 @@ export interface ProjectTargetSummary {
   batch_priority_label?: string
   is_expanded_target?: boolean
   relation?: Record<string, unknown>
+  supervising_units?: TargetRelationshipUnit[]
+  supervised_units?: TargetRelationshipUnit[]
+  related_units?: TargetRelationshipUnit[]
   task_def_ids?: string[]
   document_count: number
   project_document_count: number

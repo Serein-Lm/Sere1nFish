@@ -11,6 +11,7 @@ from api.dao import projects as projects_dao
 from api.dao import findings as findings_dao
 from api.dao import mobile_collect as mobile_collect_dao
 from api.dao import scholar_contact as scholar_dao
+from api.dao import target_relationships as target_relationships_dao
 from api.dao import targets as targets_dao
 from api.dao.project_scope import project_scope_query
 from api.db.collections import (
@@ -1077,6 +1078,11 @@ async def list_project_target_summaries(
         project_id=project_id,
         target_ids=target_ids,
     )
+    target_relationships_job = target_relationships_dao.list_for_targets(
+        db,
+        project_id=project_id,
+        target_ids=target_ids,
+    )
     task_ids = list(
         {
             str(task_id)
@@ -1111,6 +1117,7 @@ async def list_project_target_summaries(
         xhs_counts,
         bidding_counts,
         scholar_counts,
+        target_relationships,
         task_docs,
     ) = await asyncio.gather(
         document_counts_job,
@@ -1123,6 +1130,7 @@ async def list_project_target_summaries(
         xhs_counts_job,
         bidding_counts_job,
         scholar_counts_job,
+        target_relationships_job,
         task_docs_job,
     )
 
@@ -1146,6 +1154,9 @@ async def list_project_target_summaries(
         for item in wechat_counts
     }
     tasks_by_id = {str(item.get("task_id") or ""): item for item in task_docs}
+    relationship_views = target_relationships_dao.build_target_relationship_views(
+        target_relationships
+    )
 
     def _relation_payload(relation: dict[str, Any]) -> dict[str, Any]:
         if not compact:
@@ -1188,6 +1199,14 @@ async def list_project_target_summaries(
         {
             **_relation_payload(relation),
             **_target_batch_priority(relation.get("batch_tags")),
+            **relationship_views.get(
+                str(relation.get("target_id") or ""),
+                {
+                    "supervising_units": [],
+                    "supervised_units": [],
+                    "related_units": [],
+                },
+            ),
             "document_count": int(
                 by_target.get(str(relation.get("target_id") or ""), {}).get(
                     "document_count", 0

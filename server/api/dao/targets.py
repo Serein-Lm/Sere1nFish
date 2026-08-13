@@ -1096,6 +1096,7 @@ async def link_project_target(
     relation: dict[str, Any] | None = None,
     batch_tags: list[str] | tuple[str, ...] | str | None = None,
     replace_search_terms: bool = False,
+    clear_relation: bool = False,
 ) -> dict[str, Any]:
     if not project_id:
         raise ValueError("project_id 不能为空")
@@ -1221,9 +1222,10 @@ async def link_project_target(
         ):
             if key in relation_doc:
                 update["$set"][key] = relation_doc[key]
-    else:
+    elif clear_relation:
         # A directly selected project Target takes precedence over stale or
-        # circular hierarchy metadata previously written to the same relation.
+        # circular hierarchy metadata only when the caller explicitly requests
+        # promotion. Routine scans must preserve the established hierarchy.
         update["$unset"] = {
             field: "" for field in _PROJECT_TARGET_RELATION_FIELDS
         }

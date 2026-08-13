@@ -104,6 +104,7 @@ async def _link_relations(
                 relation=relation or None,
                 batch_tags=list(source.get("batch_tags") or []),
                 replace_search_terms=True,
+                clear_relation=not relation,
             )
             return True
 
