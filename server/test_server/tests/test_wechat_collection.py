@@ -366,12 +366,64 @@ async def test_wechat_configuration_rejects_unconfigured_device(
 
 
 @pytest.mark.asyncio
+async def test_wechat_configuration_can_create_missing_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import mobile_collect as collect_dao
+    from api.services import wechat_collection
+
+    async def list_defs(_db: Any, **_kwargs: Any):
+        return []
+
+    created: dict[str, str] = {}
+
+    async def ensure(_db: Any, *, project_id: str, device_id: str):
+        created.update({"project_id": project_id, "device_id": device_id})
+        return {
+            "task_def_id": "created-wechat",
+            "project_id": project_id,
+            "device_id": device_id,
+            "app_name": "微信",
+            "source_link_strategy": "wechat_copy_link",
+            "status": "idle",
+        }
+
+    async def repair(_db: Any, task_def: dict[str, Any], **_kwargs: Any):
+        return task_def
+
+    monkeypatch.setattr(collect_dao, "list_task_defs", list_defs)
+    monkeypatch.setattr(
+        wechat_collection,
+        "_ensure_wechat_task_definition",
+        ensure,
+    )
+    monkeypatch.setattr(
+        wechat_collection,
+        "_repair_wechat_task_definition",
+        repair,
+    )
+
+    task_def = await wechat_collection.resolve_wechat_task_definition(
+        object(),
+        project_id="project-1",
+        device_id="device-a",
+        create_if_missing=True,
+    )
+
+    assert created == {"project_id": "project-1", "device_id": "device-a"}
+    assert task_def["task_def_id"] == "created-wechat"
+
+
+@pytest.mark.asyncio
 async def test_company_wechat_collection_injects_internal_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.services import wechat_collection
 
-    async def resolve(*_args: Any, **_kwargs: Any):
+    resolve_kwargs: dict[str, Any] = {}
+
+    async def resolve(*_args: Any, **kwargs: Any):
+        resolve_kwargs.update(kwargs)
         return {
             "task_def_id": "wechat-a",
             "device_id": "device-a",
@@ -423,6 +475,7 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["parent_task_id"] == "scan-1"
     assert overrides["target_id"] == "target-1"
     assert captured["queue_priority"] == "low"
+    assert resolve_kwargs["create_if_missing"] is True
     assert result["documents"] == 2
     assert result["contacts"] == 4
 

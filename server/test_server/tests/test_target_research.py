@@ -18,7 +18,10 @@ from api.services.target_research import (
     _prepare_payload_for_validation,
     _relationship_direction,
     _schedule_company_scans,
+    _shared_government_path_segments,
     _unverified_navigation_domains,
+    _identity_key_matches,
+    _with_target_identity_default,
     run_target_research,
 )
 
@@ -136,6 +139,113 @@ def test_target_research_scan_urls_stay_under_verified_domains() -> None:
         "https://service.example.edu.cn/login",
         "https://example.edu.cn/portal",
     ]
+
+
+def test_shared_government_portal_scan_is_path_scoped() -> None:
+    urls = [
+        "https://wjw.anqing.gov.cn/public/4018278/2006741581.html",
+        "https://wjw.anqing.gov.cn/public/column/4018278?action=list",
+    ]
+
+    assert _shared_government_path_segments(urls, ["anqing.gov.cn"]) == [
+        "4018278"
+    ]
+
+    params = _candidate_scan_params(
+        {"enable_asset_discovery": True, "enable_url_scan": True},
+        name="安庆市疾病预防控制中心",
+        is_root=True,
+        seed_urls=urls,
+        root_domains=["anqing.gov.cn"],
+    )
+
+    assert params["website_required_path_segments"] == ["4018278"]
+    assert params["enable_asset_discovery"] is False
+
+
+def test_dedicated_official_homepage_does_not_require_identity_in_title() -> None:
+    payload = _payload(
+        canonical_name="中国疾病预防控制中心麻风病控制中心",
+        aliases=["麻风病控制中心"],
+        root_domains=["nclepc.cn"],
+        web_scan_urls=["https://www.nclepc.cn/"],
+        sources=[
+            {
+                "title": "中心概况 - 组织机构",
+                "url": "https://www.nclepc.cn/",
+                "source_type": "official",
+            },
+            {
+                "title": "挂靠单位",
+                "url": "https://www.chinacdc.cn/jgxx/gkdw/",
+                "source_type": "official",
+            },
+        ],
+        evidence=[
+            {
+                "dimension": "identity",
+                "finding": "中心官网和中国疾控中心官网共同确认机构身份",
+                "confidence": 0.95,
+                "source_urls": [
+                    "https://www.nclepc.cn/",
+                    "https://www.chinacdc.cn/jgxx/gkdw/",
+                ],
+            }
+        ],
+        related_targets=[],
+    )
+
+    normalized = _normalize_payload(TargetResearchPayload.model_validate(payload))
+
+    assert normalized["root_domains"] == ["nclepc.cn"]
+    assert normalized["web_scan_urls"] == ["https://www.nclepc.cn/"]
+
+
+def test_generic_government_homepage_is_not_target_scan_scope() -> None:
+    payload = _payload(
+        canonical_name="梅州市疾病预防控制中心",
+        aliases=["梅州疾控"],
+        root_domains=["meizhou.gov.cn"],
+        web_scan_urls=["https://www.meizhou.gov.cn/"],
+        sources=[
+            {
+                "title": "梅州市人民政府门户网站",
+                "url": "https://www.meizhou.gov.cn/",
+                "source_type": "government",
+            },
+            {
+                "title": "广东省事业单位名录",
+                "url": "https://www.gd.gov.cn/directory/meizhou-cdc",
+                "source_type": "government",
+            },
+        ],
+        evidence=[
+            {
+                "dimension": "identity",
+                "finding": "省级名录确认机构身份",
+                "confidence": 0.9,
+                "source_urls": ["https://www.gd.gov.cn/directory/meizhou-cdc"],
+            }
+        ],
+        related_targets=[],
+    )
+
+    normalized = _normalize_payload(TargetResearchPayload.model_validate(payload))
+
+    assert normalized["root_domains"] == []
+    assert normalized["web_scan_urls"] == []
+
+
+def test_target_identity_accepts_official_qualifier_and_fills_missing_name() -> None:
+    existing = "江苏省疾病预防控制中心"
+    qualified = "江苏省疾病预防控制中心江苏省预防医学科学院"
+
+    assert _identity_key_matches(qualified, existing) is True
+    assert _identity_key_matches("南京市疾病预防控制中心", existing) is False
+    assert _with_target_identity_default(
+        {"canonical_name": "", "summary": "已核验"},
+        canonical_name=existing,
+    )["canonical_name"] == existing
 
 
 def test_target_research_drops_unregistered_evidence_url() -> None:
@@ -509,6 +619,34 @@ def test_target_research_requires_dom_read_after_successful_navigation() -> None
     assert _extract_navigated_urls(raw) == {
         "https://example.edu.cn/about/index.html",
     }
+
+
+def test_target_research_rejects_error_page_snapshot() -> None:
+    raw = {
+        "messages": [
+            ToolMessage(
+                name="navigate_page",
+                tool_call_id="call_1",
+                content=(
+                    "Successfully navigated to https://example.gov.cn/missing.\n"
+                    "## Pages\n"
+                    "1: 404 Not Found (https://example.gov.cn/missing) [selected]"
+                ),
+            ),
+            ToolMessage(
+                name="take_snapshot",
+                tool_call_id="call_2",
+                content=(
+                    "## Latest page snapshot\n"
+                    'uid=1_0 RootWebArea "404 Not Found" '
+                    'url="https://example.gov.cn/missing"\n'
+                    '  uid=1_1 StaticText "Not Found"'
+                ),
+            ),
+        ]
+    }
+
+    assert _extract_navigated_urls(raw) == set()
 
 
 def test_target_research_rejects_selected_url_after_navigation_timeout() -> None:

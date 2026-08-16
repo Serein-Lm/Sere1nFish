@@ -68,7 +68,8 @@ def _valid_alias(value: Any, *, canonical: bool = False) -> str:
         not alias
         or len(alias) < 2
         or len(alias) > (128 if canonical else 64)
-        or any(marker in alias for marker in ("://", "/", "@"))
+        or any(marker in alias for marker in ("://", "@"))
+        or (not canonical and "/" in alias)
         or (
             not canonical
             and any(marker in alias for marker in _QUERY_MARKERS)

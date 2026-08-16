@@ -41,6 +41,43 @@ def test_oss_access_keys_are_encrypted_and_masked() -> None:
     }
 
 
+def test_storage_configuration_error_reads_wrapped_sdk_error() -> None:
+    from api.storage.errors import (
+        is_storage_configuration_error,
+        storage_error_details,
+    )
+
+    class ServiceError(Exception):
+        code = "InvalidAccessKeyId"
+        status_code = 403
+        request_id = "request-1"
+        message = "The OSS Access Key Id LTAI0123456789ABC is disabled."
+
+    class OperationError(Exception):
+        def __init__(self) -> None:
+            self._error = ServiceError()
+
+    error = OperationError()
+    details = storage_error_details(error)
+
+    assert is_storage_configuration_error(error) is True
+    assert details.code == "InvalidAccessKeyId"
+    assert details.status_code == 403
+    assert details.request_id == "request-1"
+    assert "LTAI0123456789ABC" not in details.safe_message()
+    assert "LTAI***" in details.safe_message()
+
+
+def test_transient_storage_error_remains_retryable() -> None:
+    from api.storage.errors import is_storage_configuration_error
+
+    class ServiceError(Exception):
+        code = "RequestTimeout"
+        status_code = 504
+
+    assert is_storage_configuration_error(ServiceError()) is False
+
+
 @pytest.mark.asyncio
 async def test_local_provider_roundtrip(tmp_path) -> None:
     from api.storage.providers.local import LocalStorageProvider

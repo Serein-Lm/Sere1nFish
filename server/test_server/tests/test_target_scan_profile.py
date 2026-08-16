@@ -34,6 +34,16 @@ def test_profile_keeps_short_names_but_rejects_appended_departments() -> None:
     assert all("联网结算服务部" not in name for name in profile["search_aliases"])
 
 
+def test_profile_accepts_slash_in_canonical_institution_name() -> None:
+    profile = build_target_scan_profile(
+        canonical_name="中国疾病预防控制中心儿少/学校卫生中心",
+        identity_aliases=["中国疾控中心儿少学校卫生中心"],
+    )
+
+    assert profile["canonical_name"] == "中国疾病预防控制中心儿少/学校卫生中心"
+    assert profile["search_aliases"][0] == "中国疾病预防控制中心儿少/学校卫生中心"
+
+
 def test_profile_rejects_unrelated_department_from_previous_profile() -> None:
     profile = build_target_scan_profile(
         canonical_name="交通运输部路网监测与应急处置中心",

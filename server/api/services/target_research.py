@@ -5,7 +5,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -64,6 +64,40 @@ _SEARCH_RESULT_PATHS = {
     "sogou.com": ("/web",),
     "so.com": ("/s",),
 }
+_ERROR_PAGE_TITLE_RE = re.compile(
+    r"(?:^|\b)(?:401|403|404|500|502|503|504)(?:\b|$)|"
+    r"not found|forbidden|bad gateway|service unavailable|gateway timeout|"
+    r"页面不存在|页面未找到|访问出错|访问异常|系统错误",
+    re.I,
+)
+_GENERIC_SHARED_PATH_SEGMENTS = {
+    "about",
+    "article",
+    "column",
+    "content",
+    "default",
+    "detail",
+    "index",
+    "info",
+    "jgsz",
+    "list",
+    "news",
+    "notice",
+    "notices",
+    "page",
+    "pages",
+    "public",
+    "wjw",
+    "wsjkw",
+    "xxgk",
+    "zwgk",
+}
+_OWNED_DOMAIN_SOURCE_TYPES = {
+    "first_party",
+    "institution",
+    "official",
+    "regulator",
+}
 
 
 class TargetResearchTargetNotFoundError(LookupError):
@@ -102,6 +136,167 @@ def _is_search_result_url(url: str) -> bool:
     return any(
         parts.path.startswith(prefix)
         for prefix in _SEARCH_RESULT_PATHS.get(host, ())
+    )
+
+
+def _snapshot_is_error_page(text: str) -> bool:
+    root_line = next(
+        (line for line in str(text or "").splitlines() if "RootWebArea" in line),
+        "",
+    )
+    title_match = re.search(r'RootWebArea\s+"([^"]*)"', root_line)
+    title = title_match.group(1).strip() if title_match else ""
+    return bool(title and _ERROR_PAGE_TITLE_RE.search(title))
+
+
+def _is_origin_homepage(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except (TypeError, ValueError):
+        return False
+    return parts.path in {"", "/"} and not parts.query
+
+
+def _source_title_matches_identity(
+    source: dict[str, Any],
+    *,
+    canonical_name: str,
+    aliases: list[Any] | None,
+) -> bool:
+    title = targets_dao.normalize_target_name(str(source.get("title") or ""))
+    if not title:
+        return False
+    labels = {
+        targets_dao.normalize_target_name(str(value or ""))
+        for value in [canonical_name, *(aliases or [])]
+        if targets_dao.normalize_target_name(str(value or ""))
+    }
+    return any(label in title or title in label for label in labels)
+
+
+def _identity_key_matches(candidate: str, known: str) -> bool:
+    """Match an existing identity with an official name carrying a qualifier."""
+    if not candidate or not known:
+        return False
+    if candidate == known:
+        return True
+    return min(len(candidate), len(known)) >= 8 and (
+        candidate.startswith(known) or known.startswith(candidate)
+    )
+
+
+def _with_target_identity_default(
+    value: dict[str, Any],
+    *,
+    canonical_name: str,
+) -> dict[str, Any]:
+    """Keep the stable Target identity when an otherwise valid Agent payload omits it."""
+    if str(value.get("canonical_name") or "").strip():
+        return value
+    return {**value, "canonical_name": str(canonical_name or "").strip()}
+
+
+def _shared_government_path_segments(
+    urls: list[str] | None,
+    root_domains: list[str] | None,
+) -> list[str]:
+    """Derive bounded path scopes for units hosted on shared gov portals."""
+    roots = [
+        normalize_root_domain(value)
+        for value in root_domains or []
+        if normalize_root_domain(value).endswith(".gov.cn")
+    ]
+    if not roots:
+        return []
+    result: list[str] = []
+    for root in roots:
+        scoped_urls = []
+        for value in urls or []:
+            url = _canonical_browser_url(value)
+            host = (urlsplit(url).hostname or "").casefold().rstrip(".") if url else ""
+            if host == root or host.endswith(f".{root}"):
+                scoped_urls.append(url)
+        if not scoped_urls or any(_is_origin_homepage(url) for url in scoped_urls):
+            continue
+        for url in scoped_urls:
+            candidates: list[tuple[int, str]] = []
+            for raw_segment in urlsplit(url).path.split("/"):
+                segment = unquote(raw_segment).strip().casefold()
+                if (
+                    len(segment) < 3
+                    or len(segment) > 64
+                    or segment in _GENERIC_SHARED_PATH_SEGMENTS
+                    or "." in segment
+                    or re.fullmatch(r"(?:19|20)\d{2}(?:\d{2}){0,2}", segment)
+                ):
+                    continue
+                if segment.isdigit():
+                    score = 100 + len(segment)
+                elif any(character.isdigit() for character in segment):
+                    score = 80 + len(segment)
+                else:
+                    score = 40 + len(segment)
+                candidates.append((score, segment))
+            if candidates:
+                selected = max(candidates)[1]
+                if selected not in result:
+                    result.append(selected)
+    return result[:16]
+
+
+def _validated_scan_scope(
+    *,
+    urls: list[str],
+    root_domains: list[Any] | None,
+    sources_by_url: dict[str, dict[str, Any]],
+    canonical_name: str,
+    aliases: list[Any] | None,
+) -> tuple[list[str], list[str]]:
+    """Keep only owned origins or bounded target-specific gov portal paths."""
+    candidate_domains = _clean_strings(
+        [normalize_root_domain(value) for value in root_domains or []],
+        limit=12,
+    )
+    relevant_urls = [
+        url
+        for url in urls
+        if url in sources_by_url
+        and (
+            not _is_origin_homepage(url)
+            or _source_title_matches_identity(
+                sources_by_url[url],
+                canonical_name=canonical_name,
+                aliases=aliases,
+            )
+            or (
+                bool(candidate_domains)
+                and not normalize_root_domain(url).endswith(".gov.cn")
+                and str(
+                    sources_by_url[url].get("source_type") or ""
+                ).strip().casefold()
+                in _OWNED_DOMAIN_SOURCE_TYPES
+                and bool(_filter_scan_urls_by_domains([url], candidate_domains))
+            )
+        )
+    ]
+    if not candidate_domains:
+        candidate_domains = _clean_strings(
+            [normalize_root_domain(url) for url in relevant_urls],
+            limit=12,
+        )
+    verified_domains = [
+        domain
+        for domain in candidate_domains
+        if _filter_scan_urls_by_domains(relevant_urls, [domain])
+        and (
+            not domain.endswith(".gov.cn")
+            or any(_is_origin_homepage(url) for url in relevant_urls)
+            or _shared_government_path_segments(relevant_urls, [domain])
+        )
+    ]
+    return verified_domains, _filter_scan_urls_by_domains(
+        relevant_urls,
+        verified_domains,
     )
 
 
@@ -197,6 +392,9 @@ def _build_navigation_evidence_observer(
                 if evaluated_values
                 else ""
             )
+            if tool_name == "take_snapshot" and _snapshot_is_error_page(text):
+                pending_selected_url = ""
+                return
             if evaluation_succeeded and (evaluated_url or pending_selected_url):
                 urls.add(evaluated_url or pending_selected_url)
                 pending_selected_url = ""
@@ -317,13 +515,25 @@ def _normalize_payload(
 
     evidence = normalize_many(list(data.get("evidence") or []))
     key_people = normalize_many(list(data.get("key_people") or []))
-    related = [
-        {
-            **item,
-            "web_scan_urls": normalize_urls(item.get("web_scan_urls") or []),
-        }
-        for item in normalize_many(list(data.get("related_targets") or []))
-    ]
+    related: list[dict[str, Any]] = []
+    for item in normalize_many(list(data.get("related_targets") or [])):
+        related_name = str(item.get("name") or "").strip()
+        related_aliases = _clean_strings(item.get("aliases"), limit=20)
+        related_domains, related_urls = _validated_scan_scope(
+            urls=normalize_urls(item.get("web_scan_urls") or []),
+            root_domains=item.get("root_domains") or [],
+            sources_by_url=sources_by_url,
+            canonical_name=related_name,
+            aliases=related_aliases,
+        )
+        related.append(
+            {
+                **item,
+                "aliases": related_aliases,
+                "root_domains": related_domains,
+                "web_scan_urls": related_urls,
+            }
+        )
     contacts: list[dict[str, Any]] = []
     for item in data.get("public_contacts") or []:
         urls = normalize_urls([item.get("source_url")])
@@ -336,10 +546,25 @@ def _normalize_payload(
             "机构深研已丢弃无有效来源的派生事实 | count=%s",
             dropped_derived,
         )
-    root_domains = _clean_strings(
+    candidate_root_domains = _clean_strings(
         [normalize_root_domain(value) for value in data.get("root_domains") or []],
         limit=12,
     )
+    canonical_name = str(data.get("canonical_name") or "").strip()
+    aliases = _clean_strings(data.get("aliases"), limit=30)
+    root_domains, web_scan_urls = _validated_scan_scope(
+        urls=normalize_urls(data.get("web_scan_urls") or []),
+        root_domains=candidate_root_domains,
+        sources_by_url=sources_by_url,
+        canonical_name=canonical_name,
+        aliases=aliases,
+    )
+    if candidate_root_domains != root_domains:
+        logger.warning(
+            "机构深研已丢弃无自营入口或无专属路径的根域名 | target=%s domains=%s",
+            canonical_name,
+            sorted(set(candidate_root_domains) - set(root_domains)),
+        )
     channel_terms = {
         str(channel).strip().lower(): _clean_strings(terms, limit=30)
         for channel, terms in (data.get("search_terms_by_channel") or {}).items()
@@ -347,10 +572,10 @@ def _normalize_payload(
     }
     return {
         **data,
-        "canonical_name": str(data.get("canonical_name") or "").strip(),
-        "aliases": _clean_strings(data.get("aliases"), limit=30),
+        "canonical_name": canonical_name,
+        "aliases": aliases,
         "root_domains": root_domains,
-        "web_scan_urls": normalize_urls(data.get("web_scan_urls") or []),
+        "web_scan_urls": web_scan_urls,
         "business_keywords": _clean_strings(data.get("business_keywords"), limit=80),
         "search_terms_by_channel": channel_terms,
         "sources": list(sources_by_url.values()),
@@ -569,6 +794,7 @@ def _candidate_scan_params(
     target_id: str = "",
     is_root: bool,
     seed_urls: list[str] | None = None,
+    root_domains: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Apply reusable root/related-Target source policies to one scan."""
     params = {**base_params, "company_name": name}
@@ -577,6 +803,14 @@ def _candidate_scan_params(
     normalized_seed_urls = _clean_strings(seed_urls, limit=60)
     if normalized_seed_urls:
         params["urls"] = normalized_seed_urls
+    shared_path_segments = _shared_government_path_segments(
+        normalized_seed_urls,
+        [normalize_root_domain(value) for value in root_domains or []],
+    )
+    if shared_path_segments and not params.get("website_required_path_segments"):
+        params["website_required_path_segments"] = shared_path_segments
+        if not bool(params.get("allow_shared_portal_asset_discovery", False)):
+            params["enable_asset_discovery"] = False
     if not is_root and not bool(params.get("enable_subsidiary_bidding", False)):
         params["enable_bidding"] = False
     if not is_root and not bool(params.get("enable_subsidiary_wechat", False)):
@@ -670,6 +904,10 @@ async def _schedule_company_scans(
             target_id=target_id,
             is_root=is_root,
             seed_urls=seed_urls,
+            root_domains=[
+                candidate.get("root_domain"),
+                *(candidate.get("root_domains") or []),
+            ],
         )
         documents.append(
             {
@@ -1056,7 +1294,12 @@ async def run_target_research(
 
                     def validate_research_payload(value: dict[str, Any]) -> None:
                         _validate_research_payload(
-                            value,
+                            _with_target_identity_default(
+                                value,
+                                canonical_name=str(
+                                    target.get("canonical_name") or ""
+                                ),
+                            ),
                             navigated_urls=attempt_urls,
                         )
 
@@ -1147,7 +1390,10 @@ async def run_target_research(
         raise ValueError("机构深研 Agent 未返回可解析的结构化结果")
 
     data = _validate_research_payload(
-        parsed,
+        _with_target_identity_default(
+            parsed,
+            canonical_name=str(target.get("canonical_name") or ""),
+        ),
         navigated_urls=navigated_urls,
     )
     await update_task_stage(
@@ -1174,7 +1420,10 @@ async def run_target_research(
         if normalize_root_domain(value)
     }
     research_identity_verified = bool(
-        research_identity_key in known_identity_keys
+        any(
+            _identity_key_matches(research_identity_key, known_key)
+            for known_key in known_identity_keys
+        )
         or known_domains.intersection(root_domains)
     )
     if not research_identity_verified:

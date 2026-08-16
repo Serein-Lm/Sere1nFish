@@ -25,6 +25,10 @@ from api.services.source_documents.resources import (
 from api.services.source_documents.service import ingest_source_url
 from api.services.source_documents.urls import canonicalize_source_url
 from api.services.task_progress import update_source_progress
+from api.storage.errors import (
+    is_storage_configuration_error,
+    storage_error_details,
+)
 from core.logger import get_logger
 from core.mobile.collect.contacts import build_contact_findings
 
@@ -565,6 +569,8 @@ class WebsiteDocumentCollectionService:
         }
         preview: list[dict[str, Any]] = []
         truncated = False
+        archive_blocked = asyncio.Event()
+        archive_blocked_reason = ""
 
         async def _queue_items(items: list[dict[str, Any]]) -> None:
             nonlocal reserved_documents, truncated
@@ -999,10 +1005,13 @@ class WebsiteDocumentCollectionService:
         ) as session:
 
             async def _worker(worker_id: int) -> None:
+                nonlocal archive_blocked_reason
                 while True:
                     queued = await queue.get()
                     item = queued[2]
                     try:
+                        if archive_blocked.is_set():
+                            continue
                         if item.get("kind") == "document" or _is_document_url(
                             str(item.get("canonical_url") or ""),
                             str(item.get("anchor_text") or ""),
@@ -1012,6 +1021,26 @@ class WebsiteDocumentCollectionService:
                         else:
                             await _discover(session, item)
                     except Exception as exc:  # noqa: BLE001
+                        if is_storage_configuration_error(exc):
+                            details = storage_error_details(exc)
+                            archive_blocked_reason = details.safe_message()
+                            if not archive_blocked.is_set():
+                                logger.error(
+                                    "官网文档归档因对象存储配置错误熔断 "
+                                    "task=%s worker=%s url=%s error=%s",
+                                    crawl_task_id,
+                                    worker_id,
+                                    item.get("canonical_url"),
+                                    archive_blocked_reason,
+                                )
+                            archive_blocked.set()
+                            if not dry_run:
+                                await crawl_dao.mark_page_retry(
+                                    self.db,
+                                    page_id=str(item["page_id"]),
+                                    error=archive_blocked_reason,
+                                )
+                            continue
                         attempt = int(item.get("attempts_in_run") or 0) + 1
                         item["attempts_in_run"] = attempt
                         logger.warning(
@@ -1134,6 +1163,14 @@ class WebsiteDocumentCollectionService:
             "dry_run": dry_run,
             "required_path_segments": required_segments,
         }
+        if archive_blocked_reason:
+            summary.update(
+                {
+                    "blocked_stage": "object_storage",
+                    "blocked_reason": archive_blocked_reason,
+                    "retryable": True,
+                }
+            )
         if dry_run:
             summary["preview"] = preview
             return summary
@@ -1143,13 +1180,16 @@ class WebsiteDocumentCollectionService:
             status=status,
             summary=summary,
             error=(
-                f"{counters['failed_pages']} 个页面失败"
-                if counters["failed_pages"]
-                else f"{counters['documents_partial']} 篇附件证据不完整"
-                if counters["documents_partial"]
-                else "达到采集上限，保留剩余范围供后续增量"
-                if truncated
-                else ""
+                archive_blocked_reason
+                or (
+                    f"{counters['failed_pages']} 个页面失败"
+                    if counters["failed_pages"]
+                    else f"{counters['documents_partial']} 篇附件证据不完整"
+                    if counters["documents_partial"]
+                    else "达到采集上限，保留剩余范围供后续增量"
+                    if truncated
+                    else ""
+                )
             ),
         )
         await update_source_progress(
@@ -1162,8 +1202,11 @@ class WebsiteDocumentCollectionService:
             succeeded=counters["documents_archived"],
             failed=counters["failed_pages"] + counters["documents_partial"],
             message=(
-                f"官网文档归档完成 {counters['documents_archived']} 篇，"
-                f"附件 {counters['attachments_archived']} 个"
+                archive_blocked_reason
+                or (
+                    f"官网文档归档完成 {counters['documents_archived']} 篇，"
+                    f"附件 {counters['attachments_archived']} 个"
+                )
             ),
         )
         try:
@@ -1199,6 +1242,7 @@ class WebsiteDocumentCollectionService:
             if (
                 result.get("status") != "partial"
                 or result.get("truncated")
+                or result.get("blocked_stage")
                 or kwargs.get("dry_run")
             ):
                 break

@@ -401,6 +401,28 @@ def test_website_collection_retries_partial_pages_once(monkeypatch) -> None:
     assert result["retry_passes"] == 1
 
 
+def test_website_collection_defers_blocked_storage_retry(monkeypatch) -> None:
+    from api.services.website_documents import WebsiteDocumentCollectionService
+
+    service = WebsiteDocumentCollectionService(object())
+    calls = 0
+
+    async def _run(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "partial",
+            "blocked_stage": "object_storage",
+            "retryable": True,
+        }
+
+    monkeypatch.setattr(service, "run", _run)
+    result = asyncio.run(service.run_until_stable(project_id="project-1"))
+
+    assert calls == 1
+    assert result["retry_passes"] == 0
+
+
 def test_website_discovery_retries_urls_after_enqueue_failure(monkeypatch) -> None:
     from api.services import website_documents
     from api.services.source_documents.resources import FetchedResource
@@ -555,6 +577,156 @@ def test_website_discovery_retries_urls_after_enqueue_failure(monkeypatch) -> No
     assert document_enqueue_batch_sizes == [1, 1]
     assert result["status"] == "completed"
     assert result["documents_archived"] == 1
+
+
+def test_storage_configuration_error_preserves_pending_website_pages(
+    monkeypatch,
+) -> None:
+    from collections import Counter
+
+    from api.services import website_documents
+    from api.services.source_documents.resources import FetchedResource
+    from api.services.website_documents import (
+        WebsiteCollectionPolicy,
+        WebsiteDocumentCollectionService,
+    )
+
+    seed_url = "https://example.gov.cn/"
+    document_urls = [
+        "https://example.gov.cn/notices/202608/t20260812_1.html",
+        "https://example.gov.cn/notices/202608/t20260812_2.html",
+    ]
+    test_pages: dict[str, dict] = {}
+    ingest_calls = 0
+    finish_error = ""
+
+    class ServiceError(Exception):
+        code = "InvalidAccessKeyId"
+        status_code = 403
+        request_id = "request-1"
+        message = "The configured access key is disabled."
+
+    class OperationError(Exception):
+        def __init__(self) -> None:
+            self._error = ServiceError()
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def _list_pages(*_args, **_kwargs):
+        return []
+
+    async def _enqueue_pages(*_args, crawl_task_id, **kwargs):
+        ids = []
+        for item in kwargs["pages"]:
+            page_id = website_documents.crawl_dao.page_id_for_url(
+                crawl_task_id,
+                item["canonical_url"],
+            )
+            ids.append(page_id)
+            page = dict(item)
+            page.update({"page_id": page_id, "status": "pending"})
+            test_pages[page_id] = page
+        return ids
+
+    async def _mark_started(*_args, page_id, status, **_kwargs):
+        test_pages[page_id]["status"] = status
+
+    async def _mark_retry(*_args, page_id, error, **_kwargs):
+        test_pages[page_id].update({"status": "pending", "error": error})
+
+    async def _mark_terminal(*_args, page_id, status, fields=None, **_kwargs):
+        test_pages[page_id].update({"status": status, **(fields or {})})
+
+    async def _fetch(*_args, **_kwargs):
+        return FetchedResource(
+            url=seed_url,
+            data=(
+                '<html><a href="/notices/202608/t20260812_1.html">联系公告一</a>'
+                '<a href="/notices/202608/t20260812_2.html">联系公告二</a></html>'
+            ).encode(),
+            content_type="text/html",
+            filename="index.html",
+        )
+
+    async def _ingest(*_args, **_kwargs):
+        nonlocal ingest_calls
+        ingest_calls += 1
+        raise OperationError()
+
+    async def _summarize(*_args, **_kwargs):
+        by_status = Counter(item["status"] for item in test_pages.values())
+        by_kind = Counter(item["kind"] for item in test_pages.values())
+        return {
+            "total_pages": len(test_pages),
+            "pending_pages": by_status["pending"],
+            "failed_pages": by_status["error"],
+            "archived_documents": by_status["archived"],
+            "partial_documents": by_status["partial"],
+            "rejected_documents": by_status["rejected"],
+            "attachments_archived": 0,
+            "contacts_found": 0,
+            "findings_upserted": 0,
+            "by_status": dict(by_status),
+            "by_kind": dict(by_kind),
+        }
+
+    async def _finish(*_args, error, **_kwargs):
+        nonlocal finish_error
+        finish_error = error
+
+    monkeypatch.setattr(website_documents.crawl_dao, "begin_task", _noop)
+    monkeypatch.setattr(website_documents.crawl_dao, "list_pages", _list_pages)
+    monkeypatch.setattr(website_documents.crawl_dao, "enqueue_pages", _enqueue_pages)
+    monkeypatch.setattr(website_documents.crawl_dao, "mark_page_started", _mark_started)
+    monkeypatch.setattr(website_documents.crawl_dao, "mark_page_retry", _mark_retry)
+    monkeypatch.setattr(website_documents.crawl_dao, "mark_page_terminal", _mark_terminal)
+    monkeypatch.setattr(website_documents.crawl_dao, "heartbeat_task", _noop)
+    monkeypatch.setattr(website_documents.crawl_dao, "summarize_task", _summarize)
+    monkeypatch.setattr(website_documents.crawl_dao, "finish_task", _finish)
+    monkeypatch.setattr(website_documents, "fetch_resource_with_retry", _fetch)
+    monkeypatch.setattr(website_documents, "ingest_source_url", _ingest)
+    monkeypatch.setattr(website_documents, "update_source_progress", _noop)
+
+    from api.services import company_scan_recovery
+
+    monkeypatch.setattr(
+        company_scan_recovery,
+        "reconcile_terminal_company_website_result",
+        _noop,
+    )
+    result = asyncio.run(
+        WebsiteDocumentCollectionService(
+            object(),
+            policy=WebsiteCollectionPolicy(
+                max_pages=20,
+                max_documents=10,
+                max_depth=3,
+                discovery_concurrency=1,
+                archive_concurrency=1,
+            ),
+        ).run(
+            parent_task_id="parent",
+            project_id="project-1",
+            target={
+                "target_id": "target-1",
+                "canonical_name": "测试单位",
+                "root_domains": ["example.gov.cn"],
+            },
+            seed_urls=[seed_url],
+        )
+    )
+
+    assert ingest_calls == 1
+    assert result["status"] == "partial"
+    assert result["blocked_stage"] == "object_storage"
+    assert result["retryable"] is True
+    assert all(
+        item["status"] == "pending"
+        for item in test_pages.values()
+        if item["canonical_url"] in document_urls
+    )
+    assert "InvalidAccessKeyId" in finish_error
 
 
 def test_official_seed_selection_prefers_probed_www_origin() -> None:

@@ -238,6 +238,7 @@ async def resolve_wechat_task_definition(
     device_id: str,
     expected_target_id: str = "",
     allow_running: bool = False,
+    create_if_missing: bool = False,
 ) -> dict[str, Any]:
     """按手机匹配当前项目的微信采集配置，具体链接策略不暴露给调用侧。"""
     device_id = str(device_id or "").strip()
@@ -251,6 +252,7 @@ async def resolve_wechat_task_definition(
             device_id=device_id,
             expected_target_id=expected_target_id,
             allow_running=allow_running,
+            create_if_missing=create_if_missing,
         )
 
 
@@ -261,6 +263,7 @@ async def _resolve_wechat_task_definition(
     device_id: str,
     expected_target_id: str = "",
     allow_running: bool = False,
+    create_if_missing: bool = False,
 ) -> dict[str, Any]:
     """Resolve and repair one definition while holding its shared lock."""
 
@@ -270,6 +273,14 @@ async def _resolve_wechat_task_definition(
         for item in task_defs
         if _is_company_wechat_task(item, device_id=device_id)
     ]
+    if not candidates and create_if_missing:
+        candidates = [
+            await _ensure_wechat_task_definition(
+                db,
+                project_id=project_id,
+                device_id=device_id,
+            )
+        ]
     if not candidates:
         raise ValueError("所选手机没有当前项目的微信采集配置")
     task_def = _select_wechat_task(
@@ -310,6 +321,7 @@ async def run_company_wechat_collection(
         device_id=device_id,
         expected_target_id=target_id,
         allow_running=True,
+        create_if_missing=True,
     )
     task_def_id = str(task_def.get("task_def_id") or "")
     run_task_id = f"{task_id}_wechat"
