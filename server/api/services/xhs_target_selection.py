@@ -267,7 +267,11 @@ class AutomaticXhsTargetSelectionStrategy:
 
         try:
             prompt = load_prompt(XHS_TARGET_SELECTION_PROMPT)
-            llm = create_llm(self.app_config, streaming=False)
+            llm = create_llm(
+                self.app_config,
+                workload="collection",
+                streaming=False,
+            )
             structured_llm = llm.with_structured_output(_AiTargetDecisionBatch)
         except Exception as exc:  # noqa: BLE001
             error = str(exc) or type(exc).__name__

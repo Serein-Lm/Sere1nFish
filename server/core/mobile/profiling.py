@@ -55,7 +55,7 @@ async def _extract_persona(
     app_config = await get_runtime_app_config()
     llm = create_llm(
         app_config,
-        model_name=app_config.runtime.models.default,
+        workload="collection",
         streaming=False,
     )
     structured = llm.with_structured_output(PersonaExtract)

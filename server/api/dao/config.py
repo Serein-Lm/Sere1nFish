@@ -28,7 +28,13 @@ def _now() -> datetime:
 CONFIG_CATEGORIES = {
     "llm": {
         "description": "LLM 大模型配置",
-        "fields": ["api_key", "base_url", "default_model", "vision_model"],
+        "fields": [
+            "api_key",
+            "base_url",
+            "default_model",
+            "collection_model",
+            "vision_model",
+        ],
     },
     "tools": {
         "description": "工具 API Key 配置",
@@ -69,6 +75,7 @@ APP_CONFIG_SECTIONS = {
 
 LLM_RUNTIME_MODEL_KEYS = {
     "default_model": "default",
+    "collection_model": "collection",
     "vision_model": "vision",
     "mobile_planner_model": "mobile_planner",
     "mobile_executor_model": "mobile_executor",
@@ -303,6 +310,7 @@ async def get_llm_config(db: AsyncIOMotorDatabase) -> dict[str, Any]:
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
         "default_model": models.get("default"),
+        "collection_model": models.get("collection"),
         "vision_model": models.get("vision"),
         "mobile_planner_model": models.get("mobile_planner"),
         "mobile_executor_model": models.get("mobile_executor"),
@@ -319,6 +327,7 @@ async def set_llm_config(
     api_key: str | None = None,
     base_url: str | None = None,
     default_model: str | None = None,
+    collection_model: str | None = None,
     vision_model: str | None = None,
     mobile_planner_model: str | None = None,
     mobile_executor_model: str | None = None,
@@ -337,6 +346,8 @@ async def set_llm_config(
         config["base_url"] = base_url
     if default_model is not None:
         config["default_model"] = default_model
+    if collection_model is not None:
+        config["collection_model"] = collection_model
     if vision_model is not None:
         config["vision_model"] = vision_model
     if mobile_planner_model is not None:

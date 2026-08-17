@@ -27,6 +27,7 @@ class LLMConfigUpdate(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     default_model: str | None = None
+    collection_model: str | None = None
     vision_model: str | None = None
     mobile_planner_model: str | None = None
     mobile_executor_model: str | None = None
@@ -39,6 +40,7 @@ class LLMConfigOut(BaseModel):
     api_key: str | None
     base_url: str | None
     default_model: str | None
+    collection_model: str | None = None
     vision_model: str | None
     mobile_planner_model: str | None = None
     mobile_executor_model: str | None = None
@@ -175,6 +177,7 @@ def _llm_config_out(config: dict[str, Any], mask: bool = True) -> LLMConfigOut:
         api_key=_mask_api_key(api_key) if mask else api_key,
         base_url=config.get("base_url"),
         default_model=config.get("default_model"),
+        collection_model=config.get("collection_model"),
         vision_model=config.get("vision_model"),
         mobile_planner_model=config.get("mobile_planner_model"),
         mobile_executor_model=config.get("mobile_executor_model"),
@@ -432,6 +435,7 @@ async def set_llm_config(body: LLMConfigUpdate, _: User = Depends(require_admin)
         api_key=body.api_key,
         base_url=body.base_url,
         default_model=body.default_model,
+        collection_model=body.collection_model,
         vision_model=body.vision_model,
         mobile_planner_model=body.mobile_planner_model,
         mobile_executor_model=body.mobile_executor_model,

@@ -1003,9 +1003,12 @@ async def test_extract_with_retry_repairs_schema_invalid_json(monkeypatch) -> No
     from Sere1nGraph.graph.agents import runtime
 
     repair_prompts: list[str] = []
+    repair_system_messages: list[object] = []
+    model_calls: list[dict] = []
 
     class FakeRepairLLM:
         async def ainvoke(self, messages):
+            repair_system_messages.append(messages[0].content)
             repair_prompts.append(str(messages[-1].content))
             return AIMessage(content='{"sources":["official","government"]}')
 
@@ -1013,20 +1016,32 @@ async def test_extract_with_retry_repairs_schema_invalid_json(monkeypatch) -> No
         if len(value.get("sources") or []) < 2:
             raise ValueError("sources 至少需要 2 项")
 
-    monkeypatch.setattr(runtime, "create_llm", lambda *_args, **_kwargs: FakeRepairLLM())
+    def create_repair_llm(*_args, **kwargs):
+        model_calls.append(kwargs)
+        return FakeRepairLLM()
+
+    monkeypatch.setattr(runtime, "create_llm", create_repair_llm)
     result = {"messages": [AIMessage(content='{"sources":[]}')]}
 
     parsed = await runtime.extract_with_retry(
         result,
         app_config=object(),
         max_retries=1,
+        system_prompt="stable collection instructions",
         validator=validate,
         repair_context="已核验 URL: https://example.edu.cn/about",
+        model_workload="collection",
     )
 
     assert parsed == {"sources": ["official", "government"]}
     assert "sources 至少需要 2 项" in repair_prompts[0]
     assert "https://example.edu.cn/about" in repair_prompts[0]
+    assert model_calls[0]["workload"] == "collection"
+    assert repair_system_messages == [[{
+        "type": "text",
+        "text": "stable collection instructions",
+        "cache_control": {"type": "ephemeral"},
+    }]]
 
 
 @pytest.mark.asyncio

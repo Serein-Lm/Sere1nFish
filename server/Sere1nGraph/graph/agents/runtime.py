@@ -20,7 +20,7 @@ from typing import Any, Callable, AsyncGenerator, Literal, Sequence
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import MessagesState
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -37,6 +37,7 @@ logger = get_logger("agent_runtime")
 
 # 输出模式类型
 OutputMode = Literal["silent", "console", "sse"]
+ModelWorkload = Literal["interactive", "collection"]
 ToolResultTransform = Callable[[str, Any], Any]
 ToolResultObserver = Callable[[str, Any], None]
 ToolCallTransform = Callable[
@@ -395,6 +396,7 @@ def create_llm(
     streaming: bool = True,
     extra_body: dict[str, Any] | None = None,
     parallel_tool_calls: bool | None = None,
+    workload: ModelWorkload = "interactive",
 ) -> ChatOpenAI:
     """
     基于配置创建 ChatOpenAI。
@@ -421,11 +423,15 @@ def create_llm(
     
     if app_config:
         runtime = app_config.runtime
-        # 优先用传入的 model_name，否则从 config.runtime.models.default 读取
+        # 显式模型优先；否则由统一工作负载路由选择模型。
         if not model_name:
             models_cfg = getattr(runtime, "models", None)
             if models_cfg:
-                model_name = getattr(models_cfg, "default", None)
+                model_name = (
+                    getattr(models_cfg, "collection_model", None)
+                    if workload == "collection"
+                    else getattr(models_cfg, "default", None)
+                )
         kwargs["model"] = model_name or "qwen-max"
         
         if getattr(runtime, "base_url", None):
@@ -450,6 +456,7 @@ def create_agent_node(
     parallel_tool_calls: bool = True,
     output_mode: OutputMode = "silent",
     streaming: bool = True,
+    model_workload: ModelWorkload = "interactive",
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     mcp_tool_limit: int = 0,
     mcp_tool_timeout: int = DEFAULT_TOOL_TIMEOUT,
@@ -476,6 +483,7 @@ def create_agent_node(
     - parallel_tool_calls: 是否允许模型在同一轮并行调用工具；单浏览器 Agent 应关闭
     - output_mode: 输出模式
     - streaming: LLM 是否使用流式输出（默认 True，关闭可获得完整 token 统计）
+    - model_workload: 模型工作负载；交互对话或批量采集分析
     - timeout: Agent 执行超时秒数（默认从 config.runtime.agent_timeout 读取，fallback 500s，0 表示不限）
     - mcp_tool_names: 专用 Agent 可见的 MCP 工具白名单；None 表示保留全部工具
     - mcp_tool_timeout: 单次 MCP 工具调用超时秒数
@@ -492,11 +500,25 @@ def create_agent_node(
     
     llm = create_llm(
         app_config,
+        workload=model_workload,
         streaming=streaming,
         parallel_tool_calls=parallel_tool_calls,
     )
     base_tools = list(builtin_tools or [])
     middleware_list = list(middleware or [])
+    prepared_system_prompt: str | SystemMessage = system_prompt
+    if model_workload == "collection" and isinstance(system_prompt, str):
+        # 百炼显式 Prompt Cache：固定的系统规则位于动态任务输入之前，
+        # 批量任务可稳定复用该前缀；未加标记的交互请求继续使用隐式缓存。
+        prepared_system_prompt = SystemMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        )
 
     # 超时：优先用参数传入的，否则从 config 读取
     if timeout == DEFAULT_AGENT_TIMEOUT:
@@ -541,7 +563,7 @@ def create_agent_node(
                         agent = create_agent(
                             model=llm,
                             tools=all_tools,
-                            system_prompt=system_prompt,
+                            system_prompt=prepared_system_prompt,
                             middleware=middleware_list,
                         )
                         
@@ -556,7 +578,7 @@ def create_agent_node(
             agent = create_agent(
                 model=llm,
                 tools=all_tools,
-                system_prompt=system_prompt,
+                system_prompt=prepared_system_prompt,
                 middleware=middleware_list,
             )
             
@@ -592,7 +614,7 @@ def create_agent_node(
                     agent = create_agent(
                         model=llm,
                         tools=tools_inner,
-                        system_prompt=system_prompt,
+                        system_prompt=prepared_system_prompt,
                         middleware=middleware_list,
                     )
                     event_handler = console_event_handler if output_mode == "console" else None
@@ -827,6 +849,7 @@ async def extract_with_retry(
     system_prompt: str = "",
     validator: Callable[[dict[str, Any]], Any] | None = None,
     repair_context: str = "",
+    model_workload: ModelWorkload = "interactive",
 ) -> dict | None:
     """
     提取结构化输出，解析失败时用 LLM 结合完整上下文和原始 system prompt 做修复。
@@ -892,9 +915,12 @@ async def extract_with_retry(
     )
 
     try:
-        repair_llm = create_llm(app_config, streaming=False)
+        repair_llm = create_llm(
+            app_config,
+            workload=model_workload,
+            streaming=False,
+        )
         repair_system = system_prompt if system_prompt else ""
-        from langchain_core.messages import SystemMessage
         from core.observability import observation_context
 
         for attempt in range(1, min(max_retries, 5) + 1):
@@ -911,7 +937,16 @@ async def extract_with_retry(
             )
             repair_messages = []
             if repair_system:
-                repair_messages.append(SystemMessage(content=repair_system))
+                repair_content: str | list[dict[str, Any]] = repair_system
+                if model_workload == "collection":
+                    repair_content = [
+                        {
+                            "type": "text",
+                            "text": repair_system,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                repair_messages.append(SystemMessage(content=repair_content))
             repair_messages.append(HumanMessage(content=repair_user))
 
             with observation_context(phase="structured_repair", agent="structured_repair"):

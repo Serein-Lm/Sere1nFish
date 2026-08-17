@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -178,6 +179,7 @@ def test_llm_frontend_config_feeds_runtime_app_config() -> None:
                 "api_key": "front-key",
                 "base_url": "https://example.test/v1",
                 "default_model": "front-default",
+                "collection_model": "front-collection",
                 "vision_model": "front-vision",
                 "mobile_planner_model": "front-planner",
                 "mobile_executor_model": "front-executor",
@@ -191,11 +193,152 @@ def test_llm_frontend_config_feeds_runtime_app_config() -> None:
     assert app_config.runtime.base_url == "https://example.test/v1"
     assert app_config.runtime.agent_timeout == 321
     assert app_config.runtime.models.default == "front-default"
+    assert app_config.runtime.models.collection_model == "front-collection"
     assert app_config.runtime.models.vision == "front-vision"
     assert app_config.runtime.models.mobile_planner_model == "front-planner"
     assert app_config.runtime.models.mobile_executor_model == "front-executor"
     assert app_config.runtime.models.mobile_screen_model == "front-screen"
     assert app_config.runtime.models.mobile_chat_model == "front-chat"
+
+
+def test_llm_workload_routes_collection_without_changing_interactive_model() -> None:
+    from Sere1nGraph.graph.agents.runtime import create_llm
+    from Sere1nGraph.graph.config.loader import load_config_from_data
+
+    app_config = load_config_from_data(
+        {
+            "runtime": {
+                "api_key": "test-key",
+                "base_url": "https://example.test/v1",
+                "models": {
+                    "default": "interactive-model",
+                    "collection": "collection-model",
+                },
+            }
+        }
+    )
+
+    interactive = create_llm(app_config, streaming=False)
+    collection = create_llm(
+        app_config,
+        workload="collection",
+        streaming=False,
+    )
+
+    assert interactive.model_name == "interactive-model"
+    assert collection.model_name == "collection-model"
+
+
+def test_collection_agent_uses_selected_model_and_explicit_prompt_cache() -> None:
+    from Sere1nGraph.graph.agents.runtime import create_agent_node
+    from Sere1nGraph.graph.config.loader import load_config_from_data
+
+    app_config = load_config_from_data(
+        {
+            "runtime": {
+                "api_key": "test-key",
+                "base_url": "https://example.test/v1",
+                "models": {
+                    "default": "interactive-model",
+                    "collection": "collection-model",
+                },
+            }
+        }
+    )
+
+    agent = create_agent_node(
+        app_config,
+        system_prompt="stable collection instructions",
+        model_workload="collection",
+        streaming=False,
+    )
+    closure = {
+        name: cell.cell_contents
+        for name, cell in zip(agent.__code__.co_freevars, agent.__closure__ or ())
+    }
+
+    assert closure["llm"].model_name == "collection-model"
+    assert closure["prepared_system_prompt"].content == [
+        {
+            "type": "text",
+            "text": "stable collection instructions",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def test_finding_context_routes_text_and_images_to_separate_models(monkeypatch) -> None:
+    from api.services.finding_context import agent as agent_module
+
+    calls: list[dict] = []
+
+    class _StructuredLLM:
+        async def ainvoke(self, _messages):
+            return {}
+
+    class _FakeLLM:
+        def with_structured_output(self, _schema):
+            return _StructuredLLM()
+
+    async def _runtime_config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(
+                models=SimpleNamespace(
+                    default="interactive-model",
+                    collection_model="collection-model",
+                    vision="vision-model",
+                )
+            )
+        )
+
+    def _create_llm(_app_config, **kwargs):
+        calls.append(kwargs)
+        return _FakeLLM()
+
+    monkeypatch.setattr(agent_module, "get_runtime_app_config", _runtime_config)
+    monkeypatch.setattr(agent_module, "create_llm", _create_llm)
+    monkeypatch.setattr(agent_module, "load_prompt", lambda _slug: "prompt")
+
+    async def run() -> None:
+        runtime = agent_module.RuntimeFindingContextAgent()
+        base = {
+            "finding_id": "finding-1",
+            "project_id": "project-1",
+            "task_id": "task-1",
+            "text": "evidence",
+        }
+        text_result = await runtime.organize(
+            agent_module.FindingContextAgentRequest(**base, images=[])
+        )
+        image_result = await runtime.organize(
+            agent_module.FindingContextAgentRequest(
+                **base,
+                images=[
+                    agent_module.FindingContextImage(
+                        evidence_ref="image-1",
+                        data_url="data:image/png;base64,AA==",
+                    )
+                ],
+            )
+        )
+
+        assert text_result.model == "collection-model"
+        assert image_result.model == "vision-model"
+
+    asyncio.run(run())
+
+    assert calls == [
+        {
+            "model_name": "collection-model",
+            "workload": "collection",
+            "streaming": False,
+        },
+        {
+            "model_name": "vision-model",
+            "workload": "interactive",
+            "streaming": False,
+        },
+    ]
 
 
 def test_llm_config_syncs_to_runtime_and_delete_clears_fallbacks() -> None:
@@ -222,6 +365,7 @@ def test_llm_config_syncs_to_runtime_and_delete_clears_fallbacks() -> None:
             db,
             api_key="front-key",
             default_model="front-default",
+            collection_model="front-collection",
             mobile_planner_model="front-planner",
         )
 
@@ -231,6 +375,7 @@ def test_llm_config_syncs_to_runtime_and_delete_clears_fallbacks() -> None:
         assert runtime["base_url"] == "https://old.example/v1"
         assert runtime["agent_timeout"] == 321
         assert runtime["models"]["default"] == "front-default"
+        assert runtime["models"]["collection"] == "front-collection"
         assert runtime["models"]["vision"] == "old-vision"
         assert runtime["models"]["mobile_planner"] == "front-planner"
         assert runtime["models"]["custom_keep"] == "kept"

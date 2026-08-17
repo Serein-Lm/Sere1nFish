@@ -468,6 +468,7 @@ class UrlWebScanTool:
                         result,
                         worker_config,
                         system_prompt=self._get_prompt(),
+                        model_workload="collection",
                     )
                     return result, parsed
 

@@ -305,7 +305,12 @@ async def normalize_company(
             raw = await agent(
                 {"messages": [HumanMessage(content=f"请规范化以下公司名并给出官网根域名：{input_name}")]}
             )
-            parsed = await extract_with_retry(raw, worker_config, system_prompt=prompt) or {}
+            parsed = await extract_with_retry(
+                raw,
+                worker_config,
+                system_prompt=prompt,
+                model_workload="collection",
+            ) or {}
     except Exception as exc:  # noqa: BLE001
         browser_error = str(exc) or type(exc).__name__
         logger.warning("公司浏览器规范化失败，降级 ICP: %s", browser_error)

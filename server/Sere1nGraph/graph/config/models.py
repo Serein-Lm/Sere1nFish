@@ -14,6 +14,7 @@ class ModelsConfig:
     模型名称配置。
     
     - `default`: 默认 LLM 模型
+    - `collection`: 批量采集与分析模型；未配置时回退到 default
     - `vision`: 视觉理解模型
     - `mobile_planner`: 手机规划层模型；未配置时回退到 default
     - `mobile_executor`: 手机执行层模型；未配置时回退到 vision
@@ -21,11 +22,16 @@ class ModelsConfig:
     - `mobile_chat`: 手机聊天状态解析/轻量回复模型；未配置时回退到 default
     """
     default: str = "qwen3.7-max"
+    collection: Optional[str] = None
     vision: str = "qwen3.7-plus"
     mobile_planner: Optional[str] = "qwen3.7-max"
     mobile_executor: Optional[str] = "qwen3.7-plus"
     mobile_screen: Optional[str] = "qwen3.7-plus"
     mobile_chat: Optional[str] = "qwen3.7-max"
+
+    @property
+    def collection_model(self) -> str:
+        return self.collection or self.default
 
     @property
     def mobile_planner_model(self) -> str:

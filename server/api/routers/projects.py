@@ -334,7 +334,12 @@ async def create_web_tagging_record(body: WebTaggingCreateRequest):
     agent = await create_web_tagging_agent(runtime_config, output_mode="silent", streaming=False)
     result = await agent({"messages": [HumanMessage(content=body.url)]})
 
-    data = await extract_with_retry(result, runtime_config, system_prompt=load_prompt("web_tagging/web_tagging"))
+    data = await extract_with_retry(
+        result,
+        runtime_config,
+        system_prompt=load_prompt("web_tagging/web_tagging"),
+        model_workload="collection",
+    )
     if not data:
         raise HTTPException(status_code=502, detail="Agent 未返回可解析的结构化内容")
 

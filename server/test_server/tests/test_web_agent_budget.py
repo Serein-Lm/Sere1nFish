@@ -88,6 +88,7 @@ def test_web_agent_factory_scales_model_call_limit(monkeypatch) -> None:
     )
 
     assert result == "agent"
+    assert captured["model_workload"] == "collection"
     assert captured["mcp_tool_limit"] == 5
     assert WEB_TAGGING_RUNTIME_POLICY in captured["system_prompt"]
     assert getattr(captured["middleware"][0], "run_limit", None) == 9

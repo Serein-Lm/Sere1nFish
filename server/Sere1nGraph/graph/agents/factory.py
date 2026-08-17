@@ -324,11 +324,12 @@ async def create_xhs_agent(
     """创建小红书信息收集 Agent。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("xhs_collect/xhs_collect"),
         builtin_tools=[],
         middleware=[
             SummarizationMiddleware(
-                model=create_llm(app_config),
+                model=create_llm(app_config, workload="collection"),
                 trigger=("tokens", 2000),
                 keep=("messages", 10),
             ),
@@ -369,6 +370,7 @@ async def create_web_tagging_agent(
     )
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=(
             f"{load_prompt('web_tagging/web_tagging')}\n\n"
             f"# 运行时策略\n\n{WEB_TAGGING_RUNTIME_POLICY}"
@@ -397,11 +399,12 @@ async def create_weixin_search_agent(
     """创建微信公众号搜索 Agent，用于搜索招投标相关信息。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("weixin_search/weixin_search"),
         builtin_tools=[],
         middleware=[
             SummarizationMiddleware(
-                model=create_llm(app_config),
+                model=create_llm(app_config, workload="collection"),
                 trigger=("tokens", 2000),
                 keep=("messages", 5),
             ),
@@ -420,11 +423,12 @@ async def create_bid_collect_agent(
     """
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("bid_collect/bid_collect"),
         builtin_tools=[tianyancha_get_bids],
         middleware=[
             SummarizationMiddleware(
-                model=create_llm(app_config),
+                model=create_llm(app_config, workload="collection"),
                 trigger=("tokens", 3000),
                 keep=("messages", 8),
             ),
@@ -448,11 +452,12 @@ async def create_company_normalize_agent(
     """
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("company_normalize/company_normalize"),
         builtin_tools=[tianyancha_get_domain],
         middleware=[
             SummarizationMiddleware(
-                model=create_llm(app_config),
+                model=create_llm(app_config, workload="collection"),
                 trigger=("tokens", 3000),
                 keep=("messages", 8),
             ),
@@ -471,6 +476,7 @@ async def create_target_research_agent(
     """创建机构 Target 深研 Agent；仅使用项目 Chrome，不另起浏览器。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=(
             f"{load_prompt('target_research/target_research')}\n\n"
             f"{TARGET_RESEARCH_RUNTIME_POLICY}"
@@ -483,7 +489,7 @@ async def create_target_research_agent(
                 exit_behavior="end",
             ),
             SummarizationMiddleware(
-                model=create_llm(app_config),
+                model=create_llm(app_config, workload="collection"),
                 trigger=("tokens", 10000),
                 keep=("messages", 2),
                 summary_prompt=PERSONA_RESEARCH_SUMMARY_PROMPT,
@@ -518,6 +524,7 @@ async def create_xhs_note_tagging_agent(
     """创建小红书笔记打标 Agent，用于分析搜索结果中的社工攻击面。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("xhs_note_tagging/xhs_note_tagging"),
         builtin_tools=[],
         middleware=None,
@@ -533,6 +540,7 @@ async def create_xhs_detail_tagging_agent(
     """创建小红书笔记详情打标 Agent，用于深度分析笔记内容。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("xhs_detail_tagging/xhs_detail_tagging"),
         builtin_tools=[],
         middleware=None,
@@ -548,6 +556,7 @@ async def create_xhs_profile_agent(
     """创建小红书人物画像 Agent，用于基于笔记生成用户画像。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("xhs_profile/xhs_profile"),
         builtin_tools=[],
         middleware=None,
@@ -563,6 +572,7 @@ async def create_douyin_tagging_agent(
     """创建抖音打标 Agent，用于分析搜索结果中的社工攻击面。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("douyin_profile/douyin_tagging"),
         builtin_tools=[],
         middleware=None,
@@ -578,6 +588,7 @@ async def create_douyin_profile_agent(
     """创建抖音人物画像 Agent，用于基于视觉分析生成用户画像。"""
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("douyin_profile/douyin_profile"),
         builtin_tools=[],
         middleware=None,
@@ -652,12 +663,13 @@ async def create_hub_specialist_agent(
 
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=system_prompt,
         builtin_tools=tools,
         middleware=[
             RequireEvidenceToolMiddleware(),
             SummarizationMiddleware(
-                model=create_llm(app_config),
+                model=create_llm(app_config, workload="collection"),
                 trigger=("tokens", summary_trigger_tokens),
                 keep=("messages", summary_keep_messages),
                 trim_tokens_to_summarize=summary_trim_tokens,
@@ -761,6 +773,7 @@ async def create_profile_copywriting_agent(
 
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=load_prompt("profile_copywriting/profile_copywriting"),
         builtin_tools=SKILL_TOOLS + PERSONA_TOOLS + WORD_TOOLS + CONTEXT_TOOLS + ANALYSIS_TOOLS,
         middleware=None,
@@ -782,6 +795,7 @@ async def create_persona_research_agent(
     """
     return create_agent_node(
         app_config=app_config,
+        model_workload="collection",
         system_prompt=(
             f"{load_prompt('persona_research/persona_research')}\n\n"
             f"{PERSONA_RESEARCH_RUNTIME_POLICY}"
@@ -794,7 +808,7 @@ async def create_persona_research_agent(
                 exit_behavior="end",
             ),
             SummarizationMiddleware(
-                model=create_llm(app_config),
+                model=create_llm(app_config, workload="collection"),
                 trigger=("tokens", 7500),
                 keep=("messages", 2),
                 summary_prompt=PERSONA_RESEARCH_SUMMARY_PROMPT,

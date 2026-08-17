@@ -8,6 +8,7 @@ export interface LLMConfig {
   api_key: string
   base_url: string
   default_model: string
+  collection_model?: string
   vision_model: string
   mobile_planner_model?: string
   mobile_executor_model?: string

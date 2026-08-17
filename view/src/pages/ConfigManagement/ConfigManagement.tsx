@@ -326,6 +326,7 @@ export default function ConfigManagement() {
         api_key: '',
         base_url: activeConfig.llm.base_url,
         default_model: activeConfig.llm.default_model,
+        collection_model: activeConfig.llm.collection_model,
         vision_model: activeConfig.llm.vision_model,
         mobile_planner_model: activeConfig.llm.mobile_planner_model,
         mobile_executor_model: activeConfig.llm.mobile_executor_model,
@@ -346,6 +347,7 @@ export default function ConfigManagement() {
       if (values.api_key) payload.api_key = values.api_key
       if (values.base_url) payload.base_url = values.base_url
       if (values.default_model) payload.default_model = values.default_model
+      if (values.collection_model) payload.collection_model = values.collection_model
       if (values.vision_model) payload.vision_model = values.vision_model
       if (values.mobile_planner_model) payload.mobile_planner_model = values.mobile_planner_model
       if (values.mobile_executor_model) payload.mobile_executor_model = values.mobile_executor_model
@@ -784,8 +786,14 @@ export default function ConfigManagement() {
               </div>
               <div className="config-item">
                 <div className="config-item-info">
-                  <div className="config-item-label">默认模型</div>
+                  <div className="config-item-label">交互对话模型</div>
                   <div className="config-item-value">{activeConfig.llm.default_model || '-'}</div>
+                </div>
+              </div>
+              <div className="config-item">
+                <div className="config-item-info">
+                  <div className="config-item-label">批量采集模型</div>
+                  <div className="config-item-value">{activeConfig.llm.collection_model || activeConfig.llm.default_model || '-'}</div>
                 </div>
               </div>
               <div className="config-item">
@@ -1327,8 +1335,11 @@ export default function ConfigManagement() {
           <Form.Item name="base_url" label="Base URL">
             <Input placeholder="https://api.openai.com/v1" />
           </Form.Item>
-          <Form.Item name="default_model" label="默认文本模型" extra="用于 AI 中枢、数据分析、内容生成等纯文本任务">
-            <Input placeholder="qwen3.7-max" />
+          <Form.Item name="default_model" label="交互对话模型" extra="用于 AI 中枢与钉钉对话；批量任务使用下方独立模型">
+            <Input placeholder="qwen3.8-max" />
+          </Form.Item>
+          <Form.Item name="collection_model" label="批量采集模型" extra="用于 URL 扫描、公司规范化、Target 深研、来源分析与上下文整理">
+            <Input placeholder="deepseek-v4-flash-0731" />
           </Form.Item>
           <Form.Item name="vision_model" label="视觉模型">
             <Input placeholder="qwen3.7-plus" />

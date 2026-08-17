@@ -207,6 +207,87 @@ def _capture(*, raw_html: bytes, rendered_html: bytes):
     )
 
 
+def test_text_analysis_uses_collection_model_and_reports_actual_model(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from api.services.source_documents import analysis
+
+    outputs = iter(
+        [
+            {
+                "summary": "目标文章摘要",
+                "article_scope": "target_focused",
+                "target_contact_values": [],
+                "subject_match": 95,
+                "relevance_score": 90,
+                "score_reason": "主体明确",
+            },
+            {
+                "decision": "accept",
+                "article_scope": "target_focused",
+                "subject_match": 95,
+                "relevance_score": 90,
+                "summary": "目标文章摘要",
+                "target_contact_values": [],
+                "reason": "主体明确",
+            },
+        ]
+    )
+    calls: list[dict] = []
+
+    class _StructuredLLM:
+        async def ainvoke(self, _messages):
+            return next(outputs)
+
+    class _FakeLLM:
+        model_name = "deepseek-v4-flash-0731"
+
+        def with_structured_output(self, _schema):
+            return _StructuredLLM()
+
+    async def _runtime_config():
+        return SimpleNamespace(
+            runtime=SimpleNamespace(
+                models=SimpleNamespace(
+                    default="qwen3.8-max",
+                    collection_model="deepseek-v4-flash-0731",
+                )
+            )
+        )
+
+    def _create_llm(_app_config, **kwargs):
+        calls.append(kwargs)
+        return _FakeLLM()
+
+    monkeypatch.setattr(analysis, "get_runtime_app_config", _runtime_config)
+    monkeypatch.setattr(analysis, "create_llm", _create_llm)
+    monkeypatch.setattr(analysis, "load_prompt", lambda _slug: "prompt")
+    capture = _capture(raw_html=b"raw", rendered_html=b"rendered")
+
+    async def run():
+        structured = await analysis.analyze_article_fields(
+            capture,
+            fields=[],
+            target_name="测试单位",
+            keyword="测试单位 联系方式",
+        )
+        review = await analysis.review_article_relevance(
+            capture,
+            draft_analysis=structured,
+            target_name="测试单位",
+            keyword="测试单位 联系方式",
+            required_subject_match=70,
+        )
+        return structured, review
+
+    structured, review = asyncio.run(run())
+
+    assert structured["analysis_model"] == "deepseek-v4-flash-0731"
+    assert review["review_model"] == "deepseek-v4-flash-0731"
+    assert [call["workload"] for call in calls] == ["collection", "collection"]
+
+
 def test_wechat_canonical_url_discards_tracking_query_and_fragment():
     from api.services.source_documents.urls import canonicalize_source_url
 

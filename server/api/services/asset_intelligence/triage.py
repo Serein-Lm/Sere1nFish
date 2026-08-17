@@ -86,7 +86,11 @@ class AssetTriageService:
 
         try:
             prompt = load_prompt("asset_triage/asset_triage")
-            llm = create_llm(self.app_config, streaming=False)
+            llm = create_llm(
+                self.app_config,
+                workload="collection",
+                streaming=False,
+            )
             structured = llm.with_structured_output(AssetTriageBatch)
         except Exception as exc:  # noqa: BLE001
             logger.warning(

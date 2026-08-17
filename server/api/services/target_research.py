@@ -1315,6 +1315,7 @@ async def run_target_research(
                             "发现候选，不得作为来源。至少选择两个正文来源：\n"
                             + "\n".join(content_urls)
                         ),
+                        model_workload="collection",
                     )
 
                 attempt_query = query

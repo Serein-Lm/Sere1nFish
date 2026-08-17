@@ -398,8 +398,16 @@ async def analyze_article_fields(
     prompt_hash = ""
     try:
         app_config = await get_runtime_app_config()
-        model_name = app_config.runtime.models.default
-        llm = create_llm(app_config, model_name=model_name, streaming=False)
+        llm = create_llm(
+            app_config,
+            workload="collection",
+            streaming=False,
+        )
+        model_name = str(
+            getattr(llm, "model_name", "")
+            or getattr(app_config.runtime.models, "collection_model", None)
+            or app_config.runtime.models.default
+        )
         structured = llm.with_structured_output(_article_output_model(fields))
         field_desc = "、".join(
             f"{item.name}({item.description or item.type})" for item in fields
@@ -528,8 +536,16 @@ async def review_article_relevance(
     prompt_hash = ""
     try:
         app_config = await get_runtime_app_config()
-        model_name = app_config.runtime.models.default
-        llm = create_llm(app_config, model_name=model_name, streaming=False)
+        llm = create_llm(
+            app_config,
+            workload="collection",
+            streaming=False,
+        )
+        model_name = str(
+            getattr(llm, "model_name", "")
+            or getattr(app_config.runtime.models, "collection_model", None)
+            or app_config.runtime.models.default
+        )
         structured = llm.with_structured_output(ArticleRelevanceReview)
         system, prompt_hash = _render_relevance_review_prompt(
             target_name=target_name,
@@ -731,8 +747,11 @@ async def attribute_target_contacts(
 
     try:
         app_config = await get_runtime_app_config()
-        model_name = app_config.runtime.models.default
-        llm = create_llm(app_config, model_name=model_name, streaming=False)
+        llm = create_llm(
+            app_config,
+            workload="collection",
+            streaming=False,
+        )
         structured = llm.with_structured_output(ContactAttributionBatch)
         single_structured = llm.with_structured_output(ContactAttributionDecision)
         system = load_prompt(CONTACT_ATTRIBUTION_PROMPT_SLUG)

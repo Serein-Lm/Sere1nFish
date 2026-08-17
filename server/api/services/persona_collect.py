@@ -654,7 +654,11 @@ async def _research_mission(
         candidate_offset=candidate_offset,
     )
     prompt = load_prompt("persona_research/persona_research")
-    structured = create_llm(app_config, streaming=False).with_structured_output(
+    structured = create_llm(
+        app_config,
+        workload="collection",
+        streaming=False,
+    ).with_structured_output(
         PersonaResearchReport
     )
     payload = {
@@ -756,7 +760,11 @@ async def _plan_research_program(
 
     expected_missions = (count + RESEARCH_BATCH_SIZE - 1) // RESEARCH_BATCH_SIZE
     prompt = load_prompt("persona_research_plan/persona_research_plan")
-    structured = create_llm(app_config, streaming=False).with_structured_output(
+    structured = create_llm(
+        app_config,
+        workload="collection",
+        streaming=False,
+    ).with_structured_output(
         PersonaResearchProgram
     )
     request = {
@@ -971,7 +979,11 @@ async def _synthesize_archetypes(
     from Sere1nGraph.graph.skills.schemas import PersonaGenerationPlan
 
     prompt = load_prompt("persona_archetype/persona_archetype")
-    structured = create_llm(app_config, streaming=False).with_structured_output(
+    structured = create_llm(
+        app_config,
+        workload="collection",
+        streaming=False,
+    ).with_structured_output(
         PersonaGenerationPlan
     )
     mission_by_id = {
@@ -1339,7 +1351,11 @@ async def generate_personas(
 
     prompt = load_prompt("persona_collect/persona_collect")
     consistency_prompt = load_prompt("persona_consistency/persona_consistency")
-    llm = create_llm(app_config, streaming=False)
+    llm = create_llm(
+        app_config,
+        workload="collection",
+        streaming=False,
+    )
     structured = llm.with_structured_output(RichFictionalPersonaProfile)
     consistency_structured = llm.with_structured_output(PersonaConsistencyReview)
     semaphore = asyncio.Semaphore(GENERATION_CONCURRENCY)

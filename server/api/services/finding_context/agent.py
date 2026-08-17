@@ -67,12 +67,18 @@ class RuntimeFindingContextAgent:
         request: FindingContextAgentRequest,
     ) -> FindingContextAgentResponse:
         app_config = await get_runtime_app_config()
+        models = app_config.runtime.models
         model_name = (
-            app_config.runtime.models.vision
+            models.vision
             if request.images
-            else app_config.runtime.models.default
+            else getattr(models, "collection_model", None) or models.default
         )
-        llm = create_llm(app_config, model_name=model_name, streaming=False)
+        llm = create_llm(
+            app_config,
+            model_name=model_name,
+            workload="interactive" if request.images else "collection",
+            streaming=False,
+        )
         # 使用 JSON Schema 让供应商适配器先返回原始结构；领域层统一处理
         # 部分兼容接口偶发的单元素数组包装。
         structured = llm.with_structured_output(

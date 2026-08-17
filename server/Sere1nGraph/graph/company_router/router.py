@@ -64,7 +64,11 @@ class CompanyRouter:
         """获取 LLM 实例"""
         if self._llm is None:
             from ..agents.runtime import create_llm
-            self._llm = create_llm(self.app_config, streaming=False)
+            self._llm = create_llm(
+                self.app_config,
+                workload="collection",
+                streaming=False,
+            )
         return self._llm
     
     async def route(self, company_name: str) -> CompanyRouterResult:
