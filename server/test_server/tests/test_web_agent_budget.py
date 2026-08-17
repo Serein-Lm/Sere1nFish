@@ -5,6 +5,7 @@ from Sere1nGraph.graph.agents.factory import (
 from Sere1nGraph.graph.prompts.loader import load_prompt
 from api.services.info_collection.url_tools import (
     _build_web_scan_message,
+    _prioritize_official_customer_service,
     _reconcile_rendered_evidence,
     _validate_web_tagging,
     _web_agent_timeout_budget,
@@ -60,6 +61,8 @@ def test_web_tagging_prompt_no_longer_limits_browsing_to_two_calls() -> None:
 
     assert "最多调用 6 次浏览器工具" in prompt
     assert "最多调用 2 次浏览器工具" not in prompt
+    assert "在线客服（真人客服/企业微信客服入口） | 82-90" in prompt
+    assert "客服中心/人工客服/咨询服务" in prompt
 
 
 def test_web_agent_runtime_policy_overrides_stale_prompt_cache() -> None:
@@ -309,3 +312,31 @@ def test_rendered_evidence_repairs_agent_contact_omission() -> None:
     assert "未直接展示" not in result["intro"]["summary"]
     assert "页面右下角提供官方在线客服入口" in result["intro"]["summary"]
     assert result["evidence_audit"]["reconciled_finding_count"] == 2
+    scores = {
+        item["subtype"]: item["attention_score"]
+        for item in result["findings"]
+    }
+    assert scores["hotline_landline"] == 78
+    assert scores["live_chat_native"] == 85
+
+
+def test_customer_service_priority_does_not_promote_unrelated_platform() -> None:
+    result = _prioritize_official_customer_service(
+        {
+            "site_category": "third_party",
+            "target_relation": "not_target",
+            "excluded": True,
+            "findings": [
+                {
+                    "type": "customer_service",
+                    "channel": "other",
+                    "subtype": "live_chat_native",
+                    "target_relation": "not_target",
+                    "attention_score": 20,
+                    "attention_reason": "无关平台客服",
+                }
+            ],
+        }
+    )
+
+    assert result["findings"][0]["attention_score"] == 20

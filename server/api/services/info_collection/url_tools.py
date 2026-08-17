@@ -25,6 +25,17 @@ from core.logger import get_logger
 logger = get_logger("api.services.info_collection.url_tools")
 
 
+_CUSTOMER_SERVICE_PRIORITY_FLOORS = {
+    "live_chat_native": 85,
+    "service_wechat": 85,
+    "hotline_400": 78,
+    "hotline_landline": 78,
+    "ticket_system": 75,
+    "feedback_form": 72,
+    "support_portal": 72,
+}
+
+
 _GENERIC_PAGE_TITLES = (
     "400 bad request",
     "404 not found",
@@ -266,6 +277,49 @@ def _contact_semantics(context: str) -> tuple[str, str, str | None, int]:
     return "customer_service", "customer_service", subtype, 30
 
 
+def _prioritize_official_customer_service(
+    tagging: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply one collection-priority policy to verified official service channels."""
+    if (
+        tagging.get("excluded")
+        or str(tagging.get("target_relation") or "") != "confirmed"
+        or str(tagging.get("site_category") or "")
+        not in {"target_business", "target_official"}
+    ):
+        return tagging
+
+    prioritized: list[dict[str, Any]] = []
+    for raw in tagging.get("findings") or []:
+        finding = dict(raw)
+        if (
+            str(finding.get("type") or "") != "customer_service"
+            or str(finding.get("target_relation") or "") != "confirmed"
+        ):
+            prioritized.append(finding)
+            continue
+
+        subtype = str(finding.get("subtype") or "")
+        channel = str(finding.get("channel") or "")
+        floor = _CUSTOMER_SERVICE_PRIORITY_FLOORS.get(subtype, 72)
+        if channel == "phone":
+            floor = max(floor, 78)
+            reason = "目标官网明确标注的客服或咨询电话，列为重点收集渠道"
+        elif subtype in {"live_chat_native", "service_wechat"}:
+            reason = "目标官网官方在线客服入口，可直接建立服务沟通，列为重点收集渠道"
+        else:
+            reason = "目标官网官方客服或咨询入口，列为重点收集渠道"
+        finding["attention_score"] = max(
+            int(finding.get("attention_score") or 0),
+            floor,
+        )
+        finding["attention_reason"] = reason
+        prioritized.append(finding)
+
+    tagging["findings"] = prioritized
+    return tagging
+
+
 def _reconcile_rendered_evidence(
     tagging: dict[str, Any],
     *,
@@ -432,7 +486,7 @@ def _reconcile_rendered_evidence(
         "reconciled_finding_count": reconciled,
         "capture_error": str(capture_error or "")[:1_000],
     }
-    return tagging
+    return _prioritize_official_customer_service(tagging)
 
 
 def _validate_web_tagging(

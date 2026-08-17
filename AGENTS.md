@@ -77,7 +77,7 @@
 - `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
 - 官网文档采集通过可恢复队列遍历普通分页、查询参数分页和脚本/嵌入资源链接；PDF、Office、文本与压缩附件先归档原件，再通过统一资源解析器提取正文，扫描版 PDF 使用有页数和时限边界的本地 OCR。来源站点明确返回 404/410 的历史图片或附件保留为可追溯警告，不得作为无限重试的临时故障；同一来源版本重跑时必须能够补齐后来成功解析的附件和视觉证据。
 - `SourceDocumentLink` 是 Project、Target、任务、关键词发现某个文档的关系，持久化在 `source_document_links`。任务字段、主体对应度和相关性评分属于该场景关联，不得写成全局来源事实；相同场景可按分析指纹复用，不同 Target 必须独立分析。
-- `Finding` 是从来源证据派生的项目级事实。联系方式 Finding 必须保留 `target_id`、`source_document_id`、`source_document_version_id`、原文 URL、联系方式邻近上下文和证据引用；同一联系方式的多次发现累计 evidence，不覆盖历史来源。来源重分析后必须按稳定 `record_id` 对账：保留仍有效的 evidence，撤销该来源已被新审核拒绝的 evidence，并且只在没有其他来源证据时删除 Finding。
+- `Finding` 是从来源证据派生的项目级事实。联系方式 Finding 必须保留 `target_id`、`source_document_id`、`source_document_version_id`、原文 URL、联系方式邻近上下文和证据引用；同一联系方式的多次发现累计 evidence，不覆盖历史来源。来源重分析后必须按稳定 `record_id` 对账：保留仍有效的 evidence，撤销该来源已被新审核拒绝的 evidence，并且只在没有其他来源证据时删除 Finding。跨网站的相同电话、邮箱、微信号和入口 URL 通过稳定 `group_key` 构建逻辑读模型；项目查询、Target 看板和 AI 工具默认返回最高分代表项以及 `finding_ids/source_urls/duplicate_count/evidence_count`，不得通过物理删除或覆盖来源记录实现去重。
 - `FindingContext` 是按 `finding_id` 唯一关联的派生上下文，持久化在 `finding_contexts`。它只能消费已归档的来源版本、Target 场景分析、浏览器结果和 OSS 视觉证据，通过 `api.services.finding_context` 的可恢复队列与独立多模态 Agent 生成；事实、推断、置信度和证据引用必须分层保存。采集流水线只负责排队，不得同步等待 Agent，也不得在页面重复拼装上下文。
 - 虚构人设持久化在 `persons`，AI 先通过 summary 投影筛选，再按 `person_id` 渐进读取完整档案；持续研究保持稳定身份并累加 `profile_version`、`research_rounds` 和来源证据。生成与升级进度独立持久化在 `persona_research_tasks`，进程重启时必须把遗留运行态明确标记为中断。
 - 公众号深采采用“手机发现、浏览器读取”的职责划分：手机只负责应用内搜索、命中文章和复制真实链接；链接交给 `api.services.source_documents` 的 Provider registry，由项目 Chrome 池读取全文和媒体。浏览器读取失败时才回退原有手机逐屏深采。

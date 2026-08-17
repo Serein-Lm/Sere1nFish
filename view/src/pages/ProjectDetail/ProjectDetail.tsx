@@ -4301,8 +4301,11 @@ export default function ProjectDetail() {
               className="target-contact-value"
               title={value}
             />
-            {contact.evidence_count > 1 ? (
-              <Text type="secondary">{contact.evidence_count} 条证据</Text>
+            {contact.evidence_count > 1 || (contact.source_count || 0) > 1 ? (
+              <Text type="secondary">
+                {(contact.source_count || 0) > 1 ? `${contact.source_count} 个来源 · ` : ''}
+                {contact.evidence_count} 条证据
+              </Text>
             ) : null}
           </Space>
         ),
@@ -4396,6 +4399,15 @@ export default function ProjectDetail() {
             <Space size={6} wrap>
               <Text strong>{finding.label || finding.type || '未命名 Finding'}</Text>
               <Tag>{finding.module_label}</Tag>
+              {(finding.source_count || 0) > 1 ? (
+                <Tooltip title={`相同信息已跨网站归类，保留 ${finding.evidence_count || finding.duplicate_count || finding.source_count} 条证据`}>
+                  <Tag color="blue">{finding.source_count} 个来源</Tag>
+                </Tooltip>
+              ) : (finding.duplicate_count || 0) > 1 ? (
+                <Tooltip title="相同信息已去重归类，原始证据仍完整保留">
+                  <Tag color="blue">{finding.evidence_count || finding.duplicate_count} 条证据</Tag>
+                </Tooltip>
+              ) : null}
             </Space>
             {finding.value ? (
               <CopyableText value={finding.value} className="target-finding-value" />

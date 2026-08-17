@@ -16,13 +16,13 @@ from api.dao import targets as targets_dao
 from api.dao.project_scope import project_scope_query
 from api.db.collections import (
     FOFA_ASSETS_COLLECTION,
-    FINDINGS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
     SOURCE_DOCUMENT_LINKS_COLLECTION,
     TARGETS_COLLECTION,
     TASKS_COLLECTION,
     XHS_NOTES_COLLECTION,
 )
+from api.utils.url_identity import endpoint_identity, prefer_https_url
 
 
 _HIGH_SCORE_SOURCE_KEYS = (
@@ -178,12 +178,16 @@ def _finding_module(source: Any) -> str:
 
 def _finding_source_url(item: dict[str, Any]) -> str:
     latest_evidence = item.get("latest_evidence_ref") or {}
+    grouped_source_urls = item.get("source_urls") or []
+    if isinstance(grouped_source_urls, str):
+        grouped_source_urls = [grouped_source_urls]
     for value in (
         item.get("source_url"),
         item.get("url"),
         latest_evidence.get("source_url")
         if isinstance(latest_evidence, dict)
         else "",
+        *grouped_source_urls,
     ):
         url = str(value or "").strip()
         if url.lower().startswith(("http://", "https://")):
@@ -191,8 +195,30 @@ def _finding_source_url(item: dict[str, Any]) -> str:
     return ""
 
 
+def _finding_source_urls(item: dict[str, Any]) -> list[str]:
+    values = item.get("source_urls") or []
+    if isinstance(values, str):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        values = []
+    urls_by_identity: dict[str, str] = {}
+    for value in values:
+        url = str(value or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        identity = endpoint_identity(url, include_query=True)
+        if not identity:
+            continue
+        urls_by_identity[identity] = prefer_https_url(
+            urls_by_identity.get(identity, ""),
+            url,
+        )
+    return list(urls_by_identity.values())
+
+
 def _dashboard_finding(item: dict[str, Any]) -> dict[str, Any]:
     module = _finding_module(item.get("source"))
+    source_urls = _finding_source_urls(item)
     return {
         "finding_id": str(item.get("finding_id") or ""),
         "source": str(item.get("source") or ""),
@@ -206,6 +232,14 @@ def _dashboard_finding(item: dict[str, Any]) -> dict[str, Any]:
         "attention_score": int(item.get("attention_score") or 0),
         "party_name": str(item.get("party_name") or item.get("entity_name") or ""),
         "source_url": _finding_source_url(item),
+        "source_urls": source_urls,
+        "source_count": max(1, len(source_urls)),
+        "duplicate_count": max(1, int(item.get("duplicate_count") or 1)),
+        "evidence_count": max(1, int(item.get("evidence_count") or 1)),
+        "finding_ids": list(item.get("finding_ids") or []),
+        "sources": list(item.get("sources") or []),
+        "finding_types": list(item.get("finding_types") or []),
+        "channels": list(item.get("channels") or []),
         "source_document_id": str(item.get("source_document_id") or ""),
         "screenshot_url": str(item.get("screenshot_url") or ""),
         "updated_at": item.get("updated_at") or item.get("created_at"),
@@ -242,6 +276,7 @@ def _dashboard_contact_from_finding(item: dict[str, Any]) -> dict[str, Any] | No
         return None
     module = _finding_module(item.get("source"))
     evidence_refs = item.get("evidence_refs") or []
+    source_urls = _finding_source_urls(item)
     return {
         "contact_id": str(item.get("finding_id") or value),
         "finding_id": str(item.get("finding_id") or ""),
@@ -258,10 +293,15 @@ def _dashboard_contact_from_finding(item: dict[str, Any]) -> dict[str, Any] | No
         "module": module,
         "module_label": _TARGET_MODULE_LABELS[module],
         "source_url": _finding_source_url(item),
+        "source_urls": source_urls,
+        "source_count": max(1, len(source_urls)),
+        "duplicate_count": max(1, int(item.get("duplicate_count") or 1)),
         "source_document_id": str(item.get("source_document_id") or ""),
-        "evidence_count": max(1, len(evidence_refs))
-        if isinstance(evidence_refs, list)
-        else 1,
+        "evidence_count": max(
+            1,
+            int(item.get("evidence_count") or 0),
+            len(evidence_refs) if isinstance(evidence_refs, list) else 0,
+        ),
         "verified": str(item.get("target_relation") or "") != "not_target",
         "updated_at": item.get("updated_at") or item.get("created_at"),
     }
@@ -340,6 +380,18 @@ def _merge_target_dashboard_contacts(
         for field in ("contact_name", "label", "role", "party_name", "context", "source_url"):
             if not preferred.get(field) and supplement.get(field):
                 preferred[field] = supplement[field]
+        preferred["source_urls"] = list(
+            dict.fromkeys(
+                [
+                    *(current.get("source_urls") or []),
+                    *(item.get("source_urls") or []),
+                ]
+            )
+        )
+        preferred["source_count"] = max(1, len(preferred["source_urls"]))
+        preferred["duplicate_count"] = int(
+            current.get("duplicate_count") or 1
+        ) + int(item.get("duplicate_count") or 1)
         preferred["evidence_count"] = int(current.get("evidence_count") or 0) + int(
             item.get("evidence_count") or 0
         )
@@ -1018,34 +1070,11 @@ async def list_project_target_summaries(
             },
         ]
     ).to_list(len(target_ids))
-    finding_counts_job = db[FINDINGS_COLLECTION].aggregate(
-        [
-            {
-                "$match": {
-                    "project_id": project_id,
-                    "target_id": {"$in": target_ids},
-                }
-            },
-            {
-                "$group": {
-                    "_id": {
-                        "target_id": "$target_id",
-                        "source": {"$ifNull": ["$source", ""]},
-                    },
-                    "finding_count": {"$sum": 1},
-                    "high_score_count": {
-                        "$sum": {
-                            "$cond": [
-                                {"$gte": [{"$ifNull": ["$attention_score", 0]}, 70]},
-                                1,
-                                0,
-                            ]
-                        }
-                    },
-                }
-            },
-        ]
-    ).to_list(None)
+    finding_counts_job = findings_dao.aggregate_target_finding_counts(
+        db,
+        project_id=project_id,
+        target_ids=target_ids,
+    )
     from api.services.website_records import count_project_website_records_by_target
 
     website_counts_job = count_project_website_records_by_target(
@@ -1643,38 +1672,16 @@ async def list_project_target_summary_page(
             "root_domains": 1,
         },
     ).to_list(len(target_ids))
-    root_stats_job = db[FINDINGS_COLLECTION].aggregate(
-        [
-            {
-                "$match": {
-                    "project_id": project_id,
-                    "target_id": {"$in": root_ids},
-                }
-            },
-            {
-                "$group": {
-                    "_id": "$target_id",
-                    "finding_count": {"$sum": 1},
-                    "high_score_finding_count": {
-                        "$sum": {
-                            "$cond": [
-                                {"$gte": [{"$ifNull": ["$attention_score", 0]}, 70]},
-                                1,
-                                0,
-                            ]
-                        }
-                    },
-                }
-            },
-        ]
-    ).to_list(len(root_ids))
+    root_stats_job = findings_dao.aggregate_target_finding_counts(
+        db,
+        project_id=project_id,
+        target_ids=root_ids,
+    )
     target_docs, root_stat_rows = await asyncio.gather(target_docs_job, root_stats_job)
     targets_by_id = {
         str(item.get("target_id") or ""): item for item in target_docs
     }
-    root_stats = {
-        str(item.get("_id") or ""): item for item in root_stat_rows
-    }
+    root_stats = _summarize_finding_counts(root_stat_rows)
     selection = _select_target_relation_page(
         relations,
         targets_by_id,

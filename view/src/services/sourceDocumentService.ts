@@ -200,6 +200,9 @@ export interface TargetDashboardContact {
   module: 'website' | 'xiaohongshu' | 'wechat' | 'bidding' | 'scholars' | 'other'
   module_label: string
   source_url?: string
+  source_urls?: string[]
+  source_count?: number
+  duplicate_count?: number
   source_document_id?: string
   evidence_count: number
   verified: boolean
@@ -219,6 +222,14 @@ export interface TargetDashboardFinding {
   attention_score: number
   party_name: string
   source_url?: string
+  source_urls?: string[]
+  source_count?: number
+  duplicate_count?: number
+  evidence_count?: number
+  finding_ids?: string[]
+  sources?: string[]
+  finding_types?: string[]
+  channels?: string[]
   source_document_id?: string
   screenshot_url?: string
   updated_at?: string

@@ -109,6 +109,13 @@ export interface WebTaggingFinding {
   value: string | null
   context: string
   source_url: string
+  source_urls?: string[]
+  duplicate_count?: number
+  evidence_count?: number
+  finding_ids?: string[]
+  sources?: string[]
+  finding_types?: string[]
+  channels?: string[]
   evidence: string
   attention_score: number
   attention_reason: string

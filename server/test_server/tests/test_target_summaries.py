@@ -1,11 +1,14 @@
 """Target summary aggregation tests."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from api.dao import findings as findings_dao
 from api.dao import targets as targets_dao
 from api.services.targets import (
     _dashboard_contact_from_finding,
+    _dashboard_finding,
     _merge_target_dashboard_contacts,
     _select_target_relation_page,
     _summarize_finding_counts,
@@ -16,6 +19,114 @@ from api.services.targets import (
     assign_project_target_batches,
     list_project_target_summary_page,
 )
+
+
+def test_finding_group_key_deduplicates_contact_across_websites() -> None:
+    first = {
+        "project_id": "project-1",
+        "target_id": "target-1",
+        "source": "web_tagging",
+        "type": "customer_service",
+        "channel": "phone",
+        "value": "010-6267 7800",
+        "source_url": "https://service.example.cn/contact",
+    }
+    second = {
+        **first,
+        "source": "official_website_document",
+        "type": "business_contact",
+        "channel": "telephone",
+        "value": "01062677800",
+        "source_url": "http://www.example.cn/support",
+    }
+
+    assert findings_dao.finding_group_key(first)
+    assert findings_dao.finding_group_key(first) == findings_dao.finding_group_key(
+        second
+    )
+    assert findings_dao.finding_group_key(
+        {**second, "target_id": "target-2"}
+    ) != findings_dao.finding_group_key(first)
+
+
+def test_finding_group_key_keeps_entry_only_evidence_source_specific() -> None:
+    first = {
+        "finding_id": "finding-1",
+        "project_id": "project-1",
+        "target_id": "target-1",
+        "source": "web_tagging",
+        "type": "customer_service",
+        "channel": "other",
+        "value": None,
+        "label": "在线客服",
+        "source_url": "https://one.example.cn",
+    }
+    second = {**first, "finding_id": "finding-2", "source_url": "https://two.example.cn"}
+
+    assert findings_dao.finding_group_key(first) == ""
+    assert findings_dao._prepare_finding_identity(first)["group_key"] == "finding-1"
+    assert findings_dao._prepare_finding_identity(second)["group_key"] == "finding-2"
+
+
+def test_finding_upsert_excludes_history_managed_fields() -> None:
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    finding_id, set_fields, additions, insert_time = (
+        findings_dao._prepare_finding_upsert(
+            {
+                "finding_id": "finding-1",
+                "project_id": "project-1",
+                "target_id": "target-1",
+                "task_id": "task-1",
+                "task_ids": ["legacy-task"],
+                "source": "web_tagging",
+                "type": "customer_service",
+                "channel": "link",
+                "value": "https://service.example.cn/chat",
+                "source_url": "https://www.example.cn",
+                "source_urls": ["https://legacy.example.cn"],
+                "evidence": "右下角在线客服",
+                "evidence_history": ["旧证据"],
+                "duplicate_count": 3,
+                "created_at": created_at,
+            },
+            now=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        )
+    )
+
+    assert finding_id == "finding-1"
+    assert insert_time == created_at
+    assert "created_at" not in set_fields
+    assert "task_ids" not in set_fields
+    assert "evidence_history" not in set_fields
+    assert "source_urls" not in set_fields
+    assert "duplicate_count" not in set_fields
+    assert set_fields["group_key"].startswith("fgrp_")
+    assert additions["task_ids"] == "task-1"
+    assert additions["evidence_history"] == "右下角在线客服"
+    assert additions["source_urls"]["$each"] == [
+        "https://legacy.example.cn",
+        "https://www.example.cn",
+    ]
+
+
+def test_dashboard_source_count_collapses_http_and_https_page_variants() -> None:
+    finding = _dashboard_finding(
+        {
+            "finding_id": "finding-1",
+            "source": "web_tagging",
+            "source_urls": [
+                "http://www.example.cn/contact/",
+                "https://www.example.cn/contact",
+                "https://www.example.cn/support",
+            ],
+        }
+    )
+
+    assert finding["source_count"] == 2
+    assert finding["source_urls"] == [
+        "https://www.example.cn/contact",
+        "https://www.example.cn/support",
+    ]
 
 
 def test_task_collection_status_exposes_partial_terminal_result() -> None:

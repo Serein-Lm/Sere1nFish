@@ -158,34 +158,17 @@ async def lifespan(app: FastAPI):
     try:
         db = get_db()
         # findings — 核心数据元
-        try:
-            await db["findings"].create_index("finding_id", sparse=True)
-        except Exception:
-            pass  # 已有同名索引（可能是 unique 的），跳过
-        await db["findings"].create_index("project_id")
-        await db["findings"].create_index([("project_id", 1), ("source", 1)])
-        await db["findings"].create_index([("project_id", 1), ("attention_score", -1)])
-        await db["findings"].create_index("xhs_user_id", sparse=True)
-        await db["findings"].create_index("note_id", sparse=True)
-        await db["findings"].create_index("task_id")
-        await db["findings"].create_index("task_ids", sparse=True)
-        await db["findings"].create_index(
-            [("project_id", 1), ("task_id", 1), ("attention_score", -1)]
-        )
-        await db["findings"].create_index(
-            [("project_id", 1), ("task_ids", 1), ("attention_score", -1)],
-            sparse=True,
-        )
-        await db["findings"].create_index("target_id", sparse=True)
-        await db["findings"].create_index(
-            [("target_id", 1), ("attention_score", -1)], sparse=True
-        )
-        await db["findings"].create_index("target_ids", sparse=True)
-        await db["findings"].create_index("source_document_id", sparse=True)
-        await db["findings"].create_index(
-            [("project_id", 1), ("source", 1), ("bidding_record_id", 1)],
-            sparse=True,
-        )
+        from api.dao import findings as findings_dao
+
+        await findings_dao.ensure_indexes(db)
+        finding_identity_backfill = await findings_dao.backfill_finding_group_keys(db)
+        if finding_identity_backfill["scanned"]:
+            logger.info(
+                "Finding 逻辑身份回填完成: scanned=%s modified=%s groupable=%s",
+                finding_identity_backfill["scanned"],
+                finding_identity_backfill["modified"],
+                finding_identity_backfill["groupable"],
+            )
         from api.dao import finding_contexts as finding_contexts_dao
 
         await finding_contexts_dao.ensure_indexes(db)

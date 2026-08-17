@@ -38,8 +38,48 @@ _FINDING_SUMMARY_PROJECTION = {
     "target_name": 1,
     "has_profile": 1,
     "notes_count": 1,
+    "group_key": 1,
+    "duplicate_count": 1,
+    "evidence_count": 1,
+    "finding_ids": 1,
+    "source_urls": 1,
+    "sources": 1,
+    "finding_types": 1,
+    "channels": 1,
     "created_at": 1,
     "updated_at": 1,
+}
+
+_FINDING_GROUP_IDENTITY_VERSION = 2
+_PHONE_CHANNELS = {"phone", "telephone", "tel", "mobile", "hotline"}
+_EMAIL_CHANNELS = {"email", "e-mail", "mail"}
+_WECHAT_CHANNELS = {"wechat", "weixin", "enterprise_wechat"}
+_QQ_CHANNELS = {"qq", "qq_group"}
+_CONTACT_FINDING_TYPES = {
+    "personal_mobile",
+    "personal_email",
+    "personal_wechat",
+    "enterprise_wechat",
+    "hr_contact",
+    "business_contact",
+    "media_contact",
+    "customer_service",
+    "group_chat",
+    "contact",
+}
+_MANAGED_UPSERT_FIELDS = {
+    "_id",
+    "created_at",
+    "updated_at",
+    "task_ids",
+    "evidence_history",
+    "source_urls",
+    "finding_ids",
+    "sources",
+    "finding_types",
+    "channels",
+    "duplicate_count",
+    "evidence_count",
 }
 
 
@@ -65,8 +105,10 @@ def task_finding_scope(task_id: str) -> dict[str, Any]:
 
 async def insert_finding(db: AsyncIOMotorDatabase, finding: dict[str, Any]) -> None:
     """插入单个 finding"""
-    finding.setdefault("created_at", _now())
-    await db[FINDINGS_COLLECTION].insert_one(finding)
+    prepared = _prepare_finding_identity(finding)
+    prepared.setdefault("created_at", _now())
+    prepared.setdefault("updated_at", prepared["created_at"])
+    await db[FINDINGS_COLLECTION].insert_one(prepared)
 
 
 async def insert_findings_batch(db: AsyncIOMotorDatabase, findings: list[dict[str, Any]]) -> int:
@@ -74,9 +116,13 @@ async def insert_findings_batch(db: AsyncIOMotorDatabase, findings: list[dict[st
     if not findings:
         return 0
     now = _now()
-    for f in findings:
-        f.setdefault("created_at", now)
-    result = await db[FINDINGS_COLLECTION].insert_many(findings)
+    prepared = []
+    for finding in findings:
+        item = _prepare_finding_identity(finding)
+        item.setdefault("created_at", now)
+        item.setdefault("updated_at", item["created_at"])
+        prepared.append(item)
+    result = await db[FINDINGS_COLLECTION].insert_many(prepared)
     return len(result.inserted_ids)
 
 
@@ -100,6 +146,136 @@ def stable_finding_id(finding: dict[str, Any]) -> str:
     return "fnd_" + digest
 
 
+def _normalized_target_identity(finding: dict[str, Any]) -> str:
+    target_ids = _finding_target_ids(finding)
+    if target_ids:
+        return sorted(target_ids)[0]
+    for field in ("target_name", "entity_name"):
+        value = re.sub(
+            r"[^0-9a-z\u4e00-\u9fff]+",
+            "",
+            str(finding.get(field) or "").strip().casefold(),
+        )
+        if value:
+            return f"name:{value}"
+    return ""
+
+
+def _canonical_finding_value(finding: dict[str, Any]) -> tuple[str, str]:
+    """Return a channel/value identity for cross-document deduplication."""
+    raw_value = str(finding.get("value") or "").strip()
+    if not raw_value:
+        return "", ""
+
+    raw_channel = str(finding.get("channel") or "").strip().casefold()
+    finding_type = str(finding.get("type") or "").strip().casefold()
+    lowered = raw_value.casefold()
+
+    url_value = raw_value
+    if lowered.startswith("www."):
+        url_value = f"https://{raw_value}"
+    if lowered.startswith(("http://", "https://", "www.")):
+        normalized_url = endpoint_identity(url_value)
+        if normalized_url:
+            return "link", normalized_url
+
+    if raw_channel in _PHONE_CHANNELS:
+        digits = re.sub(r"\D", "", raw_value.removeprefix("tel:"))
+        if digits.startswith("0086") and len(digits) > 11:
+            digits = digits[4:]
+        elif digits.startswith("86") and 12 <= len(digits) <= 14:
+            digits = digits[2:]
+        return ("phone", digits) if digits else ("", "")
+
+    if raw_channel in _EMAIL_CHANNELS:
+        normalized_email = lowered.removeprefix("mailto:").strip()
+        return ("email", normalized_email) if normalized_email else ("", "")
+
+    if raw_channel in _WECHAT_CHANNELS:
+        normalized_wechat = re.sub(r"\s+", "", lowered)
+        return ("wechat", normalized_wechat) if normalized_wechat else ("", "")
+
+    if raw_channel in _QQ_CHANNELS:
+        normalized_qq = re.sub(r"\s+", "", lowered)
+        return ("qq", normalized_qq) if normalized_qq else ("", "")
+
+    if finding_type in _CONTACT_FINDING_TYPES and raw_channel not in {
+        "link",
+        "form",
+    }:
+        normalized_value = re.sub(r"\s+", " ", lowered).strip()
+        return (raw_channel or "contact", normalized_value)
+
+    return "", ""
+
+
+def finding_group_key(finding: dict[str, Any]) -> str:
+    """Build the logical identity shared by the same Finding across websites.
+
+    Raw findings remain source-specific for auditability. This key powers a
+    grouped read model without erasing source documents or historical IDs.
+    """
+    project_id = str(finding.get("project_id") or "").strip()
+    target_identity = _normalized_target_identity(finding)
+    channel, value = _canonical_finding_value(finding)
+    if not project_id or not target_identity or not channel or not value:
+        return ""
+    raw = "\x1f".join(
+        (
+            f"v{_FINDING_GROUP_IDENTITY_VERSION}",
+            project_id,
+            target_identity,
+            channel,
+            value,
+        )
+    )
+    return "fgrp_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _finding_source_urls(finding: dict[str, Any]) -> list[str]:
+    values = finding.get("source_urls") or []
+    if isinstance(values, str):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        values = []
+    return list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in [
+                *values,
+                finding.get("source_url"),
+                finding.get("url"),
+            ]
+            if str(value or "").strip().lower().startswith(("http://", "https://"))
+        )
+    )
+
+
+def _prepare_finding_identity(finding: dict[str, Any]) -> dict[str, Any]:
+    prepared = dict(finding)
+    finding_id = str(prepared.get("finding_id") or stable_finding_id(prepared))
+    channel, value = _canonical_finding_value(prepared)
+    group_key = finding_group_key(prepared)
+    prepared.update(
+        {
+            "finding_id": finding_id,
+            "group_key": group_key or finding_id,
+            "groupable": bool(group_key),
+            "group_identity_version": _FINDING_GROUP_IDENTITY_VERSION,
+        }
+    )
+    if group_key:
+        prepared["normalized_channel"] = channel
+        prepared["normalized_value"] = value
+    else:
+        prepared.pop("normalized_channel", None)
+        prepared.pop("normalized_value", None)
+    source_urls = _finding_source_urls(prepared)
+    if source_urls:
+        prepared["source_urls"] = source_urls
+    return prepared
+
+
 def _finding_target_ids(finding: dict[str, Any]) -> list[str]:
     raw_target_ids = finding.get("target_ids") or []
     if isinstance(raw_target_ids, str):
@@ -116,6 +292,243 @@ def _finding_target_ids(finding: dict[str, Any]) -> list[str]:
             if str(value or "").strip()
         )
     )
+
+
+def _prepare_finding_upsert(
+    raw: dict[str, Any],
+    *,
+    now: datetime,
+) -> tuple[str, dict[str, Any], dict[str, Any], datetime]:
+    prepared = _prepare_finding_identity(raw)
+    finding_id = str(prepared["finding_id"])
+    source_urls = _finding_source_urls(prepared)
+    set_fields = {
+        key: value
+        for key, value in prepared.items()
+        if key not in _MANAGED_UPSERT_FIELDS
+    }
+    set_fields["updated_at"] = now
+
+    additions: dict[str, Any] = {}
+    task_id = str(prepared.get("task_id") or "").strip()
+    evidence = str(prepared.get("evidence") or "").strip()
+    if task_id:
+        additions["task_ids"] = task_id
+    if evidence:
+        additions["evidence_history"] = evidence[:4_000]
+    if source_urls:
+        additions["source_urls"] = {"$each": source_urls}
+
+    created_at = raw.get("created_at")
+    if not isinstance(created_at, datetime):
+        created_at = now
+    return finding_id, set_fields, additions, created_at
+
+
+def _mongo_finding_group_key() -> dict[str, Any]:
+    return {
+        "$cond": [
+            {
+                "$and": [
+                    {"$ne": [{"$ifNull": ["$group_key", ""]}, ""]},
+                    {"$ne": ["$group_key", None]},
+                ]
+            },
+            "$group_key",
+            {"$ifNull": ["$finding_id", "$_id"]},
+        ]
+    }
+
+
+def _grouped_finding_read_stages() -> list[dict[str, Any]]:
+    """Build the shared Mongo read model for one logical Finding group."""
+    return [
+        {
+            "$set": {
+                "_logical_group_key": _mongo_finding_group_key(),
+                "_row_source_urls": {
+                    "$setUnion": [
+                        {
+                            "$cond": [
+                                {"$isArray": "$source_urls"},
+                                "$source_urls",
+                                [],
+                            ]
+                        },
+                        [{"$ifNull": ["$source_url", ""]}],
+                        [{"$ifNull": ["$url", ""]}],
+                    ]
+                },
+                "_row_evidence_count": {
+                    "$let": {
+                        "vars": {
+                            "count": {
+                                "$size": {
+                                    "$cond": [
+                                        {"$isArray": "$evidence_refs"},
+                                        "$evidence_refs",
+                                        [],
+                                    ]
+                                }
+                            }
+                        },
+                        "in": {
+                            "$cond": [
+                                {"$gt": ["$$count", 0]},
+                                "$$count",
+                                1,
+                            ]
+                        },
+                    }
+                },
+            }
+        },
+        {
+            "$sort": {
+                "attention_score": -1,
+                "updated_at": -1,
+                "created_at": -1,
+                "finding_id": 1,
+            }
+        },
+        {
+            "$group": {
+                "_id": "$_logical_group_key",
+                "representative": {"$first": "$$ROOT"},
+                "finding_ids": {"$addToSet": "$finding_id"},
+                "source_url_lists": {"$push": "$_row_source_urls"},
+                "sources": {"$addToSet": "$source"},
+                "finding_types": {"$addToSet": "$type"},
+                "channels": {"$addToSet": "$channel"},
+                "duplicate_count": {"$sum": 1},
+                "evidence_count": {"$sum": "$_row_evidence_count"},
+                "attention_score": {
+                    "$max": {"$ifNull": ["$attention_score", 0]}
+                },
+            }
+        },
+        {
+            "$set": {
+                "source_urls": {
+                    "$reduce": {
+                        "input": "$source_url_lists",
+                        "initialValue": [],
+                        "in": {"$setUnion": ["$$value", "$$this"]},
+                    }
+                }
+            }
+        },
+        {
+            "$set": {
+                "representative.finding_ids": {
+                    "$filter": {
+                        "input": "$finding_ids",
+                        "as": "value",
+                        "cond": {
+                            "$and": [
+                                {"$ne": ["$$value", ""]},
+                                {"$ne": ["$$value", None]},
+                            ]
+                        },
+                    }
+                },
+                "representative.source_urls": {
+                    "$filter": {
+                        "input": "$source_urls",
+                        "as": "value",
+                        "cond": {
+                            "$and": [
+                                {"$ne": ["$$value", ""]},
+                                {"$ne": ["$$value", None]},
+                            ]
+                        },
+                    }
+                },
+                "representative.sources": {
+                    "$filter": {
+                        "input": "$sources",
+                        "as": "value",
+                        "cond": {
+                            "$and": [
+                                {"$ne": ["$$value", ""]},
+                                {"$ne": ["$$value", None]},
+                            ]
+                        },
+                    }
+                },
+                "representative.finding_types": {
+                    "$filter": {
+                        "input": "$finding_types",
+                        "as": "value",
+                        "cond": {
+                            "$and": [
+                                {"$ne": ["$$value", ""]},
+                                {"$ne": ["$$value", None]},
+                            ]
+                        },
+                    }
+                },
+                "representative.channels": {
+                    "$filter": {
+                        "input": "$channels",
+                        "as": "value",
+                        "cond": {
+                            "$and": [
+                                {"$ne": ["$$value", ""]},
+                                {"$ne": ["$$value", None]},
+                            ]
+                        },
+                    }
+                },
+                "representative.duplicate_count": "$duplicate_count",
+                "representative.evidence_count": "$evidence_count",
+                "representative.attention_score": "$attention_score",
+            }
+        },
+        {"$replaceRoot": {"newRoot": "$representative"}},
+        {
+            "$unset": [
+                "_logical_group_key",
+                "_row_source_urls",
+                "_row_evidence_count",
+            ]
+        },
+    ]
+
+
+async def _query_grouped_findings(
+    db: AsyncIOMotorDatabase,
+    *,
+    query: dict[str, Any],
+    sort_spec: list[tuple[str, int]],
+    limit: int,
+    skip: int = 0,
+    projection: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    item_pipeline: list[dict[str, Any]] = [
+        {"$sort": dict(sort_spec)},
+        {"$skip": max(0, int(skip or 0))},
+        {"$limit": max(1, int(limit or 1))},
+    ]
+    if projection is not None:
+        item_pipeline.append({"$project": projection})
+    pipeline = [
+        {"$match": query},
+        *_grouped_finding_read_stages(),
+        {
+            "$facet": {
+                "items": item_pipeline,
+                "total": [{"$count": "count"}],
+            }
+        },
+    ]
+    rows = await db[FINDINGS_COLLECTION].aggregate(pipeline).to_list(1)
+    if not rows:
+        return [], 0
+    result = rows[0]
+    totals = result.get("total") or []
+    total = int(totals[0].get("count") or 0) if totals else 0
+    return list(result.get("items") or []), total
 
 
 async def enrich_with_target_relations(
@@ -179,20 +592,13 @@ async def upsert_findings_batch(
     now = _now()
     operations: list[UpdateOne] = []
     for raw in findings:
-        finding = dict(raw)
-        finding_id = str(finding.get("finding_id") or stable_finding_id(finding))
-        finding["finding_id"] = finding_id
-        finding["updated_at"] = now
-        task_id = str(finding.get("task_id") or "")
-        evidence = str(finding.get("evidence") or "").strip()
-        add_to_set: dict[str, Any] = {}
-        if task_id:
-            add_to_set["task_ids"] = task_id
-        if evidence:
-            add_to_set["evidence_history"] = evidence[:4_000]
+        finding_id, set_fields, add_to_set, created_at = _prepare_finding_upsert(
+            raw,
+            now=now,
+        )
         update: dict[str, Any] = {
-            "$set": finding,
-            "$setOnInsert": {"created_at": now},
+            "$set": set_fields,
+            "$setOnInsert": {"created_at": created_at},
         }
         if add_to_set:
             update["$addToSet"] = add_to_set
@@ -239,10 +645,15 @@ async def query_findings(
     }
     sort_spec = sort_map.get(sort, [("attention_score", -1)])
 
-    total = await db[FINDINGS_COLLECTION].count_documents(query)
     projection = _FINDING_SUMMARY_PROJECTION if summary_only else {"_id": 0}
-    cursor = db[FINDINGS_COLLECTION].find(query, projection).sort(sort_spec).skip(skip).limit(limit)
-    findings = await cursor.to_list(limit)
+    findings, total = await _query_grouped_findings(
+        db,
+        query=query,
+        sort_spec=sort_spec,
+        limit=limit,
+        skip=skip,
+        projection=projection,
+    )
 
     return await enrich_with_target_relations(
         db,
@@ -259,6 +670,62 @@ async def get_finding(db: AsyncIOMotorDatabase, finding_id: str) -> dict[str, An
     )
     if not finding:
         return None
+    if finding.get("groupable") and finding.get("group_key"):
+        grouped = await db[FINDINGS_COLLECTION].find(
+            {
+                "project_id": finding.get("project_id"),
+                "group_key": finding.get("group_key"),
+            },
+            {
+                "_id": 0,
+                "finding_id": 1,
+                "source": 1,
+                "type": 1,
+                "channel": 1,
+                "url": 1,
+                "source_url": 1,
+                "source_urls": 1,
+                "evidence_refs": 1,
+            },
+        ).to_list(500)
+        source_urls = list(
+            dict.fromkeys(
+                url
+                for item in grouped
+                for url in _finding_source_urls(item)
+            )
+        )
+        finding["finding_ids"] = [
+            str(item.get("finding_id") or "")
+            for item in grouped
+            if str(item.get("finding_id") or "")
+        ]
+        finding["source_urls"] = source_urls
+        finding["sources"] = sorted(
+            {
+                str(item.get("source") or "")
+                for item in grouped
+                if str(item.get("source") or "")
+            }
+        )
+        finding["finding_types"] = sorted(
+            {
+                str(item.get("type") or "")
+                for item in grouped
+                if str(item.get("type") or "")
+            }
+        )
+        finding["channels"] = sorted(
+            {
+                str(item.get("channel") or "")
+                for item in grouped
+                if str(item.get("channel") or "")
+            }
+        )
+        finding["duplicate_count"] = len(grouped)
+        finding["evidence_count"] = sum(
+            max(1, len(item.get("evidence_refs") or [])) for item in grouped
+        )
     enriched = await enrich_with_target_relations(db, [finding])
     return enriched[0]
 
@@ -290,14 +757,13 @@ async def query_target_findings_with_copywriting(
 
     bounded_limit = max(1, min(int(limit or 20), 50))
     bounded_skip = max(0, min(int(skip or 0), 10_000))
-    total = await db[FINDINGS_COLLECTION].count_documents(query)
-    findings = await (
-        db[FINDINGS_COLLECTION]
-        .find(query, {"_id": 0})
-        .sort([("attention_score", -1), ("created_at", -1)])
-        .skip(bounded_skip)
-        .limit(bounded_limit)
-        .to_list(bounded_limit)
+    findings, total = await _query_grouped_findings(
+        db,
+        query=query,
+        sort_spec=[("attention_score", -1), ("created_at", -1)],
+        skip=bounded_skip,
+        limit=bounded_limit,
+        projection={"_id": 0},
     )
 
     findings = await enrich_with_target_relations(
@@ -305,9 +771,17 @@ async def query_target_findings_with_copywriting(
         findings,
         project_id=project_id,
     )
-    finding_ids = [
-        str(item.get("finding_id") or "") for item in findings if item.get("finding_id")
-    ]
+    finding_ids = list(
+        dict.fromkeys(
+            str(finding_id or "")
+            for item in findings
+            for finding_id in (
+                item.get("finding_ids")
+                or [item.get("finding_id")]
+            )
+            if str(finding_id or "")
+        )
+    )
     copywriting_by_finding: dict[str, dict[str, Any]] = {}
     if finding_ids:
         cursor = (
@@ -320,15 +794,19 @@ async def query_target_findings_with_copywriting(
             if finding_id and finding_id not in copywriting_by_finding:
                 copywriting_by_finding[finding_id] = item
 
-    return [
-        {
-            **item,
-            "copywriting": copywriting_by_finding.get(
-                str(item.get("finding_id") or "")
+    grouped_results = []
+    for item in findings:
+        member_ids = item.get("finding_ids") or [item.get("finding_id")]
+        copywriting = next(
+            (
+                copywriting_by_finding[str(member_id)]
+                for member_id in member_ids
+                if str(member_id) in copywriting_by_finding
             ),
-        }
-        for item in findings
-    ], total
+            None,
+        )
+        grouped_results.append({**item, "copywriting": copywriting})
+    return grouped_results, total
 
 
 async def query_target_dashboard_findings(
@@ -398,28 +876,45 @@ async def query_target_dashboard_findings(
         "screenshot_url": 1,
         "evidence_refs": 1,
         "latest_evidence_ref": 1,
+        "group_key": 1,
+        "duplicate_count": 1,
+        "evidence_count": 1,
+        "finding_ids": 1,
+        "source_urls": 1,
+        "sources": 1,
+        "finding_types": 1,
+        "channels": 1,
         "created_at": 1,
         "updated_at": 1,
     }
     bounded_top_limit = max(1, min(int(top_limit or 12), 30))
     bounded_contact_limit = max(20, min(int(contact_limit or 500), 1_000))
-    collection = db[FINDINGS_COLLECTION]
-    top_job = (
-        collection.find(
-            {**target_query, "attention_score": {"$gte": 70}},
-            projection,
-        )
-        .sort([("attention_score", -1), ("updated_at", -1), ("created_at", -1)])
-        .limit(bounded_top_limit)
-        .to_list(bounded_top_limit)
+    top_job = _query_grouped_findings(
+        db,
+        query={**target_query, "attention_score": {"$gte": 70}},
+        projection=projection,
+        sort_spec=[
+            ("attention_score", -1),
+            ("updated_at", -1),
+            ("created_at", -1),
+        ],
+        limit=bounded_top_limit,
     )
-    contacts_job = (
-        collection.find(contact_query, projection)
-        .sort([("attention_score", -1), ("updated_at", -1), ("created_at", -1)])
-        .limit(bounded_contact_limit)
-        .to_list(bounded_contact_limit)
+    contacts_job = _query_grouped_findings(
+        db,
+        query=contact_query,
+        projection=projection,
+        sort_spec=[
+            ("attention_score", -1),
+            ("updated_at", -1),
+            ("created_at", -1),
+        ],
+        limit=bounded_contact_limit,
     )
-    top_findings, contact_findings = await asyncio.gather(top_job, contacts_job)
+    (top_findings, _), (contact_findings, _) = await asyncio.gather(
+        top_job,
+        contacts_job,
+    )
     return list(top_findings), list(contact_findings)
 
 
@@ -517,10 +1012,19 @@ async def upsert_contact_finding(
     finding 需已含确定性 finding_id(同一项目同一联系方式映射同一条),
     避免多次采集重复插入。created_at 仅首次写入,task_ids 累积。
     """
-    finding_id = finding["finding_id"]
+    prepared = _prepare_finding_identity(finding)
+    finding_id = prepared["finding_id"]
     now = _now()
-    task_id = finding.get("task_id")
-    set_fields = {k: v for k, v in finding.items() if k not in ("created_at",)}
+    task_id = prepared.get("task_id")
+    set_fields = {
+        key: value
+        for key, value in prepared.items()
+        if key
+        not in (
+            _MANAGED_UPSERT_FIELDS
+            | {"evidence_refs", "source_document_ids", "target_ids"}
+        )
+    }
     evidence_ref = set_fields.pop("evidence_ref", None)
     if evidence_ref:
         set_fields["latest_evidence_ref"] = evidence_ref
@@ -538,6 +1042,9 @@ async def upsert_contact_finding(
         additions["source_document_ids"] = finding["source_document_id"]
     if finding.get("target_id"):
         additions["target_ids"] = finding["target_id"]
+    source_urls = _finding_source_urls(prepared)
+    if source_urls:
+        additions["source_urls"] = {"$each": source_urls}
     if additions:
         update["$addToSet"] = additions
     await db[FINDINGS_COLLECTION].update_one(
@@ -556,7 +1063,8 @@ async def upsert_contact_findings_batch(
     now = _now()
     operations: list[UpdateOne] = []
     seen: set[str] = set()
-    for finding in findings:
+    for raw in findings:
+        finding = _prepare_finding_identity(raw)
         finding_id = str(finding.get("finding_id") or "")
         if not finding_id or finding_id in seen:
             continue
@@ -565,7 +1073,11 @@ async def upsert_contact_findings_batch(
         set_fields = {
             key: value
             for key, value in finding.items()
-            if key != "created_at"
+            if key
+            not in (
+                _MANAGED_UPSERT_FIELDS
+                | {"evidence_refs", "source_document_ids", "target_ids"}
+            )
         }
         evidence_ref = set_fields.pop("evidence_ref", None)
         if evidence_ref:
@@ -584,6 +1096,9 @@ async def upsert_contact_findings_batch(
             additions["source_document_ids"] = finding["source_document_id"]
         if finding.get("target_id"):
             additions["target_ids"] = finding["target_id"]
+        source_urls = _finding_source_urls(finding)
+        if source_urls:
+            additions["source_urls"] = {"$each": source_urls}
         if additions:
             update["$addToSet"] = additions
         operations.append(
@@ -706,10 +1221,197 @@ async def reconcile_contact_findings_for_record(
     return {"evidence_removed": removed, "findings_deleted": deleted}
 
 
+async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
+    """Ensure indexes for raw provenance and the grouped Finding read model."""
+    collection = db[FINDINGS_COLLECTION]
+    try:
+        await collection.create_index("finding_id", sparse=True)
+    except Exception:
+        pass
+    await collection.create_index("project_id")
+    await collection.create_index([("project_id", 1), ("source", 1)])
+    await collection.create_index([("project_id", 1), ("attention_score", -1)])
+    await collection.create_index("xhs_user_id", sparse=True)
+    await collection.create_index("note_id", sparse=True)
+    await collection.create_index("task_id")
+    await collection.create_index("task_ids", sparse=True)
+    await collection.create_index(
+        [("project_id", 1), ("task_id", 1), ("attention_score", -1)]
+    )
+    await collection.create_index(
+        [("project_id", 1), ("task_ids", 1), ("attention_score", -1)],
+        sparse=True,
+    )
+    await collection.create_index("target_id", sparse=True)
+    await collection.create_index(
+        [("target_id", 1), ("attention_score", -1)],
+        sparse=True,
+    )
+    await collection.create_index("target_ids", sparse=True)
+    await collection.create_index("source_document_id", sparse=True)
+    await collection.create_index(
+        [("project_id", 1), ("source", 1), ("bidding_record_id", 1)],
+        sparse=True,
+    )
+    await collection.create_index(
+        [("project_id", 1), ("group_key", 1), ("attention_score", -1)],
+        sparse=True,
+    )
+    await collection.create_index(
+        [("project_id", 1), ("target_id", 1), ("group_key", 1)],
+        sparse=True,
+    )
+
+
+async def backfill_finding_group_keys(
+    db: AsyncIOMotorDatabase,
+    *,
+    batch_size: int = 500,
+) -> dict[str, int]:
+    """Idempotently add logical identities to findings created before v1."""
+    collection = db[FINDINGS_COLLECTION]
+    bounded_batch_size = max(50, min(int(batch_size or 500), 2_000))
+    scanned = 0
+    modified = 0
+    groupable = 0
+    query = {"group_identity_version": {"$ne": _FINDING_GROUP_IDENTITY_VERSION}}
+    projection = {
+        "project_id": 1,
+        "target_id": 1,
+        "target_ids": 1,
+        "target_name": 1,
+        "entity_name": 1,
+        "source": 1,
+        "bidding_record_id": 1,
+        "source_document_id": 1,
+        "url": 1,
+        "source_url": 1,
+        "source_urls": 1,
+        "channel": 1,
+        "value": 1,
+        "party_name": 1,
+        "type": 1,
+        "finding_id": 1,
+    }
+    while True:
+        documents = await collection.find(query, projection).limit(
+            bounded_batch_size
+        ).to_list(bounded_batch_size)
+        if not documents:
+            break
+        operations: list[UpdateOne] = []
+        for document in documents:
+            prepared = _prepare_finding_identity(document)
+            identity_fields: dict[str, Any] = {
+                "finding_id": prepared["finding_id"],
+                "group_key": prepared["group_key"],
+                "groupable": prepared["groupable"],
+                "group_identity_version": prepared["group_identity_version"],
+            }
+            if prepared.get("normalized_channel"):
+                identity_fields["normalized_channel"] = prepared[
+                    "normalized_channel"
+                ]
+                identity_fields["normalized_value"] = prepared["normalized_value"]
+            update: dict[str, Any] = {"$set": identity_fields}
+            if not prepared.get("normalized_channel"):
+                update["$unset"] = {
+                    "normalized_channel": "",
+                    "normalized_value": "",
+                }
+            source_urls = _finding_source_urls(prepared)
+            if source_urls:
+                update["$addToSet"] = {
+                    "source_urls": {"$each": source_urls}
+                }
+            operations.append(
+                UpdateOne({"_id": document["_id"]}, update, upsert=False)
+            )
+            groupable += int(bool(prepared["groupable"]))
+        result = await collection.bulk_write(operations, ordered=False)
+        scanned += len(documents)
+        modified += int(result.modified_count or 0)
+    return {"scanned": scanned, "modified": modified, "groupable": groupable}
+
+
+def _logical_finding_fact_stages() -> list[dict[str, Any]]:
+    """Collapse raw source records to one highest-value logical fact."""
+    return [
+        {"$set": {"_logical_group_key": _mongo_finding_group_key()}},
+        {
+            "$sort": {
+                "attention_score": -1,
+                "updated_at": -1,
+                "created_at": -1,
+                "finding_id": 1,
+            }
+        },
+        {
+            "$group": {
+                "_id": "$_logical_group_key",
+                "representative": {"$first": "$$ROOT"},
+                "attention_score": {
+                    "$max": {"$ifNull": ["$attention_score", 0]}
+                },
+            }
+        },
+        {
+            "$set": {
+                "representative.attention_score": "$attention_score",
+            }
+        },
+        {"$replaceRoot": {"newRoot": "$representative"}},
+        {"$unset": "_logical_group_key"},
+    ]
+
+
+async def aggregate_target_finding_counts(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Count logical Findings per Target and representative source."""
+    normalized_target_ids = list(
+        dict.fromkeys(str(value or "").strip() for value in target_ids if value)
+    )
+    if not project_id or not normalized_target_ids:
+        return []
+    pipeline = [
+        {
+            "$match": {
+                "project_id": project_id,
+                "target_id": {"$in": normalized_target_ids},
+            }
+        },
+        *_logical_finding_fact_stages(),
+        {
+            "$group": {
+                "_id": {
+                    "target_id": "$target_id",
+                    "source": {"$ifNull": ["$source", ""]},
+                },
+                "finding_count": {"$sum": 1},
+                "high_score_count": {
+                    "$sum": {
+                        "$cond": [
+                            {"$gte": [{"$ifNull": ["$attention_score", 0]}, 70]},
+                            1,
+                            0,
+                        ]
+                    }
+                },
+            }
+        },
+    ]
+    return await db[FINDINGS_COLLECTION].aggregate(pipeline).to_list(None)
+
+
 async def get_findings_summary(db: AsyncIOMotorDatabase, project_id: str) -> dict[str, Any]:
     """项目 findings 总览统计"""
     pipeline = [
         {"$match": {"project_id": project_id}},
+        *_logical_finding_fact_stages(),
         {"$facet": {
             "total": [{"$count": "count"}],
             "by_source": [{"$group": {"_id": "$source", "count": {"$sum": 1}}}],
