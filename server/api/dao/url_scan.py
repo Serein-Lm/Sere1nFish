@@ -59,6 +59,7 @@ async def upsert_terminal_result(
     screenshot_object_id: str = "",
     screenshot_url: str = "",
     excluded: bool = False,
+    evidence_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist one final URL outcome without duplicating it on restart."""
     now = _now()
@@ -82,12 +83,14 @@ async def upsert_terminal_result(
         "high_risk_count": max(0, int(high_risk_count or 0)),
         "max_attention_score": max(0, min(100, int(max_attention_score or 0))),
         "intro": dict(intro or {}),
-        "screenshot_object_id": str(screenshot_object_id or ""),
-        "screenshot_url": str(screenshot_url or ""),
         "excluded": bool(excluded),
+        "evidence_audit": dict(evidence_audit or {}),
         "updated_at": now,
         "completed_at": now,
     }
+    if screenshot_object_id or screenshot_url:
+        fields["screenshot_object_id"] = str(screenshot_object_id or "")
+        fields["screenshot_url"] = str(screenshot_url or "")
     await db[URL_SCAN_RESULTS_COLLECTION].update_one(
         {"result_id": stable_id},
         {

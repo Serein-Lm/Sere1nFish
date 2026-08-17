@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import time
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -120,13 +121,14 @@ def _build_web_scan_message(
 ) -> str:
     message = (
         f"请分析以下精确 URL：{url}\n"
-        "只能访问该站点，不得使用搜索引擎、聊天机器人、客服机器人或外部推荐页面。"
+        "只能访问该站点，不得使用搜索引擎、聊天机器人或外部推荐页面。"
+        "可以只读核验官网客服入口，但不得进入会话、提交信息或发送消息。"
         f"浏览器工具最多调用 {tool_limit} 次。"
         "先读取当前页；如果 HTTP 页面被同站跳转或拦截，可将同一地址改为 HTTPS 重试一次。"
         "遇到登录弹窗时不得登录，最多尝试关闭一次；弹窗重现时继续读取公开内容，"
         "不要重复处理。随后按技术群、商务联系、咨询热线的顺序只 hover 最相关的"
         "短文本菜单，并从新快照读取真实电话、群号、邮箱或二维码地址。"
-        "一旦获得至少一个真实值，立即停止浏览并输出最终 JSON。"
+        "一旦获得至少一个真实值，或已核验一个官方客服入口，立即停止浏览并输出最终 JSON。"
     )
     if target_context:
         message += (
@@ -145,16 +147,292 @@ def _build_web_scan_message(
     return message
 
 
-def _is_same_site(candidate_url: str, target_url: str) -> bool:
+def _target_root_domains(target_context: dict[str, Any] | None) -> list[str]:
+    context = target_context or {}
+    root_domains = context.get("root_domains") or []
+    if isinstance(root_domains, str):
+        root_domains = [root_domains]
+    values = [
+        context.get("root_domain"),
+        *root_domains,
+    ]
+    roots: list[str] = []
+    for value in values:
+        raw = str(value or "").strip()
+        host = (urlsplit(raw if "://" in raw else f"https://{raw}").hostname or "")
+        normalized = host.lower().rstrip(".")
+        if normalized and normalized not in roots:
+            roots.append(normalized)
+    return roots
+
+
+def _is_same_site(
+    candidate_url: str,
+    target_url: str,
+    *,
+    allowed_roots: list[str] | None = None,
+) -> bool:
     target_host = (urlsplit(target_url).hostname or "").lower().rstrip(".")
     candidate_host = (urlsplit(candidate_url).hostname or "").lower().rstrip(".")
     if not target_host or not candidate_host:
         return False
-    return (
+    if (
         candidate_host == target_host
         or candidate_host.endswith(f".{target_host}")
         or target_host.endswith(f".{candidate_host}")
+    ):
+        return True
+    return any(
+        candidate_host == root or candidate_host.endswith(f".{root}")
+        for root in allowed_roots or []
     )
+
+
+def _is_actionable_finding(finding: dict[str, Any]) -> bool:
+    """Keep verified entry-only findings even when the control has no href."""
+    if str(finding.get("value") or "").strip():
+        return True
+    return (
+        str(finding.get("type") or "") in {
+            "customer_service",
+            "hr_contact",
+            "business_contact",
+            "media_contact",
+        }
+        and str(finding.get("channel") or "") in {"link", "form", "other"}
+        and any(
+            str(finding.get(key) or "").strip()
+            for key in ("label", "context", "evidence")
+        )
+    )
+
+
+def _normalize_finding_channel(finding: dict[str, Any]) -> dict[str, Any]:
+    """Align channel semantics with the concrete value before deduplication."""
+    normalized = dict(finding)
+    value = str(normalized.get("value") or "").strip()
+    if value.lower().startswith(("http://", "https://")):
+        normalized["channel"] = "link"
+    elif (
+        not value
+        and str(normalized.get("type") or "") == "customer_service"
+        and str(normalized.get("channel") or "") == "link"
+    ):
+        normalized["channel"] = "other"
+    return normalized
+
+
+def _finding_identity(finding: dict[str, Any]) -> tuple[str, str, str]:
+    channel = str(finding.get("channel") or "").strip().casefold()
+    value = str(finding.get("value") or "").strip().casefold()
+    if channel == "phone":
+        digits = re.sub(r"\D", "", value)
+        if digits.startswith("86") and len(digits) > 11:
+            digits = digits[2:]
+        value = digits
+    if not value:
+        value = str(finding.get("label") or "").strip().casefold()
+    return str(finding.get("type") or ""), channel, value
+
+
+def _deduplicate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse same-page semantic duplicates while retaining the stronger row."""
+    deduplicated: list[dict[str, Any]] = []
+    index_by_identity: dict[tuple[str, str, str], int] = {}
+    for finding in findings:
+        identity = _finding_identity(finding)
+        existing_index = index_by_identity.get(identity)
+        if existing_index is None:
+            index_by_identity[identity] = len(deduplicated)
+            deduplicated.append(finding)
+            continue
+        existing = deduplicated[existing_index]
+        if int(finding.get("attention_score") or 0) > int(
+            existing.get("attention_score") or 0
+        ):
+            deduplicated[existing_index] = finding
+    return deduplicated
+
+
+def _contact_semantics(context: str) -> tuple[str, str, str | None, int]:
+    lowered = context.casefold()
+    if any(marker in lowered for marker in ("招聘", "简历", "人力", "hr")):
+        return "hr_contact", "hr", None, 55
+    if any(marker in lowered for marker in ("商务", "合作", "采购", "供应商", "销售")):
+        return "business_contact", "business", None, 55
+    if any(marker in lowered for marker in ("媒体", "记者", "宣传", "公关")):
+        return "media_contact", "media", None, 45
+    subtype = "hotline_landline" if "电话" in lowered or "热线" in lowered else None
+    return "customer_service", "customer_service", subtype, 30
+
+
+def _reconcile_rendered_evidence(
+    tagging: dict[str, Any],
+    *,
+    rendered_evidence: dict[str, Any],
+    target_url: str,
+    target_context: dict[str, Any] | None,
+    capture_error: str = "",
+) -> dict[str, Any]:
+    """Merge deterministic DOM evidence and remove contradictory no-contact text."""
+    contacts = list(rendered_evidence.get("contacts") or [])
+    service_entries = list(rendered_evidence.get("service_entries") or [])
+    existing = list(tagging.get("findings") or [])
+    seen = {_finding_identity(item) for item in existing}
+    reconciled = 0
+    intro = tagging.setdefault("intro", {})
+    party_name = str(
+        intro.get("entity_name")
+        or (target_context or {}).get("canonical_name")
+        or intro.get("site_name")
+        or ""
+    ).strip() or None
+    target_relation = str(tagging.get("target_relation") or "uncertain")
+    target_relation_reason = str(tagging.get("target_relation_reason") or "")
+    source_url = str(rendered_evidence.get("final_url") or target_url)
+    if not _is_same_site(
+        source_url,
+        target_url,
+        allowed_roots=_target_root_domains(target_context),
+    ):
+        contacts = []
+        service_entries = []
+
+    can_reconcile = (
+        not tagging.get("excluded")
+        and target_relation == "confirmed"
+        and str(tagging.get("site_category") or "")
+        in {"target_business", "target_official"}
+    )
+    if can_reconcile:
+        for contact in contacts:
+            raw_channel = str(contact.get("channel") or "").strip()
+            value = str(contact.get("value") or "").strip()
+            context = str(contact.get("context") or "").strip()
+            if not raw_channel or not value:
+                continue
+            finding_type, role, subtype, score = _contact_semantics(context)
+            channel = "email" if raw_channel == "email" else (
+                "wechat" if raw_channel == "wechat" else "phone"
+            )
+            candidate = {
+                "type": finding_type,
+                "scope": "official",
+                "channel": channel,
+                "role": role,
+                "subtype": subtype,
+                "label": str(contact.get("label") or value),
+                "value": value,
+                "context": context or "页面可见正文公开展示该联系方式",
+                "source_url": source_url,
+                "evidence": (
+                    f"浏览器渲染正文：{context or value}"
+                )[:1_000],
+                "attention_score": score,
+                "attention_reason": "目标站点公开展示的可核验联系方式",
+                "party_name": party_name,
+                "party_role": "other",
+                "target_relation": target_relation,
+                "target_relation_reason": target_relation_reason,
+            }
+            identity = _finding_identity(candidate)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            existing.append(candidate)
+            reconciled += 1
+
+        for entry in service_entries:
+            entry_value = str(entry.get("value") or "").strip()
+            if entry_value and not _is_same_site(
+                entry_value,
+                target_url,
+                allowed_roots=_target_root_domains(target_context),
+            ):
+                continue
+            is_live_chat = (
+                str(entry.get("position") or "") in {"fixed", "sticky"}
+                and not entry_value
+            )
+            candidate = {
+                "type": "customer_service",
+                "scope": "enterprise" if is_live_chat else "official",
+                "channel": "link" if entry_value else "other",
+                "role": "customer_service",
+                "subtype": "live_chat_native" if is_live_chat else "support_portal",
+                "label": str(entry.get("label") or "页面客服入口"),
+                "value": entry_value or None,
+                "context": str(entry.get("context") or ""),
+                "source_url": str(entry.get("source_url") or source_url),
+                "evidence": str(entry.get("evidence") or "")[:1_000],
+                "attention_score": 72 if is_live_chat else 45,
+                "attention_reason": (
+                    "目标官网提供可直接建立交互的在线客服入口"
+                    if is_live_chat
+                    else "目标官网公开展示的联系或咨询说明入口"
+                ),
+                "party_name": party_name,
+                "party_role": "other",
+                "target_relation": target_relation,
+                "target_relation_reason": target_relation_reason,
+            }
+            identity = _finding_identity(candidate)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            existing.append(candidate)
+            reconciled += 1
+
+    tagging["findings"] = existing
+    tagging["has_findings"] = bool(existing)
+    if existing:
+        tagging["no_findings_reason"] = None
+
+    if contacts or service_entries:
+        summary = str(intro.get("summary") or "").strip()
+        fragments = [
+            fragment.strip()
+            for fragment in re.split(r"(?<=[。！？；])", summary)
+            if fragment.strip()
+        ]
+        negative_pattern = re.compile(
+            r"(?:未(?:直接)?(?:发现|展示|提供)|无|没有)(?:任何)?[^。；！？]{0,24}"
+            r"(?:联系|电话|邮箱|客服|咨询|即时通讯)"
+        )
+        contact_markers = ("联系", "电话", "邮箱", "客服", "咨询", "即时通讯")
+        fragments = [
+            fragment
+            for fragment in fragments
+            if not (
+                negative_pattern.search(fragment)
+                and any(marker in fragment for marker in contact_markers)
+            )
+        ]
+        details: list[str] = []
+        values = list(
+            dict.fromkeys(
+                str(item.get("value") or "").strip()
+                for item in contacts
+                if str(item.get("value") or "").strip()
+            )
+        )
+        if values:
+            details.append(f"页面公开展示联系方式：{'、'.join(values[:5])}")
+        if service_entries:
+            details.append("页面右下角提供官方在线客服入口")
+        intro["summary"] = "。".join(
+            part.rstrip("。；") for part in [*fragments, "；".join(details)] if part
+        ).rstrip("。") + "。"
+
+    tagging["evidence_audit"] = {
+        "rendered_url": str(rendered_evidence.get("final_url") or ""),
+        "rendered_content_length": int(rendered_evidence.get("content_length") or 0),
+        "detected_contact_count": len(contacts),
+        "detected_service_entry_count": len(service_entries),
+        "reconciled_finding_count": reconciled,
+        "capture_error": str(capture_error or "")[:1_000],
+    }
+    return tagging
 
 
 def _validate_web_tagging(
@@ -168,18 +446,28 @@ def _validate_web_tagging(
     from api.models.web_tagging_schema import WebTaggingOutput
 
     validated = WebTaggingOutput.model_validate(tagging).model_dump(mode="json")
+    allowed_roots = _target_root_domains(target_context)
     intro = validated["intro"]
     intro["url"] = target_url
-    if not _is_same_site(str(intro.get("final_url") or ""), target_url):
+    if not _is_same_site(
+        str(intro.get("final_url") or ""),
+        target_url,
+        allowed_roots=allowed_roots,
+    ):
         intro["final_url"] = target_url
     if not intro.get("entity_name"):
         intro["entity_name"] = intro.get("site_name") or urlsplit(target_url).hostname
-    findings = [
-        finding
-        for finding in validated.get("findings") or []
-        if _is_same_site(str(finding.get("source_url") or ""), target_url)
-        and str(finding.get("value") or "").strip()
-    ]
+    findings: list[dict[str, Any]] = []
+    for finding in validated.get("findings") or []:
+        normalized_finding = _normalize_finding_channel(finding)
+        if not _is_same_site(
+            str(normalized_finding.get("source_url") or ""),
+            target_url,
+            allowed_roots=allowed_roots,
+        ):
+            continue
+        if _is_actionable_finding(normalized_finding):
+            findings.append(normalized_finding)
     if source == "web_tagging" and target_context:
         excluded = validated.get("site_category") in {
             "generic_open_source",
@@ -188,6 +476,7 @@ def _validate_web_tagging(
         validated["excluded"] = bool(excluded)
         if excluded:
             findings = []
+    findings = _deduplicate_findings(findings)
     validated["findings"] = findings
     validated["has_findings"] = bool(findings)
     if findings:
@@ -433,6 +722,50 @@ class UrlWebScanTool:
                 f"[scan-w{worker_id}] 扫描 {url} (attempt={attempt}) | 容器={cdp_url}"
             )
             started = time.time()
+            rendered_evidence: dict[str, Any] = {}
+            rendered_capture_error = ""
+            try:
+                from api.services.web_capture import (
+                    capture_cdp_rendered_links,
+                    extract_rendered_contact_evidence,
+                    format_rendered_contact_evidence,
+                )
+
+                rendered = await capture_cdp_rendered_links(
+                    cdp_url,
+                    url,
+                    timeout_seconds=20,
+                    include_html=False,
+                )
+                rendered_evidence = extract_rendered_contact_evidence(rendered)
+                deterministic_context = format_rendered_contact_evidence(
+                    rendered_evidence
+                )
+                source_context = "\n\n".join(
+                    value
+                    for value in (deterministic_context, source_context)
+                    if value
+                )
+                logger.info(
+                    "[scan-w%s] 渲染证据 url=%s final=%s chars=%s contacts=%s "
+                    "service_entries=%s",
+                    worker_id,
+                    url,
+                    rendered_evidence.get("final_url") or "",
+                    rendered_evidence.get("content_length") or 0,
+                    len(rendered_evidence.get("contacts") or []),
+                    len(rendered_evidence.get("service_entries") or []),
+                )
+            except Exception as evidence_error:  # noqa: BLE001
+                rendered_capture_error = (
+                    f"{type(evidence_error).__name__}: {evidence_error}"
+                )[:1_000]
+                logger.warning(
+                    "[scan-w%s] 渲染证据提取失败 url=%s: %s",
+                    worker_id,
+                    url,
+                    rendered_capture_error,
+                )
             worker_config = _build_worker_chrome_config(self._app_config, cdp_url)
             agent_timeout, execution_timeout = _web_agent_timeout_budget(
                 request.options
@@ -489,6 +822,24 @@ class UrlWebScanTool:
                 source=request.source,
                 target_context=target_context,
             )
+            tagging = _reconcile_rendered_evidence(
+                tagging,
+                rendered_evidence=rendered_evidence,
+                target_url=url,
+                target_context=target_context,
+                capture_error=rendered_capture_error,
+            )
+            evidence_audit = dict(tagging.get("evidence_audit") or {})
+            if int(evidence_audit.get("reconciled_finding_count") or 0):
+                logger.warning(
+                    "[scan-w%s] Agent 遗漏已由渲染证据补偿 url=%s reconciled=%s "
+                    "contacts=%s service_entries=%s",
+                    worker_id,
+                    url,
+                    evidence_audit.get("reconciled_finding_count"),
+                    evidence_audit.get("detected_contact_count"),
+                    evidence_audit.get("detected_service_entry_count"),
+                )
 
             try:
                 from api.services.web_capture import capture_cdp_page_screenshot
@@ -538,6 +889,9 @@ class UrlWebScanTool:
                 meta={
                     "elapsed_seconds": elapsed,
                     "findings_count": findings_count,
+                    "evidence_audit": dict(
+                        tagging.get("evidence_audit") or {}
+                    ),
                 },
             )
         except ScanInfrastructureError:

@@ -48,6 +48,43 @@ from core.stream import Stage, Item, RetryPolicy, DeadLetter
 logger = get_logger("url_scan_pipeline")
 
 
+_CONTACT_FINDING_TYPES = {
+    "personal_mobile",
+    "personal_email",
+    "personal_wechat",
+    "enterprise_wechat",
+    "hr_contact",
+    "business_contact",
+    "media_contact",
+    "customer_service",
+    "group_chat",
+}
+
+
+def _keep_verified_contact_finding(
+    finding: dict[str, Any],
+    *,
+    min_attention_score: int,
+) -> bool:
+    """Preserve verified contact evidence even below the attention threshold."""
+    if int(finding.get("attention_score") or 0) >= min_attention_score:
+        return True
+    if finding.get("target_relation") == "not_target":
+        return False
+    if str(finding.get("type") or "") not in _CONTACT_FINDING_TYPES:
+        return False
+    has_value = bool(str(finding.get("value") or "").strip())
+    is_entry = (
+        str(finding.get("type") or "") == "customer_service"
+        and str(finding.get("channel") or "") in {"link", "form", "other"}
+    )
+    return bool(
+        (has_value or is_entry)
+        and str(finding.get("source_url") or finding.get("url") or "").strip()
+        and str(finding.get("evidence") or finding.get("context") or "").strip()
+    )
+
+
 def terminal_url_scan_status(failed_urls: int) -> str:
     """Report terminal URL batches with any failed endpoint as partial."""
     return "partial" if max(0, int(failed_urls or 0)) else "completed"
@@ -1230,6 +1267,11 @@ class UrlScanPipeline:
                     screenshot_object_id=str(data.get("screenshot_object_id") or ""),
                     screenshot_url=str(data.get("screenshot_url") or ""),
                     excluded=bool(data.get("excluded")),
+                    evidence_audit=dict(
+                        data.get("evidence_audit")
+                        or meta.get("evidence_audit")
+                        or {}
+                    ),
                 )
                 async with progress_lock:
                     progress_counts["processed"] += 1
@@ -1272,7 +1314,10 @@ class UrlScanPipeline:
                 url_findings = self.extract_findings([result])
                 url_findings = [
                     f for f in url_findings
-                    if f.get("attention_score", 0) >= min_attention_score
+                    if _keep_verified_contact_finding(
+                        f,
+                        min_attention_score=min_attention_score,
+                    )
                 ]
                 result.setdefault("data", {})["findings"] = url_findings
                 result["data"]["has_findings"] = bool(url_findings)

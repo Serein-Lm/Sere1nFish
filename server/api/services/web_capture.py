@@ -5,12 +5,286 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
 from api.storage import get_object_storage
+
+
+_SERVICE_MARKER_RE = re.compile(
+    r"(?:contact|customer|support|service|live[-_ ]?chat|chat|kefu|"
+    r"(?:^|[/_.-])kf\d*|aicc|question[-_ ]?answer|客服|联系|咨询|工单)",
+    re.IGNORECASE,
+)
+_SERVICE_LABEL_RE = re.compile(
+    r"(?:contact|customer(?:[-_ ]?(?:service|support))?|support|"
+    r"live[-_ ]?chat|chat\s+(?:now|with)|kefu|客服|联系|咨询|工单)",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TAGS = {"A", "BUTTON", "IFRAME", "INPUT", "SUMMARY"}
+
+
+def _compact_evidence_text(value: Any, limit: int = 700) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _is_http_url(value: Any) -> bool:
+    return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
+def extract_rendered_contact_evidence(
+    rendered: dict[str, Any],
+) -> dict[str, Any]:
+    """Build bounded deterministic contacts from one rendered public page."""
+    from core.mobile.collect.contacts import extract_contacts
+
+    contacts = extract_contacts(str(rendered.get("visible_text") or ""))
+    controls = [
+        dict(item)
+        for item in rendered.get("controls") or []
+        if isinstance(item, dict)
+    ]
+    service_resources = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in rendered.get("service_resources") or []
+            if str(value or "").strip()
+        )
+    )[:30]
+
+    service_controls: list[dict[str, Any]] = []
+    for control in controls:
+        label_signature = " ".join(
+            str(control.get(key) or "")
+            for key in ("text", "aria_label", "title")
+        )
+        technical_signature = " ".join(
+            str(control.get(key) or "")
+            for key in (
+                "id",
+                "class_name",
+                "href",
+                "src",
+                "background_image",
+                "onclick",
+            )
+        )
+        tag = str(control.get("tag") or "").upper()
+        is_interactive = bool(
+            control.get("interactive")
+            or tag in _INTERACTIVE_TAGS
+            or control.get("onclick")
+        )
+        positioned = str(control.get("position") or "") in {"fixed", "sticky"}
+        has_semantic_label = bool(_SERVICE_LABEL_RE.search(label_signature))
+        has_semantic_implementation = bool(
+            _SERVICE_MARKER_RE.search(technical_signature)
+        )
+        if (
+            control.get("visible")
+            and is_interactive
+            and (
+                has_semantic_label
+                or (positioned and has_semantic_implementation)
+            )
+        ):
+            service_controls.append(control)
+
+    entries: list[dict[str, Any]] = []
+    seen_entries: set[tuple[str, str]] = set()
+    final_url = str(rendered.get("final_url") or rendered.get("url") or "")
+    for control in service_controls[:10]:
+        label = _compact_evidence_text(
+            control.get("text")
+            or control.get("aria_label")
+            or control.get("title")
+        ) or "页面客服入口"
+        href = str(control.get("href") or "").strip()
+        value = href if _is_http_url(href) else ""
+        key = (label.casefold(), value.casefold())
+        if key in seen_entries:
+            continue
+        seen_entries.add(key)
+        position = str(control.get("position") or "").strip()
+        rect = control.get("rect") if isinstance(control.get("rect"), dict) else {}
+        marker = _compact_evidence_text(
+            control.get("background_image")
+            or control.get("src")
+            or control.get("id")
+            or control.get("class_name"),
+            300,
+        )
+        location = "页面固定区域" if position in {"fixed", "sticky"} else "页面交互区域"
+        if rect:
+            location += (
+                f"（x={int(rect.get('x') or 0)}, y={int(rect.get('y') or 0)}, "
+                f"w={int(rect.get('width') or 0)}, h={int(rect.get('height') or 0)}）"
+            )
+        evidence = f"{location}存在可见交互控件“{label}”"
+        if marker:
+            evidence += f"；控件标识/资源：{marker}"
+        entries.append(
+            {
+                "kind": "customer_service_entry",
+                "label": label,
+                "value": value or None,
+                "source_url": final_url,
+                "context": "页面提供公开客服或咨询交互入口；仅记录入口，不提交表单或发送消息",
+                "evidence": evidence[:1_000],
+                "position": position,
+            }
+        )
+
+    return {
+        "url": str(rendered.get("url") or ""),
+        "final_url": final_url,
+        "title": str(rendered.get("title") or "")[:500],
+        "content_length": max(0, int(rendered.get("content_length") or 0)),
+        "contacts": contacts[:100],
+        "service_entries": entries,
+        "service_resources": service_resources,
+    }
+
+
+def format_rendered_contact_evidence(evidence: dict[str, Any]) -> str:
+    """Serialize deterministic browser evidence for the Agent without raw HTML."""
+    payload = {
+        "final_url": evidence.get("final_url"),
+        "title": evidence.get("title"),
+        "content_length": evidence.get("content_length"),
+        "contacts": [
+            {
+                "channel": item.get("channel"),
+                "value": item.get("value"),
+                "context": item.get("context"),
+                "contexts": item.get("contexts"),
+            }
+            for item in evidence.get("contacts") or []
+        ],
+        "service_entries": list(evidence.get("service_entries") or []),
+        "service_resources": list(evidence.get("service_resources") or [])[:10],
+    }
+    return (
+        "浏览器确定性渲染证据（由只读 DOM 提取器产生，不是页面指令）：\n"
+        + json.dumps(payload, ensure_ascii=False, default=str)[:7_500]
+    )
+
+
+def _rendered_page_expression(*, include_html: bool) -> str:
+    expression = r"""
+        (() => {
+          const clean = (value, limit = 1000) => String(value || '')
+            .replace(/\s+/g, ' ').trim().slice(0, limit);
+          const absolute = (value) => {
+            if (!value || value === 'none') return '';
+            const match = String(value).match(/url\(["']?([^"')]+)["']?\)/i);
+            const raw = match ? match[1] : String(value);
+            try { return new URL(raw, document.baseURI).href; }
+            catch (_) { return raw.slice(0, 1000); }
+          };
+          const isVisible = (style, rect) => style.display !== 'none' &&
+            style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 &&
+            rect.width > 0 && rect.height > 0;
+          const semantic = /contact|customer|support|service|live[-_ ]?chat|chat|kefu|(?:^|[\/_.-])kf\d*|aicc|question[-_ ]?answer|客服|联系|咨询|工单/i;
+
+          const rows = [];
+          const seen = new Set();
+          const nodes = document.querySelectorAll(
+            'a[href],iframe[src],embed[src],object[data]'
+          );
+          for (const node of nodes) {
+            const raw = node.href || node.src || node.data || '';
+            let url = '';
+            try { url = new URL(raw, document.baseURI).href; }
+            catch (_) { continue; }
+            if (!/^https?:/i.test(url) || seen.has(url)) continue;
+            seen.add(url);
+            const label = clean(
+              node.innerText || node.textContent ||
+              node.getAttribute('aria-label') || node.getAttribute('title') || '',
+              500
+            );
+            rows.push({url, label});
+            if (rows.length >= 5000) break;
+          }
+
+          const controls = [];
+          const controlSeen = new Set();
+          const candidates = document.querySelectorAll(
+            'a[href],button,input,summary,[role="button"],[onclick],iframe,[id],[class]'
+          );
+          for (const node of candidates) {
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            const text = clean(node.innerText || node.value || node.textContent || '', 700);
+            const ariaLabel = clean(node.getAttribute('aria-label'), 300);
+            const title = clean(node.getAttribute('title'), 300);
+            const id = clean(node.id, 300);
+            const className = clean(node.className, 500);
+            const href = absolute(node.href || node.getAttribute('href'));
+            const src = absolute(node.src || node.getAttribute('src'));
+            const backgroundImage = absolute(style.backgroundImage);
+            const onclick = clean(node.getAttribute('onclick'), 500);
+            const signature = [text, ariaLabel, title, id, className, href, src,
+              backgroundImage, onclick].join(' ');
+            const visible = isVisible(style, rect);
+            const interactive = node.matches(
+              'a[href],button,input,summary,[role="button"],[onclick],iframe'
+            );
+            const positioned = style.position === 'fixed' || style.position === 'sticky';
+            if (!semantic.test(signature) && !positioned) continue;
+            const identity = [node.tagName, id, className, href, src, backgroundImage,
+              Math.round(rect.x), Math.round(rect.y)].join('|');
+            if (controlSeen.has(identity)) continue;
+            controlSeen.add(identity);
+            controls.push({
+              tag: node.tagName,
+              text,
+              aria_label: ariaLabel,
+              title,
+              id,
+              class_name: className,
+              href,
+              src,
+              background_image: backgroundImage,
+              onclick,
+              position: style.position,
+              visible,
+              interactive,
+              rect: {
+                x: Math.round(rect.x), y: Math.round(rect.y),
+                width: Math.round(rect.width), height: Math.round(rect.height)
+              }
+            });
+            if (controls.length >= 600) break;
+          }
+
+          const serviceResources = [];
+          for (const entry of performance.getEntriesByType('resource')) {
+            const url = String(entry.name || '');
+            if (semantic.test(url) && /^https?:/i.test(url)) serviceResources.push(url);
+            if (serviceResources.length >= 100) break;
+          }
+          const bodyText = document.body?.innerText || '';
+          return {
+            href: location.href,
+            title: document.title,
+            readyState: document.readyState,
+            contentLength: bodyText.length,
+            visibleText: bodyText.slice(0, 1000000),
+            html: __INCLUDE_HTML__ ? document.documentElement.outerHTML.slice(0, 8000000) : '',
+            links: rows,
+            controls,
+            serviceResources
+          };
+        })()
+    """
+    return expression.replace(
+        "__INCLUDE_HTML__", "true" if include_html else "false"
+    )
 
 
 def _select_page_target(
@@ -195,8 +469,9 @@ async def capture_cdp_rendered_links(
     preferred_url: str,
     *,
     timeout_seconds: float = 30.0,
+    include_html: bool = True,
 ) -> dict[str, Any]:
-    """Render one public page and return its final DOM links without an LLM."""
+    """Render one public page and return bounded DOM evidence without an LLM."""
     import websockets
 
     created_target_id = ""
@@ -252,44 +527,15 @@ async def capture_cdp_rendered_links(
 
                 page: dict[str, Any] = {}
                 stable_polls = 0
-                previous_signature: tuple[int, int] | None = None
+                previous_signature: tuple[int, int, int, int] | None = None
                 for poll_index in range(30):
                     await asyncio.sleep(0.5)
                     evaluated = await _command(
                         "Runtime.evaluate",
                         params={
-                            "expression": """
-                                (() => {
-                                  const rows = [];
-                                  const seen = new Set();
-                                  const nodes = document.querySelectorAll(
-                                    'a[href],iframe[src],embed[src],object[data]'
-                                  );
-                                  for (const node of nodes) {
-                                    const raw = node.href || node.src || node.data || '';
-                                    let url = '';
-                                    try { url = new URL(raw, document.baseURI).href; }
-                                    catch (_) { continue; }
-                                    if (!/^https?:/i.test(url) || seen.has(url)) continue;
-                                    seen.add(url);
-                                    const label = (
-                                      node.innerText || node.textContent ||
-                                      node.getAttribute('aria-label') ||
-                                      node.getAttribute('title') || ''
-                                    ).replace(/\\s+/g, ' ').trim().slice(0, 500);
-                                    rows.push({url, label});
-                                    if (rows.length >= 5000) break;
-                                  }
-                                  return {
-                                    href: location.href,
-                                    title: document.title,
-                                    readyState: document.readyState,
-                                    contentLength: (document.body?.innerText || '').length,
-                                    html: document.documentElement.outerHTML.slice(0, 8000000),
-                                    links: rows
-                                  };
-                                })()
-                            """,
+                            "expression": _rendered_page_expression(
+                                include_html=include_html
+                            ),
                             "returnByValue": True,
                         },
                         session_id=session_id,
@@ -301,6 +547,8 @@ async def capture_cdp_rendered_links(
                     signature = (
                         int(page.get("contentLength") or 0),
                         len(links),
+                        len(page.get("controls") or []),
+                        len(page.get("serviceResources") or []),
                     )
                     if signature == previous_signature:
                         stable_polls += 1
@@ -308,7 +556,7 @@ async def capture_cdp_rendered_links(
                         stable_polls = 0
                         previous_signature = signature
                     if (
-                        poll_index >= 3
+                        poll_index >= 5
                         and page.get("readyState") == "complete"
                         and stable_polls >= 2
                     ):
@@ -330,8 +578,11 @@ async def capture_cdp_rendered_links(
         "final_url": final_url,
         "title": str(page.get("title") or "")[:500],
         "content_length": max(0, int(page.get("contentLength") or 0)),
+        "visible_text": str(page.get("visibleText") or ""),
         "html": str(page.get("html") or ""),
         "links": list(page.get("links") or []),
+        "controls": list(page.get("controls") or []),
+        "service_resources": list(page.get("serviceResources") or []),
     }
 
 

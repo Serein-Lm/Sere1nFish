@@ -7,12 +7,65 @@ from api.db.collections import (
     URL_SCAN_RESULTS_COLLECTION,
     URL_SCAN_TASKS_COLLECTION,
 )
-from api.services.url_scan_pipeline import terminal_url_scan_status
+from api.services.url_scan_pipeline import (
+    _keep_verified_contact_finding,
+    terminal_url_scan_status,
+)
 
 
 def test_terminal_url_scan_with_failures_is_partial() -> None:
     assert terminal_url_scan_status(0) == "completed"
     assert terminal_url_scan_status(1) == "partial"
+
+
+def test_low_score_verified_contact_survives_display_threshold() -> None:
+    assert _keep_verified_contact_finding(
+        {
+            "type": "customer_service",
+            "channel": "phone",
+            "value": "010-62677800",
+            "source_url": "https://zwfw.cscse.edu.cn/",
+            "evidence": "联系我们 咨询电话：010-62677800（客服中心）",
+            "attention_score": 30,
+            "target_relation": "confirmed",
+        },
+        min_attention_score=60,
+    )
+
+
+def test_low_score_non_contact_still_respects_display_threshold() -> None:
+    assert not _keep_verified_contact_finding(
+        {
+            "type": "other",
+            "channel": "other",
+            "value": "普通页面信息",
+            "source_url": "https://zwfw.cscse.edu.cn/",
+            "evidence": "普通页面正文",
+            "attention_score": 30,
+            "target_relation": "confirmed",
+        },
+        min_attention_score=60,
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_screenshot_refresh_preserves_existing_reference() -> None:
+    db = _Db()
+
+    fields = await url_scan.upsert_terminal_result(
+        db,
+        task_id="task-1",
+        project_id="project-1",
+        target_id="target-1",
+        source="web_tagging",
+        url="https://example.com",
+        success=True,
+    )
+
+    assert "screenshot_object_id" not in fields
+    assert "screenshot_url" not in fields
+    assert "screenshot_object_id" not in db.collection.update["$set"]
+    assert "screenshot_url" not in db.collection.update["$set"]
 
 
 class _Cursor:

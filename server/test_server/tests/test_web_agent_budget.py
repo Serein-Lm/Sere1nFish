@@ -5,6 +5,7 @@ from Sere1nGraph.graph.agents.factory import (
 from Sere1nGraph.graph.prompts.loader import load_prompt
 from api.services.info_collection.url_tools import (
     _build_web_scan_message,
+    _reconcile_rendered_evidence,
     _validate_web_tagging,
     _web_agent_timeout_budget,
     _web_agent_tool_limit,
@@ -133,3 +134,178 @@ def test_web_tagging_discards_label_only_contact_entries() -> None:
 
     assert result["has_findings"] is True
     assert [item["value"] for item in result["findings"]] == ["010-12345678"]
+
+
+def test_web_tagging_keeps_verified_entry_without_dom_href() -> None:
+    result = _validate_web_tagging(
+        {
+            "intro": {
+                "url": "https://zwfw.cscse.edu.cn",
+                "final_url": "https://zwfw.cscse.edu.cn/",
+                "domain": "zwfw.cscse.edu.cn",
+                "site_name": "教育部留学服务中心网上服务大厅",
+                "entity_name": "教育部留学服务中心",
+                "summary": "页面提供网上政务服务。",
+            },
+            "site_category": "target_official",
+            "target_relation": "confirmed",
+            "target_relation_reason": "目标主体官网",
+            "has_findings": True,
+            "findings": [
+                {
+                    "type": "customer_service",
+                    "scope": "enterprise",
+                    "channel": "link",
+                    "role": "customer_service",
+                    "subtype": "live_chat_native",
+                    "label": "页面客服入口",
+                    "value": None,
+                    "context": "页面右下角显示客服入口",
+                    "source_url": "https://service.cscse.edu.cn/aicc-im-base-web/",
+                    "evidence": "目标官网固定区域存在可见客服按钮",
+                    "attention_score": 72,
+                    "attention_reason": "官网可直接触达的客服入口",
+                    "party_name": "教育部留学服务中心",
+                    "party_role": "other",
+                    "target_relation": "confirmed",
+                    "target_relation_reason": "目标主体官网",
+                }
+            ],
+        },
+        "https://zwfw.cscse.edu.cn",
+        target_context={"root_domain": "cscse.edu.cn"},
+    )
+
+    assert result["has_findings"] is True
+    assert result["findings"][0]["value"] is None
+    assert result["findings"][0]["channel"] == "other"
+    assert result["findings"][0]["source_url"].startswith(
+        "https://service.cscse.edu.cn/"
+    )
+
+
+def test_web_tagging_normalizes_url_value_to_link_channel() -> None:
+    result = _validate_web_tagging(
+        {
+            "intro": {
+                "url": "https://zwfw.cscse.edu.cn",
+                "final_url": "https://zwfw.cscse.edu.cn/",
+                "domain": "zwfw.cscse.edu.cn",
+                "site_name": "网上服务大厅",
+                "entity_name": "教育部留学服务中心",
+                "summary": "页面提供技术支持邮件咨询说明入口。",
+            },
+            "site_category": "target_official",
+            "target_relation": "confirmed",
+            "target_relation_reason": "目标主体官网",
+            "has_findings": True,
+            "findings": [
+                {
+                    "type": "customer_service",
+                    "scope": "official",
+                    "channel": "email",
+                    "role": "support",
+                    "label": "技术支持邮件咨询须知",
+                    "value": "https://zwfw.cscse.edu.cn/support.html",
+                    "context": "页面展示咨询说明入口",
+                    "source_url": "https://zwfw.cscse.edu.cn/",
+                    "evidence": "页面显示技术支持邮件咨询须知",
+                    "attention_score": 45,
+                    "attention_reason": "官方咨询入口",
+                    "target_relation": "confirmed",
+                    "target_relation_reason": "目标主体官网",
+                }
+            ],
+        },
+        "https://zwfw.cscse.edu.cn",
+        target_context={"root_domain": "cscse.edu.cn"},
+    )
+
+    assert result["findings"][0]["channel"] == "link"
+    reconciled = _reconcile_rendered_evidence(
+        result,
+        rendered_evidence={
+            "final_url": "https://zwfw.cscse.edu.cn/",
+            "service_entries": [
+                {
+                    "label": "技术支持邮件咨询须知",
+                    "value": "https://zwfw.cscse.edu.cn/support.html",
+                    "source_url": "https://zwfw.cscse.edu.cn/",
+                    "context": "页面展示咨询说明入口",
+                    "evidence": "页面显示技术支持邮件咨询须知",
+                }
+            ],
+        },
+        target_url="https://zwfw.cscse.edu.cn",
+        target_context={"root_domain": "cscse.edu.cn"},
+    )
+    assert len(reconciled["findings"]) == 1
+    assert reconciled["evidence_audit"]["reconciled_finding_count"] == 0
+
+
+def test_rendered_evidence_repairs_agent_contact_omission() -> None:
+    tagging = _validate_web_tagging(
+        {
+            "intro": {
+                "url": "https://zwfw.cscse.edu.cn",
+                "final_url": "https://zwfw.cscse.edu.cn/",
+                "domain": "zwfw.cscse.edu.cn",
+                "site_name": "教育部留学服务中心网上服务大厅",
+                "entity_name": "教育部留学服务中心",
+                "summary": "页面未直接展示联系电话或客服入口。",
+            },
+            "site_category": "target_official",
+            "target_relation": "confirmed",
+            "target_relation_reason": "目标主体官网",
+            "has_findings": False,
+            "no_findings_reason": "页面未发现联系方式",
+            "findings": [],
+        },
+        "https://zwfw.cscse.edu.cn",
+        target_context={"root_domain": "cscse.edu.cn"},
+    )
+
+    result = _reconcile_rendered_evidence(
+        tagging,
+        rendered_evidence={
+            "final_url": "https://zwfw.cscse.edu.cn/",
+            "content_length": 1129,
+            "contacts": [
+                {
+                    "channel": "telephone",
+                    "value": "010-62677800",
+                    "label": "座机: 010-62677800",
+                    "context": "联系我们 咨询电话：010-62677800（客服中心）",
+                }
+            ],
+            "service_entries": [
+                {
+                    "label": "页面客服入口",
+                    "value": None,
+                    "source_url": "https://zwfw.cscse.edu.cn/",
+                    "context": "页面提供公开客服或咨询交互入口",
+                    "evidence": "页面右下角存在固定客服按钮",
+                    "position": "fixed",
+                },
+                {
+                    "label": "无关平台客服",
+                    "value": "https://support.example.net/chat",
+                    "source_url": "https://zwfw.cscse.edu.cn/",
+                    "context": "外部平台入口",
+                    "evidence": "无法确认目标主体背书",
+                }
+            ],
+        },
+        target_url="https://zwfw.cscse.edu.cn",
+        target_context={"root_domain": "cscse.edu.cn"},
+    )
+
+    assert result["has_findings"] is True
+    assert result["no_findings_reason"] is None
+    assert {item["value"] for item in result["findings"]} == {
+        "010-62677800",
+        None,
+    }
+    assert "未直接展示" not in result["intro"]["summary"]
+    assert "页面右下角提供官方在线客服入口" in result["intro"]["summary"]
+    assert result["evidence_audit"]["reconciled_finding_count"] == 2
