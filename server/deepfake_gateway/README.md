@@ -1,5 +1,9 @@
 # Deepfake GPU Gateway
 
+远端 GPU 节点的新建、模型恢复、验证、切换和旧节点释放统一按
+[DEPLOYMENT.md](DEPLOYMENT.md) 执行。不要复制历史节点的 IP、Token、证书或手工
+SSH 转发命令。
+
 This standalone service wraps FaceFusion behind a versioned HTTPS/WSS API. It
 must run with one Uvicorn worker because FaceFusion owns process-global model
 state and realtime sessions are held in memory.
@@ -82,7 +86,7 @@ the pending endpoint alive; abandoned sessions still expire after the configured
 TTL.
 
 The browser-capture fallback publishes its protected OBS viewer through the GPU
-node's trusted HTTPS origin. `sere1nfish-media-output-relay.service` maintains a
+node's trusted HTTPS origin. `sere1nfish-gpu-tunnel.service` maintains a
 loopback-only SSH reverse tunnel from GPU port `18443` to the application server's
 local HTTPS port. Caddy proxies only `/api/v1/media-output/view` and
 `/api/v1/media-output/watch` through this tunnel; no additional public port is
@@ -108,10 +112,14 @@ does not need to be exposed. Certificate-authority validators must still be
 able to reach TCP `443`; restrict application routes separately when the media
 service must remain limited to approved clients.
 
-The server-side SSH tunnel must additionally expose local nginx to GPU
-loopback. The complete forwarding set is:
+The server-side SSH tunnel also exposes local nginx to GPU loopback. The stable
+forwarding semantics are:
 
 ```text
 -L 172.18.0.1:18443:127.0.0.1:443
--R 127.0.0.1:17890:43.106.0.54:18818
+-R 127.0.0.1:18443:127.0.0.1:443
+-R 127.0.0.1:17890:<optional-http-proxy-host>:<port>
 ```
+
+Do not create these forwards manually. `deploy/deploy-from-main.sh` renders and
+installs the unified systemd service after the new node passes health checks.

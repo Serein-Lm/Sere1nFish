@@ -4,6 +4,9 @@ FROM ${BASE_IMAGE}
 USER root
 ARG TENSORRT_VERSION=10.9.0.34
 ARG WHEEL_STUB_VERSION=0.5.0
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 ARG PIP_INDEX_URL=https://pypi.org/simple
 RUN python3 -m pip install \
     --no-cache-dir \

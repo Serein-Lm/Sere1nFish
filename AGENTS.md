@@ -29,6 +29,7 @@
 - 当前运行时部署使用 Docker Compose，核心文件位于根目录：`docker-compose.yml`、`compose.yaml`、`.env`、`.env.example`、`nginx/`、`downloads/`。
 - Compose 服务包含 MongoDB、Redis、后端、前端、nginx、EasyTier，以及一个由后端管理的独立 Chrome 浏览器镜像。
 - GPU 节点的独立部署模板位于 `server/deepfake_gateway`；该部署包含 FaceFusion Gateway、MediaMTX、Caddy 和仅监听 loopback 的 MeanVC Runtime，主机不对公网暴露模型运行时端口。
+- GPU 节点重建统一从主服务器执行 `server/deepfake_gateway/deploy/deploy-from-main.sh`，模型归档由 `scripts.manage_gpu_node` 通过 `ObjectStorageService` 校验和恢复；禁止在部署文件中硬编码节点 IP、Token、证书、代理地址或直接调用 OSS SDK。具体输入、端口、回滚和旧节点释放步骤见 `server/deepfake_gateway/DEPLOYMENT.md`。
 - 业务入口只暴露 HTTPS `443`；远程手机组网额外暴露 EasyTier 固定端口 `11010-11013`。
 - MongoDB、Redis、后端开发端口、前端 Vite 端口、Chrome 调试端口都应留在 Docker 内部网络中，不对公网开放。
 - 运行时源码挂载关系：

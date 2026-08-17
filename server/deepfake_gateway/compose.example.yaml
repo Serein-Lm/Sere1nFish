@@ -1,35 +1,37 @@
-version: "2.4"
+name: sere1nfish-deepfake
 
 services:
   meanvc:
-    image: sere1nfish/meanvc-runtime:1.0.0
+    image: ${MEANVC_IMAGE:-sere1nfish/meanvc-runtime:1.0.0}
     build:
       context: ../meanvc_runtime
       dockerfile: Dockerfile
       network: host
       args:
-        HTTP_PROXY: ${HTTP_PROXY-http://127.0.0.1:17890}
-        HTTPS_PROXY: ${HTTPS_PROXY-http://127.0.0.1:17890}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}
     restart: unless-stopped
     network_mode: host
     runtime: nvidia
     shm_size: 2gb
     environment:
-      HTTP_PROXY: ${HTTP_PROXY-http://127.0.0.1:17890}
-      HTTPS_PROXY: ${HTTPS_PROXY-http://127.0.0.1:17890}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: localhost,127.0.0.1,::1
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       MEANVC_API_TOKEN_FILE: /run/secrets/meanvc_api_token
       MEANVC_MODEL_DIR: /models
       HOME: /models
-      MEANVC_DEVICE: ${MEANVC_DEVICE-auto}
-      MEANVC_CPU_THREADS: ${MEANVC_CPU_THREADS-2}
-      MEANVC_MAX_SESSIONS: ${DEEPFAKE_MAX_SESSIONS-2}
-      MEANVC_SESSION_TTL_SECONDS: ${DEEPFAKE_SESSION_TTL_SECONDS-900}
+      MEANVC_DEVICE: ${MEANVC_DEVICE:-auto}
+      MEANVC_CPU_THREADS: ${MEANVC_CPU_THREADS:-2}
+      MEANVC_MAX_SESSIONS: ${DEEPFAKE_MAX_SESSIONS:-2}
+      MEANVC_SESSION_TTL_SECONDS: ${DEEPFAKE_SESSION_TTL_SECONDS:-900}
     volumes:
-      - ${MEANVC_MODELS_DIR-../data/meanvc}:/models
-      - ${MEANVC_TOKEN_FILE-../secrets/meanvc-token}:/run/secrets/meanvc_api_token:ro
+      - ${MEANVC_MODELS_DIR:?MEANVC_MODELS_DIR is required}:/models
+      - ${MEANVC_TOKEN_FILE:?MEANVC_TOKEN_FILE is required}:/run/secrets/meanvc_api_token:ro
     healthcheck:
       test:
         - CMD
@@ -42,20 +44,26 @@ services:
       start_period: 300s
 
   gateway:
-    image: sere1nfish/deepfake-gateway:1.5.1
+    image: ${DEEPFAKE_GATEWAY_IMAGE:-sere1nfish/deepfake-gateway:1.5.1}
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
+      args:
+        BASE_IMAGE: ${FACEFUSION_BASE_IMAGE:-sere1nfish/facefusion:3.7.1-cuda12.8-py312}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     restart: unless-stopped
     network_mode: host
     runtime: nvidia
     shm_size: 2gb
     depends_on:
       meanvc:
-        condition: service_started
+        condition: service_healthy
     environment:
-      HTTP_PROXY: ${HTTP_PROXY-http://127.0.0.1:17890}
-      HTTPS_PROXY: ${HTTPS_PROXY-http://127.0.0.1:17890}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: localhost,127.0.0.1,::1
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -66,7 +74,7 @@ services:
       DEEPFAKE_DEFAULT_IMAGE_PROFILE: ${DEEPFAKE_DEFAULT_IMAGE_PROFILE:-quality}
       DEEPFAKE_DEFAULT_REALTIME_PROFILE: ${DEEPFAKE_DEFAULT_REALTIME_PROFILE:-fast}
       DEEPFAKE_MEDIA_ENABLED: "1"
-      DEEPFAKE_MEDIA_PUBLIC_BASE_URL: https://${DEEPFAKE_PUBLIC_HOST:-121-40-145-239.sslip.io}
+      DEEPFAKE_MEDIA_PUBLIC_BASE_URL: https://${DEEPFAKE_PUBLIC_HOST:?DEEPFAKE_PUBLIC_HOST is required}
       DEEPFAKE_MEDIA_RTSP_BASE_URL: rtsp://127.0.0.1:8554
       DEEPFAKE_MEDIA_OUTPUT_FPS: ${DEEPFAKE_MEDIA_OUTPUT_FPS:-15}
       DEEPFAKE_MEDIA_ENCODER: ${DEEPFAKE_MEDIA_ENCODER:-h264_nvenc}
@@ -77,11 +85,17 @@ services:
       DEEPFAKE_VOICE_CONVERTER_BASE_URL: http://127.0.0.1:8766
       DEEPFAKE_VOICE_CONVERTER_TOKEN_FILE: /run/secrets/meanvc_api_token
     volumes:
-      - ${DEEPFAKE_ASSETS_DIR:-../data/assets}:/opt/facefusion/.assets
-      - ${DEEPFAKE_CACHE_DIR:-../data/cache}:/opt/facefusion/.caches
-      - ${DEEPFAKE_FACEFUSION_CONFIG_FILE:-./facefusion.ini}:/opt/facefusion/facefusion.ini:ro
-      - ${DEEPFAKE_TOKEN_FILE:-../secrets/api-token}:/run/secrets/deepfake_api_token:ro
-      - ${MEANVC_TOKEN_FILE-../secrets/meanvc-token}:/run/secrets/meanvc_api_token:ro
+      - ${DEEPFAKE_ASSETS_DIR:?DEEPFAKE_ASSETS_DIR is required}:/opt/facefusion/.assets
+      - ${DEEPFAKE_CACHE_DIR:?DEEPFAKE_CACHE_DIR is required}:/opt/facefusion/.caches
+      - ${DEEPFAKE_FACEFUSION_CONFIG_FILE:?DEEPFAKE_FACEFUSION_CONFIG_FILE is required}:/opt/facefusion/facefusion.ini:ro
+      - ${DEEPFAKE_TOKEN_FILE:?DEEPFAKE_TOKEN_FILE is required}:/run/secrets/deepfake_api_token:ro
+      - ${MEANVC_TOKEN_FILE:?MEANVC_TOKEN_FILE is required}:/run/secrets/meanvc_api_token:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8443/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 300s
     command:
       - --host
       - 127.0.0.1
@@ -92,28 +106,30 @@ services:
       - --no-access-log
 
   mediamtx:
-    image: bluenviron/mediamtx:1.19.3
+    image: ${MEDIAMTX_IMAGE:-bluenviron/mediamtx:1.19.3}
     restart: unless-stopped
     network_mode: host
     environment:
-      MTX_WEBRTCADDITIONALHOSTS: ${DEEPFAKE_WEBRTC_ADDITIONAL_HOSTS:-121.40.145.239}
+      MTX_WEBRTCADDITIONALHOSTS: ${DEEPFAKE_WEBRTC_ADDITIONAL_HOSTS:?DEEPFAKE_WEBRTC_ADDITIONAL_HOSTS is required}
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
 
   caddy:
-    image: caddy:2.10.2-alpine
+    image: ${CADDY_IMAGE:-caddy:2.10.2-alpine}
     restart: unless-stopped
     network_mode: host
     depends_on:
-      - gateway
-      - mediamtx
+      gateway:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
     environment:
-      DEEPFAKE_PUBLIC_HOST: ${DEEPFAKE_PUBLIC_HOST:-121-40-145-239.sslip.io}
-      DEEPFAKE_LEGACY_HOST: ${DEEPFAKE_LEGACY_HOST:-121.40.145.239}
+      DEEPFAKE_PUBLIC_HOST: ${DEEPFAKE_PUBLIC_HOST:?DEEPFAKE_PUBLIC_HOST is required}
+      DEEPFAKE_LEGACY_HOST: ${DEEPFAKE_LEGACY_HOST:?DEEPFAKE_LEGACY_HOST is required}
       DEEPFAKE_TUNNEL_HOST: ${DEEPFAKE_TUNNEL_HOST:-172.18.0.1}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ${DEEPFAKE_TLS_CERT_FILE:-../secrets/tls.crt}:/etc/caddy/legacy/tls.crt:ro
-      - ${DEEPFAKE_TLS_KEY_FILE:-../secrets/tls.key}:/etc/caddy/legacy/tls.key:ro
-      - ${DEEPFAKE_CADDY_DATA_DIR:-../data/caddy}:/data
-      - ${DEEPFAKE_CADDY_CONFIG_DIR:-../data/caddy-config}:/config
+      - ${DEEPFAKE_TLS_CERT_FILE:?DEEPFAKE_TLS_CERT_FILE is required}:/etc/caddy/legacy/tls.crt:ro
+      - ${DEEPFAKE_TLS_KEY_FILE:?DEEPFAKE_TLS_KEY_FILE is required}:/etc/caddy/legacy/tls.key:ro
+      - ${DEEPFAKE_CADDY_DATA_DIR:?DEEPFAKE_CADDY_DATA_DIR is required}:/data
+      - ${DEEPFAKE_CADDY_CONFIG_DIR:?DEEPFAKE_CADDY_CONFIG_DIR is required}:/config

@@ -1,0 +1,59 @@
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+FROM ${CUDA_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG ONNXRUNTIME_VERSION=1.26.0
+ARG FACEFUSION_COMMIT=3f81a8a78454089d720b8f318a12ae1702c4633b
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:${PATH}
+
+WORKDIR /opt/facefusion
+COPY facefusion/ /opt/facefusion/
+
+RUN test "$(cat .git-commit 2>/dev/null || true)" = "${FACEFUSION_COMMIT}" \
+    && grep -v '^onnxruntime==' requirements.txt > /tmp/requirements.txt \
+    && python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install \
+        --index-url "${PIP_INDEX_URL}" \
+        --requirement /tmp/requirements.txt \
+        "onnxruntime-gpu==${ONNXRUNTIME_VERSION}" \
+    && python3 -c "import cv2, gradio, numpy, onnx, onnxruntime, scipy; assert 'CUDAExecutionProvider' in onnxruntime.get_available_providers()"
+
+COPY deepfake_gateway/facefusion.ini /opt/facefusion/facefusion.ini
+
+RUN useradd --create-home --uid 10001 facefusion \
+    && mkdir -p /data/assets /data/jobs /data/output /data/temp \
+    && chown -R facefusion:facefusion /opt/facefusion /data
+
+LABEL org.opencontainers.image.source="https://github.com/facefusion/facefusion" \
+      org.opencontainers.image.revision="${FACEFUSION_COMMIT}"
+
+USER facefusion
+
+ENTRYPOINT ["python3", "facefusion.py"]
+CMD ["run", "--config-path", "/opt/facefusion/facefusion.ini"]

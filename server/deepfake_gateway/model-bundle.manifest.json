@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "bundle_version": "t4-sm75-20260817-v1",
+  "compatibility": {
+    "gpu_compute_capability": "7.5",
+    "facefusion_commit": "3f81a8a78454089d720b8f318a12ae1702c4633b",
+    "onnxruntime_gpu": "1.26.0",
+    "tensorrt": "10.9.0.34",
+    "meanvc_commit": "b07024579284975bc8a6a9aa72201d6279b417ab"
+  },
+  "artifacts": [
+    {
+      "name": "facefusion_assets",
+      "archive": "facefusion-assets.tar.zst",
+      "object_id": "obj_gpu_bundle_t4_20260817_assets",
+      "relative_path": "gpu-node/t4-sm75-20260817-v1/facefusion-assets.tar.zst",
+      "required": true,
+      "size": 2813850257,
+      "sha256": "10f65d7588157e7eb64ee1bda0ae4ee70757526a170ac6b625cbd669908e3fb3"
+    },
+    {
+      "name": "meanvc_models",
+      "archive": "meanvc-models.tar.zst",
+      "object_id": "obj_gpu_bundle_t4_20260817_meanvc",
+      "relative_path": "gpu-node/t4-sm75-20260817-v1/meanvc-models.tar.zst",
+      "required": true,
+      "size": 2147973525,
+      "sha256": "96c46e7ccb2cc3e99f71b59ae6a28e3a90291cd203b01f462945abd43500e219"
+    },
+    {
+      "name": "tensorrt_sm75_cache",
+      "archive": "tensorrt-sm75.tar.zst",
+      "object_id": "obj_gpu_bundle_t4_20260817_trt_sm75",
+      "relative_path": "gpu-node/t4-sm75-20260817-v1/tensorrt-sm75.tar.zst",
+      "required": false,
+      "size": 3162425542,
+      "sha256": "6fbf79e438dc41619e298c5f2771c3b2ce580e453bed5050b50fef8c1528dba4"
+    }
+  ]
+}
