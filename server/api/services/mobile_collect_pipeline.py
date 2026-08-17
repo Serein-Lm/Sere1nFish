@@ -214,11 +214,31 @@ async def _run_mobile_collect_definition_claimed(
         ready_endpoint,
     )
 
-    claimed = await collect_dao.claim_task_run(
-        db,
-        task_def_id,
-        run_task_id=run_task_id,
+    claim_operation = asyncio.create_task(
+        collect_dao.claim_task_run(
+            db,
+            task_def_id,
+            run_task_id=run_task_id,
+        ),
+        name=f"mobile-collect-claim:{run_task_id}",
     )
+    try:
+        claimed = await asyncio.shield(claim_operation)
+    except asyncio.CancelledError:
+        # MongoDB may have committed the claim even when the caller is cancelled
+        # before Motor delivers the result. Finish the atomic operation and only
+        # release the run that this coroutine actually owns.
+        claimed = await asyncio.shield(claim_operation)
+        if claimed:
+            await asyncio.shield(
+                collect_dao.set_task_status(
+                    db,
+                    task_def_id,
+                    "idle",
+                    expected_run_task_id=run_task_id,
+                )
+            )
+        raise
     if not claimed:
         raise RuntimeError(f"采集任务正在运行中: {task_def_id}")
 
@@ -247,7 +267,12 @@ async def _run_mobile_collect_definition_claimed(
         )
         return result
     finally:
-        await collect_dao.set_task_status(db, task_def_id, "idle")
+        await collect_dao.set_task_status(
+            db,
+            task_def_id,
+            "idle",
+            expected_run_task_id=run_task_id,
+        )
 
 
 async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) -> dict:

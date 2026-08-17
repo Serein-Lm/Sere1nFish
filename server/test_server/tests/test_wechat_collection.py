@@ -622,6 +622,73 @@ async def test_mobile_collect_definition_claims_and_releases(
 
 
 @pytest.mark.asyncio
+async def test_mobile_collect_definition_releases_claim_when_cancelled_during_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import mobile_collect_pipeline
+
+    claim_started = asyncio.Event()
+    finish_claim = asyncio.Event()
+    releases: list[tuple[str, str | None]] = []
+
+    async def get_task(_db: Any, task_def_id: str) -> dict[str, Any]:
+        return {
+            "task_def_id": task_def_id,
+            "project_id": "project-1",
+            "device_id": "stable-device-id",
+        }
+
+    async def wait_ready(_device_id: str, **_kwargs: Any) -> str:
+        return "10.144.144.3:5555"
+
+    async def claim(
+        _db: Any,
+        task_def_id: str,
+        *,
+        run_task_id: str,
+    ) -> dict[str, Any]:
+        claim_started.set()
+        await finish_claim.wait()
+        return {
+            "task_def_id": task_def_id,
+            "project_id": "project-1",
+            "device_id": "stable-device-id",
+            "last_run_task_id": run_task_id,
+        }
+
+    async def set_status(
+        _db: Any,
+        _task_def_id: str,
+        status: str,
+        **kwargs: Any,
+    ) -> None:
+        releases.append((status, kwargs.get("expected_run_task_id")))
+
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "get_task_def", get_task)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "claim_task_run", claim)
+    monkeypatch.setattr(mobile_collect_pipeline.collect_dao, "set_task_status", set_status)
+    monkeypatch.setattr(mobile_collect_pipeline, "wait_for_mobile_device_ready", wait_ready)
+
+    task = asyncio.create_task(
+        mobile_collect_pipeline.run_mobile_collect_definition(
+            object(),
+            run_task_id="run-cancelled",
+            project_id="project-1",
+            task_def_id="wechat-a",
+        )
+    )
+    await claim_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    finish_claim.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert releases == [("idle", "run-cancelled")]
+
+
+@pytest.mark.asyncio
 async def test_mobile_collect_does_not_claim_or_start_before_device_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

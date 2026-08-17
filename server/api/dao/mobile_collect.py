@@ -386,13 +386,22 @@ async def set_task_status(
     status: str,
     *,
     run_task_id: str | None = None,
+    expected_run_task_id: str | None = None,
 ) -> None:
     set_fields: dict[str, Any] = {"status": status, "updated_at": _now()}
     if run_task_id is not None:
         set_fields["last_run_task_id"] = run_task_id
         set_fields["last_run_at"] = _now()
+    query: dict[str, Any] = {"task_def_id": task_def_id}
+    if expected_run_task_id is not None:
+        query.update(
+            {
+                "status": "running",
+                "last_run_task_id": expected_run_task_id,
+            }
+        )
     await db[MOBILE_COLLECT_TASKS_COLLECTION].update_one(
-        {"task_def_id": task_def_id}, {"$set": set_fields}
+        query, {"$set": set_fields}
     )
 
 
