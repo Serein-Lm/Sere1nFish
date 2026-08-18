@@ -13,6 +13,7 @@ from api.services.bidding_pipeline import (
     BiddingPipeline,
     _extract_contact_candidates,
 )
+from api.services.bidding_relevance import assess_bidding_relevance
 from api.services.source_documents.resources import (
     FetchedResource,
     extract_attachment_text,
@@ -20,6 +21,14 @@ from api.services.source_documents.resources import (
     html_text_and_links,
 )
 from crawler_tools.tianyancha_tools import BiddingRecord, BiddingSearchResult
+
+
+@pytest.fixture(autouse=True)
+def _stub_target_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _get_target(_db: Any, _target_id: str) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(bidding_module.targets_dao, "get_target", _get_target)
 
 
 @pytest.mark.asyncio
@@ -267,6 +276,70 @@ def test_scan_context_keeps_query_target_and_announcement_parties_distinct() -> 
     assert "代理机构、关联公司或第三方平台的联系人不得标成目标单位联系人" in context
 
 
+def test_bidding_relevance_rejects_provider_false_positive() -> None:
+    record = BiddingRecord(
+        record_id="bid-false-positive",
+        title="无锡华润上华科技有限公司干泵类供应商征集",
+        purchaser="华润微电子有限公司,无锡华润上华科技有限公司",
+        content_html="华润微电子供应商征集公告",
+    )
+    target = {
+        "canonical_name": "深圳市机场（集团）有限公司",
+        "aliases": ["深圳机场", "深圳宝安国际机场", "SZX"],
+        "root_domains": ["szairport.com"],
+    }
+
+    decision = assess_bidding_relevance(
+        record,
+        company_name="深圳市机场（集团）有限公司",
+        target=target,
+    )
+
+    assert decision.relevant is False
+    assert decision.reason == "no_target_evidence_in_announcement"
+
+
+def test_bidding_relevance_accepts_alias_or_target_domain() -> None:
+    target = {
+        "canonical_name": "深圳市机场（集团）有限公司",
+        "aliases": ["深圳机场", "深圳宝安国际机场", "SZX"],
+        "root_domains": ["szairport.com"],
+    }
+    alias_match = BiddingRecord(
+        record_id="bid-alias",
+        title="深圳机场航站楼设备采购公告",
+    )
+    domain_match = BiddingRecord(
+        record_id="bid-domain",
+        title="航站楼设备采购公告",
+        detail_url="https://bidding.szairport.com/notices/1",
+    )
+    english_alias_match = BiddingRecord(
+        record_id="bid-english-alias",
+        title="Eastern Airport Group terminal procurement notice",
+    )
+    english_target = {
+        "canonical_name": "东部机场集团有限公司",
+        "aliases": ["Eastern Airport Group"],
+    }
+
+    assert assess_bidding_relevance(
+        alias_match,
+        company_name="深圳市机场（集团）有限公司",
+        target=target,
+    ).reason == "target_alias_match"
+    assert assess_bidding_relevance(
+        domain_match,
+        company_name="深圳市机场（集团）有限公司",
+        target=target,
+    ).reason == "target_domain_match"
+    assert assess_bidding_relevance(
+        english_alias_match,
+        company_name="东部机场集团有限公司",
+        target=english_target,
+    ).reason == "target_alias_match"
+
+
 @pytest.mark.asyncio
 async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     monkeypatch: pytest.MonkeyPatch,
@@ -280,6 +353,12 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
         content_html="<p>设备采购联系人：张老师</p>",
         raw_payload={"uuid": "one", "bidList": [{"name": "供应商 A"}]},
     )
+    unrelated_record = BiddingRecord(
+        record_id="bid_unrelated",
+        title="无锡华润上华科技有限公司干泵类供应商征集",
+        purchaser="华润微电子有限公司",
+        content_html="<p>华润微电子供应商征集公告</p>",
+    )
 
     class _Client:
         async def search_all_bid_types(self, company_name: str, **kwargs: Any) -> BiddingSearchResult:
@@ -288,10 +367,10 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
             assert kwargs["max_records_per_type"] == 20
             assert kwargs["lookback_days"] == 30
             return BiddingSearchResult(
-                records=[record],
-                total_reported=1,
+                records=[record, unrelated_record],
+                total_reported=2,
                 pages_fetched=1,
-                raw_records_fetched=1,
+                raw_records_fetched=2,
                 bid_type="1,2,4",
                 bid_types=["1", "2", "4"],
                 publish_start="2026-06-17",
@@ -396,7 +475,10 @@ async def test_pipeline_archives_then_reuses_visual_and_copywriting_chain(
     assert result["visual_analysis"]["copywritings_count"] == 1
     assert result["status"] == "partial"
     assert result["pages_fetched"] == 1
-    assert result["raw_records_fetched"] == 1
+    assert result["raw_records_fetched"] == 2
+    assert result["provider_records_fetched"] == 2
+    assert result["records_fetched"] == 1
+    assert result["relevance_rejected"] == 1
     assert result["duplicates_discarded"] == 0
     assert result["truncated"] is False
     assert result["lookback_days"] == 30
@@ -410,6 +492,7 @@ async def test_pipeline_falls_back_from_relative_detail_to_provider_url(
     record = BiddingRecord(
         record_id="bid_relative",
         title="采购公告",
+        purchaser="目标单位",
         detail_url="/html/1336/content.html",
         provider_url="https://m.tianyancha.com/app/h5/bid/relative",
         content_html="<p>公告正文</p>",
@@ -495,6 +578,7 @@ async def test_pipeline_is_partial_when_records_have_no_reviewable_detail_url(
     record = BiddingRecord(
         record_id="bid-without-url",
         title="采购公告",
+        purchaser="目标单位",
         content_html="<p>采购联系人：张老师</p>",
     )
 

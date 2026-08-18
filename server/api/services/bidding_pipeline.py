@@ -11,6 +11,8 @@ import aiohttp
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import bidding as bidding_dao
+from api.dao import targets as targets_dao
+from api.services.bidding_relevance import filter_bidding_records
 from api.services.company_url import normalize_url
 from api.services.info_collection.tuning import (
     DEFAULT_COPYWRITING_CONCURRENCY,
@@ -624,8 +626,14 @@ class BiddingPipeline:
                 ),
                 error_code=exc.code,
             )
-        archives = await BiddingArchiveService().archive_records(
+        target = await targets_dao.get_target(self.db, target_id)
+        relevant_records, rejected_records = filter_bidding_records(
             search.records,
+            company_name=company_name,
+            target=target,
+        )
+        archives = await BiddingArchiveService().archive_records(
+            relevant_records,
             project_id=project_id,
             target_id=target_id,
         )
@@ -636,7 +644,7 @@ class BiddingPipeline:
         detail_urls: list[str] = []
         known_alive_detail_urls: list[str] = []
         archive_errors: list[str] = []
-        for record, archive in zip(search.records, archives):
+        for record, archive in zip(relevant_records, archives):
             context = self._scan_context(record, archive, target_name=company_name)
             resolved_detail = _first_absolute_http_url(
                 str(archive.get("resolved_detail_url") or ""),
@@ -718,7 +726,7 @@ class BiddingPipeline:
                 findings_count=url_result.get("total_findings", 0),
                 copywritings_count=url_result.get("total_copywritings", 0),
             )
-        elif enable_visual_analysis and search.records:
+        elif enable_visual_analysis and relevant_records:
             scan_result.update(
                 status="partial",
                 error="公告记录缺少可供浏览器复核的绝对详情链接",
@@ -745,7 +753,9 @@ class BiddingPipeline:
             "publish_start": search.publish_start,
             "publish_end": search.publish_end,
             "total_reported": search.total_reported,
-            "records_fetched": len(search.records),
+            "provider_records_fetched": len(search.records),
+            "records_fetched": len(relevant_records),
+            "relevance_rejected": len(rejected_records),
             "pages_fetched": search.pages_fetched,
             "raw_records_fetched": search.raw_records_fetched,
             "duplicates_discarded": search.duplicates_discarded,
@@ -783,7 +793,9 @@ class BiddingPipeline:
             level="notice",
             event="pipeline_done",
             data={
-                "records": len(search.records),
+                "provider_records": len(search.records),
+                "records": len(relevant_records),
+                "relevance_rejected": len(rejected_records),
                 "total_reported": search.total_reported,
                 "pages_fetched": search.pages_fetched,
                 "duplicates_discarded": search.duplicates_discarded,

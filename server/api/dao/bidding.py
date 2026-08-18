@@ -330,6 +330,93 @@ async def upsert_records_batch(
     }
 
 
+async def remove_record_links(
+    db: AsyncIOMotorDatabase,
+    link_ids: list[str],
+) -> int:
+    """Delete invalid context links and rebuild record compatibility projections."""
+    normalized = list(
+        dict.fromkeys(
+            normalized_value
+            for value in link_ids
+            if (normalized_value := str(value or "").strip())
+        )
+    )
+    if not normalized:
+        return 0
+    links = await db[BIDDING_RECORD_LINKS_COLLECTION].find(
+        {"link_id": {"$in": normalized}},
+        {"_id": 0, "record_id": 1},
+    ).to_list(length=None)
+    record_ids = list(
+        dict.fromkeys(
+            str(item.get("record_id") or "")
+            for item in links
+            if item.get("record_id")
+        )
+    )
+    result = await db[BIDDING_RECORD_LINKS_COLLECTION].delete_many(
+        {"link_id": {"$in": normalized}}
+    )
+
+    for record_id in record_ids:
+        remaining = await db[BIDDING_RECORD_LINKS_COLLECTION].find(
+            {"record_id": record_id},
+            {"_id": 0},
+        ).sort("last_seen_at", -1).to_list(length=None)
+        project_ids = list(
+            dict.fromkeys(
+                str(item.get("project_id") or "")
+                for item in remaining
+                if item.get("project_id")
+            )
+        )
+        target_ids = list(
+            dict.fromkeys(
+                str(item.get("target_id") or "")
+                for item in remaining
+                if item.get("target_id")
+            )
+        )
+        task_ids = list(
+            dict.fromkeys(
+                str(value)
+                for item in remaining
+                for value in item.get("task_ids") or []
+                if value
+            )
+        )
+        query_names = list(
+            dict.fromkeys(
+                str(value)
+                for item in remaining
+                for value in item.get("query_names") or []
+                if value
+            )
+        )
+        latest = remaining[0] if remaining else {}
+        now = _now()
+        await db[BIDDING_RECORDS_COLLECTION].update_one(
+            {"record_id": record_id},
+            {
+                "$set": {
+                    "project_ids": project_ids,
+                    "target_ids": target_ids,
+                    "task_ids": task_ids,
+                    "query_names": query_names,
+                    "latest_project_id": str(latest.get("project_id") or ""),
+                    "latest_target_id": str(latest.get("target_id") or ""),
+                    "latest_task_id": str(latest.get("latest_task_id") or ""),
+                    "latest_query_name": str(latest.get("latest_query_name") or ""),
+                    "updated_at": now,
+                    **({"orphaned_at": now} if not remaining else {}),
+                },
+                **({"$unset": {"orphaned_at": ""}} if remaining else {}),
+            },
+        )
+    return int(result.deleted_count or 0)
+
+
 async def clone_project_links(
     db: AsyncIOMotorDatabase,
     *,
