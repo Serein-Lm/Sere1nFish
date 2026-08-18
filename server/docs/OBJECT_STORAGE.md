@@ -10,6 +10,10 @@
 ```
 
 - 新写入由 `object_storage.enabled/provider` 选择 Provider。
+- OSS 因 AK、权限或 Bucket 配置错误不可写时，新对象自动降级到私有本地
+  `server/data/object_storage`；对象元数据记录实际 Provider 和脱敏的降级原因。
+- 配置错误会在进程内熔断，避免每个采集文件重复等待失效 OSS。超时等瞬时故障
+  不触发降级，仍保留正常重试和失败语义。
 - 历史读取按 `storage_objects.provider` 选择 Provider，迁移期间本地和 OSS 对象可以并存。
 - 领域集合只保存 `storage_object_id`；`storage_objects` 保存 Object Key、SHA-256、大小、归属和状态。
 - Bucket 使用私有读写。普通文件下载先经过本站鉴权，再返回最长 1 小时、默认 5 分钟的签名 URL。
@@ -84,6 +88,8 @@ docker-compose logs --tail=200 backend
 
 在“系统配置 -> 运行配置 -> 对象存储”查看当前 Provider、纳管对象数量、容量和最近迁移状态。删除本地源文件前，必须对全部远端对象重新校验大小和 SHA-256 元数据，并确认远端对象数量与 MongoDB 元数据一一对应。
 
-当前运行环境已完成 360 个对象、479625948 字节的迁移和全量校验，本地源文件已经删除，OSS 是唯一文件源。不要再依赖 `legacy_path` 回退，也不要把截图、Word、APK 或采集产物重新写入本地业务目录。
+正常状态下 OSS 是首选文件源；当 OSS 凭据失效时，统一存储服务会临时写入受鉴权
+API 保护的本地对象目录。修复凭据后运行上述迁移命令，可按 `provider=local` 的对象
+元数据幂等迁移到 OSS。业务模块不得自行写本地业务目录或绕过统一存储服务。
 
 完成迁移后应轮换曾经通过聊天或临时终端传递过的 AK/SK，并只给新 RAM 凭据保留 `limo-ai-fish/sere1nfish/prod/*` 所需的最小对象权限。

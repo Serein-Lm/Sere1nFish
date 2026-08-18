@@ -129,6 +129,41 @@ async def prepare_relocation(
     )
 
 
+async def activate_fallback(
+    db: AsyncIOMotorDatabase,
+    object_id: str,
+    *,
+    provider: str,
+    bucket: str,
+    object_key: str,
+    preferred_provider: str,
+    preferred_bucket: str,
+    reason: str,
+) -> None:
+    """Point one pending write at its actual fallback provider."""
+    now = _now()
+    await db[STORAGE_OBJECTS_COLLECTION].update_one(
+        {"object_id": object_id},
+        {
+            "$set": {
+                "provider": provider,
+                "bucket": bucket,
+                "object_key": object_key,
+                "status": "pending",
+                "updated_at": now,
+                "meta.storage_fallback": {
+                    "active": True,
+                    "preferred_provider": preferred_provider,
+                    "preferred_bucket": preferred_bucket,
+                    "reason": str(reason)[:1000],
+                    "activated_at": now,
+                },
+            },
+            "$unset": {"error": "", "deleted_at": ""},
+        },
+    )
+
+
 async def restore_relocation(
     db: AsyncIOMotorDatabase,
     object_id: str,

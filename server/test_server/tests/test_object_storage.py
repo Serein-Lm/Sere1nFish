@@ -304,6 +304,115 @@ async def test_storage_service_reads_with_object_provider(monkeypatch) -> None:
     assert await service.get_bytes("obj_local") == b"legacy-local-object"
 
 
+@pytest.mark.asyncio
+async def test_storage_service_falls_back_to_local_for_invalid_oss_key(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from api.storage.providers.local import LocalStorageProvider
+    from api.storage.service import ObjectStorageService
+    import api.storage.service as storage_service_module
+
+    storage_service_module._PROVIDER_CONFIGURATION_FAILURES.clear()
+    documents: dict[str, dict] = {}
+
+    class InvalidKeyError(Exception):
+        code = "InvalidAccessKeyId"
+        status_code = 403
+        request_id = "request-fallback"
+        message = "The OSS Access Key Id LTAI0123456789ABC is disabled."
+
+    class PrimaryProvider:
+        name = "aliyun_oss"
+        bucket = "private-bucket"
+
+        def __init__(self) -> None:
+            self.head_calls = 0
+            self.put_calls = 0
+
+        async def head(self, key):
+            self.head_calls += 1
+            raise InvalidKeyError()
+
+        async def put_bytes(self, key, data, **kwargs):
+            self.put_calls += 1
+            raise AssertionError("invalid primary provider must not receive a put")
+
+    async def get_object(_db, object_id):
+        doc = documents.get(object_id)
+        return dict(doc) if doc else None
+
+    async def create_pending(_db, **kwargs):
+        object_id = kwargs["object_id"]
+        documents.setdefault(object_id, {**kwargs, "status": "pending"})
+        return dict(documents[object_id])
+
+    async def activate_fallback(_db, object_id, **kwargs):
+        document = documents[object_id]
+        document.update(
+            provider=kwargs["provider"],
+            bucket=kwargs["bucket"],
+            object_key=kwargs["object_key"],
+            status="pending",
+        )
+        document.setdefault("meta", {})["storage_fallback"] = {
+            "active": True,
+            "preferred_provider": kwargs["preferred_provider"],
+            "reason": kwargs["reason"],
+        }
+
+    async def mark_ready(_db, object_id, **kwargs):
+        documents[object_id].update(status="ready", **kwargs)
+        return dict(documents[object_id])
+
+    primary = PrimaryProvider()
+    local = LocalStorageProvider(tmp_path / "objects")
+    monkeypatch.setattr(storage_service_module, "get_db", lambda: object())
+    monkeypatch.setattr(storage_service_module.storage_dao, "get_object", get_object)
+    monkeypatch.setattr(storage_service_module.storage_dao, "create_pending", create_pending)
+    monkeypatch.setattr(
+        storage_service_module.storage_dao,
+        "activate_fallback",
+        activate_fallback,
+    )
+    monkeypatch.setattr(storage_service_module.storage_dao, "mark_ready", mark_ready)
+
+    config = {
+        "provider": "aliyun_oss",
+        "enabled": True,
+        "bucket": primary.bucket,
+        "endpoint": "https://oss.example.test",
+        "access_key_id": "LTAI0123456789ABC",
+        "access_key_secret": "secret",
+        "local_root": str(tmp_path / "objects"),
+    }
+    service = ObjectStorageService(config, primary, fallback_provider=local)
+
+    first = await service.store_bytes(
+        b"first-local-object",
+        kind="source_document_raw",
+        filename="raw.html",
+        object_id="obj_fallback_first",
+    )
+    second = await service.store_bytes(
+        b"second-local-object",
+        kind="source_document_raw",
+        filename="raw.html",
+        object_id="obj_fallback_second",
+    )
+
+    assert first["provider"] == "local"
+    assert second["provider"] == "local"
+    assert primary.head_calls == 1
+    assert primary.put_calls == 0
+    assert await local.get_bytes(first["object_key"]) == b"first-local-object"
+    assert await local.get_bytes(second["object_key"]) == b"second-local-object"
+    fallback_meta = first["meta"]["storage_fallback"]
+    assert fallback_meta["preferred_provider"] == "aliyun_oss"
+    assert "InvalidAccessKeyId" in fallback_meta["reason"]
+    assert "LTAI0123456789ABC" not in fallback_meta["reason"]
+
+
 def _async_return(value):
     async def inner(*args, **kwargs):
         return value
