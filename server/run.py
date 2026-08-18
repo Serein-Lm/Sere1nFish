@@ -9,6 +9,7 @@ import uvicorn
 
 from api.config import get_settings
 from core.logger import get_logger
+from core.process_watchdog import ProcessWatchdogConfig, start_process_health_watchdog
 
 logger = get_logger("startup")
 
@@ -45,6 +46,17 @@ if __name__ == "__main__":
         str(project_root / ".pytest_cache"),
         str(project_root / "AutoGLM-GUI-main" / "tests"),
     ]
+
+    if settings.SERVER_WATCHDOG_ENABLED:
+        start_process_health_watchdog(
+            port=settings.PORT,
+            config=ProcessWatchdogConfig(
+                startup_grace_seconds=settings.SERVER_WATCHDOG_STARTUP_GRACE_SECONDS,
+                interval_seconds=settings.SERVER_WATCHDOG_INTERVAL_SECONDS,
+                probe_timeout_seconds=settings.SERVER_WATCHDOG_PROBE_TIMEOUT_SECONDS,
+                failure_threshold=settings.SERVER_WATCHDOG_FAILURE_THRESHOLD,
+            ),
+        )
     
     uvicorn.run(
         "api.main:socket_app",

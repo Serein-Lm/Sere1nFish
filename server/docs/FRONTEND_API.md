@@ -560,7 +560,7 @@ Project (项目)
 
 > 前端配置页应统一使用 `/config` 与 `/config/sections/{category}` 写入配置；后端读取 MongoDB 加密配置并返回脱敏值，不再从本地 `config.json` 导入。
 
-`collection_runtime.url_scan_agent_timeout_seconds` 控制单 URL 浏览器深扫与结构化提取的总时限，默认 `900` 秒，可配置范围为 `60-1500` 秒。超时 URL 记录为终态失败，不再整轮重复执行。
+`collection_runtime.url_scan_agent_timeout_seconds` 控制单 URL 浏览器深扫与结构化提取的总时限，默认 `900` 秒，可配置范围为 `60-1500` 秒。超时 URL 记录为终态失败，不再整轮重复执行。`collection_runtime.recovery_group_concurrency` 仅限制服务重启后同时恢复的任务组数量，默认 `3`、最大 `6`；它不降低正常扫描及任务组内部并发。
 
 ### 用户管理（admin）
 

@@ -54,6 +54,7 @@ async def test_recovered_company_batch_dispatches_all_waiters(
 
     class _Tuning:
         company_scan_concurrency = 3
+        recovery_group_concurrency = 2
 
     async def _tuning() -> _Tuning:
         return _Tuning()
@@ -86,6 +87,9 @@ async def test_recovered_company_batch_dispatches_all_waiters(
         for index in range(1, 6)
     ]
     assert await recovery._schedule_recovered_tasks(documents) == 5
+    assert len(background) == 1
+    assert background[0][1] == "task-runtime-recovery"
+    await background[0][0]
     assert scheduled[0]["concurrency"] == 3
     assert scheduled[0]["dispatch_concurrency"] == 5
     assert scheduled[0]["aggregate_notification"] is True
@@ -93,8 +97,45 @@ async def test_recovered_company_batch_dispatches_all_waiters(
         f"task-{index}" for index in range(1, 6)
     ]
     assert all(job.params["_batch_id"] == "batch-1" for job in scheduled[0]["jobs"])
-    for coro, _name in background:
-        coro.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_groups_use_bounded_startup_concurrency() -> None:
+    from api.services import task_runtime_recovery as recovery
+
+    active = 0
+    maximum_active = 0
+    started = 0
+    two_started = asyncio.Event()
+    release = asyncio.Event()
+
+    def _runner():
+        async def _run() -> None:
+            nonlocal active, maximum_active, started
+            active += 1
+            started += 1
+            maximum_active = max(maximum_active, active)
+            if started == 2:
+                two_started.set()
+            await release.wait()
+            active -= 1
+
+        return _run
+
+    items = [
+        recovery._RecoveryWorkItem(name=f"task-{index}", run=_runner())
+        for index in range(5)
+    ]
+    coordinator = asyncio.create_task(
+        recovery._run_recovery_work_items(items, concurrency=2)
+    )
+    await asyncio.wait_for(two_started.wait(), timeout=0.2)
+    assert started == 2
+    assert maximum_active == 2
+    release.set()
+    await asyncio.wait_for(coordinator, timeout=0.2)
+    assert started == 5
+    assert maximum_active == 2
 
 
 @pytest.mark.asyncio

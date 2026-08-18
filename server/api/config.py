@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     # 优雅关闭超时（秒）：WS/SSE 长连接不会自然断开，超时后强制断开，
     # 避免 reload/停机卡在 "Waiting for connections to close"。
     GRACEFUL_SHUTDOWN_TIMEOUT: int = 5
+    # Reload mode keeps a parent process alive even if the API child exits.
+    # The watchdog makes that state observable and lets Docker restart it.
+    SERVER_WATCHDOG_ENABLED: bool = True
+    SERVER_WATCHDOG_STARTUP_GRACE_SECONDS: int = 90
+    SERVER_WATCHDOG_INTERVAL_SECONDS: int = 10
+    SERVER_WATCHDOG_PROBE_TIMEOUT_SECONDS: int = 8
+    SERVER_WATCHDOG_FAILURE_THRESHOLD: int = 6
 
     # 登录额外校验 key 默认值（实际值存储在 MongoDB）
     LOGIN_KEY: str = "accesskey"

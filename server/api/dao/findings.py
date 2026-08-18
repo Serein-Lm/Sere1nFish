@@ -1365,6 +1365,31 @@ def _logical_finding_fact_stages() -> list[dict[str, Any]]:
     ]
 
 
+def _logical_finding_top_group_stage(
+    representative_output: dict[str, Any],
+) -> dict[str, Any]:
+    """Collapse logical facts without sorting or retaining full documents."""
+    return {
+        "$group": {
+            "_id": _mongo_finding_group_key(),
+            "representative": {
+                "$top": {
+                    "sortBy": {
+                        "attention_score": -1,
+                        "updated_at": -1,
+                        "created_at": -1,
+                        "finding_id": 1,
+                    },
+                    "output": representative_output,
+                }
+            },
+            "attention_score": {
+                "$max": {"$ifNull": ["$attention_score", 0]}
+            },
+        }
+    }
+
+
 async def aggregate_target_finding_counts(
     db: AsyncIOMotorDatabase,
     *,
@@ -1384,12 +1409,17 @@ async def aggregate_target_finding_counts(
                 "target_id": {"$in": normalized_target_ids},
             }
         },
-        *_logical_finding_fact_stages(),
+        _logical_finding_top_group_stage(
+            {
+                "target_id": "$target_id",
+                "source": {"$ifNull": ["$source", ""]},
+            }
+        ),
         {
             "$group": {
                 "_id": {
-                    "target_id": "$target_id",
-                    "source": {"$ifNull": ["$source", ""]},
+                    "target_id": "$representative.target_id",
+                    "source": "$representative.source",
                 },
                 "finding_count": {"$sum": 1},
                 "high_score_count": {
@@ -1411,7 +1441,19 @@ async def get_findings_summary(db: AsyncIOMotorDatabase, project_id: str) -> dic
     """项目 findings 总览统计"""
     pipeline = [
         {"$match": {"project_id": project_id}},
-        *_logical_finding_fact_stages(),
+        _logical_finding_top_group_stage(
+            {
+                "source": {"$ifNull": ["$source", ""]},
+                "type": {"$ifNull": ["$type", ""]},
+            }
+        ),
+        {
+            "$project": {
+                "source": "$representative.source",
+                "type": "$representative.type",
+                "attention_score": 1,
+            }
+        },
         {"$facet": {
             "total": [{"$count": "count"}],
             "by_source": [{"$group": {"_id": "$source", "count": {"$sum": 1}}}],

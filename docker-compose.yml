@@ -151,6 +151,19 @@ services:
     networks:
       - internal
     shm_size: "1g"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=8));
+          raise SystemExit(0 if data.get('status') == 'ok' and data.get('mongodb', {}).get('ok') else 1)
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 90s
     ulimits:
       <<: *high-ulimits
       core:

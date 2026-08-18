@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from api.dao import mobile_collect, mobile_execution_leases, tasks
 from api.services.project_task_batch import ProjectTaskJob, run_project_task_batch
@@ -86,6 +87,34 @@ def _runtime_params(task: dict[str, Any]) -> dict[str, Any]:
     return build_task_runtime_params(task)
 
 
+@dataclass(frozen=True)
+class _RecoveryWorkItem:
+    name: str
+    run: Callable[[], Awaitable[Any]]
+
+
+async def _run_recovery_work_items(
+    items: list[_RecoveryWorkItem],
+    *,
+    concurrency: int,
+) -> None:
+    """Resume task groups gradually so startup does not starve the API."""
+    limit = max(1, int(concurrency))
+    slots = asyncio.Semaphore(limit)
+
+    async def _run_one(item: _RecoveryWorkItem) -> None:
+        async with slots:
+            try:
+                await item.run()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("恢复任务组执行失败: %s", item.name)
+
+    logger.info("开始分批恢复 %d 个任务组，并发上限=%d", len(items), limit)
+    await asyncio.gather(*(_run_one(item) for item in items))
+
+
 async def _schedule_recovered_tasks(recovered: list[dict[str, Any]]) -> int:
     from api.services.info_collection.tuning import get_collection_runtime_tuning
 
@@ -100,6 +129,7 @@ async def _schedule_recovered_tasks(recovered: list[dict[str, Any]]) -> int:
             singles.append(task)
 
     scheduled = 0
+    work_items: list[_RecoveryWorkItem] = []
     for batch_id, items in batches.items():
         items.sort(key=lambda item: int(item.get("batch_index") or 0))
         jobs = [
@@ -119,32 +149,70 @@ async def _schedule_recovered_tasks(recovered: list[dict[str, Any]]) -> int:
         aggregate_notification = bool(
             mobile_aware and int(items[0].get("batch_total") or 0) > 1
         )
-        spawn_background(
-            run_project_task_batch(
-                batch_id=batch_id,
-                project_id=jobs[0].project_id,
-                jobs=jobs,
-                executor=execute_project_task,
-                concurrency=core_concurrency,
-                dispatch_concurrency=len(jobs) if mobile_aware else None,
-                aggregate_notification=aggregate_notification,
+
+        async def _run_batch(
+            *,
+            recovered_batch_id: str = batch_id,
+            recovered_jobs: list[ProjectTaskJob] = jobs,
+            recovered_core_concurrency: int = core_concurrency,
+            recovered_dispatch_concurrency: int | None = (
+                len(jobs) if mobile_aware else None
             ),
-            name=f"task-batch-recovery:{batch_id}",
+            recovered_aggregate_notification: bool = aggregate_notification,
+        ) -> None:
+            await run_project_task_batch(
+                batch_id=recovered_batch_id,
+                project_id=recovered_jobs[0].project_id,
+                jobs=recovered_jobs,
+                executor=execute_project_task,
+                concurrency=recovered_core_concurrency,
+                dispatch_concurrency=recovered_dispatch_concurrency,
+                aggregate_notification=recovered_aggregate_notification,
+            )
+
+        work_items.append(
+            _RecoveryWorkItem(
+                name=f"batch:{batch_id}",
+                run=_run_batch,
+            )
         )
         scheduled += len(jobs)
 
     for item in singles:
         task_id = str(item.get("task_id") or "")
-        spawn_background(
-            execute_project_task(
-                task_id,
-                str(item.get("project_id") or ""),
-                str(item.get("task_type") or ""),
-                _runtime_params(item),
-            ),
-            name=f"task-recovery:{task_id}",
+        project_id = str(item.get("project_id") or "")
+        task_type = str(item.get("task_type") or "")
+        params = _runtime_params(item)
+
+        async def _run_single(
+            *,
+            recovered_task_id: str = task_id,
+            recovered_project_id: str = project_id,
+            recovered_task_type: str = task_type,
+            recovered_params: dict[str, Any] = params,
+        ) -> None:
+            await execute_project_task(
+                recovered_task_id,
+                recovered_project_id,
+                recovered_task_type,
+                recovered_params,
+            )
+
+        work_items.append(
+            _RecoveryWorkItem(
+                name=f"task:{task_id}",
+                run=_run_single,
+            )
         )
         scheduled += 1
+    if work_items:
+        spawn_background(
+            _run_recovery_work_items(
+                work_items,
+                concurrency=tuning.recovery_group_concurrency,
+            ),
+            name="task-runtime-recovery",
+        )
     return scheduled
 
 

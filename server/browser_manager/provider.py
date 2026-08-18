@@ -142,7 +142,7 @@ class ChromeDockerConfig:
     # 软保留：无非批量需求时可由批量扫描借用，有需求时自动归还。
     reserved_non_bulk_containers: int = 2
     container_create_concurrency: int = 4  # Docker API 创建并发，避免启动风暴
-    container_health_concurrency: int = 12  # stats/CDP 健康检查并发
+    container_health_concurrency: int = 4  # stats/CDP 健康检查并发
     docker_api_timeout_seconds: int = 90
     memory_check_interval: int = 180
     cdp_health_failure_threshold: int = 2
