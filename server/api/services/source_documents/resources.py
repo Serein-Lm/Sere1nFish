@@ -343,6 +343,14 @@ async def fetch_resource_with_retry(
     raise RuntimeError("远程资源读取失败")
 
 
+def should_try_rendered_fallback(exc: BaseException) -> bool:
+    """Use Chrome for access/transport failures, but not confirmed missing pages."""
+    return not (
+        isinstance(exc, aiohttp.ClientResponseError)
+        and int(exc.status or 0) in {404, 410}
+    )
+
+
 def _ocr_pdf_pages(
     data: bytes,
     page_numbers: list[int],

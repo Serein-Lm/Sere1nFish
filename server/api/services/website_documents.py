@@ -21,6 +21,7 @@ from api.services.source_documents.resources import (
     fetch_resource_with_retry,
     html_text_and_links,
     is_attachment_link,
+    should_try_rendered_fallback,
 )
 from api.services.source_documents.service import ingest_source_url
 from api.services.source_documents.urls import canonicalize_source_url
@@ -878,23 +879,6 @@ class WebsiteDocumentCollectionService:
                     page_id=page_id,
                     status="fetching",
                 )
-            fetched = await fetch_resource_with_retry(
-                session,
-                item["canonical_url"],
-                max_bytes=_MAX_HTML_BYTES,
-            )
-            content_type = fetched.content_type.casefold()
-            if "html" not in content_type and not fetched.data.lstrip().startswith(
-                (b"<!DOCTYPE", b"<html", b"<HTML")
-            ):
-                raise RuntimeError(f"目录入口不是 HTML: {fetched.content_type}")
-            text, links = html_text_and_links(
-                fetched.data,
-                fetched.url,
-                content_type=fetched.content_type,
-            )
-            content_length = len(text)
-            discovery_mode = "static"
 
             def _classify_links(
                 discovered_links: list[dict[str, Any]],
@@ -930,11 +914,10 @@ class WebsiteDocumentCollectionService:
                         classified.append(candidate)
                 return classified
 
-            candidates = _classify_links(
-                links,
-                parent_url=item["canonical_url"],
-            )
-            if not candidates and self.policy.broad_official_discovery:
+            async def _rendered_discovery(
+                *,
+                static_error: BaseException | None = None,
+            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, int]:
                 try:
                     from api.services.web_capture import (
                         discover_managed_rendered_links,
@@ -950,31 +933,90 @@ class WebsiteDocumentCollectionService:
                             ),
                         )
                     rendered_links = list(rendered.get("links") or [])
-                    candidates = _classify_links(
-                        rendered_links,
-                        parent_url=str(
-                            rendered.get("final_url")
-                            or item["canonical_url"]
-                        ),
+                    rendered_final_url = str(
+                        rendered.get("final_url") or item["canonical_url"]
                     )
-                    links = rendered_links
-                    content_length = max(
-                        content_length,
+                    rendered_candidates = _classify_links(
+                        rendered_links,
+                        parent_url=rendered_final_url,
+                    )
+                    counters["rendered_discovery_pages"] += 1
+                    return (
+                        rendered_links,
+                        rendered_candidates,
+                        rendered_final_url,
                         int(rendered.get("content_length") or 0),
                     )
-                    discovery_mode = "rendered"
-                    counters["rendered_discovery_pages"] += 1
                 except Exception as exc:  # noqa: BLE001
                     counters["rendered_discovery_failures"] += 1
                     logger.warning(
-                        "官网动态目录渲染失败 task=%s url=%s error=%s",
+                        "官网动态目录渲染失败 task=%s url=%s static_error=%s "
+                        "render_error=%s",
                         crawl_task_id,
                         item.get("canonical_url"),
+                        static_error or "",
                         exc,
                     )
+                    prefix = (
+                        f"静态目录读取失败: {static_error}; "
+                        if static_error
+                        else ""
+                    )
                     raise RuntimeError(
-                        f"动态目录渲染失败: {exc}"
+                        f"{prefix}动态目录渲染失败: {exc}"
                     ) from exc
+
+            try:
+                fetched = await fetch_resource_with_retry(
+                    session,
+                    item["canonical_url"],
+                    max_bytes=_MAX_HTML_BYTES,
+                )
+                content_type = fetched.content_type.casefold()
+                if (
+                    "html" not in content_type
+                    and not fetched.data.lstrip().startswith(
+                        (b"<!DOCTYPE", b"<html", b"<HTML")
+                    )
+                ):
+                    raise RuntimeError(
+                        f"目录入口不是 HTML: {fetched.content_type}"
+                    )
+                text, links = html_text_and_links(
+                    fetched.data,
+                    fetched.url,
+                    content_type=fetched.content_type,
+                )
+                content_length = len(text)
+                final_url = fetched.url
+                discovery_mode = "static"
+                candidates = _classify_links(
+                    links,
+                    parent_url=item["canonical_url"],
+                )
+            except Exception as static_exc:  # noqa: BLE001
+                if not should_try_rendered_fallback(static_exc):
+                    raise
+                (
+                    links,
+                    candidates,
+                    final_url,
+                    content_length,
+                ) = await _rendered_discovery(static_error=static_exc)
+                discovery_mode = "rendered_fallback"
+            else:
+                if not candidates and self.policy.broad_official_discovery:
+                    (
+                        links,
+                        candidates,
+                        final_url,
+                        rendered_content_length,
+                    ) = await _rendered_discovery()
+                    content_length = max(
+                        content_length,
+                        rendered_content_length,
+                    )
+                    discovery_mode = "rendered"
             await _queue_items(candidates)
             counters["listing_pages"] += 1
             if not dry_run:
@@ -983,7 +1025,7 @@ class WebsiteDocumentCollectionService:
                     page_id=page_id,
                     status="discovered",
                     fields={
-                        "final_url": fetched.url,
+                        "final_url": final_url,
                         "content_length": content_length,
                         "links_discovered": len(links),
                         "links_enqueued": len(candidates),

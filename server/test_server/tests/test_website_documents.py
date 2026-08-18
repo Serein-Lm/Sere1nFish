@@ -13,6 +13,7 @@ from api.services.source_documents.resources import (
     create_public_fetch_ssl_context,
     extract_attachment_text,
     html_text_and_links,
+    should_try_rendered_fallback,
 )
 
 
@@ -24,6 +25,20 @@ def test_public_fetch_ssl_context_supports_legacy_public_sites() -> None:
     assert context.options & int(
         getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00000004)
     )
+
+
+def test_rendered_fallback_skips_confirmed_missing_pages() -> None:
+    def error(status: int) -> aiohttp.ClientResponseError:
+        return aiohttp.ClientResponseError(
+            request_info=SimpleNamespace(real_url="https://example.gov.cn/"),
+            history=(),
+            status=status,
+            message="request failed",
+        )
+
+    assert should_try_rendered_fallback(error(412)) is True
+    assert should_try_rendered_fallback(error(404)) is False
+    assert should_try_rendered_fallback(error(410)) is False
 
 
 def test_final_crawl_counters_are_derived_from_authoritative_summary() -> None:
@@ -421,6 +436,84 @@ def test_website_collection_defers_blocked_storage_retry(monkeypatch) -> None:
 
     assert calls == 1
     assert result["retry_passes"] == 0
+
+
+def test_website_discovery_uses_managed_chrome_after_static_412(
+    monkeypatch,
+) -> None:
+    from api.services import web_capture, website_documents
+    from api.services.website_documents import (
+        WebsiteCollectionPolicy,
+        WebsiteDocumentCollectionService,
+    )
+
+    seed_url = "https://example.gov.cn/"
+    document_url = (
+        "https://example.gov.cn/notices/202608/t20260818_123456.html"
+    )
+
+    async def _blocked(*_args, **_kwargs):
+        raise aiohttp.ClientResponseError(
+            request_info=SimpleNamespace(real_url=seed_url),
+            history=(),
+            status=412,
+            message="Precondition Failed",
+        )
+
+    async def _rendered(url, **_kwargs):
+        return {
+            "final_url": url,
+            "content_length": 100,
+            "links": [{"url": document_url, "label": "采购联系公告"}],
+        }
+
+    async def _ingest(*_args, **_kwargs):
+        return {
+            "archive_status": "complete",
+            "document_id": "doc-1",
+            "version_id": "version-1",
+            "attachment_count": 0,
+            "contacts": [],
+            "fields": {},
+        }
+
+    monkeypatch.setattr(website_documents, "fetch_resource_with_retry", _blocked)
+    monkeypatch.setattr(website_documents, "ingest_source_url", _ingest)
+    monkeypatch.setattr(
+        web_capture,
+        "discover_managed_rendered_links",
+        _rendered,
+    )
+
+    result = asyncio.run(
+        WebsiteDocumentCollectionService(
+            object(),
+            policy=WebsiteCollectionPolicy(
+                max_pages=5,
+                max_documents=2,
+                max_depth=2,
+                discovery_concurrency=1,
+                archive_concurrency=1,
+                max_page_attempts=1,
+            ),
+        ).run(
+            parent_task_id="parent",
+            project_id="project-1",
+            target={
+                "target_id": "target-1",
+                "canonical_name": "测试单位",
+                "root_domains": ["example.gov.cn"],
+            },
+            seed_urls=[seed_url],
+            dry_run=True,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["rendered_discovery_pages"] == 1
+    assert result["rendered_discovery_failures"] == 0
+    assert result["documents_archived"] == 1
+    assert result["preview"][0]["document_id"] == "doc-1"
 
 
 def test_website_discovery_retries_urls_after_enqueue_failure(monkeypatch) -> None:
@@ -1146,6 +1239,55 @@ def test_official_provider_captures_direct_attachment(monkeypatch) -> None:
     assert captured.text == "联系人 010-12345678"
     assert captured.metadata["direct_attachment"] is True
     assert captured.attachments[0].filename == "contact.pdf"
+
+
+def test_official_provider_uses_managed_chrome_after_static_412(
+    monkeypatch,
+) -> None:
+    from api.services import web_capture
+    from api.services.source_documents import web
+
+    async def _blocked(*_args, **_kwargs):
+        raise aiohttp.ClientResponseError(
+            request_info=SimpleNamespace(
+                real_url="https://example.gov.cn/notices/contact.html"
+            ),
+            history=(),
+            status=412,
+            message="Precondition Failed",
+        )
+
+    async def _rendered(url, **_kwargs):
+        return {
+            "final_url": url,
+            "html": (
+                "<html><head><title>联系公告</title></head><body>"
+                "<article><h1>联系公告</h1><p>采购联系人：张老师，"
+                "电话 010-12345678。</p></article></body></html>"
+            ),
+            "links": [],
+            "content_length": 40,
+        }
+
+    monkeypatch.setattr(web, "fetch_resource_with_retry", _blocked)
+    monkeypatch.setattr(
+        web_capture,
+        "discover_managed_rendered_links",
+        _rendered,
+    )
+
+    captured = asyncio.run(
+        OfficialWebDocumentProvider().capture(
+            "https://example.gov.cn/notices/contact.html",
+            task_id="task-1",
+        )
+    )
+
+    assert "010-12345678" in captured.text
+    assert captured.raw_html == b""
+    assert b"010-12345678" in captured.rendered_html
+    assert captured.metadata["capture_mode"] == "rendered_fallback"
+    assert "412" in captured.metadata["static_capture_error"]
 
 
 def test_official_provider_allows_large_download_endpoint(monkeypatch) -> None:

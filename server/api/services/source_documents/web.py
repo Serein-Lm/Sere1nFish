@@ -27,11 +27,13 @@ from .contracts import (
 )
 from .resources import (
     ATTACHMENT_EXTENSIONS,
+    FetchedResource,
     create_public_fetch_ssl_context,
     extract_html_links,
     extract_attachment_text,
     fetch_resource_with_retry,
     is_attachment_link,
+    should_try_rendered_fallback,
 )
 from .urls import canonicalize_source_url
 
@@ -308,6 +310,8 @@ class OfficialWebDocumentProvider:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
             },
         ) as session:
+            static_capture_error = ""
+            rendered_fallback = False
             try:
                 page = await fetch_resource_with_retry(
                     session,
@@ -315,7 +319,40 @@ class OfficialWebDocumentProvider:
                     max_bytes=fetch_limit,
                 )
             except Exception as exc:  # noqa: BLE001
-                raise SourceDocumentError(f"官网正文读取失败: {exc}") from exc
+                if not should_try_rendered_fallback(exc):
+                    raise SourceDocumentError(f"官网正文读取失败: {exc}") from exc
+                static_capture_error = str(exc)[:1_000]
+                try:
+                    from api.services.web_capture import (
+                        discover_managed_rendered_links,
+                    )
+
+                    rendered = await discover_managed_rendered_links(
+                        canonical_url,
+                        task_id=f"{task_id or 'source_document'}_render_fallback",
+                        timeout_seconds=60,
+                    )
+                    rendered_bytes = str(rendered.get("html") or "").encode(
+                        "utf-8"
+                    )
+                    if not rendered_bytes.strip():
+                        raise RuntimeError("浏览器未返回渲染 DOM")
+                    final_url = str(rendered.get("final_url") or canonical_url)
+                    page = FetchedResource(
+                        url=final_url,
+                        data=rendered_bytes,
+                        content_type="text/html; charset=utf-8",
+                        filename=(
+                            PurePosixPath(urlsplit(final_url).path).name
+                            or "index.html"
+                        ),
+                    )
+                    rendered_fallback = True
+                except Exception as rendered_exc:  # noqa: BLE001
+                    raise SourceDocumentError(
+                        "官网静态正文读取失败，浏览器回退也失败: "
+                        f"{exc}; {rendered_exc}"
+                    ) from rendered_exc
             is_html = "html" in page.content_type.lower() or page.data.lstrip().startswith(
                 (b"<!DOCTYPE", b"<html", b"<HTML")
             )
@@ -381,10 +418,13 @@ class OfficialWebDocumentProvider:
                 url=page.url,
                 content_type=page.content_type,
             )
+            raw_html = b"" if rendered_fallback else page.data
             rendered_html = page.data
-            capture_mode = "static"
+            capture_mode = "rendered_fallback" if rendered_fallback else "static"
             rendered_capture_error = ""
-            if len(str(parsed.get("text") or "").strip()) < 200:
+            if not rendered_fallback and len(
+                str(parsed.get("text") or "").strip()
+            ) < 200:
                 try:
                     from api.services.web_capture import (
                         discover_managed_rendered_links,
@@ -444,7 +484,7 @@ class OfficialWebDocumentProvider:
             account=parsed["account"],
             publish_time=parsed["publish_time"],
             text=combined_text,
-            raw_html=page.data,
+            raw_html=raw_html,
             rendered_html=rendered_html,
             images=images,
             attachments=attachments,
@@ -452,6 +492,7 @@ class OfficialWebDocumentProvider:
                 "http_status": 200,
                 "final_url": page.url,
                 "capture_mode": capture_mode,
+                "static_capture_error": static_capture_error,
                 "rendered_capture_error": rendered_capture_error,
                 "article_text": parsed["text"],
                 "image_urls": parsed["image_urls"],
