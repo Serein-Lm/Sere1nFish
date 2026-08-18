@@ -133,6 +133,13 @@ async def list_inflight_company_scans(
             "status": 1,
             "params.target_id": 1,
             "params.company_name": 1,
+            "params.enable_asset_discovery": 1,
+            "params.enable_url_scan": 1,
+            "params.enable_wechat": 1,
+            "params.enable_scholar": 1,
+            "params.enable_bidding": 1,
+            "params.enable_xhs": 1,
+            "params.enable_control_structure": 1,
         },
     ).to_list(None)
 

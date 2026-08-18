@@ -8,6 +8,45 @@ from api.services.company_scan_batch import plan_company_scan_coverage
 
 
 @pytest.mark.asyncio
+async def test_inflight_company_scan_query_keeps_channel_flags() -> None:
+    from api.dao import tasks as tasks_dao
+
+    captured: dict[str, Any] = {}
+
+    class Cursor:
+        async def to_list(self, _length: int | None) -> list[dict[str, Any]]:
+            return []
+
+    class Collection:
+        def find(
+            self,
+            query: dict[str, Any],
+            projection: dict[str, int],
+        ) -> Cursor:
+            captured["query"] = query
+            captured["projection"] = projection
+            return Cursor()
+
+    class Database:
+        def __getitem__(self, _name: str) -> Collection:
+            return Collection()
+
+    await tasks_dao.list_inflight_company_scans(
+        Database(),  # type: ignore[arg-type]
+        project_id="project-1",
+    )
+
+    projection = captured["projection"]
+    assert projection["params.enable_wechat"] == 1
+    assert projection["params.enable_asset_discovery"] == 1
+    assert projection["params.enable_url_scan"] == 1
+    assert projection["params.enable_scholar"] == 1
+    assert projection["params.enable_bidding"] == 1
+    assert projection["params.enable_xhs"] == 1
+    assert projection["params.enable_control_structure"] == 1
+
+
+@pytest.mark.asyncio
 async def test_coverage_plan_excludes_finance_and_schedules_only_missing_channels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
