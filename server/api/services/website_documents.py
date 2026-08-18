@@ -37,7 +37,7 @@ from core.mobile.collect.contacts import build_contact_findings
 logger = get_logger("website_documents")
 
 _MAX_HTML_BYTES = 8 * 1024 * 1024
-_DISCOVERY_POLICY_VERSION = 5
+_DISCOVERY_POLICY_VERSION = 6
 _DETAIL_DOCUMENT_PATH_RE = re.compile(
     r"(?:^|[/_.-])detail(?:[/_.-]|$)",
     re.I,
@@ -238,6 +238,41 @@ def normalize_required_path_segments(values: Any) -> list[str]:
     return normalized
 
 
+def normalize_website_root_domains(values: Any) -> list[str]:
+    """Normalize explicit official-site roots independently from asset domains."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raise ValueError("官网根域名必须为字符串列表")
+
+    from api.services.company_normalize import normalize_root_domain
+
+    normalized: list[str] = []
+    for raw in raw_values:
+        domain = normalize_root_domain(str(raw or ""))
+        if not domain:
+            continue
+        if (
+            len(domain) > 253
+            or ":" in domain
+            or not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                domain,
+            )
+        ):
+            raise ValueError(f"无效的官网根域名: {raw}")
+        if domain not in normalized:
+            normalized.append(domain)
+    if len(normalized) > 12:
+        raise ValueError("官网根域名最多允许 12 个")
+    return normalized
+
+
 def url_matches_required_path_segments(
     url: str,
     required_path_segments: list[str] | tuple[str, ...] | set[str] | str | None,
@@ -337,7 +372,16 @@ def select_official_seed_urls(
                 canonical,
             )
             candidates.append((rank, canonical))
-        return [url for _rank, url in sorted(candidates)]
+        selected: list[str] = []
+        selected_roots: set[str] = set()
+        for _rank, url in sorted(candidates):
+            host = str(urlsplit(url).hostname or "").casefold().strip(".")
+            root = host.removeprefix("www.")
+            if root in selected_roots:
+                continue
+            selected_roots.add(root)
+            selected.append(url)
+        return selected
 
     if required_segments:
         scoped_alive = _normalized_scoped(known_alive_urls)
@@ -593,7 +637,7 @@ class WebsiteDocumentCollectionService:
                         reached_limit = True
                         break
                     if (
-                        item.get("kind") == "document"
+                        item.get("kind") in {"document", "index_document"}
                         and counters["documents_scheduled"]
                         + reserved_documents
                         + pending_documents
@@ -602,7 +646,7 @@ class WebsiteDocumentCollectionService:
                         reached_limit = True
                         continue
                     pending_urls.add(url)
-                    if item.get("kind") == "document":
+                    if item.get("kind") in {"document", "index_document"}:
                         pending_documents += 1
                     accepted.append(item)
                 if not accepted:
@@ -659,7 +703,7 @@ class WebsiteDocumentCollectionService:
                         "canonical_url": seed,
                         "parent_url": "",
                         "anchor_text": target_name,
-                        "kind": "index",
+                        "kind": "index_document",
                         "scope_relevant": False,
                         "depth": 0,
                         "priority": 60,
@@ -674,7 +718,8 @@ class WebsiteDocumentCollectionService:
             )
             seen.update(str(item.get("canonical_url") or "") for item in existing)
             counters["documents_scheduled"] = sum(
-                str(item.get("kind") or "") == "document" for item in existing
+                str(item.get("kind") or "") in {"document", "index_document"}
+                for item in existing
             )
             counters["total_pages"] = len(seen)
             counters["processed_pages"] = sum(
@@ -720,6 +765,19 @@ class WebsiteDocumentCollectionService:
             )
             pending = [item for item in existing if item.get("status") == "pending"]
             for item in pending:
+                surface = classify_candidate_surface(
+                    url=str(item.get("canonical_url") or ""),
+                    title=str(item.get("anchor_text") or ""),
+                )
+                if surface:
+                    counters["processed_pages"] += 1
+                    await crawl_dao.mark_page_terminal(
+                        self.db,
+                        page_id=str(item.get("page_id") or ""),
+                        status="superseded",
+                        fields={"scope_change_reason": surface},
+                    )
+                    continue
                 await queue.put(
                     (-int(item.get("priority") or 0), next(sequence), item)
                 )
@@ -729,7 +787,7 @@ class WebsiteDocumentCollectionService:
                         "canonical_url": seed,
                         "parent_url": "",
                         "anchor_text": target_name,
-                        "kind": "index",
+                        "kind": "index_document",
                         "scope_relevant": False,
                         "depth": 0,
                         "priority": 60,
@@ -1054,7 +1112,10 @@ class WebsiteDocumentCollectionService:
                     try:
                         if archive_blocked.is_set():
                             continue
-                        if item.get("kind") == "document" or _is_document_url(
+                        if item.get("kind") == "index_document":
+                            await _discover(session, item)
+                            await _archive(item)
+                        elif item.get("kind") == "document" or _is_document_url(
                             str(item.get("canonical_url") or ""),
                             str(item.get("anchor_text") or ""),
                         ):

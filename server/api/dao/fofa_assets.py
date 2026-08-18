@@ -242,6 +242,7 @@ async def query_assets(
         query["root_domain"] = root_domain
     if target_id:
         query["$or"] = [{"target_ids": target_id}, {"target_id": target_id}]
+        query["excluded_target_ids"] = {"$ne": target_id}
     cursor = (
         db[FOFA_ASSETS_COLLECTION]
         .find(query, {"_id": 0})
@@ -264,6 +265,7 @@ async def count_assets(
         query["root_domain"] = root_domain
     if target_id:
         query["$or"] = [{"target_ids": target_id}, {"target_id": target_id}]
+        query["excluded_target_ids"] = {"$ne": target_id}
     return await db[FOFA_ASSETS_COLLECTION].count_documents(query)
 
 

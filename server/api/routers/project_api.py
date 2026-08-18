@@ -107,6 +107,15 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
             )
         )
 
+    if "website_root_domains" in params:
+        from api.services.website_documents import (
+            normalize_website_root_domains,
+        )
+
+        params["website_root_domains"] = normalize_website_root_domains(
+            params.get("website_root_domains")
+        )
+
     if params.get("enable_control_structure", False) or any(
         key in params
         for key in (
@@ -304,6 +313,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         ),
         company_core_concurrency=tuning.company_scan_concurrency,
         website_collection_mode=params.get("website_collection_mode", "deep"),
+        website_root_domains=params.get("website_root_domains", []),
         website_required_path_segments=params.get(
             "website_required_path_segments", []
         ),
@@ -605,9 +615,14 @@ async def create_company_scan_batch(
         raise HTTPException(400, str(exc)) from exc
     requested_concurrency = shared_params.pop("company_scan_concurrency", None)
     if len(company_names) > 1 and (
-        shared_params.get("urls") or str(shared_params.get("url_text") or "").strip()
+        shared_params.get("urls")
+        or str(shared_params.get("url_text") or "").strip()
+        or shared_params.get("website_root_domains")
     ):
-        raise HTTPException(400, "批量公司扫描不能共用 URL 列表，请留空后由资产发现自动获取")
+        raise HTTPException(
+            400,
+            "批量公司扫描不能共用 URL 或官网根域名，请逐个任务配置",
+        )
 
     if shared_params.get("enable_wechat", False):
         from api.services.wechat_collection import ensure_wechat_task_definition

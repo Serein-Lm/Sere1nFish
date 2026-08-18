@@ -22,6 +22,7 @@ from api.services.targets import (
     list_project_target_summaries,
     list_project_target_summary_page,
     resolve_target,
+    set_target_official_website_roots,
 )
 
 
@@ -41,6 +42,11 @@ class ProjectTargetLinkRequest(BaseModel):
     search_terms: list[str] = Field(default_factory=list)
     objectives: list[str] = Field(default_factory=list)
     task_def_id: str = ""
+
+
+class TargetOfficialWebsiteRootsRequest(BaseModel):
+    root_domains: list[str] = Field(min_length=1, max_length=12)
+    asset_root_domains: list[str] = Field(default_factory=list, max_length=12)
 
 
 class TargetResearchRequest(BaseModel):
@@ -145,6 +151,23 @@ async def create_target(payload: TargetCreateRequest):
             clear_relation=True,
         )
     return target
+
+
+@router.put("/targets/{target_id}/official-website-roots")
+async def update_target_official_website_roots(
+    target_id: str,
+    payload: TargetOfficialWebsiteRootsRequest,
+):
+    try:
+        return await set_target_official_website_roots(
+            get_db(),
+            target_id=target_id,
+            root_domains=payload.root_domains,
+            asset_root_domains=payload.asset_root_domains,
+        )
+    except ValueError as exc:
+        status_code = 404 if str(exc) == "Target 不存在" else 400
+        raise HTTPException(status_code, str(exc)) from exc
 
 
 @router.post("/targets/research-batch")

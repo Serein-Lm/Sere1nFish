@@ -11,6 +11,7 @@ from api.services.company_scan_pipeline import (
     CompanyScanPipeline,
     incomplete_collection_sources,
     related_entity_task_id,
+    resolve_official_website_roots,
     should_checkpoint_module,
 )
 
@@ -37,6 +38,68 @@ def test_xhs_collection_is_disabled_by_default() -> None:
     ]
 
     assert parameter.default is False
+
+
+def test_official_website_roots_preserve_unverified_asset_domains() -> None:
+    assert resolve_official_website_roots(
+        ["express-sn.com", "suning.com", "snygwl.cn"]
+    ) == ["express-sn.com", "suning.com", "snygwl.cn"]
+
+
+def test_official_website_roots_allow_explicit_multi_domain_scope() -> None:
+    assert resolve_official_website_roots(
+        ["suning.com", "express-sn.com"],
+        ["https://www.express-sn.com/#1", "express-sn.com"],
+    ) == ["express-sn.com"]
+
+
+@pytest.mark.asyncio
+async def test_verified_asset_roots_restrict_provider_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.asset_intelligence import AssetIntelligenceService
+
+    captured = {}
+
+    async def discover(_self: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "enabled": True,
+            "providers": {},
+            "alive_urls": [],
+            "scan_urls": [],
+            "probe_metadata_by_url": {},
+        }
+
+    monkeypatch.setattr(AssetIntelligenceService, "discover", discover)
+    pipeline = CompanyScanPipeline(object(), object())
+
+    await pipeline._run_asset_and_url_scan(
+        task_id="task-verified-scope",
+        project_id="project-1",
+        identity={
+            "input_name": "江苏苏宁物流有限公司",
+            "normalized_name": "江苏苏宁物流有限公司",
+            "root_domain": "express-sn.com",
+            "root_domains": ["express-sn.com", "suning.com"],
+            "asset_root_domains": ["express-sn.com"],
+            "target_id": "target-1",
+            "aliases": ["苏宁物流"],
+        },
+        url_text="",
+        urls=[],
+        enable_asset_discovery=True,
+        enable_url_scan=False,
+        enable_copywriting=False,
+        min_attention_score=40,
+        fofa_size=20,
+        hunter_size=20,
+        probe_concurrency=4,
+    )
+
+    provider_identity = captured["identity"]
+    assert provider_identity.domains == ["express-sn.com"]
+    assert provider_identity.strict_domain_scope is True
 
 
 def test_tianyancha_collection_is_disabled_by_default() -> None:
@@ -1300,6 +1363,43 @@ async def test_trusted_identity_alias_does_not_downgrade_canonical_target(
     )
 
     assert collection.update["$set"]["canonical_name"] == "上海宽娱数码科技有限公司"
+
+
+@pytest.mark.asyncio
+async def test_verified_official_root_survives_later_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+
+    collection = _TargetCollection()
+    collection.existing.update(
+        canonical_name="江苏苏宁物流有限公司",
+        normalized_name="江苏苏宁物流有限公司",
+        root_domain="express-sn.com",
+        root_domains=["express-sn.com", "suning.com"],
+        official_root_domains=["express-sn.com"],
+        official_root_domains_source="verified_override",
+    )
+
+    async def trusted_match(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return dict(collection.existing)
+
+    monkeypatch.setattr(targets_dao, "find_target", trusted_match)
+    await targets_dao.upsert_target(
+        _TargetDb(collection),
+        name="江苏苏宁物流有限公司",
+        root_domain="suning.com",
+        root_domains=["suning.com", "snygwl.cn"],
+        source="company_normalize",
+    )
+
+    fields = collection.update["$set"]
+    assert fields["root_domain"] == "express-sn.com"
+    assert fields["root_domains"] == [
+        "express-sn.com",
+        "suning.com",
+        "snygwl.cn",
+    ]
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,57 @@ from api.services.targets import (
     _target_summary_sort_key,
     assign_project_target_batches,
     list_project_target_summary_page,
+    set_target_official_website_roots,
 )
+
+
+@pytest.mark.asyncio
+async def test_verified_website_roots_are_normalized_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    async def persist(_db, *, target_id, root_domains, asset_root_domains):
+        captured.update(
+            target_id=target_id,
+            root_domains=root_domains,
+            asset_root_domains=asset_root_domains,
+        )
+        return {
+            "target_id": target_id,
+            "official_root_domains": root_domains,
+            "asset_root_domains": asset_root_domains,
+        }
+
+    async def reconcile(_db, *, target_id, root_domains):
+        return {
+            "assets_excluded": 0,
+            "website_records_excluded": 0,
+            "findings_removed": 0,
+        }
+
+    monkeypatch.setattr(
+        targets_dao,
+        "set_target_official_root_domains",
+        persist,
+    )
+    monkeypatch.setattr(
+        "api.services.targets.reconcile_target_asset_scope",
+        reconcile,
+    )
+
+    result = await set_target_official_website_roots(
+        object(),  # type: ignore[arg-type]
+        target_id="target-1",
+        root_domains=["https://www.express-sn.com/#1", "EXPRESS-SN.COM"],
+    )
+
+    assert captured == {
+        "target_id": "target-1",
+        "root_domains": ["express-sn.com"],
+        "asset_root_domains": ["express-sn.com"],
+    }
+    assert result["official_root_domains"] == ["express-sn.com"]
 
 
 def test_finding_group_key_deduplicates_contact_across_websites() -> None:

@@ -201,7 +201,7 @@ class HunterAssetProvider:
         specs: list[tuple[str, str]] = []
         for domain in identity.domains:
             specs.append(("domain", domain))
-        if identity.normalized_name:
+        if identity.normalized_name and not identity.strict_domain_scope:
             specs.append(("icp", identity.normalized_name))
         if not specs:
             result.errors.append("缺少公司名称和根域名，Hunter 查询已跳过")

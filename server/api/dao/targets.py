@@ -944,6 +944,19 @@ async def upsert_target(
         if existing
         else target_id_for_name(display_name, target_type)
     )
+    verified_root_domains = (
+        [
+            str(value or "").strip().casefold()
+            for value in (existing or {}).get("official_root_domains") or []
+            if str(value or "").strip()
+        ]
+        if (existing or {}).get("official_root_domains_source")
+        == "verified_override"
+        else []
+    )
+    effective_root_domain = (
+        verified_root_domains[0] if verified_root_domains else root_domain
+    )
     now = _now()
     canonical_name = display_name
     if existing and (source != "company_normalize" or preserve_canonical_name):
@@ -957,13 +970,14 @@ async def upsert_target(
         "last_seen_at": now,
         "updated_at": now,
     }
-    if root_domain:
-        set_fields["root_domain"] = root_domain
-    if root_domains is not None or root_domain:
+    if effective_root_domain:
+        set_fields["root_domain"] = effective_root_domain
+    if root_domains is not None or root_domain or verified_root_domains:
         set_fields["root_domains"] = list(
             dict.fromkeys(
                 str(value).strip().lower()
                 for value in [
+                    *verified_root_domains,
                     *((existing or {}).get("root_domains") or []),
                     (existing or {}).get("root_domain") or "",
                     root_domain,
@@ -991,6 +1005,73 @@ async def upsert_target(
         {"target_id": target_id}, update, upsert=True
     )
     return await get_target(db, target_id) or set_fields
+
+
+async def set_target_official_root_domains(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    root_domains: list[str],
+    asset_root_domains: list[str],
+) -> dict[str, Any] | None:
+    """Persist verified official and asset roots while retaining domain history."""
+    current = await get_target(db, target_id)
+    if not current:
+        return None
+    verified = list(
+        dict.fromkeys(
+            str(value or "").strip().casefold()
+            for value in root_domains
+            if str(value or "").strip()
+        )
+    )[:12]
+    if not verified:
+        raise ValueError("已核验官网根域名不能为空")
+    verified_assets = list(
+        dict.fromkeys(
+            str(value or "").strip().casefold()
+            for value in asset_root_domains
+            if str(value or "").strip()
+        )
+    )[:12]
+    if not verified_assets:
+        raise ValueError("已核验资产根域名不能为空")
+    all_domains = list(
+        dict.fromkeys(
+            [
+                *verified,
+                str(current.get("root_domain") or "").strip().casefold(),
+                *[
+                    str(value or "").strip().casefold()
+                    for value in current.get("root_domains") or []
+                ],
+            ]
+        )
+    )
+    all_domains = [value for value in all_domains if value][:12]
+    now = _now()
+    fields = {
+        "root_domain": verified[0],
+        "root_domains": all_domains,
+        "official_root_domains": verified,
+        "official_root_domains_source": "verified_override",
+        "official_root_domains_updated_at": now,
+        "asset_root_domains": verified_assets,
+        "asset_root_domains_source": "verified_override",
+        "asset_root_domains_updated_at": now,
+        "updated_at": now,
+    }
+    target = await db[TARGETS_COLLECTION].find_one_and_update(
+        {"target_id": target_id},
+        {"$set": fields},
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    await db[PROJECT_TARGETS_COLLECTION].update_many(
+        {"target_id": target_id},
+        {"$set": fields},
+    )
+    return target
 
 
 async def enrich_target_from_research(

@@ -30,6 +30,17 @@ _RULES = (
             "nacos console",
         ),
     ),
+    GenericSurfaceRule(
+        category="generic_tracking_endpoint",
+        markers=(
+            "/statisticalquantity/add.",
+            "/analytics/collect",
+            "/telemetry/collect",
+            "/tracking/collect",
+            "/beacon/collect",
+            "/metrics/collect",
+        ),
+    ),
 )
 
 

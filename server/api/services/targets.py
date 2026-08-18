@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -15,11 +16,16 @@ from api.dao import target_relationships as target_relationships_dao
 from api.dao import targets as targets_dao
 from api.dao.project_scope import project_scope_query
 from api.db.collections import (
+    COPYWRITINGS_COLLECTION,
+    FINDINGS_COLLECTION,
     FOFA_ASSETS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
+    PROFILES_COLLECTION,
     SOURCE_DOCUMENT_LINKS_COLLECTION,
     TARGETS_COLLECTION,
     TASKS_COLLECTION,
+    URL_SCAN_RESULTS_COLLECTION,
+    WEB_TAGS_COLLECTION,
     XHS_NOTES_COLLECTION,
 )
 from api.utils.url_identity import endpoint_identity, prefer_https_url
@@ -768,6 +774,236 @@ async def resolve_target(
     )
 
 
+def _value_matches_root_domains(value: Any, root_domains: set[str]) -> bool:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return False
+    try:
+        host = str(
+            urlsplit(text if "://" in text else f"//{text}").hostname or ""
+        ).casefold().strip(".")
+    except ValueError:
+        return False
+    return bool(
+        host
+        and any(host == root or host.endswith("." + root) for root in root_domains)
+    )
+
+
+def _asset_record_matches_root_domains(
+    record: dict[str, Any],
+    root_domains: set[str],
+) -> bool:
+    return any(
+        _value_matches_root_domains(record.get(field), root_domains)
+        for field in (
+            "canonical_url",
+            "link",
+            "host",
+            "domain",
+            "cert_domain",
+            "root_domain",
+        )
+    )
+
+
+async def reconcile_target_asset_scope(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    root_domains: list[str],
+) -> dict[str, int]:
+    """Detach derived Target data outside a newly verified asset boundary."""
+    selected_target_id = str(target_id or "").strip()
+    roots = {
+        str(value or "").casefold().strip(".").removeprefix("www.")
+        for value in root_domains
+        if str(value or "").strip()
+    }
+    if not selected_target_id or not roots:
+        return {
+            "assets_excluded": 0,
+            "website_records_excluded": 0,
+            "findings_removed": 0,
+        }
+
+    asset_rows, scan_rows, legacy_rows, finding_rows = await asyncio.gather(
+        db[FOFA_ASSETS_COLLECTION]
+        .find(
+            {
+                "$or": [
+                    {"target_id": selected_target_id},
+                    {"target_ids": selected_target_id},
+                ]
+            },
+            {
+                "_id": 1,
+                "canonical_url": 1,
+                "link": 1,
+                "host": 1,
+                "domain": 1,
+                "cert_domain": 1,
+                "root_domain": 1,
+            },
+        )
+        .to_list(None),
+        db[URL_SCAN_RESULTS_COLLECTION]
+        .find(
+            {"target_id": selected_target_id, "source": "web_tagging"},
+            {"_id": 1, "url": 1, "exclusion_reason": 1},
+        )
+        .to_list(None),
+        db[WEB_TAGS_COLLECTION]
+        .find(
+            {
+                "target_id": selected_target_id,
+                "$or": [
+                    {"source": "web_tagging"},
+                    {"source": {"$exists": False}},
+                    {"source": None},
+                ],
+            },
+            {"_id": 1, "url": 1, "exclusion_reason": 1},
+        )
+        .to_list(None),
+        db[FINDINGS_COLLECTION]
+        .find(
+            {"target_id": selected_target_id, "source": "web_tagging"},
+            {"_id": 1, "finding_id": 1, "url": 1, "source_url": 1},
+        )
+        .to_list(None),
+    )
+
+    asset_outside = [
+        row["_id"]
+        for row in asset_rows
+        if not _asset_record_matches_root_domains(row, roots)
+    ]
+    asset_inside = [
+        row["_id"]
+        for row in asset_rows
+        if _asset_record_matches_root_domains(row, roots)
+    ]
+    if asset_outside:
+        await db[FOFA_ASSETS_COLLECTION].update_many(
+            {"_id": {"$in": asset_outside}},
+            {"$addToSet": {"excluded_target_ids": selected_target_id}},
+        )
+    if asset_inside:
+        await db[FOFA_ASSETS_COLLECTION].update_many(
+            {"_id": {"$in": asset_inside}},
+            {"$pull": {"excluded_target_ids": selected_target_id}},
+        )
+
+    async def _reconcile_website_collection(
+        collection_name: str,
+        rows: list[dict[str, Any]],
+    ) -> int:
+        outside = [
+            row["_id"]
+            for row in rows
+            if not _value_matches_root_domains(row.get("url"), roots)
+        ]
+        restored = [
+            row["_id"]
+            for row in rows
+            if _value_matches_root_domains(row.get("url"), roots)
+            and row.get("exclusion_reason") == "outside_verified_asset_scope"
+        ]
+        if outside:
+            await db[collection_name].update_many(
+                {"_id": {"$in": outside}},
+                {
+                    "$set": {
+                        "excluded": True,
+                        "exclusion_reason": "outside_verified_asset_scope",
+                    }
+                },
+            )
+        if restored:
+            await db[collection_name].update_many(
+                {
+                    "_id": {"$in": restored},
+                    "exclusion_reason": "outside_verified_asset_scope",
+                },
+                {"$unset": {"excluded": "", "exclusion_reason": ""}},
+            )
+        return len(outside)
+
+    scan_excluded, legacy_excluded = await asyncio.gather(
+        _reconcile_website_collection(URL_SCAN_RESULTS_COLLECTION, scan_rows),
+        _reconcile_website_collection(WEB_TAGS_COLLECTION, legacy_rows),
+    )
+
+    invalid_findings = [
+        row
+        for row in finding_rows
+        if (row.get("source_url") or row.get("url"))
+        and not _value_matches_root_domains(
+            row.get("source_url") or row.get("url"),
+            roots,
+        )
+    ]
+    finding_object_ids = [row["_id"] for row in invalid_findings]
+    finding_ids = [
+        str(row.get("finding_id") or "")
+        for row in invalid_findings
+        if str(row.get("finding_id") or "")
+    ]
+    if finding_object_ids:
+        await db[FINDINGS_COLLECTION].delete_many(
+            {"_id": {"$in": finding_object_ids}}
+        )
+    if finding_ids:
+        derivative_query = {
+            "$or": [
+                {"finding_id": {"$in": finding_ids}},
+                {"finding_ids": {"$in": finding_ids}},
+            ]
+        }
+        await asyncio.gather(
+            db[COPYWRITINGS_COLLECTION].delete_many(derivative_query),
+            db[PROFILES_COLLECTION].delete_many(derivative_query),
+        )
+    return {
+        "assets_excluded": len(asset_outside),
+        "website_records_excluded": scan_excluded + legacy_excluded,
+        "findings_removed": len(finding_object_ids),
+    }
+
+
+async def set_target_official_website_roots(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    root_domains: list[str] | str,
+    asset_root_domains: list[str] | str | None = None,
+) -> dict[str, Any]:
+    """Apply verified website and asset scopes while retaining domain history."""
+    from api.services.website_documents import normalize_website_root_domains
+
+    normalized = normalize_website_root_domains(root_domains)
+    if not normalized:
+        raise ValueError("已核验官网根域名不能为空")
+    normalized_assets = normalize_website_root_domains(
+        asset_root_domains if asset_root_domains else normalized
+    )
+    target = await targets_dao.set_target_official_root_domains(
+        db,
+        target_id=str(target_id or "").strip(),
+        root_domains=normalized,
+        asset_root_domains=normalized_assets,
+    )
+    if not target:
+        raise ValueError("Target 不存在")
+    reconciliation = await reconcile_target_asset_scope(
+        db,
+        target_id=str(target_id or "").strip(),
+        root_domains=normalized_assets,
+    )
+    return {**target, "scope_reconciliation": reconciliation}
+
+
 async def require_project_target(
     db: AsyncIOMotorDatabase,
     *,
@@ -1058,7 +1294,21 @@ async def list_project_target_summaries(
                 }
             },
             {"$unwind": "$_resolved_target_ids"},
-            {"$match": {"_resolved_target_ids": {"$in": target_ids}}},
+            {
+                "$match": {
+                    "_resolved_target_ids": {"$in": target_ids},
+                    "$expr": {
+                        "$not": [
+                            {
+                                "$in": [
+                                    "$_resolved_target_ids",
+                                    {"$ifNull": ["$excluded_target_ids", []]},
+                                ]
+                            }
+                        ]
+                    },
+                }
+            },
             {
                 "$group": {
                     "_id": "$_resolved_target_ids",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from urllib.parse import urlsplit
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -17,6 +18,39 @@ from .factory import AssetProviderFactory
 from .triage import AssetTriageService
 
 logger = get_logger("asset_intelligence")
+
+
+def _candidate_matches_domain_scope(
+    candidate: AssetCandidate,
+    domains: list[str],
+) -> bool:
+    roots = {
+        str(value or "").casefold().strip(".").removeprefix("www.")
+        for value in domains
+        if str(value or "").strip()
+    }
+    if not roots:
+        return False
+    values = [
+        candidate.host,
+        candidate.domain,
+        candidate.cert_domain,
+        candidate.link,
+        candidate.canonical_url,
+    ]
+    for value in values:
+        text = str(value or "").strip().casefold()
+        if not text:
+            continue
+        try:
+            host = str(
+                urlsplit(text if "://" in text else f"//{text}").hostname or ""
+            ).casefold().strip(".")
+        except ValueError:
+            continue
+        if any(host == root or host.endswith("." + root) for root in roots):
+            return True
+    return False
 
 
 class AssetIntelligenceService:
@@ -62,6 +96,12 @@ class AssetIntelligenceService:
             ]
         )
         merged = self._merge_candidates(searches)
+        if identity.strict_domain_scope:
+            merged = [
+                candidate
+                for candidate in merged
+                if _candidate_matches_domain_scope(candidate, identity.domains)
+            ]
         urls = list(dict.fromkeys(item.canonical_url for item in merged if item.canonical_url))
         probe_by_url = await self.probe.probe(
             urls,

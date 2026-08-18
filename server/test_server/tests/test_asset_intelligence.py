@@ -19,7 +19,10 @@ from api.services.asset_intelligence.contracts import (
     ProviderSearchResult,
     canonical_asset_url,
 )
-from api.services.asset_intelligence.service import AssetIntelligenceService
+from api.services.asset_intelligence.service import (
+    AssetIntelligenceService,
+    _candidate_matches_domain_scope,
+)
 from api.services.asset_intelligence.triage import (
     AssetTriageBatch,
     AssetTriageService,
@@ -48,6 +51,19 @@ class _Probe:
             }
             for url in urls
         }
+
+
+def test_verified_domain_scope_rejects_unrelated_brand_assets() -> None:
+    roots = ["express-sn.com"]
+
+    assert _candidate_matches_domain_scope(
+        AssetCandidate(host="www.express-sn.com", link="https://www.express-sn.com"),
+        roots,
+    )
+    assert not _candidate_matches_domain_scope(
+        AssetCandidate(host="product.suning.com", cert_domain="suning.com"),
+        roots,
+    )
 
 
 def test_fofa_parser_accepts_json_object_rows() -> None:

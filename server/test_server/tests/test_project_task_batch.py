@@ -249,6 +249,30 @@ def test_company_scan_normalizes_website_path_scope() -> None:
     assert params["website_required_path_segments"] == ["ah"]
 
 
+def test_company_scan_normalizes_official_website_roots() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    params = {
+        "website_root_domains": [
+            "https://www.express-sn.com/#1",
+            "EXPRESS-SN.COM",
+        ]
+    }
+
+    _validate_company_scan_params(params)
+
+    assert params["website_root_domains"] == ["express-sn.com"]
+
+
+def test_company_scan_rejects_invalid_official_website_root() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    with pytest.raises(ValueError, match="无效的官网根域名"):
+        _validate_company_scan_params(
+            {"website_root_domains": ["https://example.com:8443/"]}
+        )
+
+
 def test_company_scan_rejects_invalid_website_path_scope() -> None:
     from api.routers.project_api import _validate_company_scan_params
 

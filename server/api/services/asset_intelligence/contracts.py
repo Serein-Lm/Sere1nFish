@@ -17,6 +17,7 @@ class AssetIdentity:
     target_id: str = ""
     aliases: list[str] = field(default_factory=list)
     root_domains: list[str] = field(default_factory=list)
+    strict_domain_scope: bool = False
 
     @property
     def domains(self) -> list[str]:

@@ -59,6 +59,19 @@ def related_entity_task_id(
     return f"{parent_task_id}_entity_{suffix}"
 
 
+def resolve_official_website_roots(
+    asset_root_domains: list[str],
+    configured_roots: list[str] | None = None,
+) -> list[str]:
+    """Resolve the official-site boundary independently from domain history."""
+    from api.services.website_documents import normalize_website_root_domains
+
+    explicit = normalize_website_root_domains(configured_roots)
+    if explicit:
+        return explicit
+    return normalize_website_root_domains(asset_root_domains)
+
+
 def should_checkpoint_module(kind: str, outcome: Any) -> bool:
     """Only cache modules whose enabled work reached a complete terminal state."""
     if not isinstance(outcome, dict):
@@ -339,6 +352,7 @@ class CompanyScanPipeline:
         skip_completed_subsidiaries: bool = True,
         company_core_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY,
         website_collection_mode: str = "deep",
+        website_root_domains: list[str] | None = None,
         website_required_path_segments: list[str] | None = None,
         requested_by: str = "",
     ) -> dict[str, Any]:
@@ -860,6 +874,12 @@ class CompanyScanPipeline:
                 "normalized_name": normalized_name,
                 "root_domain": root_domain,
                 "root_domains": root_domains,
+                "official_root_domains": list(
+                    target.get("official_root_domains") or []
+                ),
+                "asset_root_domains": list(
+                    target.get("asset_root_domains") or []
+                ),
                 "aliases": aliases,
                 "display_name": scan_profile.get("display_name") or normalized_name,
                 "short_names": list(scan_profile.get("short_names") or []),
@@ -1166,6 +1186,10 @@ class CompanyScanPipeline:
                         url_scan_concurrency=url_scan_concurrency,
                         copywriting_concurrency=copywriting_concurrency,
                         website_collection_mode=website_collection_mode,
+                        website_root_domains=(
+                            website_root_domains
+                            or result["identity"].get("official_root_domains")
+                        ),
                         website_required_path_segments=(
                             website_required_path_segments
                         ),
@@ -2836,9 +2860,22 @@ class CompanyScanPipeline:
         progress_task_id: str = "",
         progress_source: str = "",
         website_collection_mode: str = "deep",
+        website_root_domains: list[str] | None = None,
         website_required_path_segments: list[str] | None = None,
     ) -> dict[str, Any]:
         from api.services.asset_intelligence import AssetIdentity, AssetIntelligenceService
+        from api.services.website_documents import normalize_website_root_domains
+
+        verified_asset_root_domains = normalize_website_root_domains(
+            identity.get("asset_root_domains")
+        )
+        asset_root_domains = self._dedupe_text(
+            verified_asset_root_domains
+            or [
+                str(identity.get("root_domain") or ""),
+                *list(identity.get("root_domains") or []),
+            ]
+        )[:6]
 
         asset_result: dict[str, Any] = {
             "enabled": enable_asset_discovery,
@@ -2861,10 +2898,13 @@ class CompanyScanPipeline:
                 identity=AssetIdentity(
                     input_name=str(identity.get("input_name") or ""),
                     normalized_name=str(identity.get("normalized_name") or ""),
-                    root_domain=str(identity.get("root_domain") or ""),
+                    root_domain=(
+                        asset_root_domains[0] if asset_root_domains else ""
+                    ),
                     target_id=str(identity.get("target_id") or ""),
                     aliases=list(identity.get("aliases") or []),
-                    root_domains=list(identity.get("root_domains") or []),
+                    root_domains=asset_root_domains,
+                    strict_domain_scope=bool(verified_asset_root_domains),
                 ),
                 project_id=project_id,
                 task_id=task_id,
@@ -2910,20 +2950,27 @@ class CompanyScanPipeline:
             "failed_pages": 0,
         }
         if enable_url_scan:
-            root_domains = self._dedupe_text(
-                [
-                    str(identity.get("root_domain") or ""),
-                    *list(identity.get("root_domains") or []),
-                ]
-            )[:6]
-            root_urls = [normalize_url(domain) for domain in root_domains if domain]
+            official_root_domains = resolve_official_website_roots(
+                asset_root_domains,
+                website_root_domains,
+            )
+            root_urls = [
+                normalize_url(domain) for domain in asset_root_domains if domain
+            ]
+            official_root_urls = [
+                normalize_url(domain)
+                for domain in official_root_domains
+                if domain
+            ]
             direct_root_urls = (
                 [] if website_required_path_segments else root_urls
             )
             merged_urls = self._dedupe_text(
                 [*direct_root_urls, *urls, *discovered_urls]
             )
-            website_seed_urls = self._dedupe_text([*urls, *root_urls])
+            website_seed_urls = self._dedupe_text(
+                [*urls, *official_root_urls]
+            )
             operations: list[tuple[str, Any]] = []
             if merged_urls or url_text.strip():
                 operations.append((
@@ -2947,7 +2994,7 @@ class CompanyScanPipeline:
                             "target_id": str(identity.get("target_id") or ""),
                             "canonical_name": str(identity.get("normalized_name") or ""),
                             "aliases": list(identity.get("aliases") or [])[:12],
-                            "root_domains": root_domains,
+                            "root_domains": asset_root_domains,
                         },
                     ),
                 ))
@@ -2978,8 +3025,12 @@ class CompanyScanPipeline:
                                 identity.get("normalized_name") or ""
                             ),
                             "aliases": list(identity.get("aliases") or [])[:12],
-                            "root_domain": str(identity.get("root_domain") or ""),
-                            "root_domains": root_domains,
+                            "root_domain": (
+                                official_root_domains[0]
+                                if official_root_domains
+                                else ""
+                            ),
+                            "root_domains": official_root_domains,
                         },
                         seed_urls=website_seed_urls,
                         known_alive_urls=discovered_urls,

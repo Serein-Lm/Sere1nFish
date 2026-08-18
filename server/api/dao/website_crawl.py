@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
@@ -164,7 +165,83 @@ async def begin_task(
             }
         },
     )
+    await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
+        {
+            "crawl_task_id": crawl_task_id,
+            "canonical_url": {"$in": seeds},
+            "status": {"$ne": "archived"},
+        },
+        {"$set": {"kind": "index_document", "updated_at": now}},
+    )
+    await supersede_pages_outside_roots(
+        db,
+        crawl_task_id=crawl_task_id,
+        root_domains=root_domains,
+    )
     return await get_task(db, crawl_task_id) or {}
+
+
+async def supersede_pages_outside_roots(
+    db: AsyncIOMotorDatabase,
+    *,
+    crawl_task_id: str,
+    root_domains: list[str],
+) -> int:
+    """Stop unfinished pages that no longer belong to the official-site scope."""
+    roots = {
+        str(value or "").casefold().strip(".").removeprefix("www.")
+        for value in root_domains
+        if str(value or "").strip()
+    }
+    if not roots:
+        return 0
+    resumable_statuses = [
+        "pending",
+        "fetching",
+        "archiving",
+        "error",
+        "partial",
+        "discovered",
+    ]
+    rows = await db[WEBSITE_CRAWL_PAGES_COLLECTION].find(
+        {
+            "crawl_task_id": crawl_task_id,
+            "status": {"$in": resumable_statuses},
+        },
+        {"_id": 0, "page_id": 1, "canonical_url": 1},
+    ).to_list(None)
+    outside_ids: list[str] = []
+    for row in rows:
+        try:
+            host = str(
+                urlsplit(str(row.get("canonical_url") or "")).hostname or ""
+            ).casefold().strip(".")
+        except ValueError:
+            host = ""
+        if not host or not any(
+            host == root or host.endswith("." + root) for root in roots
+        ):
+            page_id = str(row.get("page_id") or "").strip()
+            if page_id:
+                outside_ids.append(page_id)
+    if not outside_ids:
+        return 0
+    now = _now()
+    result = await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
+        {
+            "page_id": {"$in": outside_ids},
+            "status": {"$in": resumable_statuses},
+        },
+        {
+            "$set": {
+                "status": "superseded",
+                "scope_change_reason": "outside_official_root_domains",
+                "completed_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    return int(result.modified_count)
 
 
 async def get_task(

@@ -105,10 +105,67 @@ from api.services.source_documents.web import (
 from api.services.website_documents import (
     archive_page_status,
     classify_discovered_link,
+    normalize_website_root_domains,
     resolve_website_collection_policy,
     select_official_seed_urls,
     url_matches_required_path_segments,
 )
+
+
+def test_official_root_normalization_accepts_full_url_with_fragment() -> None:
+    assert normalize_website_root_domains(
+        ["https://www.express-sn.com/#1"]
+    ) == ["express-sn.com"]
+
+
+def test_crawl_scope_supersedes_only_unfinished_external_pages() -> None:
+    class Cursor:
+        async def to_list(self, _length):
+            return [
+                {
+                    "page_id": "inside",
+                    "canonical_url": "https://www.express-sn.com/home/news.htm",
+                },
+                {
+                    "page_id": "outside",
+                    "canonical_url": "https://product.suning.com/123.html",
+                },
+                {"page_id": "invalid", "canonical_url": "not a url"},
+            ]
+
+    class Collection:
+        def __init__(self):
+            self.query = None
+            self.update = None
+
+        def find(self, query, _projection):
+            self.query = query
+            return Cursor()
+
+        async def update_many(self, query, update):
+            self.query = query
+            self.update = update
+            return SimpleNamespace(modified_count=2)
+
+    class Db:
+        def __init__(self):
+            self.collection = Collection()
+
+        def __getitem__(self, _name):
+            return self.collection
+
+    db = Db()
+    modified = asyncio.run(
+        website_crawl_dao.supersede_pages_outside_roots(
+            db,  # type: ignore[arg-type]
+            crawl_task_id="task-webdocs",
+            root_domains=["express-sn.com"],
+        )
+    )
+
+    assert modified == 2
+    assert set(db.collection.query["page_id"]["$in"]) == {"outside", "invalid"}
+    assert db.collection.update["$set"]["status"] == "superseded"
 
 
 def test_official_html_extracts_article_and_attachment() -> None:
@@ -516,7 +573,8 @@ def test_website_discovery_uses_managed_chrome_after_static_412(
     assert result["status"] == "completed"
     assert result["rendered_discovery_pages"] == 1
     assert result["rendered_discovery_failures"] == 0
-    assert result["documents_archived"] == 1
+    assert result["documents_archived"] == 2
+    assert len(result["preview"]) == 2
     assert result["preview"][0]["document_id"] == "doc-1"
 
 
@@ -833,6 +891,19 @@ def test_official_seed_selection_prefers_probed_www_origin() -> None:
             "http://portal.example.gov.cn:9999/",
             "https://www.example.gov.cn/",
             "https://mail.example.gov.cn/",
+        ],
+        root_domains=["example.gov.cn"],
+    )
+
+    assert seeds == ["https://www.example.gov.cn/"]
+
+
+def test_official_seed_selection_deduplicates_www_and_apex_origins() -> None:
+    seeds = select_official_seed_urls(
+        fallback_urls=["https://example.gov.cn/"],
+        known_alive_urls=[
+            "https://example.gov.cn/",
+            "https://www.example.gov.cn/",
         ],
         root_domains=["example.gov.cn"],
     )
