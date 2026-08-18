@@ -82,7 +82,7 @@ Content-Type: application/json
 ```
 - `access_token`：后续所有 `/api/v1/mobile/**` 请求 Header `Authorization: Bearer <access_token>`。
 - `server_token`：可为 `null`；系统启用「登录 Key」时返回服务器端证据。
-- **TTL = 24 小时**（`ACCESS_TOKEN_EXPIRE_MINUTES = 60*24`）。
+- **TTL 默认 30 天**（`ACCESS_TOKEN_EXPIRE_MINUTES = 43200`，可通过部署环境覆盖）。
 - 默认用户 `admin / admin123`（生产请改）。
 
 ### 登出 / 主动撤销 token

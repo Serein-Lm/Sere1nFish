@@ -8,6 +8,7 @@ x-backend-env: &backend-env
   MONGODB_DIRECT: "true"
   REDIS_ADDR: redis:6379
   REDIS_DB: 2
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-43200}
   CHROME_DOCKER_NETWORK: sere1nfish_internal
   HTTP_PROXY: ""
   HTTPS_PROXY: ""

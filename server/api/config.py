@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # JWT 配置 - 使用固定密钥（可通过 .env 覆盖）
     SECRET_KEY: str = "CHANGE_ME"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 小时
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30  # 30 天
     
     # 服务配置
     HOST: str = "127.0.0.1"  # 只允许本地访问
