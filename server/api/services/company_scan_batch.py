@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -86,6 +87,27 @@ def _task_identity(task: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _inflight_task_channels(task: dict[str, Any]) -> set[str]:
+    """Return channels an existing task is expected to complete."""
+    params = dict(task.get("params") or {})
+    channels: set[str] = set()
+    if params.get("enable_asset_discovery", True) or params.get(
+        "enable_url_scan", True
+    ):
+        channels.add("website")
+    if params.get("enable_wechat", False):
+        channels.add("wechat")
+    if params.get("enable_scholar", True):
+        channels.add("scholar")
+    if params.get("enable_bidding", False):
+        channels.add("bidding")
+    if params.get("enable_xhs", False):
+        channels.add("xhs")
+    if params.get("enable_control_structure", False):
+        channels.add("control")
+    return channels
+
+
 async def plan_company_scan_coverage(
     db: AsyncIOMotorDatabase,
     *,
@@ -95,6 +117,7 @@ async def plan_company_scan_coverage(
     excluded_sectors: list[str] | tuple[str, ...] | None = None,
     target_ids: list[str] | tuple[str, ...] | None = None,
     wechat_device_id: str = "",
+    wechat_app_instance: str = "primary",
     subsidiary_scan_limit: int = 12,
     bidding_max_records: int = 10,
     enable_copywriting: bool = True,
@@ -119,15 +142,14 @@ async def plan_company_scan_coverage(
         db,
         project_id=project_id,
     )
-    inflight_target_ids: dict[str, str] = {}
-    inflight_names: dict[str, str] = {}
+    inflight_target_ids: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    inflight_names: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for task in inflight_tasks:
         inflight_target_id, inflight_name = _task_identity(task)
-        task_id = str(task.get("task_id") or "")
         if inflight_target_id:
-            inflight_target_ids[inflight_target_id] = task_id
+            inflight_target_ids[inflight_target_id].append(task)
         if inflight_name:
-            inflight_names[inflight_name] = task_id
+            inflight_names[inflight_name].append(task)
 
     items: list[dict[str, Any]] = []
     excluded_items: list[dict[str, Any]] = []
@@ -174,15 +196,32 @@ async def plan_company_scan_coverage(
             continue
 
         normalized_name = targets_dao.normalize_target_name(target_name)
-        inflight_task_id = inflight_target_ids.get(target_id) or inflight_names.get(
-            normalized_name
-        )
-        if inflight_task_id:
+        matching_inflight: dict[str, dict[str, Any]] = {}
+        for task in (
+            *inflight_target_ids.get(target_id, []),
+            *inflight_names.get(normalized_name, []),
+        ):
+            task_id = str(task.get("task_id") or "")
+            if task_id:
+                matching_inflight[task_id] = task
+        inflight_channels = set().union(
+            *(
+                _inflight_task_channels(task)
+                for task in matching_inflight.values()
+            )
+        ) if matching_inflight else set()
+        missing_channels = [
+            channel for channel in missing_channels if channel not in inflight_channels
+        ]
+        if not missing_channels and matching_inflight:
+            inflight_task_ids = list(matching_inflight)
             inflight_items.append(
                 {
                     **base,
-                    "missing_channels": missing_channels,
-                    "task_id": inflight_task_id,
+                    "missing_channels": [],
+                    "inflight_channels": sorted(inflight_channels),
+                    "task_id": inflight_task_ids[0],
+                    "task_ids": inflight_task_ids,
                 }
             )
             continue
@@ -199,6 +238,7 @@ async def plan_company_scan_coverage(
             "enable_bidding_visual_analysis": bidding_missing,
             "enable_wechat": "wechat" in missing_channels,
             "wechat_device_id": str(wechat_device_id or "").strip(),
+            "wechat_app_instance": str(wechat_app_instance or "primary"),
             "wechat_target_selection_mode": "all",
             "enable_xhs": "xhs" in missing_channels,
             "enable_subsidiary_xhs": False,
@@ -218,6 +258,7 @@ async def plan_company_scan_coverage(
             {
                 **base,
                 "missing_channels": missing_channels,
+                "inflight_channels": sorted(inflight_channels),
                 "params": params,
             }
         )

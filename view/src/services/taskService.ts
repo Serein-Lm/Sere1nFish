@@ -487,6 +487,7 @@ export async function createCompanyScanCoverageBatch(
     excluded_sectors?: string[]
     target_ids?: string[]
     wechat_device_id?: string
+    wechat_app_instance?: 'primary' | 'clone'
     subsidiary_scan_limit?: number
     bidding_max_records?: number
     enable_copywriting?: boolean

@@ -115,12 +115,14 @@ async def test_ensure_wechat_configuration_creates_unbound_project_definition(
         object(),
         project_id="project-1",
         device_id="device-a",
+        app_instance="clone",
     )
 
     assert task_def["task_def_id"] == "wechat-auto"
     assert captured["project_id"] == "project-1"
     assert captured["device_id"] == "device-a"
     assert captured["app_name"] == "微信"
+    assert captured["app_instance"] == "clone"
     assert captured["target_id"] is None
     assert captured["source_link_strategy"] == WECHAT_SOURCE_LINK_STRATEGY
     assert captured["use_target_keyword_library"] is True
@@ -377,8 +379,20 @@ async def test_wechat_configuration_can_create_missing_definition(
 
     created: dict[str, str] = {}
 
-    async def ensure(_db: Any, *, project_id: str, device_id: str):
-        created.update({"project_id": project_id, "device_id": device_id})
+    async def ensure(
+        _db: Any,
+        *,
+        project_id: str,
+        device_id: str,
+        app_instance: str = "primary",
+    ):
+        created.update(
+            {
+                "project_id": project_id,
+                "device_id": device_id,
+                "app_instance": app_instance,
+            }
+        )
         return {
             "task_def_id": "created-wechat",
             "project_id": project_id,
@@ -410,7 +424,11 @@ async def test_wechat_configuration_can_create_missing_definition(
         create_if_missing=True,
     )
 
-    assert created == {"project_id": "project-1", "device_id": "device-a"}
+    assert created == {
+        "project_id": "project-1",
+        "device_id": "device-a",
+        "app_instance": "primary",
+    }
     assert task_def["task_def_id"] == "created-wechat"
 
 
@@ -453,11 +471,13 @@ async def test_company_wechat_collection_injects_internal_defaults(
         target_id="target-1",
         target_name="目标公司",
         device_id="device-a",
+        app_instance="clone",
         collection_priority="low",
     )
 
     overrides = captured["runtime_overrides"]
     assert overrides["app_name"] == "微信"
+    assert overrides["app_instance"] == "clone"
     assert overrides["direct_launch_app"] is True
     assert overrides["source_link_strategy"] == "wechat_copy_link"
     assert overrides["extract_fields"]
@@ -476,6 +496,8 @@ async def test_company_wechat_collection_injects_internal_defaults(
     assert overrides["target_id"] == "target-1"
     assert captured["queue_priority"] == "low"
     assert resolve_kwargs["create_if_missing"] is True
+    assert resolve_kwargs["app_instance"] == "clone"
+    assert result["app_instance"] == "clone"
     assert result["documents"] == 2
     assert result["contacts"] == 4
 

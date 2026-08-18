@@ -5667,6 +5667,7 @@ export default function ProjectDetail() {
                     params.enable_wechat = values.enable_wechat ?? false
                     if (values.enable_wechat) {
                       params.wechat_device_id = values.wechat_device_id
+                      params.wechat_app_instance = values.wechat_app_instance ?? 'primary'
                       params.wechat_target_selection_mode = values.wechat_target_selection_mode ?? 'auto'
                     }
                     params.enable_scholar = values.enable_scholar ?? true
@@ -5779,7 +5780,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', website_collection_mode: 'deep', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', website_collection_mode: 'deep', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_app_instance: 'primary', wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -5949,6 +5950,12 @@ export default function ProjectDetail() {
                                 <Segmented block options={[
                                   { label: '机构优先自动分级', value: 'auto' },
                                   { label: '全部目标', value: 'all' },
+                                ]} />
+                              </Form.Item>
+                              <Form.Item name="wechat_app_instance" label="微信应用实例">
+                                <Segmented block options={[
+                                  { label: '主微信', value: 'primary' },
+                                  { label: '微信分身', value: 'clone' },
                                 ]} />
                               </Form.Item>
                               <Form.Item

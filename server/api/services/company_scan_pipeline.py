@@ -324,6 +324,7 @@ class CompanyScanPipeline:
         bidding_max_records: int = 20,
         enable_wechat: bool = False,
         wechat_device_id: str = "",
+        wechat_app_instance: str = "primary",
         wechat_target_selection_mode: str = "auto",
         enable_scholar: bool = True,
         scholar_direction: str = "",
@@ -368,6 +369,7 @@ class CompanyScanPipeline:
         from core.observability import obs_log
         from api.services.company_scan_runtime import get_company_scan_resource_pool
         from api.services.xhs_target_selection import parse_manual_targets
+        from api.services.wechat_collection import normalize_wechat_app_instance
 
         subsidiary_xhs_enabled = bool(enable_xhs and enable_subsidiary_xhs)
         subsidiary_bidding_enabled = bool(
@@ -379,6 +381,9 @@ class CompanyScanPipeline:
             else bool(enable_bidding_visual_analysis)
         )
         manual_xhs_targets = parse_manual_targets(xhs_manual_targets)
+        normalized_wechat_app_instance = normalize_wechat_app_instance(
+            wechat_app_instance
+        )
         result = {
             "task_id": task_id,
             "company_name": company_name,
@@ -465,6 +470,7 @@ class CompanyScanPipeline:
                 "selected": False,
                 "priority": None,
                 "device_id": wechat_device_id,
+                "app_instance": normalized_wechat_app_instance,
                 "task_def_id": "",
                 "total": 0,
                 "new": 0,
@@ -1261,6 +1267,7 @@ class CompanyScanPipeline:
                         target_id=target_id,
                         target_name=normalized_name,
                         device_id=wechat_device_id,
+                        app_instance=normalized_wechat_app_instance,
                         collection_priority=str(
                             result["wechat"].get("priority") or "normal"
                         ),
@@ -2092,6 +2099,7 @@ class CompanyScanPipeline:
         target_id: str,
         target_name: str,
         device_id: str,
+        app_instance: str = "primary",
         collection_priority: str = "normal",
         requested_by: str = "",
         started_event: asyncio.Event | None = None,
@@ -2118,6 +2126,7 @@ class CompanyScanPipeline:
             target_id=target_id,
             target_name=target_name,
             device_id=device_id,
+            app_instance=app_instance,
             collection_priority=collection_priority,
             requested_by=requested_by,
             on_started=_on_started,

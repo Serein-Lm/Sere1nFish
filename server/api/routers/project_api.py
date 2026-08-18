@@ -11,7 +11,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field
@@ -145,10 +145,14 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
         )
 
     if params.get("enable_wechat", False):
+        from api.services.wechat_collection import normalize_wechat_app_instance
         from api.services.wechat_target_selection import (
             normalize_wechat_selection_mode,
         )
 
+        params["wechat_app_instance"] = normalize_wechat_app_instance(
+            params.get("wechat_app_instance", "primary")
+        )
         params["wechat_target_selection_mode"] = (
             normalize_wechat_selection_mode(
                 params.get("wechat_target_selection_mode", "auto")
@@ -279,6 +283,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         ),
         enable_wechat=params.get("enable_wechat", False),
         wechat_device_id=params.get("wechat_device_id", ""),
+        wechat_app_instance=params.get("wechat_app_instance", "primary"),
         wechat_target_selection_mode=params.get(
             "wechat_target_selection_mode", "auto"
         ),
@@ -443,6 +448,7 @@ class CompanyScanCoverageRequest(BaseModel):
     )
     target_ids: list[str] = Field(default_factory=list, max_length=200)
     wechat_device_id: str = Field(default="", max_length=128)
+    wechat_app_instance: Literal["primary", "clone"] = "primary"
     subsidiary_scan_limit: int = Field(default=12, ge=1, le=100)
     bidding_max_records: int = Field(default=10, ge=1, le=20)
     enable_copywriting: bool = True
@@ -553,6 +559,9 @@ async def create_task(
                 db,
                 project_id=project_id,
                 device_id=str(req.params.get("wechat_device_id") or ""),
+                app_instance=str(
+                    req.params.get("wechat_app_instance") or "primary"
+                ),
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -632,6 +641,9 @@ async def create_company_scan_batch(
                 db,
                 project_id=project_id,
                 device_id=str(shared_params.get("wechat_device_id") or ""),
+                app_instance=str(
+                    shared_params.get("wechat_app_instance") or "primary"
+                ),
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -682,6 +694,7 @@ async def create_company_scan_coverage_batch(
             excluded_sectors=req.excluded_sectors,
             target_ids=req.target_ids,
             wechat_device_id=req.wechat_device_id,
+            wechat_app_instance=req.wechat_app_instance,
             subsidiary_scan_limit=req.subsidiary_scan_limit,
             bidding_max_records=req.bidding_max_records,
             enable_copywriting=req.enable_copywriting,
@@ -703,6 +716,7 @@ async def create_company_scan_coverage_batch(
                 db,
                 project_id=project_id,
                 device_id=req.wechat_device_id,
+                app_instance=req.wechat_app_instance,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
