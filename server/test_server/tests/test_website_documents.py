@@ -27,6 +27,10 @@ def test_public_fetch_ssl_context_supports_legacy_public_sites() -> None:
     )
 
 
+def test_public_fetch_ssl_context_is_reused() -> None:
+    assert create_public_fetch_ssl_context() is create_public_fetch_ssl_context()
+
+
 def test_rendered_fallback_skips_confirmed_missing_pages() -> None:
     def error(status: int) -> aiohttp.ClientResponseError:
         return aiohttp.ClientResponseError(

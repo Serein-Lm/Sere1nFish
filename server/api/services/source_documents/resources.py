@@ -19,6 +19,7 @@ import threading
 import time
 import zipfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
 
@@ -89,8 +90,15 @@ class FetchedResource:
     filename: str
 
 
+@lru_cache(maxsize=1)
 def create_public_fetch_ssl_context() -> ssl.SSLContext:
-    """Create the relaxed TLS context used only for public evidence downloads."""
+    """Return the shared relaxed TLS context for public evidence downloads.
+
+    Loading the system CA store is synchronous and expensive. Website workers
+    call this helper from the event-loop thread, so rebuilding the context for
+    every page can stall unrelated API requests while a deep scan is running.
+    ``SSLContext`` is designed to be reused by concurrent client connections.
+    """
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
