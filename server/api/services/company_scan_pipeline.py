@@ -3114,6 +3114,12 @@ class CompanyScanPipeline:
                 )
                 for (kind, _operation), outcome in zip(operations, outcomes):
                     if isinstance(outcome, BaseException):
+                        from core.llm_capacity import find_llm_capacity_error
+
+                        capacity_error = find_llm_capacity_error(outcome)
+                        if capacity_error is not None:
+                            raise capacity_error
+                    if isinstance(outcome, BaseException):
                         failed = {
                             "enabled": True,
                             "status": "error",

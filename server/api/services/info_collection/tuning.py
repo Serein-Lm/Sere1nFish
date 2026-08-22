@@ -28,6 +28,7 @@ DEFAULT_WEBSITE_CRAWL_MAX_DOCUMENTS = 400
 DEFAULT_WEBSITE_CRAWL_MAX_DEPTH = 5
 DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS = 120
 DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS = 900
+DEFAULT_LLM_STANDARD_START_INTERVAL_SECONDS = 0.2
 
 MAX_ASSET_PROBE_CONCURRENCY = 128
 MAX_URL_PROBE_CONCURRENCY = 128
@@ -45,6 +46,7 @@ MAX_WEBSITE_CRAWL_MAX_PAGES = 10_000
 MAX_WEBSITE_CRAWL_MAX_DOCUMENTS = 3_000
 MAX_WEBSITE_CRAWL_MAX_DEPTH = 10
 MAX_LLM_QUOTA_COOLDOWN_SECONDS = 1800
+MAX_LLM_STANDARD_START_INTERVAL_SECONDS = 2.0
 
 
 def _bounded(value: Any, *, default: int, maximum: int) -> int:
@@ -64,6 +66,20 @@ def _bounded_timeout(
 ) -> int:
     try:
         parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _bounded_float(
+    value: Any,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        parsed = float(value)
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(parsed, maximum))
@@ -90,6 +106,9 @@ class CollectionRuntimeTuning:
     website_crawl_max_depth: int = DEFAULT_WEBSITE_CRAWL_MAX_DEPTH
     llm_quota_cooldown_seconds: int = DEFAULT_LLM_QUOTA_COOLDOWN_SECONDS
     llm_quota_max_cooldown_seconds: int = DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS
+    llm_standard_start_interval_seconds: float = (
+        DEFAULT_LLM_STANDARD_START_INTERVAL_SECONDS
+    )
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None) -> "CollectionRuntimeTuning":
@@ -181,9 +200,15 @@ class CollectionRuntimeTuning:
                 default=DEFAULT_LLM_QUOTA_MAX_COOLDOWN_SECONDS,
                 maximum=MAX_LLM_QUOTA_COOLDOWN_SECONDS,
             ),
+            llm_standard_start_interval_seconds=_bounded_float(
+                data.get("llm_standard_start_interval_seconds"),
+                default=DEFAULT_LLM_STANDARD_START_INTERVAL_SECONDS,
+                minimum=0.0,
+                maximum=MAX_LLM_STANDARD_START_INTERVAL_SECONDS,
+            ),
         )
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, int | float]:
         return asdict(self)
 
     def with_overrides(self, **overrides: Any) -> "CollectionRuntimeTuning":

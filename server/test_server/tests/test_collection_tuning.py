@@ -21,6 +21,7 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "website_crawl_max_depth": 5,
         "llm_quota_cooldown_seconds": 120,
         "llm_quota_max_cooldown_seconds": 900,
+        "llm_standard_start_interval_seconds": 0.2,
     }
 
     bounded = CollectionRuntimeTuning.from_config(
@@ -42,6 +43,7 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
             "website_crawl_max_depth": 999,
             "llm_quota_cooldown_seconds": 9999,
             "llm_quota_max_cooldown_seconds": 9999,
+            "llm_standard_start_interval_seconds": 999,
         }
     )
     assert bounded.as_dict() == {
@@ -62,6 +64,7 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "website_crawl_max_depth": 10,
         "llm_quota_cooldown_seconds": 1800,
         "llm_quota_max_cooldown_seconds": 1800,
+        "llm_standard_start_interval_seconds": 2.0,
     }
 
     overridden = defaults.with_overrides(
@@ -88,4 +91,5 @@ def test_collection_runtime_tuning_applies_defaults_and_safety_limits() -> None:
         "website_crawl_max_depth": 5,
         "llm_quota_cooldown_seconds": 120,
         "llm_quota_max_cooldown_seconds": 900,
+        "llm_standard_start_interval_seconds": 0.2,
     }

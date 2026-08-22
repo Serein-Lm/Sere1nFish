@@ -141,6 +141,7 @@ class LLMCapacityGuard:
         cooldown_seconds: int = 120,
         max_cooldown_seconds: int = 900,
         interactive_reserve: int = 0,
+        standard_start_interval_seconds: float = 0.0,
         clock: Any = time.monotonic,
         sleep: Any = asyncio.sleep,
     ) -> None:
@@ -154,6 +155,10 @@ class LLMCapacityGuard:
             self._cooldown_seconds,
             int(max_cooldown_seconds),
         )
+        self._standard_start_interval_seconds = max(
+            0.0,
+            float(standard_start_interval_seconds),
+        )
         self._clock = clock
         self._sleep = sleep
         self._open_until = 0.0
@@ -161,6 +166,8 @@ class LLMCapacityGuard:
         self._incident_id = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._probe_lock: asyncio.Lock | None = None
+        self._standard_start_lock: asyncio.Lock | None = None
+        self._next_standard_start_at = 0.0
 
     def _standard_concurrency(self, max_concurrency: int) -> int:
         total = max(1, int(max_concurrency))
@@ -173,6 +180,7 @@ class LLMCapacityGuard:
         max_concurrency: int,
         cooldown_seconds: int,
         max_cooldown_seconds: int,
+        standard_start_interval_seconds: float | None = None,
     ) -> None:
         normalized_concurrency = max(1, int(max_concurrency))
         self._slots.resize(normalized_concurrency)
@@ -184,13 +192,47 @@ class LLMCapacityGuard:
             self._cooldown_seconds,
             int(max_cooldown_seconds),
         )
+        if standard_start_interval_seconds is not None:
+            self._standard_start_interval_seconds = max(
+                0.0,
+                float(standard_start_interval_seconds),
+            )
+            if self._standard_start_interval_seconds == 0:
+                self._next_standard_start_at = 0.0
 
     def _get_probe_lock(self) -> asyncio.Lock:
+        self._ensure_loop_locks()
+        assert self._probe_lock is not None
+        return self._probe_lock
+
+    def _get_standard_start_lock(self) -> asyncio.Lock:
+        self._ensure_loop_locks()
+        assert self._standard_start_lock is not None
+        return self._standard_start_lock
+
+    def _ensure_loop_locks(self) -> None:
         loop = asyncio.get_running_loop()
-        if self._loop is not loop or self._probe_lock is None:
+        if self._loop is not loop:
             self._loop = loop
             self._probe_lock = asyncio.Lock()
-        return self._probe_lock
+            self._standard_start_lock = asyncio.Lock()
+            self._next_standard_start_at = 0.0
+            return
+        if self._probe_lock is None:
+            self._probe_lock = asyncio.Lock()
+        if self._standard_start_lock is None:
+            self._standard_start_lock = asyncio.Lock()
+
+    async def _pace_standard_start(self) -> None:
+        """Smooth collection-model starts without reducing steady concurrency."""
+        interval = self._standard_start_interval_seconds
+        if interval <= 0:
+            return
+        async with self._get_standard_start_lock():
+            delay = max(0.0, self._next_standard_start_at - self._clock())
+            if delay:
+                await self._sleep(delay)
+            self._next_standard_start_at = self._clock() + interval
 
     def _retry_after(self) -> float:
         return max(1.0, self._open_until - self._clock())
@@ -301,6 +343,8 @@ class LLMCapacityGuard:
                     await self._standard_slots.acquire()
                     standard_slot_acquired = True
                 try:
+                    if not is_interactive:
+                        await self._pace_standard_start()
                     await self._slots.acquire()
                 except BaseException:
                     if standard_slot_acquired:
@@ -365,6 +409,7 @@ class LLMCapacityGuard:
             "standard_limit": self._standard_slots.limit,
             "standard_in_use": self._standard_slots.in_use,
             "standard_waiting": self._standard_slots.waiting,
+            "standard_start_interval_seconds": self._standard_start_interval_seconds,
             "circuit_open": self._open_until > self._clock(),
             "retry_after_seconds": (
                 round(self._retry_after(), 1)
@@ -388,9 +433,11 @@ def configure_global_llm_capacity(
     max_concurrency: int,
     cooldown_seconds: int,
     max_cooldown_seconds: int,
+    standard_start_interval_seconds: float | None = None,
 ) -> None:
     _GLOBAL_GUARD.configure(
         max_concurrency=max_concurrency,
         cooldown_seconds=cooldown_seconds,
         max_cooldown_seconds=max_cooldown_seconds,
+        standard_start_interval_seconds=standard_start_interval_seconds,
     )

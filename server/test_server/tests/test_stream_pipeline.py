@@ -276,6 +276,70 @@ async def test_pipeline_abort_stops_queued_items_without_dlq() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pipeline_abort_does_not_wait_for_cancellation_resistant_worker() -> None:
+    blocking_started = asyncio.Event()
+    release_detached = asyncio.Event()
+
+    class _AbortWithBlockingPeer(Stage):
+        name = "abort-with-blocking-peer"
+        concurrency = 2
+
+        async def handle(self, item, _ctx):
+            if item.payload == "abort":
+                await blocking_started.wait()
+                raise PipelineAbortError("shared dependency unavailable")
+            blocking_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await release_detached.wait()
+
+    pipe = Pipeline(
+        pipeline_id="bounded-abort-test",
+        worker_cancel_timeout=0.01,
+    )
+    pipe.add(_AbortWithBlockingPeer())
+
+    with pytest.raises(PipelineAbortError, match="shared dependency"):
+        await asyncio.wait_for(
+            pipe.run(seeds=["blocking", "abort"], entry="abort-with-blocking-peer"),
+            timeout=0.2,
+        )
+
+    release_detached.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_stage_hard_timeout_does_not_wait_for_slow_cancellation() -> None:
+    release_detached = asyncio.Event()
+
+    class _HardTimeout(Stage):
+        name = "hard-timeout"
+        item_timeout_seconds = 0.01
+
+        async def handle(self, _item, _ctx):
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await release_detached.wait()
+
+    pipe = Pipeline(pipeline_id="hard-timeout-test")
+    pipe.add(_HardTimeout())
+
+    started = asyncio.get_running_loop().time()
+    await asyncio.wait_for(
+        pipe.run(seeds=["slow"], entry="hard-timeout"),
+        timeout=0.2,
+    )
+    assert asyncio.get_running_loop().time() - started < 0.1
+    assert pipe.metrics_summary()["hard-timeout"]["failed"] == 1
+
+    release_detached.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_retry_policy_can_extend_attempts_for_selected_errors() -> None:
     class _InfrastructureError(RuntimeError):
         pass

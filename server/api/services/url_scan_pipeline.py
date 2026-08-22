@@ -250,7 +250,12 @@ class _UrlScanStage(Stage):
         self.emit_to = emit_to
         self.source = source
         self.agent_timeout_seconds = agent_timeout_seconds
-        super().__init__(concurrency=concurrency)
+        # Agent 自身预算之外，为 Chrome 租约、渲染证据和结果持久化预留时间。
+        # Stage 的硬时限覆盖整段操作，并保证 MCP 不响应取消时 worker 仍可退出。
+        super().__init__(
+            concurrency=concurrency,
+            item_timeout_seconds=max(180, int(agent_timeout_seconds) + 120),
+        )
 
     async def on_setup(self, state: dict[str, Any]) -> None:
         state.setdefault("scan_results", [])

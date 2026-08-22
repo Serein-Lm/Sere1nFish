@@ -9,8 +9,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from core.stream.types import Item, Context
+from core.async_runtime import await_with_hard_timeout
 from core.stream.errors import PipelineAbortError
+from core.stream.types import Item, Context
 
 
 @dataclass
@@ -63,6 +64,7 @@ class Stage(ABC):
     - queue_maxsize: 该 stage 输入队列的最大长度 (默认 concurrency*4, 用于背压).
                      0 表示无界 (不推荐).
     - retry:         RetryPolicy 实例 (默认不重试).
+    - item_timeout_seconds: 单次 handle 的硬超时；0 表示不限制.
     - on_setup / on_teardown: 整个 stage 启动/结束时各调用一次 (worker 之外).
 
     `handle` 内部:
@@ -74,6 +76,7 @@ class Stage(ABC):
     name: str = ""
     concurrency: int = 1
     queue_maxsize: int = 0  # 0 → pipeline 自动算 concurrency*4
+    item_timeout_seconds: float = 0
     retry: RetryPolicy = RetryPolicy()  # 默认不重试
 
     def __init__(self, **overrides: Any) -> None:
@@ -111,7 +114,16 @@ class Stage(ABC):
         while True:
             item.attempt = attempt
             try:
-                await self.handle(item, ctx)
+                try:
+                    await await_with_hard_timeout(
+                        self.handle(item, ctx),
+                        float(self.item_timeout_seconds or 0),
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(
+                        f"stage={self.name} item={item.item_id} 处理超过硬时限 "
+                        f"{float(self.item_timeout_seconds):g}s"
+                    ) from exc
                 return True, None
             except asyncio.CancelledError:
                 raise

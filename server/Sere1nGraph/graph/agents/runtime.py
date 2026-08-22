@@ -29,6 +29,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from ..config.models import AppConfig
 from .streaming import process_agent_stream, console_event_handler, process_agent_stream_sse
 
+from core.async_runtime import await_with_hard_timeout, consume_task_result
 from core.logger import get_logger
 from core.llm_params import disable_thinking_extra_body
 from core.llm_capacity import get_global_llm_capacity_guard
@@ -53,28 +54,12 @@ REQUIRE_EVIDENCE_TOOL_MARKER = "【工具调用要求】本子任务必须先调
 
 def _consume_task_result(task: asyncio.Future[Any]) -> None:
     """取走分离任务的最终异常，避免超时后的未检索异常告警。"""
-    try:
-        task.exception()
-    except (asyncio.CancelledError, Exception):
-        pass
+    consume_task_result(task)
 
 
 async def _await_tool_call(call: Any, timeout: float) -> Any:
     """限制第三方工具调用时长，不等待不响应取消的底层协程。"""
-    if timeout <= 0:
-        return await call
-    task = asyncio.ensure_future(call)
-    try:
-        done, _pending = await asyncio.wait({task}, timeout=timeout)
-    except BaseException:
-        task.cancel()
-        task.add_done_callback(_consume_task_result)
-        raise
-    if task in done:
-        return task.result()
-    task.cancel()
-    task.add_done_callback(_consume_task_result)
-    raise asyncio.TimeoutError
+    return await await_with_hard_timeout(call, timeout)
 
 
 @asynccontextmanager

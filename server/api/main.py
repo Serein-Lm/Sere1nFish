@@ -114,12 +114,17 @@ async def lifespan(app: FastAPI):
                 max_concurrency=tuning.llm_concurrency,
                 cooldown_seconds=tuning.llm_quota_cooldown_seconds,
                 max_cooldown_seconds=tuning.llm_quota_max_cooldown_seconds,
+                standard_start_interval_seconds=(
+                    tuning.llm_standard_start_interval_seconds
+                ),
             )
             logger.info(
-                "模型容量保护已从 MongoDB 注入: concurrency=%s cooldown=%ss max=%ss",
+                "模型容量保护已从 MongoDB 注入: concurrency=%s cooldown=%ss "
+                "max=%ss start_interval=%.2fs",
                 tuning.llm_concurrency,
                 tuning.llm_quota_cooldown_seconds,
                 tuning.llm_quota_max_cooldown_seconds,
+                tuning.llm_standard_start_interval_seconds,
             )
 
             chrome_doc = await config_dao.get_config(db, "chrome_docker")

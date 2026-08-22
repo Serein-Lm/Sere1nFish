@@ -169,6 +169,40 @@ async def test_interactive_capacity_remains_available_during_standard_load() -> 
     assert guard.status()["in_use"] == 0
 
 
+@pytest.mark.asyncio
+async def test_standard_model_starts_are_paced_but_interactive_bypasses_pacer() -> None:
+    now = 0.0
+    starts: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    async def sleep(delay: float) -> None:
+        nonlocal now
+        now += delay
+        await asyncio.sleep(0)
+
+    guard = LLMCapacityGuard(
+        max_concurrency=3,
+        interactive_reserve=1,
+        standard_start_interval_seconds=0.2,
+        clock=clock,
+        sleep=sleep,
+    )
+
+    async def standard() -> None:
+        async with guard.lease():
+            starts.append(now)
+
+    await asyncio.gather(standard(), standard(), standard())
+    assert starts == pytest.approx([0.0, 0.2, 0.4])
+
+    before = now
+    with llm_capacity_priority("interactive"):
+        async with guard.lease():
+            assert now == before
+
+
 def test_assistant_workflow_is_registered_as_interactive() -> None:
     from Sere1nGraph.graph.workflow.registry import get_workflow_capacity_priority
 

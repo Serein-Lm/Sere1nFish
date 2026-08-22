@@ -28,6 +28,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from core.async_runtime import cancel_tasks_bounded
 from core.logger import get_logger
 from core.stream.types import Item, Context
 from core.stream.stage import Stage
@@ -99,11 +100,13 @@ class Pipeline:
         dlq: DeadLetter | None = None,
         pipeline_id: str = "",
         worker_get_timeout: float = 0.5,
+        worker_cancel_timeout: float = 10.0,
     ) -> None:
         self.pipeline_id = pipeline_id or uuid.uuid4().hex[:8]
         self.state = state or {}
         self.dlq = dlq or InMemoryDeadLetter()
         self._worker_get_timeout = worker_get_timeout
+        self._worker_cancel_timeout = max(0.0, float(worker_cancel_timeout))
 
         self._defs: dict[str, tuple[Stage, list[str]]] = {}  # name → (stage, downstream)
         self._runtime: dict[str, _StageRuntime] = {}
@@ -287,12 +290,23 @@ class Pipeline:
             self._running = False
 
     async def _cancel_all(self) -> None:
-        for rt in self._runtime.values():
-            for w in rt.workers:
-                if not w.done():
-                    w.cancel()
-        for rt in self._runtime.values():
-            await asyncio.gather(*rt.workers, return_exceptions=True)
+        workers = [
+            worker
+            for runtime in self._runtime.values()
+            for worker in runtime.workers
+        ]
+        pending = await cancel_tasks_bounded(
+            workers,
+            timeout=self._worker_cancel_timeout,
+        )
+        if pending:
+            logger.warning(
+                "[%s] %s 个 worker 在 %.1fs 内未响应取消，已分离清理: %s",
+                self.pipeline_id,
+                len(pending),
+                self._worker_cancel_timeout,
+                ", ".join(sorted(task.get_name() for task in pending)[:10]),
+            )
 
     def _set_fatal_error(self, error: BaseException) -> None:
         if self._fatal_error is not None:

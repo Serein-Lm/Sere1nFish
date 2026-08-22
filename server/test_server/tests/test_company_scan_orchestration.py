@@ -1570,6 +1570,47 @@ async def test_asset_and_manual_urls_share_one_deep_scan(
 
 
 @pytest.mark.asyncio
+async def test_asset_url_scan_propagates_model_capacity_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.llm_capacity import LLMCapacityUnavailableError
+
+    pipeline = CompanyScanPipeline(object(), object())
+
+    async def wait_for_model(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise LLMCapacityUnavailableError(
+            retry_after_seconds=120,
+            incident_id=7,
+        )
+
+    monkeypatch.setattr(pipeline, "_run_url_scan", wait_for_model)
+
+    with pytest.raises(LLMCapacityUnavailableError) as raised:
+        await pipeline._run_asset_and_url_scan(
+            task_id="task-capacity",
+            project_id="project-1",
+            identity={
+                "input_name": "目标公司",
+                "normalized_name": "目标公司",
+                "root_domain": "example.com",
+                "target_id": "",
+                "aliases": ["目标公司"],
+            },
+            url_text="",
+            urls=["https://example.com"],
+            enable_asset_discovery=False,
+            enable_url_scan=True,
+            enable_copywriting=False,
+            min_attention_score=40,
+            fofa_size=20,
+            hunter_size=20,
+            probe_concurrency=8,
+        )
+
+    assert raised.value.incident_id == 7
+
+
+@pytest.mark.asyncio
 async def test_wholly_owned_entity_setup_failure_is_aggregated_without_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
