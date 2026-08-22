@@ -271,3 +271,30 @@ def test_merge_project_ids_removes_source_and_preserves_destinations() -> None:
     )
 
     assert merged == ["destination-a", "destination-b"]
+
+
+def test_coverage_merge_prefers_newer_or_stronger_checkpoint() -> None:
+    from datetime import datetime, timezone
+
+    from api.services.project_data_merge import should_replace_scan_coverage
+
+    timestamp = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    partial = {
+        "task_id": "task-1",
+        "status": "partial",
+        "updated_at": timestamp,
+    }
+    completed = {
+        "task_id": "task-1",
+        "status": "completed",
+        "updated_at": timestamp,
+    }
+    newer_partial = {
+        "task_id": "task-2",
+        "status": "partial",
+        "updated_at": datetime(2026, 8, 23, tzinfo=timezone.utc),
+    }
+
+    assert should_replace_scan_coverage(partial, completed) is True
+    assert should_replace_scan_coverage(completed, partial) is False
+    assert should_replace_scan_coverage(completed, newer_partial) is True

@@ -9,6 +9,7 @@ from api.dao import bidding as bidding_dao
 from api.dao import project_groups as project_groups_dao
 from api.dao import projects as projects_dao
 from api.dao import source_documents as source_documents_dao
+from api.dao import target_relationships as target_relationships_dao
 from api.dao import targets as targets_dao
 from api.db.collections import PROJECT_TARGETS_COLLECTION
 from api.models.projects import ProjectPartitionRequest
@@ -237,6 +238,14 @@ async def partition_project_by_batch_tags(
             destination_project_id=destination_project_id,
             relations=selected,
         )
+        relationships_linked = (
+            await target_relationships_dao.clone_project_relationships(
+                db,
+                source_project_id=source_project_id,
+                destination_project_id=destination_project_id,
+                target_ids=target_ids,
+            )
+        )
         source_links = (
             await source_documents_dao.clone_project_links(
                 db,
@@ -263,6 +272,7 @@ async def partition_project_by_batch_tags(
                 "project_id": destination_project_id,
                 "project_name": spec.project_name,
                 "target_relations_linked": linked,
+                "target_relationships_linked": relationships_linked,
                 "source_links_copied": source_links,
                 "bidding_links_copied": bidding_links,
             }

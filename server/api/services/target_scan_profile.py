@@ -559,6 +559,44 @@ def coverage_status_from_result(
     return "completed"
 
 
+def has_current_mobile_keyword_coverage(
+    outcome: dict[str, Any],
+    *,
+    target_id: str,
+) -> bool:
+    """Return whether a mobile result proves full use of resolved Target terms."""
+    resolution = outcome.get("keyword_resolution") or {}
+    if not isinstance(resolution, dict):
+        return False
+    keywords = [
+        _clean_text(value)
+        for value in resolution.get("keywords") or []
+        if _clean_text(value)
+    ]
+    resolved_target_ids = {
+        _clean_text(value)
+        for value in resolution.get("target_ids") or []
+        if _clean_text(value)
+    }
+    if not keywords or (target_id and target_id not in resolved_target_ids):
+        return False
+    try:
+        keyword_total = int(outcome.get("keyword_total") or len(keywords))
+        keywords_completed = int(outcome.get("keywords_completed") or 0)
+        failed_keywords = int(outcome.get("failed_keywords") or 0)
+        persist_failed = int(outcome.get("persist_failed") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        keyword_total > 0
+        and keywords_completed >= keyword_total
+        and failed_keywords == 0
+        and persist_failed == 0
+        and not outcome.get("stopped")
+        and not outcome.get("timed_out")
+    )
+
+
 async def backfill_target_scan_coverage(
     db: AsyncIOMotorDatabase,
 ) -> dict[str, int]:
@@ -749,7 +787,14 @@ async def backfill_target_scan_coverage(
                 for key, value in outcome.items()
                 if isinstance(value, (str, int, float, bool)) and key != "error"
             }
-            if channel in {"wechat", "xhs"} and status == "completed":
+            if (
+                channel in {"wechat", "xhs"}
+                and status == "completed"
+                and not has_current_mobile_keyword_coverage(
+                    outcome,
+                    target_id=target_id,
+                )
+            ):
                 status = "partial"
                 summary["legacy_keyword_strategy"] = True
             coverage: dict[str, Any] = {
@@ -775,15 +820,14 @@ async def backfill_target_scan_coverage(
                 and not persisted_params.get("enable_asset_discovery", True)
                 and not persisted_params.get("enable_url_scan", True)
             )
-            correcting_same_task = bool(
+            reclassifying_same_task = bool(
                 str(persisted.get("task_id") or "")
                 == str(task.get("task_id") or "")
-                and str(persisted.get("status") or "") == "completed"
-                and status != "completed"
+                and str(persisted.get("status") or "") != status
             )
             if (
                 is_at_least_as_new(persisted.get("updated_at"), completed_at)
-                and not correcting_same_task
+                and not reclassifying_same_task
                 and not persisted_channel_invalid
             ):
                 continue

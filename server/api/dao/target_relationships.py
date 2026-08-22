@@ -196,6 +196,103 @@ async def sync_research_relationships(
     return normalized
 
 
+async def clone_project_relationships(
+    db: AsyncIOMotorDatabase,
+    *,
+    source_project_id: str,
+    destination_project_id: str,
+    target_ids: list[str],
+) -> int:
+    """Clone relationship edges whose two endpoints belong to one partition."""
+    normalized_ids = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in target_ids
+            if str(value or "").strip()
+        )
+    )
+    if (
+        not source_project_id
+        or not destination_project_id
+        or source_project_id == destination_project_id
+        or not normalized_ids
+    ):
+        return 0
+
+    relationships = await db[TARGET_RELATIONSHIPS_COLLECTION].find(
+        {
+            "project_id": source_project_id,
+            "active": {"$ne": False},
+            "subject_target_id": {"$in": normalized_ids},
+            "related_target_id": {"$in": normalized_ids},
+        },
+        {"_id": 0},
+    ).to_list(None)
+    if not relationships:
+        return 0
+
+    now = _now()
+    operations: list[UpdateOne] = []
+    for source in relationships:
+        subject_target_id = str(source.get("subject_target_id") or "").strip()
+        related_target_id = str(source.get("related_target_id") or "").strip()
+        relation_type = str(source.get("relation_type") or "").strip().casefold()
+        rid = relationship_id(
+            destination_project_id,
+            subject_target_id,
+            related_target_id,
+            relation_type,
+        )
+        set_fields = {
+            "relationship_id": rid,
+            "project_id": destination_project_id,
+            "subject_target_id": subject_target_id,
+            "subject_target_name": str(source.get("subject_target_name") or "")[:300],
+            "related_target_id": related_target_id,
+            "related_target_name": str(source.get("related_target_name") or "")[:300],
+            "relation_type": relation_type,
+            "direction": str(source.get("direction") or "").strip().casefold(),
+            "summary": str(source.get("summary") or "")[:3000],
+            "confidence": float(source.get("confidence") or 0),
+            "source": str(source.get("source") or "target_research"),
+            "active": True,
+            "last_verified_at": source.get("last_verified_at") or now,
+            "updated_at": now,
+        }
+        additions: dict[str, Any] = {
+            "merged_from_project_ids": source_project_id,
+        }
+        for field in ("source_urls", "task_ids", "research_ids"):
+            values = list(
+                dict.fromkeys(
+                    str(value or "").strip()
+                    for value in source.get(field) or []
+                    if str(value or "").strip()
+                )
+            )
+            if values:
+                additions[field] = {"$each": values}
+        operations.append(
+            UpdateOne(
+                {"relationship_id": rid},
+                {
+                    "$set": set_fields,
+                    "$setOnInsert": {
+                        "created_at": source.get("created_at") or now,
+                    },
+                    "$addToSet": additions,
+                },
+                upsert=True,
+            )
+        )
+
+    await db[TARGET_RELATIONSHIPS_COLLECTION].bulk_write(
+        operations,
+        ordered=False,
+    )
+    return len(operations)
+
+
 async def list_for_targets(
     db: AsyncIOMotorDatabase,
     *,

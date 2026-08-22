@@ -74,6 +74,43 @@ def _unique_strings(values: list[Any]) -> list[str]:
     )
 
 
+def _coverage_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def should_replace_scan_coverage(
+    current: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    """Prefer newer coverage, or a stronger reclassification of one checkpoint."""
+    if not current:
+        return True
+    current_time = _coverage_timestamp(
+        current.get("updated_at") or current.get("completed_at")
+    )
+    candidate_time = _coverage_timestamp(
+        candidate.get("updated_at") or candidate.get("completed_at")
+    )
+    if candidate_time != current_time:
+        return candidate_time > current_time
+    status_rank = {
+        "": 0,
+        "skipped": 1,
+        "error": 2,
+        "partial": 3,
+        "completed": 4,
+    }
+    current_status = str(current.get("status") or "").strip().lower()
+    candidate_status = str(candidate.get("status") or "").strip().lower()
+    return status_rank.get(candidate_status, 0) > status_rank.get(current_status, 0)
+
+
 @dataclass(frozen=True)
 class MergeDestination:
     project_id: str
@@ -613,7 +650,7 @@ async def _merge_project_target_metadata(
             }
             existing = await db[PROJECT_TARGETS_COLLECTION].find_one(
                 query,
-                {"_id": 0, "project_target_id": 1},
+                {"_id": 0, "project_target_id": 1, "scan_coverage": 1},
             )
             stats.planned_relations += 1
             if existing:
@@ -690,10 +727,14 @@ async def _merge_project_target_metadata(
                 if not normalized_channel:
                     continue
                 path = f"scan_coverage.{normalized_channel}"
-                await db[PROJECT_TARGETS_COLLECTION].update_one(
-                    {**query, path: {"$exists": False}},
-                    {"$set": {path: coverage}},
+                current_coverage = dict(
+                    ((existing or {}).get("scan_coverage") or {}).get(channel) or {}
                 )
+                if should_replace_scan_coverage(current_coverage, coverage):
+                    await db[PROJECT_TARGETS_COLLECTION].update_one(
+                        query,
+                        {"$set": {path: coverage}},
+                    )
             if source.get("scan_profile"):
                 await db[PROJECT_TARGETS_COLLECTION].update_one(
                     {**query, "scan_profile": {"$exists": False}},

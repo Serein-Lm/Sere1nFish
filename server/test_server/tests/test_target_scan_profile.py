@@ -8,6 +8,7 @@ from api.services.target_scan_profile import (
     SCAN_PROFILE_VERSION,
     build_target_scan_profile,
     coverage_status_from_result,
+    has_current_mobile_keyword_coverage,
     is_scan_coverage_current,
     load_project_descendant_scan_entities,
     select_subsidiary_scan_scope,
@@ -175,6 +176,35 @@ def test_website_coverage_requires_completed_url_and_document_stages() -> None:
 
     assert legacy == "partial"
     assert complete == "completed"
+
+
+def test_current_mobile_keywords_keep_completed_coverage() -> None:
+    outcome = {
+        "status": "completed",
+        "keyword_resolution": {
+            "keywords": ["示例机场", "示例机场 联系方式"],
+            "target_ids": ["target-airport"],
+        },
+        "keywords_completed": 2,
+        "keyword_total": 2,
+        "failed_keywords": 0,
+        "persist_failed": 0,
+        "stopped": False,
+        "timed_out": False,
+    }
+
+    assert has_current_mobile_keyword_coverage(
+        outcome,
+        target_id="target-airport",
+    ) is True
+    assert has_current_mobile_keyword_coverage(
+        outcome,
+        target_id="another-target",
+    ) is False
+    assert has_current_mobile_keyword_coverage(
+        {"status": "completed"},
+        target_id="target-airport",
+    ) is False
 
 
 @pytest.mark.asyncio
