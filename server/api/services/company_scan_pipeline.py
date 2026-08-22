@@ -322,6 +322,7 @@ class CompanyScanPipeline:
         enable_bidding_visual_analysis: bool | None = None,
         bidding_page_size: int = 20,
         bidding_max_records: int = 20,
+        bidding_lookback_days: int = 30,
         enable_wechat: bool = False,
         wechat_device_id: str = "",
         wechat_app_instance: str = "primary",
@@ -356,6 +357,7 @@ class CompanyScanPipeline:
         website_root_domains: list[str] | None = None,
         website_required_path_segments: list[str] | None = None,
         requested_by: str = "",
+        refresh_target_identity: bool = False,
     ) -> dict[str, Any]:
         """
         运行综合扫描流水线
@@ -664,6 +666,40 @@ class CompanyScanPipeline:
                     success=False,
                     error="核心阶段从持久化结果恢复，未重复执行公司路由",
                 )
+            elif pinned_target is not None and not refresh_target_identity:
+                pinned_profile = dict(pinned_target.get("scan_profile") or {})
+                pinned_root_domains = self._dedupe_text(
+                    [
+                        str(pinned_target.get("root_domain") or ""),
+                        *list(pinned_target.get("root_domains") or []),
+                        *list(pinned_target.get("official_root_domains") or []),
+                    ]
+                )[:6]
+                normalized_result = {
+                    "normalized_name": str(
+                        pinned_target.get("canonical_name") or company_name
+                    ).strip(),
+                    "root_domain": (
+                        pinned_root_domains[0] if pinned_root_domains else ""
+                    ),
+                    "icp_domains": pinned_root_domains,
+                    "aliases": self._dedupe_text(
+                        [
+                            *list(pinned_target.get("identity_aliases") or []),
+                            *list(pinned_profile.get("search_aliases") or []),
+                        ]
+                    )[:20],
+                    "source": "project_target_identity",
+                    "confidence": 1.0,
+                    "provenance": {
+                        "pinned_target_id": requested_target_id,
+                        "identity_reused": True,
+                    },
+                }
+                router_result = CompanyRouterResult(
+                    success=False,
+                    error="复用项目内已确认的 Target 身份，未重复执行公司路由",
+                )
             else:
                 normalized_result, router_result = await asyncio.gather(
                     asyncio.wait_for(
@@ -822,6 +858,7 @@ class CompanyScanPipeline:
                 persist_target_scan_profile,
             )
 
+            identity_reused = bool(provenance.get("identity_reused"))
             scan_profile = build_target_scan_profile(
                 canonical_name=normalized_name,
                 identity_aliases=list(target.get("identity_aliases") or []),
@@ -849,7 +886,11 @@ class CompanyScanPipeline:
                     router_profile
                     and (pinned_target is None or router_matches_target)
                 ),
-                source="company_scan_router",
+                source=(
+                    "project_target_identity"
+                    if identity_reused
+                    else "company_scan_router"
+                ),
             )
             target = await persist_target_scan_profile(
                 self.db,
@@ -896,6 +937,7 @@ class CompanyScanPipeline:
             }
             result["router_result"] = {
                 "success": router_output.success,
+                "identity_reused": identity_reused,
                 "enabled_nodes": router_output.enabled_nodes,
                 "keywords": router_output.all_keywords,
             }
@@ -1072,6 +1114,11 @@ class CompanyScanPipeline:
                         "[company_scan] task=%s 核心阶段已恢复，跳过重复公司路由",
                         task_id,
                     )
+                elif identity_reused:
+                    logger.info(
+                        "[company_scan] task=%s 已复用 Target 身份，跳过重复公司路由",
+                        task_id,
+                    )
                 else:
                     logger.warning(
                         "[company_scan] 公司路由失败: %s，使用默认策略",
@@ -1238,6 +1285,7 @@ class CompanyScanPipeline:
                         target_id=target_id,
                         page_size=bidding_page_size,
                         max_records=bidding_max_records,
+                        lookback_days=bidding_lookback_days,
                         enable_visual_analysis=bidding_visual_analysis_enabled,
                         enable_copywriting=enable_copywriting,
                         min_attention_score=min_attention_score,
@@ -1660,6 +1708,7 @@ class CompanyScanPipeline:
                         enable_bidding=subsidiary_bidding_enabled,
                         bidding_page_size=bidding_page_size,
                         bidding_max_records=bidding_max_records,
+                        bidding_lookback_days=bidding_lookback_days,
                         xhs_decisions=child_xhs_decisions,
                         website_collection_mode=website_collection_mode,
                     ),
@@ -2173,6 +2222,7 @@ class CompanyScanPipeline:
         target_id: str,
         page_size: int,
         max_records: int,
+        lookback_days: int,
         enable_visual_analysis: bool,
         enable_copywriting: bool,
         min_attention_score: int,
@@ -2190,6 +2240,7 @@ class CompanyScanPipeline:
                 parent_task_id=task_id,
                 page_size=max(1, min(int(page_size), 20)),
                 max_records=max(1, min(int(max_records), 2000)),
+                lookback_days=max(1, min(int(lookback_days), 30)),
                 enable_visual_analysis=enable_visual_analysis,
                 enable_copywriting=enable_copywriting,
                 min_attention_score=min_attention_score,
@@ -2242,6 +2293,7 @@ class CompanyScanPipeline:
         enable_bidding: bool = False,
         bidding_page_size: int = 20,
         bidding_max_records: int = 20,
+        bidding_lookback_days: int = 30,
         xhs_decisions: dict[str, dict[str, Any]] | None = None,
         website_collection_mode: str = "deep",
     ) -> dict[str, Any]:
@@ -2401,6 +2453,7 @@ class CompanyScanPipeline:
                                 target_id=target_id,
                                 page_size=bidding_page_size,
                                 max_records=bidding_max_records,
+                                lookback_days=bidding_lookback_days,
                                 enable_visual_analysis=enable_url_scan,
                                 enable_copywriting=enable_copywriting,
                                 min_attention_score=min_attention_score,

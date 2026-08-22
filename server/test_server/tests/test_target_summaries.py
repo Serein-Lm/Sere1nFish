@@ -16,6 +16,7 @@ from api.services.targets import (
     _target_batch_priority,
     _target_scan_coverage_summary,
     _target_summary_sort_key,
+    apply_project_target_hierarchy,
     assign_project_target_batches,
     list_project_target_summary_page,
     set_target_official_website_roots,
@@ -488,7 +489,14 @@ async def test_batch_assignment_propagates_only_to_selected_descendants(
         mutation.update(kwargs)
         return {"matched_count": 3, "modified_count": 3}
 
+    async def list_relationships(*_args, **_kwargs):
+        return []
+
     monkeypatch.setattr(targets_dao, "list_project_targets", list_relations)
+    monkeypatch.setattr(
+        "api.services.targets.target_relationships_dao.list_for_targets",
+        list_relationships,
+    )
     monkeypatch.setattr(
         targets_dao,
         "update_project_target_batch_tags",
@@ -506,6 +514,98 @@ async def test_batch_assignment_propagates_only_to_selected_descendants(
     assert mutation["target_ids"] == ["child", "grandchild", "root"]
     assert "other" not in mutation["target_ids"]
     assert result["target_count"] == 3
+
+
+def test_parent_organization_builds_read_tree_without_control_lineage() -> None:
+    relations = [
+        {"target_id": "group", "target_name": "机场集团"},
+        {"target_id": "airport", "target_name": "成员机场"},
+    ]
+    relationships = [
+        {
+            "relationship_id": "relation-1",
+            "subject_target_id": "airport",
+            "related_target_id": "group",
+            "related_target_name": "机场集团",
+            "relation_type": "parent_organization",
+            "direction": "upstream",
+            "confidence": 0.98,
+            "source_urls": ["https://example.test/official"],
+        }
+    ]
+
+    projected = apply_project_target_hierarchy(relations, relationships)
+    airport = next(item for item in projected if item["target_id"] == "airport")
+
+    assert airport["hierarchy_parent_target_id"] == "group"
+    assert airport["hierarchy_root_target_id"] == "group"
+    assert airport["hierarchy_depth"] == 1
+    assert airport["hierarchy_relation_type"] == "parent_organization"
+    assert "parent_target_id" not in airport
+    assert "ownership_percent" not in airport
+
+
+def test_control_lineage_takes_precedence_over_organization_projection() -> None:
+    relations = [
+        {"target_id": "owner", "target_name": "直接股东"},
+        {"target_id": "group", "target_name": "行业集团"},
+        {
+            "target_id": "company",
+            "target_name": "目标公司",
+            "parent_target_id": "owner",
+            "parent_target_name": "直接股东",
+            "relation_type": "wholly_owned",
+            "relation_depth": 1,
+            "ownership_percent": 100,
+        },
+    ]
+    relationships = [
+        {
+            "relationship_id": "relation-2",
+            "subject_target_id": "company",
+            "related_target_id": "group",
+            "relation_type": "parent_organization",
+            "direction": "upstream",
+            "confidence": 1,
+        }
+    ]
+
+    projected = apply_project_target_hierarchy(relations, relationships)
+    company = next(item for item in projected if item["target_id"] == "company")
+
+    assert company["hierarchy_parent_target_id"] == "owner"
+    assert company["hierarchy_relation_type"] == "wholly_owned"
+    assert company["ownership_percent"] == 100
+
+
+def test_controlled_subsidiary_projects_ownership_into_hierarchy() -> None:
+    relations = [
+        {"target_id": "parent", "target_name": "航空公司"},
+        {"target_id": "child", "target_name": "控股航司"},
+    ]
+    relationships = [
+        {
+            "relationship_id": "relation-3",
+            "subject_target_id": "child",
+            "related_target_id": "parent",
+            "related_target_name": "航空公司",
+            "relation_type": "controlled_subsidiary",
+            "direction": "upstream",
+            "confidence": 1,
+            "ownership_percent": 72.83,
+            "indirect_ownership_percent": 27.17,
+            "effective_ownership_percent": 100,
+        }
+    ]
+
+    projected = apply_project_target_hierarchy(relations, relationships)
+    child = next(item for item in projected if item["target_id"] == "child")
+
+    assert child["hierarchy_parent_target_id"] == "parent"
+    assert child["hierarchy_relation_type"] == "controlled_subsidiary"
+    assert child["hierarchy_ownership_percent"] == 72.83
+    assert child["hierarchy_indirect_ownership_percent"] == 27.17
+    assert child["hierarchy_effective_ownership_percent"] == 100
 
 
 def test_summarize_finding_counts_groups_high_scores_by_frontend_module() -> None:
@@ -1040,7 +1140,14 @@ async def test_target_summary_page_loads_trusted_identity_aliases(
     async def list_summaries(*_args, **_kwargs):
         return []
 
+    async def list_relationships(*_args, **_kwargs):
+        return []
+
     monkeypatch.setattr(targets_dao, "list_project_targets", list_relations)
+    monkeypatch.setattr(
+        "api.services.targets.target_relationships_dao.list_for_targets",
+        list_relationships,
+    )
     monkeypatch.setattr(
         "api.services.targets.list_project_target_summaries",
         list_summaries,

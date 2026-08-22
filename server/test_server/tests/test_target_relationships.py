@@ -52,6 +52,28 @@ def test_relationship_rejects_self_reference() -> None:
         )
 
 
+def test_relationship_normalizes_direct_and_indirect_ownership() -> None:
+    relation = normalize_relationship(
+        {
+            "related_target_id": "target-parent",
+            "related_target_name": "母公司",
+            "relation_type": "controlled_subsidiary",
+            "direction": "upstream",
+            "ownership_percent": "72.83",
+            "indirect_ownership_percent": 27.17,
+        },
+        project_id="project-1",
+        subject_target_id="target-child",
+        subject_target_name="子公司",
+        task_id="task-1",
+        research_id="research-1",
+    )
+
+    assert relation["ownership_percent"] == 72.83
+    assert relation["indirect_ownership_percent"] == 27.17
+    assert relation["effective_ownership_percent"] == 100
+
+
 def test_relationship_views_expose_supervisor_without_inverting_tree() -> None:
     views = build_target_relationship_views(
         [

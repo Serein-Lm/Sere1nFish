@@ -109,6 +109,9 @@ export interface TargetRelationshipUnit {
   relation_type: string
   summary?: string
   confidence?: number
+  ownership_percent?: number | null
+  indirect_ownership_percent?: number | null
+  effective_ownership_percent?: number | null
   source_urls?: string[]
   research_ids?: string[]
 }
@@ -145,6 +148,20 @@ export interface ProjectTargetSummary {
   relation_source?: string
   lineage_target_ids?: string[]
   lineage_target_names?: string[]
+  hierarchy_root_target_id?: string
+  hierarchy_root_target_name?: string
+  hierarchy_parent_target_id?: string
+  hierarchy_parent_target_name?: string
+  hierarchy_relation_type?: string
+  hierarchy_relation_source?: string
+  hierarchy_relation_summary?: string
+  hierarchy_source_urls?: string[]
+  hierarchy_ownership_percent?: number | null
+  hierarchy_indirect_ownership_percent?: number | null
+  hierarchy_effective_ownership_percent?: number | null
+  hierarchy_depth?: number
+  hierarchy_lineage_target_ids?: string[]
+  hierarchy_lineage_target_names?: string[]
   batch_tags?: string[]
   batch_priority_rank?: number | null
   batch_priority_label?: string
@@ -256,6 +273,12 @@ export interface ProjectTargetOption {
   parent_target_id?: string
   parent_target_name?: string
   relation_depth?: number
+  hierarchy_root_target_id?: string
+  hierarchy_root_target_name?: string
+  hierarchy_parent_target_id?: string
+  hierarchy_parent_target_name?: string
+  hierarchy_relation_type?: string
+  hierarchy_depth?: number
   batch_tags?: string[]
 }
 

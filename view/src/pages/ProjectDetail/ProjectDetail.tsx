@@ -149,6 +149,32 @@ interface TargetDashboardRow extends ProjectTargetSummary {
   isLoadingPlaceholder?: boolean
 }
 
+function targetHierarchyDepth(target: ProjectTargetSummary | ProjectTargetOption): number {
+  return Number(target.hierarchy_depth ?? target.relation_depth ?? 0)
+}
+
+function targetHierarchyParentId(target: ProjectTargetSummary | ProjectTargetOption): string {
+  return target.hierarchy_parent_target_id || target.parent_target_id || ''
+}
+
+function targetHierarchyParentName(target: ProjectTargetSummary | ProjectTargetOption): string {
+  return target.hierarchy_parent_target_name || target.parent_target_name || ''
+}
+
+function targetHierarchyRole(target: ProjectTargetSummary | ProjectTargetOption): string {
+  const depth = targetHierarchyDepth(target)
+  if (target.hierarchy_relation_type === 'controlled_subsidiary') {
+    return depth >= 2 ? '二级控股单位' : '控股子公司'
+  }
+  if (target.hierarchy_relation_type?.includes('wholly_owned')) {
+    return depth >= 2 ? '全资孙公司' : '全资子公司'
+  }
+  if (target.hierarchy_relation_type === 'parent_organization') {
+    return depth >= 2 ? '二级成员' : '成员单位'
+  }
+  return depth >= 2 ? '孙单位' : depth === 1 ? '子单位' : '主目标'
+}
+
 interface TargetModuleDefinition {
   tab: TargetDataTabKey
   label: string
@@ -3472,7 +3498,7 @@ export default function ProjectDetail() {
               style={{ width: 360, maxWidth: '100%' }}
               options={projectTargetOptions.map((target) => ({
                 value: target.target_id,
-                label: `${(target.relation_depth ?? 0) >= 2 ? '[孙单位] ' : (target.relation_depth ?? 0) === 1 ? '[子单位] ' : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
+                label: `${targetHierarchyDepth(target) > 0 ? `[${targetHierarchyRole(target)}] ` : ''}${target.target_name}${target.root_domain ? ` · ${target.root_domain}` : ''}`,
               }))}
               onChange={(value) => {
                 openTargetModule(value, 'wechat')
@@ -4025,11 +4051,12 @@ export default function ProjectDetail() {
     const byTargetId = new Map(rows.map((target) => [target.target_id, target]))
     const roots: TargetDashboardRow[] = []
     rows.forEach((target) => {
-      const depth = Number(target.relation_depth || 0)
-      const parent = target.parent_target_id
-        ? byTargetId.get(target.parent_target_id)
+      const depth = targetHierarchyDepth(target)
+      const parentTargetId = targetHierarchyParentId(target)
+      const parent = parentTargetId
+        ? byTargetId.get(parentTargetId)
         : undefined
-      const parentDepth = Number(parent?.relation_depth || 0)
+      const parentDepth = parent ? targetHierarchyDepth(parent) : 0
       if (parent && parent.target_id !== target.target_id && parentDepth < depth) {
         parent.children?.push(target)
       } else {
@@ -4038,8 +4065,8 @@ export default function ProjectDetail() {
     })
     rows.forEach((target) => {
       if (!target.children?.length) delete target.children
-      const isRoot = Number(target.relation_depth || 0) === 0
-        || !target.parent_target_id
+      const isRoot = targetHierarchyDepth(target) === 0
+        || !targetHierarchyParentId(target)
       const branchLoaded = Object.prototype.hasOwnProperty.call(
         targetBranches,
         target.target_id,
@@ -4057,9 +4084,13 @@ export default function ProjectDetail() {
           target_name: targetBranchLoading[target.target_id]
             ? '正在加载关联单位...'
             : `展开加载 ${target.descendant_count || target.child_count || 0} 个关联单位`,
+          hierarchy_parent_target_id: target.target_id,
+          hierarchy_parent_target_name: target.target_name,
+          hierarchy_relation_type: target.hierarchy_relation_type,
+          hierarchy_depth: targetHierarchyDepth(target) + 1,
           parent_target_id: target.target_id,
           parent_target_name: target.target_name,
-          relation_depth: Number(target.relation_depth || 0) + 1,
+          relation_depth: targetHierarchyDepth(target) + 1,
           document_count: 0,
           project_document_count: 0,
           record_count: 0,
@@ -4579,7 +4610,7 @@ export default function ProjectDetail() {
         width: 320,
         render: (_, target) => target.isLoadingPlaceholder ? (
           <Space size={8}>
-            {targetBranchLoading[target.parent_target_id || ''] ? <Spin size="small" /> : null}
+            {targetBranchLoading[targetHierarchyParentId(target)] ? <Spin size="small" /> : null}
             <Text type="secondary">{target.target_name}</Text>
           </Space>
         ) : (() => {
@@ -4600,6 +4631,10 @@ export default function ProjectDetail() {
             (module) => Number(target[module.countKey] || 0) > 0,
           )
           const taskStatus = taskStatusMap[target.latest_task_status || '']
+          const hierarchyParentId = targetHierarchyParentId(target)
+          const supervisingUnits = (target.supervising_units || []).filter(
+            (unit) => !hierarchyParentId || unit.target_id !== hierarchyParentId,
+          )
           return (
             <div className="target-company-cell">
               <div className="target-company-heading">
@@ -4609,11 +4644,9 @@ export default function ProjectDetail() {
                     {target.batch_priority_label}
                   </Tag>
                 ) : null}
-                {(target.relation_depth ?? 0) >= 2
-                  ? <Tag color="gold">孙单位</Tag>
-                  : (target.relation_depth ?? 0) === 1
-                  ? <Tag color="cyan">子单位</Tag>
-                  : <Tag color="blue">主目标</Tag>}
+                <Tag color={targetHierarchyDepth(target) >= 2 ? 'gold' : targetHierarchyDepth(target) === 1 ? 'cyan' : 'blue'}>
+                  {targetHierarchyRole(target)}
+                </Tag>
               </div>
               <div className="target-company-tags">
                 {(target.batch_tags || [])
@@ -4643,20 +4676,29 @@ export default function ProjectDetail() {
                   {completedChannels.length ? `已覆盖：${completedChannels.join(' · ')}` : ''}
                 </Text>
               ) : null}
-              {target.parent_target_name ? (
+              {targetHierarchyParentName(target) ? (
                 <Text type="secondary" className="target-company-meta-line">
-                  上级：{target.parent_target_name}
-                  {target.ownership_percent != null ? ` · 持股 ${target.ownership_percent}%` : ''}
+                  {target.hierarchy_relation_type === 'parent_organization'
+                    ? '归属'
+                    : target.hierarchy_relation_type === 'controlled_subsidiary'
+                    ? '控股方'
+                    : '上级'}：{targetHierarchyParentName(target)}
+                  {(target.ownership_percent ?? target.hierarchy_ownership_percent) != null
+                    ? ` · 直接持股 ${target.ownership_percent ?? target.hierarchy_ownership_percent}%`
+                    : ''}
+                  {target.hierarchy_indirect_ownership_percent != null
+                    ? ` · 间接持股 ${target.hierarchy_indirect_ownership_percent}%`
+                    : ''}
                 </Text>
               ) : null}
-              {target.supervising_units?.length ? (
+              {supervisingUnits.length ? (
                 <Tooltip
-                  title={target.supervising_units
+                  title={supervisingUnits
                     .map((unit) => unit.summary || unit.target_name)
                     .join('\n')}
                 >
                   <Text type="secondary" className="target-company-meta-line">
-                    主管单位：{target.supervising_units
+                    主管单位：{supervisingUnits
                       .map((unit) => unit.target_name)
                       .join(' · ')}
                   </Text>
@@ -5434,12 +5476,11 @@ export default function ProjectDetail() {
                     {(selectedTarget.batch_tags || []).map((batchTag) => (
                       <Tag key={batchTag} color="processing">{batchTag}</Tag>
                     ))}
-                    {selectedTarget.relation_type === 'primary' && <Tag color="blue">主目标</Tag>}
-                    {(selectedTarget.relation_depth ?? 0) >= 2
-                      ? <Tag color="gold">孙单位</Tag>
-                      : (selectedTarget.relation_depth ?? 0) === 1
-                      ? <Tag color="cyan">子单位</Tag>
-                      : null}
+                    {targetHierarchyDepth(selectedTarget) === 0
+                      ? <Tag color="blue">主目标</Tag>
+                      : <Tag color={targetHierarchyDepth(selectedTarget) >= 2 ? 'gold' : 'cyan'}>
+                          {targetHierarchyRole(selectedTarget)}
+                        </Tag>}
                   </Space>
                   {selectedTarget.root_domain && (
                     <Text type="secondary" className="target-scope-domain">{selectedTarget.root_domain}</Text>
@@ -5664,6 +5705,7 @@ export default function ProjectDetail() {
                     params.enable_bidding = values.enable_bidding ?? false
                     if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
                     if (values.bidding_max_records) params.bidding_max_records = values.bidding_max_records
+                    if (values.bidding_lookback_days) params.bidding_lookback_days = values.bidding_lookback_days
                     params.enable_wechat = values.enable_wechat ?? false
                     if (values.enable_wechat) {
                       params.wechat_device_id = values.wechat_device_id
@@ -5780,7 +5822,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', website_collection_mode: 'deep', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, enable_wechat: false, wechat_app_instance: 'primary', wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', website_collection_mode: 'deep', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, bidding_lookback_days: 30, enable_wechat: false, wechat_app_instance: 'primary', wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -6122,6 +6164,13 @@ export default function ProjectDetail() {
                               <InputNumber min={1} max={20} style={{ width: '100%' }} />
                             </Form.Item>
                           </Col>
+                          <Col xs={24} sm={6}>
+                            <Form.Item name="bidding_lookback_days" label="招投标回溯天数" tooltip="按任务控制时间窗口；机场专项建议 7 天，默认 30 天">
+                              <InputNumber min={1} max={30} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Row gutter={16}>
                           <Col xs={24} sm={6}>
                             <Form.Item name="min_attention_score" label="最低关注度阈值">
                               <InputNumber min={0} max={100} style={{ width: '100%' }} />

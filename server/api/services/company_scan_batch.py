@@ -10,6 +10,7 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from api.dao import target_relationships as target_relationships_dao
 from api.dao import targets as targets_dao
 from api.dao import tasks as tasks_dao
 from api.services.target_scan_profile import (
@@ -37,6 +38,75 @@ class CompanyScanJobSpec:
     target_id: str
     company_name: str
     params: dict[str, Any]
+
+
+def _project_target_identity_names(relation: dict[str, Any]) -> list[str]:
+    profile = dict(relation.get("scan_profile") or {})
+    return _dedupe_text(
+        [
+            str(relation.get("target_name") or ""),
+            str(relation.get("display_name") or ""),
+            *[str(value) for value in relation.get("short_names") or []],
+            *[str(value) for value in relation.get("scan_aliases") or []],
+            *[str(value) for value in profile.get("search_aliases") or []],
+        ]
+    )
+
+
+async def resolve_company_scan_job_specs(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    company_names: list[str],
+    shared_params: dict[str, Any] | None = None,
+) -> list[CompanyScanJobSpec]:
+    """Resolve exact project Target identities before creating scan jobs.
+
+    Ambiguous aliases deliberately remain unpinned so the normal identity pipeline can
+    disambiguate them. A unique project identity is safe to reuse and avoids spending
+    model capacity on names and domains the project has already verified.
+    """
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=True,
+    )
+    identity_index: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for relation in relations:
+        target_id = str(relation.get("target_id") or "").strip()
+        if not target_id:
+            continue
+        for identity_name in _project_target_identity_names(relation):
+            normalized_name = targets_dao.normalize_target_name(identity_name)
+            if normalized_name:
+                identity_index[normalized_name][target_id] = relation
+
+    specs: list[CompanyScanJobSpec] = []
+    for company_name in company_names:
+        candidates = identity_index.get(
+            targets_dao.normalize_target_name(company_name),
+            {},
+        )
+        relation = next(iter(candidates.values())) if len(candidates) == 1 else None
+        target_id = str((relation or {}).get("target_id") or "").strip()
+        canonical_name = str(
+            (relation or {}).get("target_name") or company_name
+        ).strip()
+        params = dict(shared_params or {})
+        if target_id:
+            params.setdefault("refresh_target_identity", False)
+            if "target_batch_tags" not in params:
+                params["target_batch_tags"] = list(
+                    (relation or {}).get("batch_tags") or []
+                )
+        specs.append(
+            CompanyScanJobSpec(
+                target_id=target_id,
+                company_name=canonical_name,
+                params=params,
+            )
+        )
+    return specs
 
 
 def _dedupe_text(values: list[str] | tuple[str, ...]) -> list[str]:
@@ -120,6 +190,7 @@ async def plan_company_scan_coverage(
     wechat_app_instance: str = "primary",
     subsidiary_scan_limit: int = 12,
     bidding_max_records: int = 10,
+    bidding_lookback_days: int = 30,
     enable_copywriting: bool = True,
 ) -> dict[str, Any]:
     """按当前画像指纹规划根 Target 缺失渠道，结果可直接进入统一队列。"""
@@ -132,11 +203,30 @@ async def plan_company_scan_coverage(
     }
     safe_subsidiary_limit = max(1, min(int(subsidiary_scan_limit or 12), 100))
     safe_bidding_limit = max(1, min(int(bidding_max_records or 10), 20))
+    safe_bidding_lookback = max(
+        1,
+        min(int(bidding_lookback_days or 30), 30),
+    )
 
     relations = await targets_dao.list_project_targets(
         db,
         project_id,
         summary_only=True,
+    )
+    from api.services.targets import apply_project_target_hierarchy
+
+    hierarchy_relationships = await target_relationships_dao.list_for_targets(
+        project_id=project_id,
+        db=db,
+        target_ids=[
+            str(relation.get("target_id") or "")
+            for relation in relations
+            if str(relation.get("target_id") or "")
+        ],
+    )
+    relations = apply_project_target_hierarchy(
+        relations,
+        hierarchy_relationships,
     )
     inflight_tasks = await tasks_dao.list_inflight_company_scans(
         db,
@@ -158,7 +248,10 @@ async def plan_company_scan_coverage(
     for relation in relations:
         target_id = str(relation.get("target_id") or "").strip()
         target_name = str(relation.get("target_name") or "").strip()
-        relation_depth = int(relation.get("relation_depth") or 0)
+        relation_depth = max(
+            int(relation.get("relation_depth") or 0),
+            int(relation.get("hierarchy_depth") or 0),
+        )
         if not target_id or not target_name or relation_depth != 0:
             continue
         if batch_tag and batch_tag not in list(relation.get("batch_tags") or []):
@@ -245,6 +338,7 @@ async def plan_company_scan_coverage(
             "enable_bidding": bidding_missing,
             "bidding_page_size": safe_bidding_limit,
             "bidding_max_records": safe_bidding_limit,
+            "bidding_lookback_days": safe_bidding_lookback,
             "enable_scholar": "scholar" in missing_channels,
             "scholar_limit": 20,
             "enable_control_structure": "control" in missing_channels,

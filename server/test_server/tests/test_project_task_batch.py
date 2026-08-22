@@ -97,6 +97,7 @@ def test_project_task_batch_emits_one_aggregate_completion(monkeypatch) -> None:
 
 def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) -> None:
     from api.auth import User
+    from api.dao import targets as targets_dao
     from api.routers import project_api
     from api.services.info_collection import tuning as tuning_service
     from core import background as background_service
@@ -111,6 +112,16 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
     async def insert_tasks(_db, documents):
         captured_documents.extend(documents)
         return len(documents)
+
+    async def list_project_targets(*_args, **_kwargs):
+        return [
+            {
+                "target_id": "target-anhui",
+                "target_name": "安徽广播电视台",
+                "display_name": "安徽广播电视台",
+                "batch_tags": ["第一批"],
+            }
+        ]
 
     class _Tuning:
         company_scan_concurrency = 2
@@ -128,6 +139,7 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
     monkeypatch.setattr(project_api, "get_db", lambda: object())
     monkeypatch.setattr(project_api.projects_dao, "get_project", get_project)
     monkeypatch.setattr(project_api.tasks_dao, "insert_tasks", insert_tasks)
+    monkeypatch.setattr(targets_dao, "list_project_targets", list_project_targets)
     monkeypatch.setattr(background_service, "spawn_background", spawn)
     monkeypatch.setattr(tuning_service, "get_collection_runtime_tuning", get_tuning)
 
@@ -152,6 +164,9 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
         "安徽广播电视台",
         "鞍钢集团有限公司",
     ]
+    assert captured_documents[0]["params"]["target_id"] == "target-anhui"
+    assert captured_documents[0]["params"]["refresh_target_identity"] is False
+    assert captured_documents[1]["params"]["target_id"] == ""
     assert all(doc["batch_id"] == response["batch_id"] for doc in captured_documents)
     assert all(doc["batch_concurrency"] == 2 for doc in captured_documents)
     assert [doc["batch_index"] for doc in captured_documents] == [1, 2]
@@ -237,6 +252,17 @@ def test_company_scan_validates_website_collection_mode() -> None:
 
     with pytest.raises(ValueError, match="standard 或 deep"):
         _validate_company_scan_params({"website_collection_mode": "unbounded"})
+
+
+def test_company_scan_validates_bidding_lookback_days() -> None:
+    from api.routers.project_api import _validate_company_scan_params
+
+    params = {"bidding_lookback_days": "7"}
+    _validate_company_scan_params(params)
+    assert params["bidding_lookback_days"] == 7
+
+    with pytest.raises(ValueError, match="必须为 1 到 30"):
+        _validate_company_scan_params({"bidding_lookback_days": 31})
 
 
 def test_company_scan_normalizes_website_path_scope() -> None:

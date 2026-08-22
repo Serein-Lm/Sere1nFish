@@ -771,6 +771,7 @@ async def test_company_scan_keeps_a_pinned_related_target_identity(
     assert stored_meta["normalized_name"] == "目标子公司"
     assert result["identity"]["target_id"] == "target-child"
     assert result["identity"]["normalization_error"] is None
+    assert result["router_result"]["identity_reused"] is True
     assert len(website_calls) == 1
     assert website_calls[0]["identity"]["root_domain"] == "child.example"
 

@@ -4,7 +4,62 @@ from typing import Any
 
 import pytest
 
-from api.services.company_scan_batch import plan_company_scan_coverage
+from api.services.company_scan_batch import (
+    plan_company_scan_coverage,
+    resolve_company_scan_job_specs,
+)
+
+
+async def _no_target_relationships(
+    db: Any,
+    *,
+    project_id: str,
+    target_ids: list[str],
+) -> list[dict[str, Any]]:
+    assert db is not None
+    assert project_id == "project-1"
+    assert target_ids
+    return []
+
+
+@pytest.mark.asyncio
+async def test_scan_specs_pin_only_unique_project_target_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import targets as targets_dao
+
+    async def relations(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "target_id": "airport-chongqing",
+                "target_name": "重庆江北国际机场有限公司",
+                "batch_tags": ["机场航空重点专项"],
+                "scan_profile": {
+                    "search_aliases": ["重庆江北国际机场", "江北机场"]
+                },
+            },
+            {
+                "target_id": "airport-other",
+                "target_name": "江北机场服务有限公司",
+                "scan_profile": {"search_aliases": ["江北机场"]},
+            },
+        ]
+
+    monkeypatch.setattr(targets_dao, "list_project_targets", relations)
+
+    specs = await resolve_company_scan_job_specs(
+        object(),  # type: ignore[arg-type]
+        project_id="project-1",
+        company_names=["重庆江北国际机场", "江北机场", "新机场"],
+        shared_params={"enable_wechat": True},
+    )
+
+    assert specs[0].target_id == "airport-chongqing"
+    assert specs[0].company_name == "重庆江北国际机场有限公司"
+    assert specs[0].params["refresh_target_identity"] is False
+    assert specs[0].params["target_batch_tags"] == ["机场航空重点专项"]
+    assert specs[1].target_id == ""
+    assert specs[2].target_id == ""
 
 
 @pytest.mark.asyncio
@@ -51,6 +106,7 @@ async def test_coverage_plan_excludes_finance_and_schedules_only_missing_channel
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.dao import targets as targets_dao
+    from api.dao import target_relationships as target_relationships_dao
     from api.dao import tasks as tasks_dao
 
     async def relations(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
@@ -89,6 +145,11 @@ async def test_coverage_plan_excludes_finance_and_schedules_only_missing_channel
 
     monkeypatch.setattr(targets_dao, "list_project_targets", relations)
     monkeypatch.setattr(tasks_dao, "list_inflight_company_scans", inflight)
+    monkeypatch.setattr(
+        target_relationships_dao,
+        "list_for_targets",
+        _no_target_relationships,
+    )
 
     plan = await plan_company_scan_coverage(
         object(),
@@ -120,6 +181,7 @@ async def test_coverage_plan_does_not_duplicate_inflight_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.dao import targets as targets_dao
+    from api.dao import target_relationships as target_relationships_dao
     from api.dao import tasks as tasks_dao
 
     async def relations(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
@@ -146,6 +208,11 @@ async def test_coverage_plan_does_not_duplicate_inflight_target(
 
     monkeypatch.setattr(targets_dao, "list_project_targets", relations)
     monkeypatch.setattr(tasks_dao, "list_inflight_company_scans", inflight)
+    monkeypatch.setattr(
+        target_relationships_dao,
+        "list_for_targets",
+        _no_target_relationships,
+    )
 
     plan = await plan_company_scan_coverage(
         object(),
@@ -164,6 +231,7 @@ async def test_coverage_plan_allows_missing_wechat_while_website_is_inflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.dao import targets as targets_dao
+    from api.dao import target_relationships as target_relationships_dao
     from api.dao import tasks as tasks_dao
 
     async def relations(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
@@ -194,6 +262,11 @@ async def test_coverage_plan_allows_missing_wechat_while_website_is_inflight(
 
     monkeypatch.setattr(targets_dao, "list_project_targets", relations)
     monkeypatch.setattr(tasks_dao, "list_inflight_company_scans", inflight)
+    monkeypatch.setattr(
+        target_relationships_dao,
+        "list_for_targets",
+        _no_target_relationships,
+    )
 
     plan = await plan_company_scan_coverage(
         object(),
@@ -212,3 +285,54 @@ async def test_coverage_plan_allows_missing_wechat_while_website_is_inflight(
     assert item["params"]["enable_url_scan"] is False
     assert item["params"]["enable_wechat"] is True
     assert item["params"]["wechat_app_instance"] == "clone"
+
+
+@pytest.mark.asyncio
+async def test_coverage_plan_skips_organization_tree_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.dao import target_relationships as target_relationships_dao
+    from api.dao import targets as targets_dao
+    from api.dao import tasks as tasks_dao
+
+    async def relations(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "target_id": "group",
+                "target_name": "机场集团",
+                "relation_depth": 0,
+            },
+            {
+                "target_id": "airport",
+                "target_name": "成员机场",
+                "relation_depth": 0,
+            },
+        ]
+
+    async def relationships(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "relationship_id": "relation-1",
+                "subject_target_id": "airport",
+                "related_target_id": "group",
+                "related_target_name": "机场集团",
+                "relation_type": "parent_organization",
+                "direction": "upstream",
+                "confidence": 1,
+            }
+        ]
+
+    async def inflight(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(targets_dao, "list_project_targets", relations)
+    monkeypatch.setattr(target_relationships_dao, "list_for_targets", relationships)
+    monkeypatch.setattr(tasks_dao, "list_inflight_company_scans", inflight)
+
+    plan = await plan_company_scan_coverage(
+        object(),  # type: ignore[arg-type]
+        project_id="project-1",
+        required_channels=["website"],
+    )
+
+    assert [item["target_id"] for item in plan["items"]] == ["group"]

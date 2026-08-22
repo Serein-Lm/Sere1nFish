@@ -96,6 +96,15 @@ def _validate_company_scan_params(params: dict[str, Any]) -> None:
         raise ValueError("官网归档模式必须为 standard 或 deep")
     params["website_collection_mode"] = website_collection_mode
 
+    if "bidding_lookback_days" in params:
+        try:
+            bidding_lookback_days = int(params.get("bidding_lookback_days") or 30)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("招投标回溯天数必须为 1 到 30") from exc
+        if not 1 <= bidding_lookback_days <= 30:
+            raise ValueError("招投标回溯天数必须为 1 到 30")
+        params["bidding_lookback_days"] = bidding_lookback_days
+
     if "website_required_path_segments" in params:
         from api.services.website_documents import (
             normalize_required_path_segments,
@@ -262,6 +271,7 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         task_id=task_id, project_id=project_id,
         company_name=params.get("company_name", ""),
         target_id=str(params.get("target_id") or ""),
+        refresh_target_identity=bool(params.get("refresh_target_identity", False)),
         batch_id=str(params.get("_batch_id") or ""),
         target_batch_tags=params.get("target_batch_tags", []),
         url_text=params.get("url_text", ""), urls=params.get("urls", []),
@@ -280,6 +290,10 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         bidding_max_records=max(
             1,
             min(int(params.get("bidding_max_records") or 20), 20),
+        ),
+        bidding_lookback_days=max(
+            1,
+            min(int(params.get("bidding_lookback_days") or 30), 30),
         ),
         enable_wechat=params.get("enable_wechat", False),
         wechat_device_id=params.get("wechat_device_id", ""),
@@ -451,6 +465,7 @@ class CompanyScanCoverageRequest(BaseModel):
     wechat_app_instance: Literal["primary", "clone"] = "primary"
     subsidiary_scan_limit: int = Field(default=12, ge=1, le=100)
     bidding_max_records: int = Field(default=10, ge=1, le=20)
+    bidding_lookback_days: int = Field(default=30, ge=1, le=30)
     enable_copywriting: bool = True
     company_scan_concurrency: int | None = Field(default=None, ge=1, le=12)
     dry_run: bool = True
@@ -597,8 +612,8 @@ async def create_company_scan_batch(
 ):
     """Create one independently traceable company-scan task per company."""
     from api.services.company_scan_batch import (
-        CompanyScanJobSpec,
         enqueue_company_scan_jobs,
+        resolve_company_scan_job_specs,
     )
     from api.services.info_collection.tuning import get_collection_runtime_tuning
     from api.services.project_task_batch import (
@@ -651,17 +666,16 @@ async def create_company_scan_batch(
     tuning = (await get_collection_runtime_tuning()).with_overrides(
         company_scan_concurrency=requested_concurrency,
     )
+    specs = await resolve_company_scan_job_specs(
+        db,
+        project_id=project_id,
+        company_names=company_names,
+        shared_params=shared_params,
+    )
     return await enqueue_company_scan_jobs(
         db,
         project_id=project_id,
-        specs=[
-            CompanyScanJobSpec(
-                target_id="",
-                company_name=company_name,
-                params=dict(shared_params),
-            )
-            for company_name in company_names
-        ],
+        specs=specs,
         requested_by=current_user.username,
         concurrency=tuning.company_scan_concurrency,
         aggregate_notification=True,
@@ -697,6 +711,7 @@ async def create_company_scan_coverage_batch(
             wechat_app_instance=req.wechat_app_instance,
             subsidiary_scan_limit=req.subsidiary_scan_limit,
             bidding_max_records=req.bidding_max_records,
+            bidding_lookback_days=req.bidding_lookback_days,
             enable_copywriting=req.enable_copywriting,
         )
     except ValueError as exc:

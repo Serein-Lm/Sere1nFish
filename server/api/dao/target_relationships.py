@@ -16,6 +16,15 @@ DOWNSTREAM_DIRECTION = "downstream"
 LATERAL_DIRECTION = "lateral"
 
 
+def _ownership_percent(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return max(0.0, min(float(value), 100.0))
+    except (TypeError, ValueError):
+        return None
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -84,7 +93,21 @@ def normalize_relationship(
         confidence = float(value.get("confidence") or 0)
     except (TypeError, ValueError):
         confidence = 0.0
-    return {
+    ownership_percent = _ownership_percent(value.get("ownership_percent"))
+    indirect_ownership_percent = _ownership_percent(
+        value.get("indirect_ownership_percent")
+    )
+    effective_ownership_percent = _ownership_percent(
+        value.get("effective_ownership_percent")
+    )
+    if effective_ownership_percent is None and (
+        ownership_percent is not None or indirect_ownership_percent is not None
+    ):
+        effective_ownership_percent = min(
+            100.0,
+            float(ownership_percent or 0) + float(indirect_ownership_percent or 0),
+        )
+    normalized = {
         "relationship_id": rid,
         "project_id": str(project_id or "").strip(),
         "subject_target_id": str(subject_target_id or "").strip(),
@@ -105,6 +128,14 @@ def normalize_relationship(
         "task_id": str(task_id or "").strip(),
         "research_id": str(research_id or "").strip(),
     }
+    for field, field_value in (
+        ("ownership_percent", ownership_percent),
+        ("indirect_ownership_percent", indirect_ownership_percent),
+        ("effective_ownership_percent", effective_ownership_percent),
+    ):
+        if field_value is not None:
+            normalized[field] = field_value
+    return normalized
 
 
 async def sync_research_relationships(
@@ -259,6 +290,14 @@ async def clone_project_relationships(
             "last_verified_at": source.get("last_verified_at") or now,
             "updated_at": now,
         }
+        for field in (
+            "ownership_percent",
+            "indirect_ownership_percent",
+            "effective_ownership_percent",
+        ):
+            value = _ownership_percent(source.get(field))
+            if value is not None:
+                set_fields[field] = value
         additions: dict[str, Any] = {
             "merged_from_project_ids": source_project_id,
         }
@@ -353,6 +392,14 @@ def build_target_relationship_views(
             "source_urls": list(relation.get("source_urls") or []),
             "research_ids": list(relation.get("research_ids") or []),
         }
+        for field in (
+            "ownership_percent",
+            "indirect_ownership_percent",
+            "effective_ownership_percent",
+        ):
+            value = _ownership_percent(relation.get(field))
+            if value is not None:
+                common[field] = value
         if direction == LATERAL_DIRECTION:
             add(
                 subject_id,

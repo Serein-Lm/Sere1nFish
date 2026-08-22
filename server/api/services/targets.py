@@ -78,6 +78,11 @@ _TARGET_MODULE_LABELS = {
     "other": "其他",
 }
 
+_ORGANIZATION_HIERARCHY_RELATION_TYPES = {
+    "parent_organization",
+    "controlled_subsidiary",
+}
+
 
 def _empty_high_score_breakdown() -> dict[str, int]:
     return {key: 0 for key in _HIGH_SCORE_SOURCE_KEYS}
@@ -539,18 +544,206 @@ def _target_search_rank(
     return score
 
 
+def _hierarchy_parent_target_id(relation: dict[str, Any]) -> str:
+    return str(
+        relation.get("hierarchy_parent_target_id")
+        or relation.get("parent_target_id")
+        or ""
+    )
+
+
+def _hierarchy_depth(relation: dict[str, Any]) -> int:
+    value = relation.get("hierarchy_depth")
+    if value is None:
+        value = relation.get("relation_depth")
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _relationship_confidence(relationship: dict[str, Any]) -> float:
+    try:
+        return float(relationship.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def apply_project_target_hierarchy(
+    relations: list[dict[str, Any]],
+    relationships: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build a tree read model without persisting organization edges as control."""
+    projected = [dict(relation) for relation in relations]
+    by_target = {
+        str(relation.get("target_id") or ""): relation
+        for relation in projected
+        if str(relation.get("target_id") or "")
+    }
+    parent_by_target: dict[str, str] = {}
+    for target_id, relation in by_target.items():
+        parent_id = _hierarchy_parent_target_id(relation)
+        if parent_id and parent_id != target_id:
+            relation_details = (
+                relation.get("relation")
+                if isinstance(relation.get("relation"), dict)
+                else {}
+            )
+            parent_by_target[target_id] = parent_id
+            relation.setdefault("hierarchy_parent_target_id", parent_id)
+            relation.setdefault(
+                "hierarchy_parent_target_name",
+                str(relation.get("parent_target_name") or ""),
+            )
+            relation.setdefault(
+                "hierarchy_relation_type",
+                str(relation.get("relation_type") or ""),
+            )
+            relation.setdefault(
+                "hierarchy_relation_source",
+                str(relation.get("relation_source") or ""),
+            )
+            relation.setdefault(
+                "hierarchy_source_urls",
+                list(
+                    relation.get("source_urls")
+                    or relation_details.get("source_urls")
+                    or []
+                ),
+            )
+            relation.setdefault(
+                "hierarchy_ownership_percent",
+                relation.get("ownership_percent"),
+            )
+            relation.setdefault(
+                "hierarchy_effective_ownership_percent",
+                relation.get("ownership_percent"),
+            )
+
+    def would_cycle(child_id: str, parent_id: str) -> bool:
+        current_id = parent_id
+        visited: set[str] = set()
+        while current_id and current_id not in visited:
+            if current_id == child_id:
+                return True
+            visited.add(current_id)
+            current_id = parent_by_target.get(current_id, "")
+        return False
+
+    candidates = sorted(
+        relationships,
+        key=lambda item: (
+            -_relationship_confidence(item),
+            str(item.get("relationship_id") or ""),
+        ),
+    )
+    for edge in candidates:
+        if edge.get("active") is False:
+            continue
+        if str(edge.get("direction") or "") != "upstream":
+            continue
+        relation_type = str(edge.get("relation_type") or "")
+        if relation_type not in _ORGANIZATION_HIERARCHY_RELATION_TYPES:
+            continue
+        child_id = str(edge.get("subject_target_id") or "")
+        parent_id = str(edge.get("related_target_id") or "")
+        if (
+            not child_id
+            or not parent_id
+            or child_id not in by_target
+            or parent_id not in by_target
+            or child_id in parent_by_target
+            or would_cycle(child_id, parent_id)
+        ):
+            continue
+        child = by_target[child_id]
+        parent_by_target[child_id] = parent_id
+        child.update(
+            {
+                "hierarchy_parent_target_id": parent_id,
+                "hierarchy_parent_target_name": str(
+                    edge.get("related_target_name")
+                    or by_target[parent_id].get("target_name")
+                    or ""
+                ),
+                "hierarchy_relation_type": relation_type,
+                "hierarchy_relation_source": str(edge.get("source") or ""),
+                "hierarchy_relation_summary": str(edge.get("summary") or ""),
+                "hierarchy_source_urls": list(edge.get("source_urls") or []),
+                "hierarchy_ownership_percent": edge.get("ownership_percent"),
+                "hierarchy_indirect_ownership_percent": edge.get(
+                    "indirect_ownership_percent"
+                ),
+                "hierarchy_effective_ownership_percent": edge.get(
+                    "effective_ownership_percent"
+                ),
+            }
+        )
+
+    for target_id, relation in by_target.items():
+        lineage_ids = [target_id]
+        visited = {target_id}
+        current_id = target_id
+        while parent_id := parent_by_target.get(current_id, ""):
+            if parent_id in visited:
+                break
+            visited.add(parent_id)
+            lineage_ids.append(parent_id)
+            current_id = parent_id
+            if parent_id not in by_target:
+                break
+        lineage_ids.reverse()
+        lineage_names = [
+            str(by_target.get(lineage_id, {}).get("target_name") or "")
+            for lineage_id in lineage_ids
+        ]
+        relation.update(
+            {
+                "hierarchy_root_target_id": lineage_ids[0],
+                "hierarchy_root_target_name": lineage_names[0],
+                "hierarchy_depth": max(0, len(lineage_ids) - 1),
+                "hierarchy_lineage_target_ids": lineage_ids,
+                "hierarchy_lineage_target_names": lineage_names,
+            }
+        )
+    return projected
+
+
+async def _load_project_target_hierarchy(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    relations: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    target_ids = [
+        str(relation.get("target_id") or "")
+        for relation in relations
+        if str(relation.get("target_id") or "")
+    ]
+    relationships = await target_relationships_dao.list_for_targets(
+        db,
+        project_id=project_id,
+        target_ids=target_ids,
+    )
+    return apply_project_target_hierarchy(relations, relationships), relationships
+
+
 def _relation_root_target_id(
     relation: dict[str, Any],
     relations_by_target: dict[str, dict[str, Any]],
 ) -> str:
     target_id = str(relation.get("target_id") or "")
-    root_target_id = str(relation.get("root_target_id") or "")
+    root_target_id = str(
+        relation.get("hierarchy_root_target_id")
+        or relation.get("root_target_id")
+        or ""
+    )
     if root_target_id and root_target_id in relations_by_target:
         return root_target_id
 
     current = relation
     visited = {target_id}
-    while parent_id := str(current.get("parent_target_id") or ""):
+    while parent_id := _hierarchy_parent_target_id(current):
         if parent_id in visited or parent_id not in relations_by_target:
             break
         visited.add(parent_id)
@@ -571,7 +764,7 @@ def _target_hierarchy_counts(
     child_counts = {target_id: 0 for target_id in relations_by_target}
     descendant_counts: dict[str, int] = {}
     for target_id, relation in relations_by_target.items():
-        parent_target_id = str(relation.get("parent_target_id") or "")
+        parent_target_id = _hierarchy_parent_target_id(relation)
         if parent_target_id in child_counts and parent_target_id != target_id:
             child_counts[parent_target_id] += 1
         root_target_id = _relation_root_target_id(relation, relations_by_target)
@@ -687,7 +880,7 @@ def _select_target_relation_page(
                 visited.add(current_id)
                 values.append(current_id)
                 current = relations_by_target.get(current_id, {})
-                current_id = str(current.get("parent_target_id") or "")
+                current_id = _hierarchy_parent_target_id(current)
             return values
 
         for root_id in selected_roots:
@@ -717,7 +910,7 @@ def _select_target_relation_page(
                 root_by_target.get(str(relation.get("target_id") or ""), ""),
                 len(root_order),
             ),
-            int(relation.get("relation_depth") or 0),
+            _hierarchy_depth(relation),
             str(relation.get("target_name") or "").casefold(),
         )
     )
@@ -1176,6 +1369,7 @@ async def list_project_target_summaries(
     *,
     compact: bool = False,
     relations: list[dict[str, Any]] | None = None,
+    target_relationships: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if relations is None:
         relations = await targets_dao.list_project_targets(
@@ -1357,10 +1551,14 @@ async def list_project_target_summaries(
         project_id=project_id,
         target_ids=target_ids,
     )
-    target_relationships_job = target_relationships_dao.list_for_targets(
-        db,
-        project_id=project_id,
-        target_ids=target_ids,
+    target_relationships_job = (
+        asyncio.sleep(0, result=target_relationships)
+        if target_relationships is not None
+        else target_relationships_dao.list_for_targets(
+            db,
+            project_id=project_id,
+            target_ids=target_ids,
+        )
     )
     task_ids = list(
         {
@@ -1433,6 +1631,7 @@ async def list_project_target_summaries(
         for item in wechat_counts
     }
     tasks_by_id = {str(item.get("task_id") or ""): item for item in task_docs}
+    relations = apply_project_target_hierarchy(relations, target_relationships)
     relationship_views = target_relationships_dao.build_target_relationship_views(
         target_relationships
     )
@@ -1462,6 +1661,20 @@ async def list_project_target_summaries(
                 "relation_source",
                 "lineage_target_ids",
                 "lineage_target_names",
+                "hierarchy_root_target_id",
+                "hierarchy_root_target_name",
+                "hierarchy_parent_target_id",
+                "hierarchy_parent_target_name",
+                "hierarchy_relation_type",
+                "hierarchy_relation_source",
+                "hierarchy_relation_summary",
+                "hierarchy_source_urls",
+                "hierarchy_ownership_percent",
+                "hierarchy_indirect_ownership_percent",
+                "hierarchy_effective_ownership_percent",
+                "hierarchy_depth",
+                "hierarchy_lineage_target_ids",
+                "hierarchy_lineage_target_names",
                 "batch_tags",
                 "display_name",
                 "short_names",
@@ -1575,6 +1788,11 @@ async def list_project_target_options(
         project_id,
         summary_only=True,
     )
+    relations, _relationships = await _load_project_target_hierarchy(
+        db,
+        project_id=project_id,
+        relations=relations,
+    )
     fields = (
         "project_target_id",
         "target_id",
@@ -1585,6 +1803,12 @@ async def list_project_target_options(
         "parent_target_id",
         "parent_target_name",
         "relation_depth",
+        "hierarchy_root_target_id",
+        "hierarchy_root_target_name",
+        "hierarchy_parent_target_id",
+        "hierarchy_parent_target_name",
+        "hierarchy_relation_type",
+        "hierarchy_depth",
         "batch_tags",
         "display_name",
         "short_names",
@@ -1600,8 +1824,13 @@ async def list_project_target_options(
     ]
     items.sort(
         key=lambda item: (
-            str(item.get("root_target_name") or item.get("target_name") or "").casefold(),
-            int(item.get("relation_depth") or 0),
+            str(
+                item.get("hierarchy_root_target_name")
+                or item.get("root_target_name")
+                or item.get("target_name")
+                or ""
+            ).casefold(),
+            _hierarchy_depth(item),
             str(item.get("target_name") or "").casefold(),
             str(item.get("target_id") or ""),
         )
@@ -1618,6 +1847,11 @@ async def list_project_target_batches(
         db,
         project_id,
         summary_only=True,
+    )
+    relations, _relationships = await _load_project_target_hierarchy(
+        db,
+        project_id=project_id,
+        relations=relations,
     )
     relations_by_target = {
         str(item.get("target_id") or ""): item
@@ -1678,6 +1912,11 @@ async def assign_project_target_batches(
         project_id,
         summary_only=True,
     )
+    relations, _relationships = await _load_project_target_hierarchy(
+        db,
+        project_id=project_id,
+        relations=relations,
+    )
     relations_by_target = {
         str(item.get("target_id") or ""): item
         for item in relations
@@ -1713,9 +1952,8 @@ async def assign_project_target_batches(
                     selected_ids.add(candidate_id)
                     break
                 visited.add(current_id)
-                current_id = str(
-                    relations_by_target.get(current_id, {}).get("parent_target_id")
-                    or ""
+                current_id = _hierarchy_parent_target_id(
+                    relations_by_target.get(current_id, {})
                 )
 
     result = await targets_dao.update_project_target_batch_tags(
@@ -1830,6 +2068,11 @@ async def list_project_target_branch(
         project_id,
         summary_only=True,
     )
+    relations, target_relationships = await _load_project_target_hierarchy(
+        db,
+        project_id=project_id,
+        relations=relations,
+    )
     relations_by_target = {
         str(item.get("target_id") or ""): item
         for item in relations
@@ -1850,6 +2093,7 @@ async def list_project_target_branch(
         project_id,
         compact=True,
         relations=branch_relations,
+        target_relationships=target_relationships,
     )
     child_counts, descendant_counts = _target_hierarchy_counts(relations)
     for summary in summaries:
@@ -1894,6 +2138,12 @@ async def list_project_target_summary_page(
             "matched_target_ids": [],
             "expanded_project_target_ids": [],
         }
+
+    relations, target_relationships = await _load_project_target_hierarchy(
+        db,
+        project_id=project_id,
+        relations=relations,
+    )
 
     relations_by_target = {
         str(item.get("target_id") or ""): item
@@ -1946,6 +2196,7 @@ async def list_project_target_summary_page(
         project_id,
         compact=True,
         relations=selection["relations"],
+        target_relationships=target_relationships,
     )
     matched_target_ids = set(selection["matched_target_ids"])
     search_scores = selection["search_scores"]
