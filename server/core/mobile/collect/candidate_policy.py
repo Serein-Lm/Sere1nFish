@@ -415,10 +415,21 @@ def _has_direct_target_identity(
         for alias in aliases
         if len(normalized := _normalized_identity_text(alias)) >= 3
     }
-    return (
-        normalized_title in normalized_aliases
-        or normalized_account in normalized_aliases
-    )
+    for alias in normalized_aliases:
+        if alias in {normalized_title, normalized_account}:
+            return True
+        # A descriptive title/account commonly appends words such as "发布" or
+        # "招标公告" to an identity. Only allow containment for aliases that are
+        # intrinsically specific, so short abbreviations do not match unrelated
+        # organizations that merely share the same prefix.
+        alias_is_specific = len(alias) >= 6 or (
+            len(alias) >= 4 and canonical and alias in canonical
+        )
+        if alias_is_specific and (
+            alias in normalized_title or alias in normalized_account
+        ):
+            return True
+    return False
 
 
 def _has_location_identity(fields: dict, target_name: str) -> bool:

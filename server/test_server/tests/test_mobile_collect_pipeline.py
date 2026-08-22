@@ -976,6 +976,41 @@ def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:
     )
     assert ambiguous_alias.accepted is False
     assert "未直接证明目标主体" in ambiguous_alias.reason
+    airport_alias = policy.review_detail(
+        {
+            **base,
+            "fields": {
+                "title": "重庆江北国际机场航站区资源项目公开招租公告",
+                "account": "江北机场发布",
+            },
+            "target_evidence": "标题出现重庆江北国际机场，账号为江北机场发布",
+            "content_kind": "article",
+            "is_article_result": True,
+        },
+        min_score=60,
+        min_subject_match=70,
+        target_name="重庆江北国际机场有限公司",
+        aliases=["重庆江北国际机场", "江北机场", "重庆机场", "CKG"],
+    )
+    assert airport_alias.accepted is True
+    ambiguous_airport_group = policy.review_detail(
+        {
+            **base,
+            "fields": {
+                "title": "重庆机场集团近期工作动态",
+                "account": "重庆机场集团",
+            },
+            "target_evidence": "标题只出现重庆机场集团",
+            "content_kind": "article",
+            "is_article_result": True,
+        },
+        min_score=60,
+        min_subject_match=70,
+        target_name="重庆江北国际机场有限公司",
+        aliases=["重庆机场"],
+    )
+    assert ambiguous_airport_group.accepted is False
+    assert "未直接证明目标主体" in ambiguous_airport_group.reason
     rejected = policy.review_detail(
         {**base, "content_kind": "video", "is_article_result": False},
         min_score=60,

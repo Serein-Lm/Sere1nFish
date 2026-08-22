@@ -1887,6 +1887,37 @@ async def run_collect_task(
     keywords = list(keyword_resolution.get("keywords") or [""])
     definition_fp = collect_dao.definition_fingerprint(task_def)
     keyword_targets = keyword_resolution.get("keyword_targets") or {}
+    resolved_targets_by_id: dict[str, dict[str, Any]] = {}
+    if target and target.get("target_id"):
+        resolved_targets_by_id[str(target["target_id"])] = target
+    keyword_target_ids = list(
+        dict.fromkeys(
+            str(value.get("target_id") or "")
+            for value in keyword_targets.values()
+            if isinstance(value, dict) and value.get("target_id")
+        )
+    )
+    missing_target_ids = [
+        target_id
+        for target_id in keyword_target_ids
+        if target_id not in resolved_targets_by_id
+    ]
+    if missing_target_ids:
+        from api.services.targets import resolve_target
+
+        resolved_targets = await asyncio.gather(
+            *(
+                resolve_target(db, target_id=target_id)
+                for target_id in missing_target_ids
+            )
+        )
+        resolved_targets_by_id.update(
+            {
+                str(item["target_id"]): item
+                for item in resolved_targets
+                if item and item.get("target_id")
+            }
+        )
     seed_specs: list[dict[str, Any]] = []
     for keyword in keywords:
         target_info = (
@@ -1896,8 +1927,9 @@ async def run_collect_task(
         )
         resolved_target = target
         if isinstance(target_info, dict) and target_info.get("target_id"):
-            resolved_target = {
-                "target_id": str(target_info.get("target_id") or ""),
+            keyword_target_id = str(target_info.get("target_id") or "")
+            resolved_target = resolved_targets_by_id.get(keyword_target_id) or {
+                "target_id": keyword_target_id,
                 "target_type": "company",
                 "canonical_name": str(target_info.get("target_name") or ""),
             }
