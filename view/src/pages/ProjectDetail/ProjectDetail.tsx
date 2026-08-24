@@ -149,6 +149,14 @@ interface TargetDashboardRow extends ProjectTargetSummary {
   isLoadingPlaceholder?: boolean
 }
 
+interface TargetTreeViewState {
+  batchTag: string
+  page: number
+  pageSize: number
+  expandedRowKeys: React.Key[]
+  scrollTop: number
+}
+
 function targetHierarchyDepth(target: ProjectTargetSummary | ProjectTargetOption): number {
   return Number(target.hierarchy_depth ?? target.relation_depth ?? 0)
 }
@@ -794,6 +802,15 @@ export default function ProjectDetail() {
   const [targetMatchedTotal, setTargetMatchedTotal] = useState(0)
   const [targetExpandedRowKeys, setTargetExpandedRowKeys] = useState<React.Key[]>([])
   const targetRequestRef = useRef(0)
+  const targetSearchQueryRef = useRef('')
+  const targetTreeViewStateRef = useRef<TargetTreeViewState>({
+    batchTag: '',
+    page: 1,
+    pageSize: 10,
+    expandedRowKeys: [],
+    scrollTop: 0,
+  })
+  const targetTreeRestoreRef = useRef<TargetTreeViewState | null>(null)
   const targetOptionsRequestRef = useRef(0)
   const targetSummaryRequestRef = useRef<Record<string, number>>({})
   const targetSummaryPendingRef = useRef<Set<string>>(new Set())
@@ -940,8 +957,26 @@ export default function ProjectDetail() {
       setTargetMatchedTotal(result.matched_total)
       setTargetBranches({})
       setTargetBranchLoading({})
-      setTargetExpandedRowKeys(query ? result.expanded_project_target_ids : [])
+      const treeRestore = query ? null : targetTreeRestoreRef.current
+      const restoredRowKeys = treeRestore?.expandedRowKeys || []
+      setTargetExpandedRowKeys(
+        treeRestore ? restoredRowKeys : query ? result.expanded_project_target_ids : [],
+      )
       loadedTabsRef.current.add('targets')
+      if (treeRestore) {
+        targetTreeRestoreRef.current = null
+        const expandedRowKeySet = new Set(restoredRowKeys.map(String))
+        const expandedRoots = result.items.filter((target) => (
+          expandedRowKeySet.has(String(target.project_target_id))
+          && Number(target.child_count || 0) > 0
+        ))
+        await Promise.all(
+          expandedRoots.map((target) => fetchTargetBranch(pid, target.target_id, true)),
+        )
+        if (requestId === targetRequestRef.current) {
+          restoreTargetTreeScroll(treeRestore.scrollTop)
+        }
+      }
     } catch (e) {
       console.error('加载项目 Target 失败:', e)
     } finally {
@@ -965,8 +1000,8 @@ export default function ProjectDetail() {
     }
   }
 
-  const fetchTargetBranch = async (pid: string, rootTargetId: string) => {
-    if (targetBranches[rootTargetId] || targetBranchLoading[rootTargetId]) return
+  async function fetchTargetBranch(pid: string, rootTargetId: string, force = false) {
+    if (!force && (targetBranches[rootTargetId] || targetBranchLoading[rootTargetId])) return
     const requestGeneration = targetRequestRef.current
     setTargetBranchLoading((current) => ({ ...current, [rootTargetId]: true }))
     try {
@@ -1384,6 +1419,15 @@ export default function ProjectDetail() {
       setAllProjectTargetTotal(0)
       setTargetMatchedTotal(0)
       setTargetExpandedRowKeys([])
+      targetSearchQueryRef.current = ''
+      targetTreeViewStateRef.current = {
+        batchTag: '',
+        page: 1,
+        pageSize: 10,
+        expandedRowKeys: [],
+        scrollTop: 0,
+      }
+      targetTreeRestoreRef.current = null
       targetRequestRef.current += 1
       targetOptionsRequestRef.current += 1
       targetSummaryRequestRef.current = {}
@@ -1448,7 +1492,10 @@ export default function ProjectDetail() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setTargetSearchQuery(targetSearchText.trim())
+      const nextQuery = targetSearchText.trim()
+      if (nextQuery === targetSearchQueryRef.current) return
+      targetSearchQueryRef.current = nextQuery
+      setTargetSearchQuery(nextQuery)
       setTargetPage(1)
     }, 250)
     return () => window.clearTimeout(timer)
@@ -4139,7 +4186,33 @@ export default function ProjectDetail() {
     setScholarTargetId(targetId)
   }
 
+  const rememberTargetTreeView = () => {
+    if (activeTab !== 'targets' || targetSearchText.trim() || targetSearchQuery) return
+    targetTreeViewStateRef.current = {
+      batchTag: targetBatchTag,
+      page: targetPage,
+      pageSize: targetPageSize,
+      expandedRowKeys: [...targetExpandedRowKeys],
+      scrollTop: window.scrollY,
+    }
+  }
+
+  const restoreTargetTreeScroll = (scrollTop: number) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: scrollTop, behavior: 'auto' })
+      })
+    })
+  }
+
   const returnToTargetDashboard = () => {
+    const treeView = targetTreeViewStateRef.current
+    const needsTreeReload = Boolean(targetSearchQuery)
+      || targetBatchTag !== treeView.batchTag
+      || targetPage !== treeView.page
+      || targetPageSize !== treeView.pageSize
+    targetSearchQueryRef.current = ''
+    targetTreeRestoreRef.current = needsTreeReload ? treeView : null
     selectedTargetDashboardRequestRef.current += 1
     setSelectedTargetId('')
     setSelectedTargetDashboard(null)
@@ -4149,11 +4222,19 @@ export default function ProjectDetail() {
     setWechatTargetId('')
     setBiddingTargetId('')
     setScholarTargetId('')
+    setTargetSearchText('')
+    setTargetSearchQuery('')
+    setTargetBatchTag(treeView.batchTag)
+    setTargetPage(treeView.page)
+    setTargetPageSize(treeView.pageSize)
+    setTargetExpandedRowKeys([...treeView.expandedRowKeys])
     setActiveTab('targets')
+    if (!needsTreeReload) restoreTargetTreeScroll(treeView.scrollTop)
   }
 
   const openTargetOverview = (targetId: string) => {
     if (!projectId || !targetId) return
+    rememberTargetTreeView()
     blurFocusedTabPaneElement()
     applyTargetScope(targetId)
     loadedTabsRef.current.add('target')
@@ -4163,6 +4244,7 @@ export default function ProjectDetail() {
 
   const openTargetModule = (targetId: string, tab: TargetDataTabKey) => {
     if (!projectId || !targetId) return
+    rememberTargetTreeView()
     blurFocusedTabPaneElement()
     applyTargetScope(targetId)
     void syncProjectTargetSummary(projectId, targetId)
@@ -4863,7 +4945,13 @@ export default function ProjectDetail() {
               suffix={targetDashboardLoading ? <Spin size="small" /> : null}
               placeholder="搜索 Target 名称、域名或关键词"
               aria-label="搜索 Target"
-              onChange={(event) => setTargetSearchText(event.target.value)}
+              onChange={(event) => {
+                const nextSearchText = event.target.value
+                if (!targetSearchText.trim() && nextSearchText.trim()) {
+                  rememberTargetTreeView()
+                }
+                setTargetSearchText(nextSearchText)
+              }}
             />
             <Tooltip title="按当前扫描画像补齐网站、公众号、学者和招投标，默认排除金融目标">
               <Button
@@ -5477,7 +5565,7 @@ export default function ProjectDetail() {
                   icon={<ArrowLeftOutlined />}
                   onClick={returnToTargetDashboard}
                 >
-                  返回 Target 列表
+                  返回 Target 树
                 </Button>
                 <div className="target-scope-identity">
                   <Space size={[6, 4]} wrap>
