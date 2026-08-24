@@ -2,7 +2,7 @@ import type { CSSProperties, MouseEvent, ReactNode } from 'react'
 import Button from 'antd/es/button'
 import Tooltip from 'antd/es/tooltip'
 import message from 'antd/es/message'
-import { CopyOutlined } from '@ant-design/icons'
+import { CopyOutlined, LinkOutlined } from '@ant-design/icons'
 
 async function copyText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -25,6 +25,53 @@ export interface CopyLinkButtonProps {
   value?: string | null
   label?: string
   className?: string
+}
+
+export interface OpenLinkButtonProps {
+  value?: string | null
+  label?: string
+  className?: string
+}
+
+function safeWebUrl(value?: string | null): string {
+  const normalized = String(value || '').trim()
+  if (!normalized) return ''
+  try {
+    const parsed = new URL(normalized)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : ''
+  } catch {
+    return ''
+  }
+}
+
+export function OpenLinkButton({
+  value,
+  label = '链接',
+  className,
+}: OpenLinkButtonProps) {
+  const url = safeWebUrl(value)
+
+  const handleOpen = (event: MouseEvent<HTMLElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (!url) return
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+
+  return (
+    <Tooltip title={url ? `打开${label}` : `暂无${label}`}>
+      <Button
+        type="text"
+        size="small"
+        className={className}
+        aria-label={`打开${label}`}
+        icon={<LinkOutlined />}
+        disabled={!url}
+        onClick={handleOpen}
+        style={{ width: 24, minWidth: 24, height: 24, minHeight: 24, padding: 0, flex: '0 0 24px' }}
+      />
+    </Tooltip>
+  )
 }
 
 export default function CopyLinkButton({

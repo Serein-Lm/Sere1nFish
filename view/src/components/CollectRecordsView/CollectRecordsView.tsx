@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Table from 'antd/es/table'
 import Tag from 'antd/es/tag'
 import Space from 'antd/es/space'
@@ -17,7 +17,7 @@ import { CodeOutlined, DatabaseOutlined, EyeOutlined, FileTextOutlined, PictureO
 
 import { type CollectRecord } from '../../services/mobileCollectService'
 import AuthenticatedImage from '../AuthenticatedImage'
-import { CopyableLink } from '../CopyLinkButton'
+import { CopyableText, OpenLinkButton } from '../CopyLinkButton'
 import {
   getSourceDocument,
   openAuthenticatedArtifact,
@@ -25,7 +25,13 @@ import {
   type SourceDocumentDetail,
 } from '../../services/sourceDocumentService'
 import { renderFindingValue } from '../../utils/findingValueRenderer'
-import { extractContactsFromFields, scoreColor } from './collectRecordUtils'
+import {
+  createIndividualCollectRecordGroups,
+  extractContactsFromFields,
+  groupCollectRecordsBySource,
+  scoreColor,
+  type CollectRecordGroup,
+} from './collectRecordUtils'
 import './CollectRecordsView.css'
 
 const { Text } = Typography
@@ -60,16 +66,66 @@ export function CollectShotImage({
   )
 }
 
-function renderContacts(record: CollectRecord) {
-  const contacts = extractContactsFromFields((record.fields || {}) as Record<string, unknown>)
+function groupFieldContacts(group: CollectRecordGroup) {
+  const seen = new Set<string>()
+  return group.records.flatMap((record) => (
+    extractContactsFromFields((record.fields || {}) as Record<string, unknown>)
+  )).filter((contact) => {
+    const key = `${contact.channel}:${contact.value.toLowerCase()}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function renderContacts(group: CollectRecordGroup, limit = 4) {
+  const contacts = groupFieldContacts(group)
   if (contacts.length === 0) return <Text type="secondary">-</Text>
   return (
     <Space orientation="vertical" size={2}>
-      {contacts.slice(0, 4).map((c, i) => (
+      {contacts.slice(0, limit).map((c, i) => (
         <span key={`${c.channel}-${c.value}-${i}`}>{renderFindingValue(c.value, { copyable: true, maxWidth: 150, linkify: false })}</span>
       ))}
     </Space>
   )
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))]
+}
+
+function mergeSourceContacts(contacts: SourceContact[]): SourceContact[] {
+  const merged = new Map<string, SourceContact>()
+  for (const contact of contacts) {
+    const value = String(contact.value || '').trim()
+    if (!value) continue
+    const channel = String(contact.channel || 'contact').trim()
+    const key = `${channel.toLowerCase()}:${value.toLowerCase()}`
+    const existing = merged.get(key)
+    if (!existing) {
+      merged.set(key, {
+        ...contact,
+        channel,
+        value,
+        contexts: uniqueStrings([contact.context, ...(contact.contexts || [])]),
+        sources: uniqueStrings([contact.source, ...(contact.sources || [])]),
+      })
+      continue
+    }
+    existing.contexts = uniqueStrings([
+      existing.context,
+      ...(existing.contexts || []),
+      contact.context,
+      ...(contact.contexts || []),
+    ])
+    existing.sources = uniqueStrings([
+      existing.source,
+      ...(existing.sources || []),
+      contact.source,
+      ...(contact.sources || []),
+    ])
+  }
+  return [...merged.values()]
 }
 
 function renderDetailValue(value: unknown): string {
@@ -82,11 +138,18 @@ function renderDetailValue(value: unknown): string {
   return String(value)
 }
 
-function CollectRecordDetail({ record }: { record: CollectRecord }) {
-  const fields = (record.fields || {}) as Record<string, unknown>
-  const sourceDocumentId = record.source_document_id || ''
+function CollectRecordDetail({ group }: { group: CollectRecordGroup }) {
+  const record = group.primary
+  const fields = Object.assign(
+    {},
+    ...group.records
+      .filter((item) => item.record_id !== record.record_id)
+      .map((item) => item.fields || {}),
+    record.fields || {},
+  ) as Record<string, unknown>
+  const sourceDocumentId = record.source_document_id || group.sourceDocumentIds[0] || ''
   const sourceProjectId = record.project_id || ''
-  const sourceVersionId = record.source_document_version_id || ''
+  const sourceVersionId = record.source_document_version_id || group.sourceDocumentVersionIds[0] || ''
   const sourceRequestKey = [sourceProjectId, sourceDocumentId, sourceVersionId].join(':')
   const [sourceResult, setSourceResult] = useState<{
     requestKey: string
@@ -130,21 +193,25 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
 
   const version = sourceDetail?.version
   const sourceContacts = (version?.contacts || []) as SourceContact[]
-  const fallbackContacts = extractContactsFromFields(fields).map((item) => ({ ...item } as SourceContact))
-  const targetLink = sourceDetail?.links?.find((link) => (
-    link.project_id === record.project_id
-    && (!record.target_id || link.target_id === record.target_id)
-  ))
-  const contacts = targetLink
-    ? (targetLink.latest_analysis?.target_contacts || [])
-    : (sourceContacts.length ? sourceContacts : fallbackContacts)
-  const browserShots = version?.screenshots?.map((item) => item.url).filter(Boolean)
-    || record.browser_screenshot_urls
-    || []
+  const fallbackContacts = groupFieldContacts(group).map((item) => ({ ...item } as SourceContact))
+  const projectIds = new Set(group.records.map((item) => item.project_id).filter(Boolean))
+  const targetIds = new Set(group.targetIds)
+  const targetContacts = (sourceDetail?.links || [])
+    .filter((link) => (
+      (!projectIds.size || projectIds.has(link.project_id))
+      && (!targetIds.size || !link.target_id || targetIds.has(link.target_id))
+    ))
+    .flatMap((link) => link.latest_analysis?.target_contacts || [])
+  const contacts = mergeSourceContacts([...targetContacts, ...sourceContacts, ...fallbackContacts])
+  const browserShots = uniqueStrings([
+    ...(version?.screenshots?.map((item) => item.url).filter(Boolean) || []),
+    ...group.browserScreenshotUrls,
+  ])
   const browserShotSet = new Set(browserShots)
-  const collectShots = record.discovery_screenshot_urls?.length
-    ? record.discovery_screenshot_urls
-    : (record.screenshot_urls || []).filter((url) => !browserShotSet.has(url))
+  const collectShots = uniqueStrings([
+    ...group.discoveryScreenshotUrls,
+    ...group.screenshotUrls.filter((url) => !browserShotSet.has(url)),
+  ])
   const images = version?.images || []
   const articleText = String(version?.content?.text || fields.content || fields.article_content || '')
   const excludedKeys = new Set(['content', 'article_content', 'image_context', 'contact'])
@@ -172,10 +239,11 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
     <div className="collect-record-detail">
       <div className="collect-detail-header">
         <Space size={6} wrap>
-          {record.target_name && <Tag color="cyan">Target: {record.target_name}</Tag>}
-          {record.score != null && <Tag color={scoreColor(record.score)}>相关性 {record.score}</Tag>}
-          {record.subject_match != null && <Tag color={scoreColor(record.subject_match)}>主体对应 {record.subject_match}</Tag>}
-          {record.keyword && <Tag>{record.keyword}</Tag>}
+          {group.targetNames.map((targetName) => <Tag key={targetName} color="cyan">Target: {targetName}</Tag>)}
+          {group.score != null && <Tag color={scoreColor(group.score)}>相关性 {group.score}</Tag>}
+          {group.subjectMatch != null && <Tag color={scoreColor(group.subjectMatch)}>主体对应 {group.subjectMatch}</Tag>}
+          {group.keywords.map((keyword) => <Tag key={keyword}>{keyword}</Tag>)}
+          {group.records.length > 1 && <Tag color="geekblue">采集证据 {group.records.length}</Tag>}
           {version?.version_id && <Tag>版本 {version.version_id.slice(-8)}</Tag>}
           {browserShots.length > 0 && <Tag icon={<PictureOutlined />}>浏览器截图 {browserShots.length}</Tag>}
         </Space>
@@ -200,11 +268,11 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
                   {renderFindingValue(contact.value, { copyable: true, maxWidth: 420, linkify: false })}
                   {contact.source === 'image' || contact.sources?.includes('image') ? <Tag>图片识别</Tag> : null}
                 </div>
-                {(contact.context || contact.contexts?.[0]) && (
-                  <Text type="secondary" className="collect-contact-context">
-                    {contact.context || contact.contexts?.[0]}
+                {uniqueStrings([contact.context, ...(contact.contexts || [])]).map((context) => (
+                  <Text key={context} type="secondary" className="collect-contact-context">
+                    {context}
                   </Text>
-                )}
+                ))}
               </div>
             ))}
           </div>
@@ -219,13 +287,20 @@ function CollectRecordDetail({ record }: { record: CollectRecord }) {
           column={{ xxl: 2, xl: 2, lg: 2, md: 1, sm: 1, xs: 1 }}
           className="collect-detail-descriptions"
         >
-          {record.target_name && <Descriptions.Item label="目标实体">{record.target_name}</Descriptions.Item>}
+          {group.targetNames.length > 0 && <Descriptions.Item label="目标实体">{group.targetNames.join('、')}</Descriptions.Item>}
           {basicEntries.map(([key, value]) => (
             <Descriptions.Item key={key} label={key}>{renderDetailValue(value)}</Descriptions.Item>
           ))}
-          {record.source_url && (
+          {group.sourceUrl && (
             <Descriptions.Item label="原文链接" span="filled">
-              <CopyableLink href={record.source_url} style={{ wordBreak: 'break-all' }} />
+              <span className="collect-source-link-actions">
+                <CopyableText
+                  value={group.sourceUrl}
+                  copyLabel="原文链接"
+                  style={{ minWidth: 0, flex: 1, wordBreak: 'break-all' }}
+                />
+                <OpenLinkButton value={group.sourceUrl} label="公众号原文" />
+              </span>
             </Descriptions.Item>
           )}
         </Descriptions>
@@ -330,6 +405,8 @@ export interface CollectRecordsViewProps {
   showSubjectMatch?: boolean
   /** 展示手机发现后的浏览器全文归档状态 */
   showBrowserArchive?: boolean
+  /** 将同一来源链接的多条发现合并为一篇文章，仅改变读模型，不修改原始记录 */
+  groupBySource?: boolean
 }
 
 /** 采集记录统一展示:紧凑列表(缩略图+标题+相关性+联系方式)+ 小眼睛预览详情(分层分级)。 */
@@ -340,17 +417,24 @@ export default function CollectRecordsView({
   pageSize = 10,
   showSubjectMatch = true,
   showBrowserArchive = false,
+  groupBySource = false,
 }: CollectRecordsViewProps) {
-  const [detail, setDetail] = useState<CollectRecord | null>(null)
+  const [detail, setDetail] = useState<CollectRecordGroup | null>(null)
+  const groups = useMemo(
+    () => groupBySource
+      ? groupCollectRecordsBySource(records)
+      : createIndividualCollectRecordGroups(records),
+    [groupBySource, records],
+  )
 
-  const columns: ColumnsType<CollectRecord> = [
+  const compactColumns: ColumnsType<CollectRecordGroup> = [
     {
       title: '',
       key: 'shot',
       width: 52,
-      render: (_, r) =>
-        r.screenshot_urls?.length ? (
-          <CollectShotImage url={r.screenshot_urls[0]} width={40} height={40} />
+      render: (_, group) =>
+        group.screenshotUrls.length ? (
+          <CollectShotImage url={group.screenshotUrls[0]} width={40} height={40} />
         ) : (
           <div className="collect-shot-empty sm">无图</div>
         ),
@@ -358,19 +442,15 @@ export default function CollectRecordsView({
     {
       title: '内容',
       key: 'content',
-      render: (_, r) => {
-        const f = (r.fields || {}) as Record<string, unknown>
-        const title = String(f.title ?? f.name ?? r.keyword ?? '无标题')
-        const account = f.account != null ? String(f.account) : ''
-        const publishTime = f.publish_time != null ? String(f.publish_time) : ''
-        const meta = [account, publishTime].filter(Boolean).join(' · ')
+      render: (_, group) => {
+        const meta = [group.account, group.publishTime].filter(Boolean).join(' · ')
         return (
           <div className="collect-row-cell">
             <div className="collect-row-title">
-              {title}
-              {r.is_new ? (
+              {group.title}
+              {group.isNew ? (
                 <Tag color="green" className="collect-row-tag">新</Tag>
-              ) : r.is_changed ? (
+              ) : group.isChanged ? (
                 <Tag color="orange" className="collect-row-tag">改</Tag>
               ) : null}
             </div>
@@ -384,14 +464,18 @@ export default function CollectRecordsView({
       key: 'score',
       width: 84,
       sorter: (a, b) => (a.score ?? -1) - (b.score ?? -1),
-      render: (_, r) => (r.score != null ? <Tag color={scoreColor(r.score)}>{r.score}</Tag> : <Text type="secondary">-</Text>),
+      render: (_, group) => group.score != null
+        ? <Tag color={scoreColor(group.score)}>{group.score}</Tag>
+        : <Text type="secondary">-</Text>,
     },
     {
       title: 'Target',
       key: 'target',
       width: 150,
       ellipsis: true,
-      render: (_, r) => r.target_name ? <Tag color="cyan">{r.target_name}</Tag> : <Text type="secondary">未关联</Text>,
+      render: (_, group) => group.targetNames.length
+        ? <Tag color="cyan">{group.targetNames[0]}</Tag>
+        : <Text type="secondary">未关联</Text>,
     },
     ...(showBrowserArchive
       ? ([
@@ -399,25 +483,25 @@ export default function CollectRecordsView({
             title: '浏览器池归档',
             key: 'browser_archive',
             width: 142,
-            render: (_: unknown, r: CollectRecord) => {
-              const screenshotCount = r.browser_screenshot_urls?.length || 0
-              if (r.source_document_id) {
+            render: (_: unknown, group: CollectRecordGroup) => {
+              const screenshotCount = group.browserScreenshotUrls.length
+              if (group.sourceDocumentIds.length) {
                 return (
                   <Space orientation="vertical" size={2}>
                     <Tag color="success" icon={<DatabaseOutlined />}>已归档</Tag>
-                    {r.source_document_version_id && (
-                      <Text type="secondary">版本 {r.source_document_version_id.slice(-8)}</Text>
+                    {group.sourceDocumentVersionIds[0] && (
+                      <Text type="secondary">版本 {group.sourceDocumentVersionIds[0].slice(-8)}</Text>
                     )}
                     {screenshotCount > 0 && <Text type="secondary">全文截图 {screenshotCount}</Text>}
                   </Space>
                 )
               }
-              return r.source_url
+              return group.sourceUrl
                 ? <Tag color="warning">尚未归档</Tag>
                 : <Tag>无原文链接</Tag>
             },
           },
-        ] as ColumnsType<CollectRecord>)
+        ] as ColumnsType<CollectRecordGroup>)
       : []),
     ...(showSubjectMatch
       ? ([
@@ -425,46 +509,144 @@ export default function CollectRecordsView({
             title: '主体对应',
             key: 'subject_match',
             width: 90,
-            sorter: (a: CollectRecord, b: CollectRecord) => (a.subject_match ?? -1) - (b.subject_match ?? -1),
-            render: (_: unknown, r: CollectRecord) =>
-              r.subject_match != null ? <Tag color={scoreColor(r.subject_match)}>{r.subject_match}</Tag> : <Text type="secondary">-</Text>,
+            sorter: (a: CollectRecordGroup, b: CollectRecordGroup) => (a.subjectMatch ?? -1) - (b.subjectMatch ?? -1),
+            render: (_: unknown, group: CollectRecordGroup) =>
+              group.subjectMatch != null
+                ? <Tag color={scoreColor(group.subjectMatch)}>{group.subjectMatch}</Tag>
+                : <Text type="secondary">-</Text>,
           },
-        ] as ColumnsType<CollectRecord>)
+        ] as ColumnsType<CollectRecordGroup>)
       : []),
     {
       title: '联系方式',
       key: 'contacts',
       width: 160,
-      render: (_, r) => renderContacts(r),
+      render: (_, group) => renderContacts(group),
     },
     {
       title: '',
       key: 'action',
-      width: 48,
-      render: (_, r) => (
-        <Tooltip title={r.source_document_id ? '查看浏览器全文归档' : '查看采集详情'}>
-          <Button
-            type="text"
-            size="small"
-            icon={r.source_document_id ? <DatabaseOutlined /> : <EyeOutlined />}
-            onClick={() => setDetail(r)}
-          />
-        </Tooltip>
+      width: 76,
+      render: (_, group) => (
+        <Space size={0}>
+          <Tooltip title={group.sourceDocumentIds.length ? '查看浏览器全文归档' : '查看采集详情'}>
+            <Button
+              type="text"
+              size="small"
+              aria-label={group.sourceDocumentIds.length ? '查看浏览器全文归档' : '查看采集详情'}
+              icon={group.sourceDocumentIds.length ? <DatabaseOutlined /> : <EyeOutlined />}
+              onClick={() => setDetail(group)}
+            />
+          </Tooltip>
+          <OpenLinkButton value={group.sourceUrl} label="公众号原文" />
+        </Space>
+      ),
+    },
+  ]
+
+  const groupedColumns: ColumnsType<CollectRecordGroup> = [
+    {
+      title: '',
+      key: 'shot',
+      width: 76,
+      responsive: ['sm'],
+      render: (_, group) => {
+        const url = group.discoveryScreenshotUrls[0]
+          || group.screenshotUrls[0]
+          || group.browserScreenshotUrls[0]
+        return url
+          ? <CollectShotImage url={url} width={56} height={56} />
+          : <div className="collect-shot-empty">无图</div>
+      },
+    },
+    {
+      title: '公众号文章',
+      key: 'source_summary',
+      render: (_, group) => {
+        const contacts = groupFieldContacts(group)
+        return (
+          <div className="collect-source-summary">
+            <div className="collect-source-title-row">
+              <span className="collect-source-title">{group.title}</span>
+              {group.isNew ? <Tag color="green">新</Tag> : group.isChanged ? <Tag color="orange">改</Tag> : null}
+            </div>
+            {(group.account || group.publishTime) && (
+              <div className="collect-source-meta">
+                {[group.account, group.publishTime].filter(Boolean).join(' · ')}
+              </div>
+            )}
+            <div className="collect-source-facts">
+              {group.score != null && <Tag color={scoreColor(group.score)}>相关性 {group.score}</Tag>}
+              {showSubjectMatch && group.subjectMatch != null && (
+                <Tag color={scoreColor(group.subjectMatch)}>主体对应 {group.subjectMatch}</Tag>
+              )}
+              {group.targetNames.map((targetName) => <Tag key={targetName} color="cyan">{targetName}</Tag>)}
+              {group.records.length > 1 && <Tag color="geekblue">采集证据 {group.records.length}</Tag>}
+              {showBrowserArchive && group.sourceDocumentIds.length > 0 && (
+                <Tag color="success" icon={<DatabaseOutlined />}>浏览器已归档</Tag>
+              )}
+              {group.sourceDocumentVersionIds.length > 0 && (
+                <Tag>内容版本 {group.sourceDocumentVersionIds.length}</Tag>
+              )}
+              {group.browserScreenshotUrls.length > 0 && (
+                <Tag icon={<PictureOutlined />}>全文截图 {group.browserScreenshotUrls.length}</Tag>
+              )}
+            </div>
+            {contacts.length > 0 && (
+              <div className="collect-source-contacts">
+                <Text type="secondary">联系方式</Text>
+                <Space size={[8, 4]} wrap>
+                  {contacts.slice(0, 8).map((contact) => (
+                    <span key={`${contact.channel}-${contact.value}`}>
+                      {renderFindingValue(contact.value, { copyable: true, maxWidth: 220, linkify: false })}
+                    </span>
+                  ))}
+                  {contacts.length > 8 && <Tag>另有 {contacts.length - 8} 条</Tag>}
+                </Space>
+              </div>
+            )}
+          </div>
+        )
+      },
+    },
+    {
+      title: '',
+      key: 'action',
+      width: 76,
+      align: 'right',
+      render: (_, group) => (
+        <Space size={0}>
+          <Tooltip title="查看文章归档与全部采集证据">
+            <Button
+              type="text"
+              size="small"
+              aria-label="查看文章归档与全部采集证据"
+              icon={<EyeOutlined />}
+              onClick={() => setDetail(group)}
+            />
+          </Tooltip>
+          <OpenLinkButton value={group.sourceUrl} label="公众号原文" />
+        </Space>
       ),
     },
   ]
 
   return (
     <>
-      <Table<CollectRecord>
-        className="collect-records-table"
-        rowKey="record_id"
+      <Table<CollectRecordGroup>
+        className={`collect-records-table${groupBySource ? ' collect-source-groups-table' : ''}`}
+        rowKey="groupKey"
         size="small"
         loading={loading}
-        columns={columns}
-        dataSource={records}
+        columns={groupBySource ? groupedColumns : compactColumns}
+        dataSource={groups}
+        tableLayout={groupBySource ? 'fixed' : undefined}
         locale={{ emptyText: <Empty description={emptyText ?? '暂无采集记录'} /> }}
-        pagination={{ pageSize, hideOnSinglePage: true, showTotal: (t) => `共 ${t} 条` }}
+        pagination={{
+          pageSize,
+          hideOnSinglePage: true,
+          showTotal: (total) => groupBySource ? `共 ${total} 篇文章` : `共 ${total} 条`,
+        }}
       />
       <Modal
         open={!!detail}
@@ -473,17 +655,12 @@ export default function CollectRecordsView({
         width={960}
         title={
           detail
-            ? String(
-                (detail.fields as Record<string, unknown>)?.title ??
-                  (detail.fields as Record<string, unknown>)?.name ??
-                  detail.keyword ??
-                  '采集详情',
-              )
+            ? detail.title
             : '采集详情'
         }
         destroyOnHidden
       >
-        {detail && <CollectRecordDetail record={detail} />}
+        {detail && <CollectRecordDetail group={detail} />}
       </Modal>
     </>
   )

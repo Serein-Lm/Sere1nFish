@@ -61,6 +61,7 @@ import {
   type CollectRecord,
 } from '../../services/mobileCollectService'
 import CollectRecordsView from '../../components/CollectRecordsView/CollectRecordsView'
+import { groupCollectRecordsBySource } from '../../components/CollectRecordsView/collectRecordUtils'
 import AuthenticatedImage from '../../components/AuthenticatedImage'
 import CopyLinkButton, { CopyableLink, CopyableText } from '../../components/CopyLinkButton'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
@@ -3524,15 +3525,14 @@ export default function ProjectDetail() {
   }
 
   const renderWechatContent = () => {
-    const sourceUrlCount = wechatRecords.filter((record) => Boolean(record.source_url)).length
-    const archivedCount = wechatRecords.filter((record) => Boolean(record.source_document_id)).length
-    const versionedCount = wechatRecords.filter((record) => Boolean(record.source_document_version_id)).length
-    const browserScreenshotCount = wechatRecords.reduce(
-      (total, record) => total + (record.browser_screenshot_urls?.length || 0),
-      0,
-    )
-    const unarchivedCount = wechatRecords.filter(
-      (record) => Boolean(record.source_url) && !record.source_document_id,
+    const sourceGroups = groupCollectRecordsBySource(wechatRecords)
+    const sourceUrlCount = sourceGroups.filter((group) => Boolean(group.sourceUrl)).length
+    const archivedCount = sourceGroups.filter((group) => group.sourceDocumentIds.length > 0).length
+    const browserScreenshotCount = new Set(
+      sourceGroups.flatMap((group) => group.browserScreenshotUrls),
+    ).size
+    const unarchivedCount = sourceGroups.filter(
+      (group) => Boolean(group.sourceUrl) && group.sourceDocumentIds.length === 0,
     ).length
 
     return (
@@ -3542,7 +3542,7 @@ export default function ProjectDetail() {
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
           <Text type="secondary">
-            手机采集搜索结果；提取到公众号文章链接后，项目 Chrome 浏览器池读取并永久保存全文、原图、截图和结构化版本。
+            同一原文下的手机发现与浏览器证据合并展示；每篇文章只保留一个跳转入口，全文、原图、截图和结构化版本永久归档。
           </Text>
           <Space>
             <Select
@@ -3578,9 +3578,9 @@ export default function ProjectDetail() {
           </Space>
         </div>
         <Row gutter={[16, 12]} className="wechat-archive-summary">
-          <Col xs={12} sm={6}><Statistic title="手机采集记录" value={wechatRecords.length} /></Col>
+          <Col xs={12} sm={6}><Statistic title="公众号文章" value={sourceGroups.length} /></Col>
+          <Col xs={12} sm={6}><Statistic title="采集证据" value={wechatRecords.length} /></Col>
           <Col xs={12} sm={6}><Statistic title="浏览器已归档" value={archivedCount} /></Col>
-          <Col xs={12} sm={6}><Statistic title="永久内容版本" value={versionedCount} /></Col>
           <Col xs={12} sm={6}><Statistic title="浏览器全文截图" value={browserScreenshotCount} /></Col>
           {wechatRecords.length > 0 && sourceUrlCount === 0 && (
             <Col span={24}>
@@ -3595,6 +3595,7 @@ export default function ProjectDetail() {
           records={wechatRecords}
           loading={wechatLoading}
           showBrowserArchive
+          groupBySource
           emptyText="暂无公众号记录；综合扫描启用公众号后，手机发现与浏览器归档结果会显示在这里"
         />
       </div>
