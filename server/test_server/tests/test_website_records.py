@@ -50,6 +50,68 @@ def test_website_read_model_honors_legacy_nested_exclusion(data: dict[str, Any])
     )
 
 
+def test_website_read_model_hides_historical_chrome_error_screenshot() -> None:
+    from api.services.website_records import _sanitize_screenshot_record
+    from api.services.web_capture import is_browser_error_page_url
+
+    assert is_browser_error_page_url(
+        "https://203.0.113.10:8443/host_not_found_error"
+    )
+    record = _sanitize_screenshot_record(
+        {
+            "url": "https://203.0.113.10:8443",
+            "data": {
+                "screenshot_object_id": "blank-image",
+                "screenshot_url": "/objects/blank-image/content",
+                "evidence_audit": {
+                    "rendered_url": (
+                        "https://203.0.113.10:8443/host_not_found_error"
+                    )
+                },
+            },
+        }
+    )
+
+    assert record["data"]["screenshot_status"] == "unavailable"
+    assert record["data"]["screenshot_url"] == ""
+
+
+def test_website_read_model_keeps_valid_backfilled_screenshot() -> None:
+    from api.services.website_records import _sanitize_screenshot_record
+
+    record = _sanitize_screenshot_record(
+        {
+            "url": "https://203.0.113.10:8443",
+            "screenshot_object_id": "real-image",
+            "screenshot_url": "/objects/real-image/content",
+            "screenshot_captured_url": "https://www.cqa.cn/gywm/20/",
+            "evidence_audit": {
+                "rendered_url": "https://203.0.113.10:8443/host_not_found_error"
+            },
+        }
+    )
+
+    assert record["data"]["screenshot_status"] == "ready"
+    assert record["data"]["screenshot_url"] == "/objects/real-image/content"
+
+
+def test_website_read_model_preserves_prior_valid_capture_after_refresh_failure() -> None:
+    from api.services.website_records import _sanitize_screenshot_record
+
+    record = _sanitize_screenshot_record(
+        {
+            "screenshot_object_id": "prior-image",
+            "screenshot_url": "/objects/prior-image/content",
+            "screenshot_captured_url": "https://example.com/contact",
+            "screenshot_status": "unavailable",
+            "screenshot_unavailable_reason": "latest refresh timed out",
+        }
+    )
+
+    assert record["data"]["screenshot_status"] == "ready"
+    assert record["data"]["screenshot_url"] == "/objects/prior-image/content"
+
+
 class _Cursor:
     def __init__(self, docs: list[dict[str, Any]]) -> None:
         self.docs = list(docs)

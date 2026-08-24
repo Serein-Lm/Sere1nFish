@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
 from api.models.web_tagging_schema import WebTaggingOutput
 from api.services.url_scan_pipeline import UrlScanPipeline
 from api.services.bidding_records import (
     _public_bidding_record,
     _record_recency_key,
     _record_urls,
+    archived_bidding_contacts,
     is_actionable_bidding_contact,
 )
 
@@ -113,6 +118,128 @@ def test_bidding_contact_fallback_keeps_article_query_identity() -> None:
     assert first == {"example.com/site/detail?articleId=first"}
     assert second == {"example.com/site/detail?articleId=second"}
     assert first.isdisjoint(second)
+
+
+def test_bidding_archive_contacts_keep_participants_and_drop_platform_support() -> None:
+    contacts = archived_bidding_contacts(
+        {
+            "purchaser": "重庆江北国际机场有限公司",
+            "contact_candidates": [
+                {
+                    "channel": "phone",
+                    "value": "023-67156296",
+                    "context": (
+                        "联系方式 招标人：重庆江北国际机场有限公司 "
+                        "代理机构：重庆国际投资咨询集团有限公司 "
+                        "项目负责人：凌女士 电话：023-67156296"
+                    ),
+                },
+                {
+                    "channel": "phone",
+                    "value": "023-63626470",
+                    "context": "技术支持与联系电话 网站操作：023-63626470",
+                },
+            ],
+        }
+    )
+
+    assert [item["value"] for item in contacts] == ["023-67156296"]
+    assert contacts[0]["party_role"] == "participant"
+    assert contacts[0]["target_relation"] == "uncertain"
+    assert contacts[0]["review_source"] == "archived_context"
+
+
+def test_bidding_archive_contact_attributes_unambiguous_purchaser() -> None:
+    contacts = archived_bidding_contacts(
+        {
+            "purchaser": "示例采购单位",
+            "contact_candidates": [
+                {
+                    "channel": "email",
+                    "value": "buyer@example.com",
+                    "context": "采购人：示例采购单位 联系邮箱 buyer@example.com",
+                }
+            ],
+        }
+    )
+
+    assert contacts[0]["party_name"] == "示例采购单位"
+    assert contacts[0]["party_role"] == "purchaser"
+    assert contacts[0]["target_relation"] == "confirmed"
+
+
+class _BiddingCursor:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    async def to_list(self, _length: int | None) -> list[dict[str, Any]]:
+        return list(self.rows)
+
+
+class _BiddingCollection:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def find(self, *_args: Any, **_kwargs: Any) -> _BiddingCursor:
+        return _BiddingCursor(self.rows)
+
+
+class _BiddingDb:
+    def __init__(self, findings: list[dict[str, Any]]) -> None:
+        self.findings = _BiddingCollection(findings)
+
+    def __getitem__(self, _name: str) -> _BiddingCollection:
+        return self.findings
+
+
+@pytest.mark.asyncio
+async def test_bidding_read_model_uses_archived_contacts_without_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import bidding_records
+
+    records = [
+        {
+            "record_id": "bid-participant",
+            "title": "采购公告",
+            "published_on": "2026-08-24",
+            "purchaser": "示例采购单位",
+            "contact_candidates": [
+                {
+                    "channel": "phone",
+                    "value": "010-12345678",
+                    "context": "采购人：示例采购单位 联系电话：010-12345678",
+                }
+            ],
+        },
+        {
+            "record_id": "bid-support",
+            "title": "交易平台说明",
+            "published_on": "2026-08-23",
+            "contact_candidates": [
+                {
+                    "channel": "phone",
+                    "value": "010-87654321",
+                    "context": "技术支持与联系电话 网站操作：010-87654321",
+                }
+            ],
+        },
+    ]
+
+    async def query_records(*_args: Any, **_kwargs: Any):
+        return records, len(records)
+
+    monkeypatch.setattr(bidding_records.bidding_dao, "query_records", query_records)
+
+    items, total = await bidding_records.list_project_bidding_records(
+        _BiddingDb([]),
+        project_id="project-1",
+    )
+
+    assert total == 1
+    assert items[0]["record_id"] == "bid-participant"
+    assert items[0]["contacts"][0]["value"] == "010-12345678"
+    assert items[0]["contacts"][0]["review_source"] == "archived_context"
 
 
 def test_bidding_read_model_excludes_heavy_archived_evidence() -> None:

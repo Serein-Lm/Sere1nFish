@@ -135,6 +135,8 @@ export interface WebTaggingData {
   screenshot_captured_at?: string
   screenshot_width?: number
   screenshot_height?: number
+  screenshot_status?: 'ready' | 'unavailable' | 'missing'
+  screenshot_unavailable_reason?: string
 }
 
 export interface WebTaggingRecord {

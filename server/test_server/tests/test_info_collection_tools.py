@@ -43,8 +43,24 @@ from api.services.info_collection.url_tools import (
     HunterSearchProbeTool,
     UrlProbeTool,
     UrlWebScanTool,
+    _screenshot_preferred_url,
 )
 from api.services.info_collection.xhs_tools import XhsDetailTool, XhsProfileTool, XhsSearchTool
+
+
+def test_screenshot_prefers_verified_target_root_page() -> None:
+    tagging = {"intro": {"final_url": "https://www.cqa.cn/gywm/20/"}}
+
+    assert _screenshot_preferred_url(
+        tagging,
+        "https://203.0.113.10:8443",
+        target_context={"root_domain": "cqa.cn"},
+    ) == "https://www.cqa.cn/gywm/20/"
+    assert _screenshot_preferred_url(
+        {"intro": {"final_url": "https://unrelated.example/contact"}},
+        "https://203.0.113.10:8443",
+        target_context={"root_domain": "cqa.cn"},
+    ) == "https://203.0.113.10:8443"
 
 
 class _FakeSearchTool:

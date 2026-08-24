@@ -58,6 +58,12 @@ async def upsert_terminal_result(
     intro: dict[str, Any] | None = None,
     screenshot_object_id: str = "",
     screenshot_url: str = "",
+    screenshot_captured_url: str = "",
+    screenshot_captured_at: str = "",
+    screenshot_width: int = 0,
+    screenshot_height: int = 0,
+    screenshot_status: str = "",
+    screenshot_unavailable_reason: str = "",
     excluded: bool = False,
     evidence_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -91,6 +97,20 @@ async def upsert_terminal_result(
     if screenshot_object_id or screenshot_url:
         fields["screenshot_object_id"] = str(screenshot_object_id or "")
         fields["screenshot_url"] = str(screenshot_url or "")
+    if screenshot_captured_url:
+        fields["screenshot_captured_url"] = str(screenshot_captured_url)
+    if screenshot_captured_at:
+        fields["screenshot_captured_at"] = str(screenshot_captured_at)
+    if screenshot_width:
+        fields["screenshot_width"] = max(0, int(screenshot_width))
+    if screenshot_height:
+        fields["screenshot_height"] = max(0, int(screenshot_height))
+    if screenshot_status:
+        fields["screenshot_status"] = str(screenshot_status)
+    if screenshot_unavailable_reason:
+        fields["screenshot_unavailable_reason"] = str(
+            screenshot_unavailable_reason
+        )[:500]
     await db[URL_SCAN_RESULTS_COLLECTION].update_one(
         {"result_id": stable_id},
         {

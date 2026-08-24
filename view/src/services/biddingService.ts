@@ -61,6 +61,7 @@ export interface BiddingRecord {
     context?: string
     evidence?: string
     attention_score?: number
+    review_source?: 'archived_context' | string
   }>
   contact_count: number
   overview?: string

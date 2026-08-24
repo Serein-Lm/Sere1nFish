@@ -361,6 +361,10 @@ const taggingColumns: ColumnsType<WebTaggingRecord> = [
         height={64}
         preview={false}
       />
+    ) : rec.data?.screenshot_status === 'unavailable' ? (
+      <Tooltip title={rec.data.screenshot_unavailable_reason || '原始页面不可达，未生成有效截图'}>
+        <Text type="secondary">页面不可达</Text>
+      </Tooltip>
     ) : <Text type="secondary">-</Text>,
   },
   {
@@ -584,6 +588,10 @@ function ExpandedRecordContent({
                 width={144}
                 height={88}
               />
+            ) : record.data?.screenshot_status === 'unavailable' ? (
+              <Tooltip title={record.data.screenshot_unavailable_reason || '原始页面不可达，未生成有效截图'}>
+                <Text type="secondary">页面不可达，截图不可用</Text>
+              </Tooltip>
             ) : <Text type="secondary">-</Text>}
           </Descriptions.Item>
           <Descriptions.Item label="摘要">{record.data?.intro?.summary || '-'}</Descriptions.Item>
@@ -3791,6 +3799,7 @@ export default function ProjectDetail() {
                 <Tag color="blue">{contactChannelLabel(contact.channel)}</Tag>
                 <CopyableText value={contact.value} className="bidding-contact-value" />
                 {contact.party_name ? <Text type="secondary" className="bidding-contact-party">{contact.party_name}</Text> : null}
+                {contact.review_source === 'archived_context' ? <Tag>正文提取</Tag> : null}
               </div>
             ))}
             {(record.contacts || []).length > 3 ? <Text type="secondary">另有 {record.contacts.length - 3} 条</Text> : null}
@@ -3883,6 +3892,7 @@ export default function ProjectDetail() {
                             <Tag color="blue">{contactChannelLabel(contact.channel)}</Tag>
                             <CopyableText value={contact.value} className="bidding-contact-value" />
                             {contact.party_name ? <Tag>{contact.party_name}</Tag> : null}
+                            {contact.review_source === 'archived_context' ? <Tag>正文提取</Tag> : null}
                             {contact.attention_score != null ? (
                               <Tag color={contact.attention_score >= 70 ? 'red' : 'orange'}>{contact.attention_score}</Tag>
                             ) : null}

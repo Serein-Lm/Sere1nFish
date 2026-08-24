@@ -18,6 +18,18 @@ _EXCLUDED_ROLES = {"customer_service", "support"}
 _EXCLUDED_TYPES = {"customer_service"}
 _EXCLUDED_PARTY_ROLES = {"publisher"}
 _ACTIONABLE_CHANNELS = {"email", "phone", "wechat"}
+_PLATFORM_SUPPORT_RE = re.compile(
+    r"(?:技术支持与联系电话|网站操作|统一用户中心|平台(?:技术)?支持|"
+    r"系统(?:操作|技术)支持|CA.{0,12}(?:客服|服务)热线)",
+    re.IGNORECASE,
+)
+_PARTICIPANT_CONTACT_RE = re.compile(
+    r"(?:招\s*标\s*人|采\s*购\s*人|代理机构|项目负责人|项目联系人|"
+    r"联\s*系\s*人|联系方式|联系电话|电\s*话)",
+    re.IGNORECASE,
+)
+_PURCHASER_RE = re.compile(r"(?:招\s*标\s*人|采\s*购\s*人)", re.IGNORECASE)
+_AGENCY_RE = re.compile(r"(?:代理机构|招标代理)", re.IGNORECASE)
 _PUBLIC_RECORD_FIELDS = (
     "record_id",
     "provider",
@@ -57,6 +69,7 @@ _PUBLIC_CONTACT_FIELDS = (
     "context",
     "evidence",
     "attention_score",
+    "review_source",
 )
 _PUBLIC_ATTACHMENT_FIELDS = (
     "index",
@@ -83,6 +96,72 @@ def is_actionable_bidding_contact(finding: dict[str, Any]) -> bool:
     if str(finding.get("party_role") or "") in _EXCLUDED_PARTY_ROLES:
         return False
     return True
+
+
+def archived_bidding_contacts(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Review deterministic archive candidates without inventing party ownership."""
+    contacts: list[dict[str, Any]] = []
+    purchaser = str(record.get("purchaser") or "").strip()
+    agency = str(record.get("agency") or "").strip()
+    for candidate in record.get("contact_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        channel = str(candidate.get("channel") or "").strip()
+        value = str(candidate.get("value") or "").strip()
+        context = _SPACE_RE.sub(
+            " ",
+            str(candidate.get("context") or ""),
+        ).strip()
+        if (
+            channel not in _ACTIONABLE_CHANNELS
+            or not value
+            or not context
+            or _PLATFORM_SUPPORT_RE.search(context)
+            or not _PARTICIPANT_CONTACT_RE.search(context)
+        ):
+            continue
+
+        purchaser_match = bool(
+            _PURCHASER_RE.search(context) or (purchaser and purchaser in context)
+        )
+        agency_match = bool(
+            _AGENCY_RE.search(context) or (agency and agency in context)
+        )
+        if purchaser_match and not agency_match:
+            party_name = purchaser
+            party_role = "purchaser"
+            target_relation = "confirmed"
+            score = 75
+            relation_reason = "公告联系方式上下文仅指向采购人/招标人"
+        elif agency_match and not purchaser_match:
+            party_name = agency
+            party_role = "agency"
+            target_relation = "not_target"
+            score = 65
+            relation_reason = "公告联系方式上下文仅指向代理机构"
+        else:
+            party_name = ""
+            party_role = "participant"
+            target_relation = "uncertain"
+            score = 60
+            relation_reason = "正文包含多个公告参与方，无法仅凭邻近文本可靠归属"
+        contacts.append(
+            {
+                "channel": channel,
+                "value": value,
+                "label": "公告参与方联系方式",
+                "party_name": party_name,
+                "party_role": party_role,
+                "target_relation": target_relation,
+                "target_relation_reason": relation_reason,
+                "role": "business",
+                "context": context[:1_000],
+                "evidence": context[:1_000],
+                "attention_score": score,
+                "review_source": "archived_context",
+            }
+        )
+    return contacts
 
 
 def _record_urls(record: dict[str, Any]) -> set[str]:
@@ -115,7 +194,18 @@ def _overview(record: dict[str, Any]) -> str:
                 return value
             boundary = max(value.rfind(mark, 120, 320) for mark in ("。", "；", ";"))
             return value[: boundary + 1 if boundary >= 120 else 320].rstrip() + "..."
-    return ""
+    facts = [
+        str(record.get("title") or record.get("procurement_title") or "").strip(),
+        f"公告阶段：{record.get('stage') or record.get('announcement_type')}"
+        if record.get("stage") or record.get("announcement_type")
+        else "",
+        f"发布时间：{record.get('published_on')}" if record.get("published_on") else "",
+        f"采购人：{record.get('purchaser')}" if record.get("purchaser") else "",
+        f"代理机构：{record.get('agency')}" if record.get("agency") else "",
+        f"中标方：{record.get('winner')}" if record.get("winner") else "",
+        f"金额：{record.get('amount')}" if record.get("amount") else "",
+    ]
+    return "；".join(value for value in facts if value)[:500]
 
 
 def _compact_text(value: Any, *, limit: int) -> str:
@@ -233,17 +323,26 @@ async def list_project_bidding_records(
         if not contacts:
             for key in _record_urls(record):
                 contacts.extend(by_endpoint.get(key, []))
-        deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+        contacts.extend(archived_bidding_contacts(record))
+        deduped: dict[tuple[str, str], dict[str, Any]] = {}
         for contact in contacts:
             key = (
                 str(contact.get("channel") or ""),
                 str(contact.get("value") or "").casefold(),
-                str(contact.get("party_name") or "").casefold(),
             )
             previous = deduped.get(key)
-            if previous is None or int(contact.get("attention_score") or 0) > int(
-                previous.get("attention_score") or 0
-            ):
+            rank = (
+                int(contact.get("attention_score") or 0),
+                int(str(contact.get("review_source") or "") != "archived_context"),
+            )
+            previous_rank = (
+                int((previous or {}).get("attention_score") or 0),
+                int(
+                    str((previous or {}).get("review_source") or "")
+                    != "archived_context"
+                ),
+            )
+            if previous is None or rank > previous_rank:
                 deduped[key] = contact
         ordered_contacts = sorted(
             deduped.values(),
@@ -304,15 +403,10 @@ async def count_project_bidding_records_by_target(
         )
         if endpoint_key:
             legacy_endpoint_keys.add(endpoint_key)
-    if not actionable_record_ids and not legacy_endpoint_keys:
-        return counts
-
     record_query: dict[str, Any] = {
         "project_ids": project_id,
         "target_ids": {"$in": list(selected)},
     }
-    if not legacy_endpoint_keys:
-        record_query["record_id"] = {"$in": list(actionable_record_ids)}
     records = await db[BIDDING_RECORDS_COLLECTION].find(
         record_query,
         {
@@ -322,6 +416,9 @@ async def count_project_bidding_records_by_target(
             "resolved_detail_url": 1,
             "detail_url": 1,
             "provider_url": 1,
+            "contact_candidates": 1,
+            "purchaser": 1,
+            "agency": 1,
         },
     ).to_list(None)
     counted: dict[str, set[str]] = {target_id: set() for target_id in selected}
@@ -330,6 +427,8 @@ async def count_project_bidding_records_by_target(
         is_actionable = record_id in actionable_record_ids
         if not is_actionable and legacy_endpoint_keys:
             is_actionable = bool(_record_urls(record).intersection(legacy_endpoint_keys))
+        if not is_actionable:
+            is_actionable = bool(archived_bidding_contacts(record))
         if not is_actionable:
             continue
         identity = record_id or next(iter(_record_urls(record)), "")

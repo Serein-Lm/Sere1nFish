@@ -17,6 +17,7 @@ from api.dao import web_tagging as web_tagging_dao
 from api.dao.project_scope import project_scope_query
 from api.db.collections import FINDINGS_COLLECTION, URL_SCAN_RESULTS_COLLECTION
 from api.services.site_relevance import classify_generic_surface
+from api.services.web_capture import is_browser_error_page_url
 from api.utils.url_identity import endpoint_identity, prefer_https_url
 
 
@@ -136,6 +137,77 @@ def _is_excluded(record: dict[str, Any]) -> bool:
     )
 
 
+def _sanitize_screenshot_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Expose screenshots only when their captured page is usable."""
+    item = dict(record)
+    data = dict(item.get("data") or {})
+    evidence_audit = dict(
+        item.get("evidence_audit") or data.get("evidence_audit") or {}
+    )
+    object_id = str(
+        item.get("screenshot_object_id") or data.get("screenshot_object_id") or ""
+    )
+    screenshot_url = str(
+        item.get("screenshot_url") or data.get("screenshot_url") or ""
+    )
+    captured_url = str(
+        item.get("screenshot_captured_url")
+        or data.get("screenshot_captured_url")
+        or ""
+    )
+    rendered_url = str(evidence_audit.get("rendered_url") or "")
+    stored_status = str(
+        item.get("screenshot_status") or data.get("screenshot_status") or ""
+    )
+    inferred_error_url = captured_url or rendered_url
+    valid_preserved_capture = bool(
+        (object_id or screenshot_url)
+        and captured_url
+        and not is_browser_error_page_url(captured_url)
+    )
+    unusable = is_browser_error_page_url(inferred_error_url) or (
+        stored_status == "unavailable" and not valid_preserved_capture
+    )
+    if unusable:
+        object_id = ""
+        screenshot_url = ""
+        status = "unavailable"
+        reason = str(
+            item.get("screenshot_unavailable_reason")
+            or data.get("screenshot_unavailable_reason")
+            or "原始页面不可达，未生成有效截图"
+        )[:500]
+    elif object_id or screenshot_url:
+        status = "ready"
+        reason = ""
+    else:
+        status = "missing"
+        reason = "未生成页面截图"
+
+    screenshot_fields = {
+        "screenshot_object_id": object_id,
+        "screenshot_url": screenshot_url,
+        "screenshot_captured_url": captured_url,
+        "screenshot_captured_at": str(
+            item.get("screenshot_captured_at")
+            or data.get("screenshot_captured_at")
+            or ""
+        ),
+        "screenshot_width": int(
+            item.get("screenshot_width") or data.get("screenshot_width") or 0
+        ),
+        "screenshot_height": int(
+            item.get("screenshot_height") or data.get("screenshot_height") or 0
+        ),
+        "screenshot_status": status,
+        "screenshot_unavailable_reason": reason,
+    }
+    item.update(screenshot_fields)
+    data.update(screenshot_fields)
+    item["data"] = data
+    return item
+
+
 def _adapt_url_scan_record(
     scan: dict[str, Any],
     findings: list[dict[str, Any]],
@@ -162,31 +234,53 @@ def _adapt_url_scan_record(
         "summary": str(stored_intro.get("summary") or lead.get("summary") or ""),
     }
     error = str(scan.get("error") or "").strip()
-    return {
-        "_id": scan.get("_id"),
-        "project_id": str(scan.get("project_id") or ""),
-        "url": url,
-        "endpoint_key": str(scan.get("endpoint_key") or endpoint_identity(url)),
-        "task_id": str(scan.get("task_id") or ""),
-        "source": str(scan.get("source") or "web_tagging"),
-        "target_id": str(scan.get("target_id") or ""),
-        "success": bool(scan.get("success")),
-        "error": error,
-        "created_at": _created_at(scan),
-        "screenshot_object_id": str(scan.get("screenshot_object_id") or ""),
-        "screenshot_url": str(scan.get("screenshot_url") or ""),
-        "data": {
-            "intro": intro,
-            "has_findings": bool(ordered_findings),
-            "no_findings_reason": (
-                error
-                or (None if ordered_findings else "扫描完成，未发现符合条件的信息")
-            ),
-            "findings": ordered_findings,
+    return _sanitize_screenshot_record(
+        {
+            "_id": scan.get("_id"),
+            "project_id": str(scan.get("project_id") or ""),
+            "url": url,
+            "endpoint_key": str(scan.get("endpoint_key") or endpoint_identity(url)),
+            "task_id": str(scan.get("task_id") or ""),
+            "source": str(scan.get("source") or "web_tagging"),
+            "target_id": str(scan.get("target_id") or ""),
+            "success": bool(scan.get("success")),
+            "error": error,
+            "created_at": _created_at(scan),
             "screenshot_object_id": str(scan.get("screenshot_object_id") or ""),
             "screenshot_url": str(scan.get("screenshot_url") or ""),
-        },
-    }
+            "data": {
+                "intro": intro,
+                "has_findings": bool(ordered_findings),
+                "no_findings_reason": (
+                    error
+                    or (
+                        None
+                        if ordered_findings
+                        else "扫描完成，未发现符合条件的信息"
+                    )
+                ),
+                "findings": ordered_findings,
+                "screenshot_object_id": str(
+                    scan.get("screenshot_object_id") or ""
+                ),
+                "screenshot_url": str(scan.get("screenshot_url") or ""),
+                "screenshot_captured_url": str(
+                    scan.get("screenshot_captured_url") or ""
+                ),
+                "screenshot_captured_at": str(
+                    scan.get("screenshot_captured_at") or ""
+                ),
+                "screenshot_width": int(scan.get("screenshot_width") or 0),
+                "screenshot_height": int(scan.get("screenshot_height") or 0),
+                "screenshot_status": str(scan.get("screenshot_status") or ""),
+                "screenshot_unavailable_reason": str(
+                    scan.get("screenshot_unavailable_reason") or ""
+                ),
+                "evidence_audit": dict(scan.get("evidence_audit") or {}),
+            },
+            "evidence_audit": dict(scan.get("evidence_audit") or {}),
+        }
+    )
 
 
 async def _list_url_scan_candidates(
@@ -286,7 +380,8 @@ async def _list_url_scan_records(
 
 def _deduplicate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_endpoint: dict[tuple[str, str], dict[str, Any]] = {}
-    for record in records:
+    for raw_record in records:
+        record = _sanitize_screenshot_record(raw_record)
         if _is_excluded(record):
             continue
         url = str(record.get("url") or "")

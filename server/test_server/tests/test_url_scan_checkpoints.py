@@ -68,6 +68,32 @@ async def test_failed_screenshot_refresh_preserves_existing_reference() -> None:
     assert "screenshot_url" not in db.collection.update["$set"]
 
 
+@pytest.mark.asyncio
+async def test_url_scan_persists_screenshot_capture_metadata() -> None:
+    db = _Db()
+
+    fields = await url_scan.upsert_terminal_result(
+        db,
+        task_id="task-1",
+        project_id="project-1",
+        target_id="target-1",
+        source="web_tagging",
+        url="https://example.com",
+        success=True,
+        screenshot_object_id="object-1",
+        screenshot_url="/objects/object-1/content",
+        screenshot_captured_url="https://example.com/contact",
+        screenshot_captured_at="2026-08-24T00:00:00+00:00",
+        screenshot_width=1280,
+        screenshot_height=720,
+        screenshot_status="ready",
+    )
+
+    assert fields["screenshot_captured_url"] == "https://example.com/contact"
+    assert fields["screenshot_width"] == 1280
+    assert fields["screenshot_status"] == "ready"
+
+
 class _Cursor:
     def __init__(self, rows):
         self.rows = rows

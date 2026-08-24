@@ -199,6 +199,29 @@ def _is_same_site(
     )
 
 
+def _screenshot_preferred_url(
+    tagging: dict[str, Any],
+    target_url: str,
+    *,
+    target_context: dict[str, Any] | None = None,
+) -> str:
+    """Choose a verified same-site page reached by the Agent for screenshotting."""
+    from api.services.web_capture import is_browser_error_page_url
+
+    final_url = str((tagging.get("intro") or {}).get("final_url") or "").strip()
+    if (
+        final_url.startswith(("http://", "https://"))
+        and not is_browser_error_page_url(final_url)
+        and _is_same_site(
+            final_url,
+            target_url,
+            allowed_roots=_target_root_domains(target_context),
+        )
+    ):
+        return final_url
+    return target_url
+
+
 def _is_actionable_finding(finding: dict[str, Any]) -> bool:
     """Keep verified entry-only findings even when the control has no href."""
     if str(finding.get("value") or "").strip():
@@ -898,16 +921,27 @@ class UrlWebScanTool:
             try:
                 from api.services.web_capture import capture_cdp_page_screenshot
 
+                screenshot_url = _screenshot_preferred_url(
+                    tagging,
+                    url,
+                    target_context=target_context,
+                )
                 screenshot = await capture_cdp_page_screenshot(
                     cdp_url,
-                    url,
+                    screenshot_url,
                     project_id=request.project_id,
                     target_id=str(request.target_info.get("target_id") or ""),
                     task_id=request.task_id,
                     source=request.source,
                 )
                 tagging.update(screenshot)
+                tagging["screenshot_status"] = "ready"
+                tagging.pop("screenshot_unavailable_reason", None)
             except Exception as screenshot_error:  # noqa: BLE001
+                tagging["screenshot_status"] = "unavailable"
+                tagging["screenshot_unavailable_reason"] = str(
+                    screenshot_error
+                )[:500]
                 logger.warning(
                     "[scan-w%s] 页面截图失败 url=%s: %s",
                     worker_id,

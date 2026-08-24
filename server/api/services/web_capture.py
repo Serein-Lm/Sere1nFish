@@ -25,6 +25,10 @@ _SERVICE_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _INTERACTIVE_TAGS = {"A", "BUTTON", "IFRAME", "INPUT", "SUMMARY"}
+_BROWSER_ERROR_PATH_MARKERS = (
+    "/host_not_found_error",
+    "/chromewebdata/",
+)
 
 
 def _compact_evidence_text(value: Any, limit: int = 700) -> str:
@@ -33,6 +37,17 @@ def _compact_evidence_text(value: Any, limit: int = 700) -> str:
 
 def _is_http_url(value: Any) -> bool:
     return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
+def is_browser_error_page_url(value: Any) -> bool:
+    """Return whether Chrome resolved a navigation to its synthetic error page."""
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized.startswith(("chrome-error://", "chrome://network-error/")):
+        return True
+    path = (urlsplit(normalized).path or "").rstrip("/") + "/"
+    return any(marker in path for marker in _BROWSER_ERROR_PATH_MARKERS)
 
 
 def extract_rendered_contact_evidence(
@@ -296,6 +311,7 @@ def _select_page_target(
         for item in targets
         if item.get("type") == "page"
         and str(item.get("url") or "").startswith(("http://", "https://"))
+        and not is_browser_error_page_url(item.get("url"))
     ]
     if not pages:
         return None
@@ -315,7 +331,9 @@ def _select_page_target(
         return score, len(candidate_url)
 
     selected = max(pages, key=_score)
-    return selected if _score(selected)[0] > 0 else None
+    # A same-host tab can be a different application route. Create a fresh tab
+    # unless the requested path also matches, so evidence never drifts pages.
+    return selected if _score(selected)[0] >= 70 else None
 
 
 async def _cdp_command(
@@ -571,7 +589,10 @@ async def capture_cdp_rendered_links(
                     pass
 
     final_url = str(page.get("href") or preferred_url)
-    if not final_url.startswith(("http://", "https://")):
+    if (
+        not final_url.startswith(("http://", "https://"))
+        or is_browser_error_page_url(final_url)
+    ):
         raise RuntimeError(f"浏览器落入错误页: {final_url[:200]}")
     return {
         "url": preferred_url,
@@ -637,6 +658,12 @@ async def capture_cdp_page_screenshot(
 ) -> dict[str, Any]:
     """截取 Agent 当前页面并返回稳定的鉴权 OSS 引用。"""
     import websockets
+
+    from api.services.url_security import assert_public_http_url
+
+    await assert_public_http_url(preferred_url)
+    if is_browser_error_page_url(preferred_url):
+        raise RuntimeError(f"拒绝截取浏览器错误页: {preferred_url[:200]}")
 
     async with websockets.connect(
         cdp_url,
@@ -717,6 +744,8 @@ async def capture_cdp_page_screenshot(
                 )
             except Exception:
                 pass
+            if is_browser_error_page_url(captured_url):
+                raise RuntimeError(f"浏览器落入错误页: {captured_url[:200]}")
             metrics = await _command("Page.getLayoutMetrics", session_id=session_id)
             captured = await _command(
                 "Page.captureScreenshot",

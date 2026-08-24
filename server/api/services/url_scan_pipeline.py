@@ -1271,6 +1271,18 @@ class UrlScanPipeline:
                     intro=dict(data.get("intro") or {}),
                     screenshot_object_id=str(data.get("screenshot_object_id") or ""),
                     screenshot_url=str(data.get("screenshot_url") or ""),
+                    screenshot_captured_url=str(
+                        data.get("screenshot_captured_url") or ""
+                    ),
+                    screenshot_captured_at=str(
+                        data.get("screenshot_captured_at") or ""
+                    ),
+                    screenshot_width=int(data.get("screenshot_width") or 0),
+                    screenshot_height=int(data.get("screenshot_height") or 0),
+                    screenshot_status=str(data.get("screenshot_status") or ""),
+                    screenshot_unavailable_reason=str(
+                        data.get("screenshot_unavailable_reason") or ""
+                    ),
                     excluded=bool(data.get("excluded")),
                     evidence_audit=dict(
                         data.get("evidence_audit")
