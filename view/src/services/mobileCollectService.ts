@@ -41,6 +41,9 @@ export interface CollectTaskDef {
   min_score_to_detail?: number
   min_subject_match?: number
   min_score_to_persist?: number
+  skip_previously_collected?: boolean
+  prefer_recent_items?: boolean
+  max_item_age_days?: number
   status?: string
   last_run_task_id?: string | null
   last_run_at?: string | null
@@ -75,6 +78,9 @@ export interface CollectTaskInput {
   min_score_to_detail?: number
   min_subject_match?: number
   min_score_to_persist?: number
+  skip_previously_collected?: boolean
+  prefer_recent_items?: boolean
+  max_item_age_days?: number
 }
 
 export interface CollectRecord {
@@ -134,6 +140,8 @@ export interface DryRunResult {
   total: number
   new: number
   changed: number
+  duplicates_skipped?: number
+  stale_skipped?: number
 }
 
 export interface ResolvedTaskKeywords {

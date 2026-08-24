@@ -179,6 +179,20 @@ class CollectTaskDef(BaseModel):
     min_score_to_persist: int = Field(
         default=0, ge=0, le=100, description="入库最低相关性分(0=全收)"
     )
+    skip_previously_collected: bool = Field(
+        default=True,
+        description="详情点击前按项目 Target 历史记录跳过已采集候选",
+    )
+    prefer_recent_items: bool = Field(
+        default=False,
+        description="候选通过审核后优先点击发布时间较新的条目",
+    )
+    max_item_age_days: int = Field(
+        default=0,
+        ge=0,
+        le=3650,
+        description="已知发布时间超过该天数时跳过详情；0 表示不限制",
+    )
     max_runtime_seconds: int = Field(
         default=0,
         ge=0,
@@ -262,6 +276,9 @@ class CollectTaskUpdate(BaseModel):
     min_score_to_detail: int | None = Field(default=None, ge=0, le=100)
     min_subject_match: int | None = Field(default=None, ge=0, le=100)
     min_score_to_persist: int | None = Field(default=None, ge=0, le=100)
+    skip_previously_collected: bool | None = None
+    prefer_recent_items: bool | None = None
+    max_item_age_days: int | None = Field(default=None, ge=0, le=3650)
     max_runtime_seconds: int | None = Field(default=None, ge=0, le=14400)
 
 

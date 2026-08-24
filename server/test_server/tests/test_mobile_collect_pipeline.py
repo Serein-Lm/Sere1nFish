@@ -5,6 +5,7 @@
 并验证设备 acquire/release 与取消(request_stop)幂等。
 """
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -624,6 +625,129 @@ def test_rejected_detail_candidate_does_not_consume_accept_limit(monkeypatch):
     assert context.state["details_accepted"] == 1
 
 
+def test_collect_stage_skips_previously_collected_candidate_before_tap(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    stage = pl._CollectStage()
+    dives: list[str] = []
+
+    async def navigate(*_args, **_kwargs):
+        return True
+
+    async def capture(*_args, **_kwargs):
+        return "QUJD", "shot", "/shot"
+
+    async def analyze(*_args, **_kwargs):
+        return [
+            {
+                "fields": {
+                    "title": "目标机场2026年度信息系统采购招标公告",
+                    "account": "机场发布",
+                    "publish_time": "8月20日",
+                },
+                "score": 95,
+                "subject_match": 95,
+                "content_kind": "article",
+                "is_article_result": True,
+                "target_evidence": "标题直接出现目标机场",
+                "tap_x": 100,
+                "tap_y": 200,
+                "tap_bounds": [50, 150, 900, 300],
+            }
+        ]
+
+    async def history(*_args, **_kwargs):
+        return [
+            {
+                "fields": {
+                    "title": "目标机场2026年度信息系统采购招标公告",
+                    "account": "机场发布",
+                }
+            }
+        ]
+
+    async def deep_dive(_ctx, _keyword, candidate, _target):
+        dives.append(candidate["fields"]["title"])
+        return True
+
+    class _Context:
+        worker_id = 0
+        logger = __import__("logging").getLogger("history-dedup-test")
+        state = {
+            "db": object(),
+            "stop_event": asyncio.Event(),
+            "device_id": "device",
+            "app_name": "微信",
+            "project_id": "project",
+            "run_task_id": "run",
+            "target": {
+                "target_id": "target-1",
+                "canonical_name": "目标机场",
+                "aliases": [],
+            },
+            "deep_collect": True,
+            "detail_max_items": 2,
+            "min_score_to_detail": 60,
+            "min_subject_match": 70,
+            "no_new_stop_threshold": 1,
+            "task_def_id": "definition",
+            "dedup_key_fields": ["title", "account"],
+            "source_link_strategy": "wechat_copy_link",
+            "skip_previously_collected": True,
+            "max_item_age_days": 120,
+            "direct_launch_app": False,
+            "search_hint": "",
+            "owner": "test",
+            "swipe_times": 0,
+            "swipe_interval": 0.01,
+            "parent_task_id": "",
+            "keyword_total": 1,
+            "keywords_completed": 0,
+            "counters": {"duplicates_skipped": 0, "stale_skipped": 0},
+        }
+
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    context = _Context()
+    monkeypatch.setattr(pl, "_run_search_navigation", navigate)
+    monkeypatch.setattr(stage, "_capture_save", capture)
+    monkeypatch.setattr(stage, "_analyze_list", analyze)
+    monkeypatch.setattr(stage, "_deep_dive", deep_dive)
+    monkeypatch.setattr(pl.collect_dao, "list_collected_candidate_history", history)
+    monkeypatch.setattr(pl, "obs_log", lambda *_args, **_kwargs: "")
+
+    asyncio.run(
+        stage.handle(
+            type("Item", (), {"payload": {"keyword": "目标"}, "item_id": "1"})(),
+            context,
+        )
+    )
+
+    assert dives == []
+    assert context.state["counters"]["duplicates_skipped"] == 1
+
+
+def test_candidate_age_filter_keeps_unknown_dates_and_rejects_old_dates():
+    from core.mobile.collect.pipeline import _candidate_age_rejection
+
+    reference = datetime(2026, 8, 24, tzinfo=timezone.utc)
+
+    assert _candidate_age_rejection(
+        {"fields": {"publish_time": "2025年8月20日"}},
+        max_age_days=120,
+        reference=reference,
+    )
+    assert (
+        _candidate_age_rejection(
+            {"fields": {"publish_time": ""}},
+            max_age_days=120,
+            reference=reference,
+        )
+        is None
+    )
+
+
 def test_persist_stage_respects_authoritative_empty_source_contacts():
     from core.mobile.collect.pipeline import _resolve_payload_contacts
 
@@ -1035,6 +1159,24 @@ def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:
     )
     assert mismatch.accepted is False
     assert "候选不一致" in mismatch.reason
+    truncated_title = policy.review_opened_detail(
+        {
+            "page_kind": "article",
+            "visible_title": "1.1亿元！南京市东部机场集团航空食品有限公司的日产10万份航空餐项目施工中标候选人公示",
+            "visible_account": "筑路之程",
+            "candidate_match": 100,
+            "target_match": 95,
+        },
+        candidate={
+            "fields": {
+                "title": "项目名称：南京市东部机场集团航空食品有限公司的日产10万份航空餐项目施工...",
+            }
+        },
+        target_name="东部机场集团有限公司",
+        aliases=["东部机场集团"],
+        min_subject_match=80,
+    )
+    assert truncated_title.accepted is True
     roundup = policy.review_opened_detail(
         {
             "page_kind": "article",

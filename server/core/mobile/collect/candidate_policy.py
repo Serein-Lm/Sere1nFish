@@ -388,12 +388,32 @@ def _normalized_identity_text(value: object) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold())
 
 
+_TITLE_LABEL_PREFIX = re.compile(
+    r"^\s*(?:项目名称|文章标题|标题)\s*[:：]\s*",
+    re.IGNORECASE,
+)
+
+
 def _titles_correspond(candidate_title: object, visible_title: object) -> bool:
     candidate = _normalized_identity_text(candidate_title)
     visible = _normalized_identity_text(visible_title)
     if not candidate or not visible:
         return False
-    return candidate in visible or visible in candidate
+    if candidate in visible or visible in candidate:
+        return True
+
+    # Search result cards often prefix a truncated title with labels such as
+    # "项目名称：". Compare the substantive fragment as well, while requiring
+    # enough text to avoid turning a generic short label into a match.
+    candidate_core = _normalized_identity_text(
+        _TITLE_LABEL_PREFIX.sub("", str(candidate_title or ""))
+    )
+    visible_core = _normalized_identity_text(
+        _TITLE_LABEL_PREFIX.sub("", str(visible_title or ""))
+    )
+    if min(len(candidate_core), len(visible_core)) < 8:
+        return False
+    return candidate_core in visible_core or visible_core in candidate_core
 
 
 def _has_direct_target_identity(

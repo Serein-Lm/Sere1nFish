@@ -181,6 +181,9 @@ export default function MobileCollect() {
       min_score_to_detail: 60,
       min_subject_match: 70,
       min_score_to_persist: 0,
+      skip_previously_collected: true,
+      prefer_recent_items: false,
+      max_item_age_days: 0,
     }
     form.setFieldsValue(preset ? { ...base, ...preset.task } : base)
     setEditorOpen(true)
@@ -210,6 +213,9 @@ export default function MobileCollect() {
       min_score_to_detail: task.min_score_to_detail ?? 60,
       min_subject_match: task.min_subject_match ?? 70,
       min_score_to_persist: task.min_score_to_persist ?? 0,
+      skip_previously_collected: task.skip_previously_collected ?? true,
+      prefer_recent_items: task.prefer_recent_items ?? false,
+      max_item_age_days: task.max_item_age_days ?? 0,
       project_id: task.project_id ?? undefined,
     })
     setEditorOpen(true)
@@ -666,6 +672,29 @@ export default function MobileCollect() {
             </Form.Item>
             <Form.Item name="min_score_to_persist" label="入库最低分" tooltip="低于该分不入库/不通知(0=全收)">
               <InputNumber min={0} max={100} />
+            </Form.Item>
+            <Form.Item
+              name="skip_previously_collected"
+              label="跳过已采集"
+              valuePropName="checked"
+              tooltip="在列表页按项目和 Target 历史记录查重，命中后不再点开详情"
+            >
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              name="prefer_recent_items"
+              label="近期优先"
+              valuePropName="checked"
+              tooltip="同屏候选审核通过后，优先点开发布时间较新的文章"
+            >
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              name="max_item_age_days"
+              label="文章时间窗"
+              tooltip="已知发布时间超过该天数时不点开；0 表示不限，未识别日期仍保留"
+            >
+              <InputNumber min={0} max={3650} suffix="天" />
             </Form.Item>
           </Space>
           <Form.Item name="project_id" label="归属项目(可选)">

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -41,6 +42,7 @@ from core.mobile.collect.candidate_policy import (
     CandidatePolicyRegistry,
     candidate_tap_point,
 )
+from core.mobile.collect.candidate_history import CandidateHistory
 from core.mobile.collect.search_navigation import (
     SearchNavigationRegistry,
     SearchNavigationResult,
@@ -252,12 +254,93 @@ async def _update_parent_terminal_progress(
 
 # ── Stages ─────────────────────────────────────────────
 
+
+_CANDIDATE_PUBLISH_TIME_FIELDS = (
+    "publish_time",
+    "published_at",
+    "publish_date",
+    "published_time",
+    "发布时间",
+)
+
+
+def _candidate_publish_time(candidate: dict[str, Any]) -> datetime | None:
+    fields = dict(candidate.get("fields") or {})
+    value = next(
+        (
+            fields.get(key)
+            for key in _CANDIDATE_PUBLISH_TIME_FIELDS
+            if fields.get(key) not in (None, "")
+        ),
+        None,
+    )
+    return collect_dao.parse_record_publish_time(value)
+
+
+def _candidate_age_rejection(
+    candidate: dict[str, Any],
+    *,
+    max_age_days: int,
+    reference: datetime | None = None,
+) -> str | None:
+    if max_age_days <= 0:
+        return None
+    published_at = _candidate_publish_time(candidate)
+    if published_at is None:
+        return None
+    now = reference or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cutoff = now.astimezone(timezone.utc) - timedelta(days=max_age_days)
+    if published_at < cutoff:
+        return f"发布时间早于最近 {max_age_days} 天窗口"
+    return None
+
+
 class _CollectStage(Stage):
     """打开应用+搜索, 逐屏分诊(列表全收)+ 高分条目点进详情深采。单 worker 串行独占设备。"""
 
     name = "collect"
     concurrency = 1
     retry = RetryPolicy(max_attempts=2, base_delay=3.0, jitter=False)
+
+    async def _candidate_history(
+        self,
+        ctx,
+        collect_target: dict[str, Any] | None,
+    ) -> CandidateHistory:
+        st = ctx.state
+        if not bool(st.get("skip_previously_collected", False)):
+            return CandidateHistory()
+        project_id = str(st.get("project_id") or "")
+        target_id = str((collect_target or {}).get("target_id") or "")
+        if not project_id or not target_id:
+            return CandidateHistory()
+        cache: dict[str, CandidateHistory] = st.setdefault(
+            "candidate_history_cache",
+            {},
+        )
+        cache_key = f"{project_id}:{target_id}"
+        history = cache.get(cache_key)
+        if history is not None:
+            return history
+        records = await collect_dao.list_collected_candidate_history(
+            st["db"],
+            project_id=project_id,
+            target_id=target_id,
+        )
+        history = CandidateHistory.from_records(records)
+        cache[cache_key] = history
+        obs_log(
+            "已加载手机候选历史索引",
+            project_id=project_id,
+            task_id=str(st.get("run_task_id") or ""),
+            source=_OBS_SOURCE,
+            level="info",
+            event="collect_candidate_history_loaded",
+            data={"target_id": target_id, "records": len(records)},
+        )
+        return history
 
     async def _navigate_to_search_results(
         self,
@@ -1033,6 +1116,9 @@ class _CollectStage(Stage):
                 or "default"
             )
         )
+        candidate_history = await self._candidate_history(ctx, collect_target)
+        max_item_age_days = int(st.get("max_item_age_days") or 0)
+        prefer_recent_items = bool(st.get("prefer_recent_items"))
 
         if checkpoint_key and not st.get("dry_run"):
             await collect_dao.mark_keyword_checkpoint(
@@ -1091,13 +1177,44 @@ class _CollectStage(Stage):
                 successful_screens += 1
                 # 普通来源保留列表候选；文章链接来源只持久化浏览器验证后的详情。
                 new_this_screen = 0
+                candidate_rejections: dict[str, tuple[str, str]] = {}
                 for rec in records:
                     key = collect_dao.stable_record_id(
                         task_def_id, rec["fields"], dedup_key_fields
                     )
-                    if key not in seen_keys:
+                    history_reason = candidate_history.match(
+                        dict(rec.get("fields") or {}),
+                        source_url=rec.get("source_url"),
+                    )
+                    age_reason = _candidate_age_rejection(
+                        rec,
+                        max_age_days=max_item_age_days,
+                    )
+                    rejection = None
+                    if history_reason:
+                        rejection = ("history", history_reason)
+                    elif age_reason:
+                        rejection = ("stale", age_reason)
+                    if rejection:
+                        candidate_rejections[key] = rejection
+                        skipped_keys: set[str] = st.setdefault(
+                            f"{rejection[0]}_candidate_keys",
+                            set(),
+                        )
+                        if key not in skipped_keys:
+                            skipped_keys.add(key)
+                            counter_key = (
+                                "duplicates_skipped"
+                                if rejection[0] == "history"
+                                else "stale_skipped"
+                            )
+                            counters = st.setdefault("counters", {})
+                            counters[counter_key] = (
+                                int(counters.get(counter_key) or 0) + 1
+                            )
+                    elif key not in seen_keys:
                         new_this_screen += 1
-                        seen_keys.add(key)
+                    seen_keys.add(key)
                     if candidate_policy.persist_list_candidates:
                         await ctx.emit(
                             "persist",
@@ -1147,23 +1264,31 @@ class _CollectStage(Stage):
                             candidate["fields"],
                             dedup_key_fields,
                         )
-                        decision = candidate_policy.review_detail(
-                            candidate,
-                            min_score=min_score_to_detail,
-                            min_subject_match=min_subject_match,
-                            target_name=str(
-                                (collect_target or {}).get("canonical_name")
-                                or st.get("collection_subject")
-                                or keyword
-                            ),
-                            aliases=list((collect_target or {}).get("aliases") or []),
-                        )
+                        precheck = candidate_rejections.get(candidate_key)
+                        if precheck:
+                            accepted = False
+                            decision_reason = precheck[1]
+                        else:
+                            decision = candidate_policy.review_detail(
+                                candidate,
+                                min_score=min_score_to_detail,
+                                min_subject_match=min_subject_match,
+                                target_name=str(
+                                    (collect_target or {}).get("canonical_name")
+                                    or st.get("collection_subject")
+                                    or keyword
+                                ),
+                                aliases=list((collect_target or {}).get("aliases") or []),
+                            )
+                            accepted = decision.accepted
+                            decision_reason = decision.reason
                         review = {
                             "keyword": keyword,
                             "screen": i,
                             "candidate_key": candidate_key,
-                            "accepted": decision.accepted,
-                            "reason": decision.reason,
+                            "accepted": accepted,
+                            "reason": decision_reason,
+                            "precheck": precheck[0] if precheck else "",
                             "content_kind": candidate.get("content_kind"),
                             "is_article_result": candidate.get("is_article_result"),
                             "subject_match": candidate.get("subject_match"),
@@ -1174,7 +1299,7 @@ class _CollectStage(Stage):
                             "fields": candidate.get("fields") or {},
                         }
                         candidate_reviews.append(review)
-                        if decision.accepted:
+                        if accepted:
                             candidates.append((candidate_key, candidate))
                     if candidate_reviews:
                         obs_log(
@@ -1197,13 +1322,22 @@ class _CollectStage(Stage):
                                 int(st.get("candidate_review_limit") or 0) - len(audit),
                             )
                             audit.extend(candidate_reviews[:remaining])
-                    candidates.sort(
-                        key=lambda item: (
-                            item[1].get("subject_match") or 0,
-                            item[1].get("score") or 0,
-                        ),
-                        reverse=True,
-                    )
+
+                    def candidate_rank(entry):
+                        candidate = entry[1]
+                        published_at = _candidate_publish_time(candidate)
+                        recency = (
+                            published_at.timestamp()
+                            if prefer_recent_items and published_at is not None
+                            else 0.0
+                        )
+                        return (
+                            recency,
+                            candidate.get("subject_match") or 0,
+                            candidate.get("score") or 0,
+                        )
+
+                    candidates.sort(key=candidate_rank, reverse=True)
                     remaining_details = max(0, detail_max_items - details_accepted)
                     if detail_max_total_items > 0:
                         remaining_details = min(
@@ -1257,6 +1391,10 @@ class _CollectStage(Stage):
                             collect_target,
                         )
                         if accepted:
+                            candidate_history.add(
+                                dict(cand.get("fields") or {}),
+                                source_url=cand.get("source_url"),
+                            )
                             details_accepted += 1
                             st["details_accepted"] = int(
                                 st.get("details_accepted") or 0
@@ -1362,6 +1500,12 @@ class _CollectStage(Stage):
             "successful_screens": successful_screens,
             "screen_errors": screen_errors,
             "emitted": emitted,
+            "duplicates_skipped": int(
+                st.get("counters", {}).get("duplicates_skipped") or 0
+            ),
+            "stale_skipped": int(
+                st.get("counters", {}).get("stale_skipped") or 0
+            ),
         }
         if checkpoint_key and not st.get("dry_run"):
             await collect_dao.mark_keyword_checkpoint(
@@ -1792,6 +1936,8 @@ async def run_collect_task(
         "high_score_records": 0,
         "high_score_documents": 0,
         "max_score": 0,
+        "duplicates_skipped": 0,
+        "stale_skipped": 0,
     }
     preview: list[dict[str, Any]] = []
     candidate_reviews: list[dict[str, Any]] = []
@@ -2018,6 +2164,11 @@ async def run_collect_task(
         ),
         "min_subject_match": int(task_def.get("min_subject_match", 70) or 0),
         "min_score_to_persist": int(task_def.get("min_score_to_persist", 0) or 0),
+        "skip_previously_collected": bool(
+            task_def.get("skip_previously_collected", True)
+        ),
+        "prefer_recent_items": bool(task_def.get("prefer_recent_items", False)),
+        "max_item_age_days": int(task_def.get("max_item_age_days", 0) or 0),
         "no_new_stop_threshold": int(task_def.get("no_new_stop_threshold", 2) or 2),
         "collection_subject": str(task_def.get("collection_subject") or ""),
         "collection_goal": str(task_def.get("collection_goal") or ""),
@@ -2052,6 +2203,7 @@ async def run_collect_task(
         "details_attempted": 0,
         "details_accepted": 0,
         "detailed_record_keys": set(),
+        "candidate_history_cache": {},
     }
 
     pipe = Pipeline(state=state, pipeline_id=run_task_id[:8])

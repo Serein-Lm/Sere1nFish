@@ -15,6 +15,7 @@ import json
 import re
 import unicodedata
 import uuid
+from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -26,6 +27,8 @@ from api.db.collections import (
     MOBILE_COLLECT_CHECKPOINTS_COLLECTION,
     MOBILE_COLLECT_RECORDS_COLLECTION,
     MOBILE_COLLECT_TASKS_COLLECTION,
+    SOURCE_DOCUMENT_LINKS_COLLECTION,
+    SOURCE_DOCUMENTS_COLLECTION,
 )
 from api.dao.project_scope import project_scope_query
 
@@ -82,14 +85,35 @@ def parse_record_publish_time(
     if reference_utc.tzinfo is None:
         reference_utc = reference_utc.replace(tzinfo=timezone.utc)
     local_reference = reference_utc.astimezone(_SHANGHAI_TZ)
-    relative_match = re.fullmatch(r"(\d+)\s*(分钟|小时|天)前", text)
+    relative_match = re.fullmatch(
+        r"(\d+)\s*(分钟|小时|天|周|个月|月|年)前",
+        text,
+    )
     if relative_match:
         amount = int(relative_match.group(1))
         unit = relative_match.group(2)
+        if unit in {"个月", "月"}:
+            month_index = local_reference.year * 12 + local_reference.month - 1 - amount
+            year, zero_based_month = divmod(month_index, 12)
+            month = zero_based_month + 1
+            day = min(local_reference.day, monthrange(year, month)[1])
+            return local_reference.replace(
+                year=year,
+                month=month,
+                day=day,
+            ).astimezone(timezone.utc)
+        if unit == "年":
+            year = local_reference.year - amount
+            day = min(local_reference.day, monthrange(year, local_reference.month)[1])
+            return local_reference.replace(
+                year=year,
+                day=day,
+            ).astimezone(timezone.utc)
         delta = {
             "分钟": timedelta(minutes=amount),
             "小时": timedelta(hours=amount),
             "天": timedelta(days=amount),
+            "周": timedelta(weeks=amount),
         }[unit]
         return (local_reference - delta).astimezone(timezone.utc)
     if text in {"刚刚", "现在"}:
@@ -111,6 +135,30 @@ def parse_record_publish_time(
             int(day_match.group(4) or 0),
             tzinfo=_SHANGHAI_TZ,
         )
+        return parsed.astimezone(timezone.utc)
+
+    month_day_match = re.fullmatch(
+        r"(\d{1,2})\s*[月./-]\s*(\d{1,2})(?:\s*日)?"
+        r"(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?",
+        text,
+    )
+    if month_day_match:
+        month = int(month_day_match.group(1))
+        day = int(month_day_match.group(2))
+        try:
+            parsed = datetime(
+                local_reference.year,
+                month,
+                day,
+                int(month_day_match.group(3) or 0),
+                int(month_day_match.group(4) or 0),
+                int(month_day_match.group(5) or 0),
+                tzinfo=_SHANGHAI_TZ,
+            )
+        except ValueError:
+            return None
+        if parsed > local_reference + timedelta(days=2):
+            parsed = parsed.replace(year=parsed.year - 1)
         return parsed.astimezone(timezone.utc)
 
     normalized = re.sub(r"\s+", " ", text)
@@ -1059,3 +1107,85 @@ async def list_records(
         .limit(max(1, min(limit, 200)))
     )
     return [doc async for doc in cursor], total
+
+
+async def list_collected_candidate_history(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    """Load compact mobile and archived-source identities for pre-tap dedup."""
+    if not project_id or not target_id:
+        return []
+    bounded_limit = max(1, min(int(limit), 20_000))
+    query = project_scope_query(
+        project_id,
+        {
+            "target_id": target_id,
+            "superseded_by_record_id": {"$exists": False},
+        },
+    )
+    cursor = (
+        db[MOBILE_COLLECT_RECORDS_COLLECTION]
+        .find(
+            query,
+            {
+                "_id": 0,
+                "fields.title": 1,
+                "fields.account": 1,
+                "fields.author": 1,
+                "discovery_fields.title": 1,
+                "discovery_fields.account": 1,
+                "discovery_fields.author": 1,
+                "source_url": 1,
+            },
+        )
+        .sort("last_seen", -1)
+        .limit(bounded_limit)
+    )
+    history = [document async for document in cursor]
+
+    link_cursor = (
+        db[SOURCE_DOCUMENT_LINKS_COLLECTION]
+        .find(
+            project_scope_query(project_id, {"target_id": target_id}),
+            {"_id": 0, "document_id": 1},
+        )
+        .sort("last_seen_at", -1)
+        .limit(bounded_limit)
+    )
+    linked_document_ids = [
+        str(link.get("document_id") or "")
+        async for link in link_cursor
+        if link.get("document_id")
+    ]
+    document_ids = list(dict.fromkeys(linked_document_ids))
+    if not document_ids:
+        return history
+
+    source_cursor = db[SOURCE_DOCUMENTS_COLLECTION].find(
+        {
+            "document_id": {"$in": document_ids},
+            "archive_status": {"$in": ["complete", "complete_with_warnings"]},
+        },
+        {
+            "_id": 0,
+            "title": 1,
+            "account": 1,
+            "canonical_url": 1,
+        },
+    )
+    archived_sources = [
+        {
+            "fields": {
+                "title": source.get("title"),
+                "account": source.get("account"),
+            },
+            "source_url": source.get("canonical_url"),
+        }
+        async for source in source_cursor
+    ]
+    history.extend(archived_sources)
+    return history

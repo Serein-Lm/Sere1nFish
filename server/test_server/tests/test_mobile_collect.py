@@ -161,6 +161,19 @@ def test_parse_record_publish_time_supports_wechat_and_relative_values():
     assert dao.parse_record_publish_time("昨天 09:15", reference=reference) == datetime(
         2026, 8, 12, 1, 15, tzinfo=timezone.utc
     )
+    assert dao.parse_record_publish_time("9个月前", reference=reference) == datetime(
+        2025, 11, 13, 4, 0, tzinfo=timezone.utc
+    )
+
+
+def test_parse_record_publish_time_infers_year_for_month_day_values():
+    from api.dao import mobile_collect as dao
+
+    reference = datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc)
+
+    assert dao.parse_record_publish_time("12月31日 09:15", reference=reference) == datetime(
+        2025, 12, 31, 1, 15, tzinfo=timezone.utc
+    )
 
 
 def test_record_ranking_is_value_first_then_publish_time():
