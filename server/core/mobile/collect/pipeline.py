@@ -860,7 +860,10 @@ class _CollectStage(Stage):
                         await ctx.emit(
                             "persist",
                             {
-                                "fields": source_result.get("fields") or candidate.get("fields") or {},
+                                "fields": {
+                                    **dict(candidate.get("fields") or {}),
+                                    **dict(source_result.get("fields") or {}),
+                                },
                                 "score": source_result.get("score"),
                                 "subject_match": source_result.get("subject_match"),
                                 "score_reason": source_result.get("score_reason") or "",
@@ -1177,11 +1180,15 @@ class _CollectStage(Stage):
                 successful_screens += 1
                 # 普通来源保留列表候选；文章链接来源只持久化浏览器验证后的详情。
                 new_this_screen = 0
+                new_visible_this_screen = 0
                 candidate_rejections: dict[str, tuple[str, str]] = {}
                 for rec in records:
                     key = collect_dao.stable_record_id(
                         task_def_id, rec["fields"], dedup_key_fields
                     )
+                    is_new_visible = key not in seen_keys
+                    if is_new_visible:
+                        new_visible_this_screen += 1
                     history_reason = candidate_history.match(
                         dict(rec.get("fields") or {}),
                         source_url=rec.get("source_url"),
@@ -1212,7 +1219,7 @@ class _CollectStage(Stage):
                             counters[counter_key] = (
                                 int(counters.get(counter_key) or 0) + 1
                             )
-                    elif key not in seen_keys:
+                    elif is_new_visible:
                         new_this_screen += 1
                     seen_keys.add(key)
                     if candidate_policy.persist_list_candidates:
@@ -1250,6 +1257,7 @@ class _CollectStage(Stage):
                         "index": i,
                         "candidates": len(records),
                         "new": new_this_screen,
+                        "new_visible": new_visible_this_screen,
                         "max_score": max((r.get("score") or 0 for r in records), default=0),
                     },
                 )
@@ -1402,7 +1410,10 @@ class _CollectStage(Stage):
                             remaining_details -= 1
 
                 # 到底检测: 连续若干屏无新去重键 → 判定已滑到底, 提前停止
-                if new_this_screen == 0:
+                # 旧记录和超出时间窗的条目虽然不会进入详情采集，但它们仍能
+                # 证明列表已经翻到新位置。只有连续屏幕没有出现新的可见条目，
+                # 才能判断到底，避免增量任务被首屏历史结果提前截断。
+                if new_visible_this_screen == 0:
                     no_new_streak += 1
                 else:
                     no_new_streak = 0
@@ -1587,7 +1598,14 @@ class _PersistStage(Stage):
         ).score(raw_score, has_contacts=bool(contacts))
 
         min_persist = int(st.get("min_score_to_persist", 0) or 0)
-        if min_persist > 0 and (score or 0) < min_persist:
+        # 来源文档已经通过独立的正文相关性审核并完成永久归档。这里的
+        # contact_weighted 分数只负责展示分层，不能再次把无联系方式的已归档
+        # 文章从公众号读模型中删除；阈值仅约束尚未经过来源审核的手机记录。
+        if (
+            min_persist > 0
+            and not payload.get("source_document_id")
+            and (score or 0) < min_persist
+        ):
             return
 
         if st.get("dry_run"):

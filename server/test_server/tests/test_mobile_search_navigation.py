@@ -131,7 +131,7 @@ def test_wechat_search_navigator_uses_verified_activity_path(monkeypatch) -> Non
 
     assert result.ok is True
     assert result.metadata["activity"].endswith("MMFTSSOSHomeWebViewUI")
-    assert result.metadata["submission"] == "suggestion_tap"
+    assert result.metadata["submission"] == "search_exact"
     assert result.metadata["verified_query"] == "安徽广播电视台 招标"
     assert result.metadata["query_verification"] == "uiautomator_exact"
     assert launcher.calls == [("10.0.0.2:5555", "微信", "primary")]
@@ -141,7 +141,7 @@ def test_wechat_search_navigator_uses_verified_activity_path(monkeypatch) -> Non
         ("tap", 500, 67),
         ("clear",),
         ("type", "安徽广播电视台 招标"),
-        ("tap", 400, 229),
+        ("press", "search"),
         ("keyboard", "restore", "original/.Ime"),
     ]
 
@@ -246,7 +246,7 @@ def test_wechat_search_navigator_recovers_from_article_webview(monkeypatch) -> N
     assert ("type", "安徽广播电视台 招标") in device.events
 
 
-def test_wechat_search_navigator_retries_enter_when_suggestion_does_not_submit(
+def test_wechat_search_navigator_uses_enter_when_search_key_does_not_submit(
     monkeypatch,
 ) -> None:
     from core.mobile.collect import search_navigation
@@ -279,8 +279,47 @@ def test_wechat_search_navigator_retries_enter_when_suggestion_does_not_submit(
     )
 
     assert result.ok is True
-    assert result.metadata["submission"] == "enter_retry_1"
+    assert result.metadata["submission"] == "enter_exact"
+    assert ("press", "search") in device.events
     assert ("press", "enter") in device.events
+
+
+def test_wechat_search_navigator_uses_exact_query_row_after_key_fallback(
+    monkeypatch,
+) -> None:
+    from core.mobile.collect import search_navigation
+
+    device = _FakeDevice()
+    monkeypatch.setattr(
+        search_navigation,
+        "resolve_tap",
+        lambda x, y, **_kwargs: (x, y),
+    )
+    search_activity = "com.tencent.mm.plugin.fts.ui.FTSMainUI"
+    result_activity = (
+        "com.tencent.mm.plugin.webview.ui.tools.fts.MMFTSSOSHomeWebViewUI"
+    )
+    navigator = WechatArticleSearchNavigator(
+        manager_factory=lambda: _FakeManager(device),
+        launcher_factory=_FakeLauncher,
+        runner=_activity_runner(
+            [search_activity, *([search_activity] * 8), result_activity],
+            query="安徽广播电视台 招标",
+        ),
+        sleep=lambda _seconds: None,
+    )
+
+    result = navigator.navigate(
+        "device-a",
+        app_name="微信",
+        app_instance="primary",
+        keyword="安徽广播电视台 招标",
+    )
+
+    assert result.ok is True
+    assert result.metadata["submission"] == "exact_query_row"
+    assert ("tap", 400, 202) in device.events
+    assert ("tap", 400, 229) not in device.events
 
 
 def test_wechat_search_navigator_rejects_stale_query(monkeypatch) -> None:

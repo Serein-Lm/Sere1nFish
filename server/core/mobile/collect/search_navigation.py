@@ -88,7 +88,8 @@ class WechatArticleSearchNavigator:
     _LAUNCHER_ACTIVITY = "com.tencent.mm.ui.LauncherUI"
     _LAUNCHER_SEARCH_ENTRY = (830, 67)
     _SEARCH_EDITOR = (500, 67)
-    _EXACT_QUERY_SUGGESTION = (400, 229)
+    # FTSMainUI 第一条结果是当前输入词本身；后续条目才是“小程序”等联想词。
+    _EXACT_QUERY_ROW = (400, 202)
 
     def __init__(
         self,
@@ -280,15 +281,15 @@ class WechatArticleSearchNavigator:
             f"{activity.rsplit('.', 1)[-1] if activity else 'unknown'}"
         )
 
-    def _submit_search(self, device, adb_device_id: str) -> tuple[str, str]:
-        """提交搜索并校验结果页；建议项未响应时用键盘确定性重试。"""
-        self._tap_normalized(
-            device,
-            adb_device_id,
-            self._EXACT_QUERY_SUGGESTION,
-        )
-        submission = "suggestion_tap"
-        for attempt in range(4):
+    def _submit_search(
+        self,
+        device,
+        adb_device_id: str,
+    ) -> tuple[str, str]:
+        """提交已校验输入词；按键无效时只点原词行，不点后续联想词。"""
+        for key in ("search", "enter"):
+            if not device.press_key(key, delay=0.1):
+                continue
             activity = self._wait_for_activity(
                 adb_device_id,
                 self._RESULT_ACTIVITY,
@@ -296,14 +297,24 @@ class WechatArticleSearchNavigator:
                 pending=self._SEARCH_ACTIVITY,
             )
             if activity == self._RESULT_ACTIVITY:
-                return activity, submission
-            if attempt >= 3:
-                break
-            if not device.press_key("enter", delay=0.1):
-                raise RuntimeError("微信搜索提交失败: Enter 按键未执行")
-            submission = f"enter_retry_{attempt + 1}"
-            self._sleep(0.25)
-        raise RuntimeError("微信搜索提交失败: 多次提交后仍停留在 FTSMainUI")
+                return activity, f"{key}_exact"
+
+        self._tap_normalized(
+            device,
+            adb_device_id,
+            self._EXACT_QUERY_ROW,
+        )
+        activity = self._wait_for_activity(
+            adb_device_id,
+            self._RESULT_ACTIVITY,
+            attempts=6,
+            pending=self._SEARCH_ACTIVITY,
+        )
+        if activity == self._RESULT_ACTIVITY:
+            return activity, "exact_query_row"
+        raise RuntimeError(
+            "微信未响应精确搜索提交；已拒绝点击后续联想结果"
+        )
 
     @staticmethod
     def _tap_normalized(device, adb_device_id: str, point: tuple[int, int]) -> None:

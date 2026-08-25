@@ -6,6 +6,7 @@
 """
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -272,6 +273,64 @@ def test_pipeline_no_notify_when_notify_on_none(monkeypatch):
     result = asyncio.new_event_loop().run_until_complete(scenario())
     assert result["new"] == 1
     assert notifies == []
+
+
+def test_persist_threshold_keeps_relevance_reviewed_source_documents() -> None:
+    from api.dao.mobile_collect import MOBILE_COLLECT_RECORDS_COLLECTION
+    from core.mobile.collect import pipeline as pl
+
+    db = _FakeDB()
+    counters = {
+        "total": 0,
+        "new": 0,
+        "changed": 0,
+        "contacts": 0,
+        "media": 0,
+        "media_failed": 0,
+        "high_score_records": 0,
+        "high_score_documents": 0,
+        "max_score": 0,
+    }
+    context = SimpleNamespace(
+        state={
+            "db": db,
+            "counters": counters,
+            "extract_contact_findings": False,
+            "score_policy": "contact_weighted",
+            "min_score_to_persist": 60,
+            "dry_run": False,
+            "task_def_id": "task-source",
+            "project_id": "",
+            "dedup_key_fields": ["title", "account"],
+            "run_task_id": "run-source",
+            "notification_min_score": 60,
+            "notify_on": "none",
+        },
+        emit=None,
+    )
+    source_payload = {
+        "fields": {"title": "目标机场近期公告", "account": "目标机场"},
+        "score": 85,
+        "subject_match": 95,
+        "source_url": "https://mp.weixin.qq.com/s/source",
+        "source_document_id": "source-doc-1",
+        "source_document_version_id": "source-version-1",
+        "keyword": "目标机场",
+        "screenshot_id": "browser-shot-1",
+        "screenshot_url": "/storage/browser-shot-1",
+    }
+
+    asyncio.run(
+        pl._PersistStage().handle(
+            SimpleNamespace(payload=source_payload),
+            context,
+        )
+    )
+
+    records = db[MOBILE_COLLECT_RECORDS_COLLECTION].docs
+    assert len(records) == 1
+    assert counters["total"] == 1
+    assert next(iter(records.values()))["source_document_id"] == "source-doc-1"
 
 
 def test_pipeline_suppresses_low_score_incremental_notification(monkeypatch):
@@ -728,6 +787,116 @@ def test_collect_stage_skips_previously_collected_candidate_before_tap(monkeypat
     assert context.state["counters"]["duplicates_skipped"] == 1
 
 
+def test_stale_visible_candidates_do_not_stop_incremental_scrolling(monkeypatch):
+    from core.mobile.collect import pipeline as pl
+
+    stage = pl._CollectStage()
+    dives: list[str] = []
+    screens = iter(
+        [
+            [
+                {
+                    "fields": {
+                        "title": "目标机场历史公告",
+                        "account": "目标机场发布",
+                        "publish_time": "2025年1月1日",
+                    },
+                    "score": 90,
+                    "subject_match": 95,
+                    "content_kind": "article",
+                    "is_article_result": True,
+                    "target_evidence": "标题直接出现目标机场",
+                    "tap_bounds": [50, 150, 900, 300],
+                }
+            ],
+            [
+                {
+                    "fields": {
+                        "title": "目标机场最新采购公告",
+                        "account": "目标机场发布",
+                        "publish_time": "1天前",
+                    },
+                    "score": 95,
+                    "subject_match": 100,
+                    "content_kind": "article",
+                    "is_article_result": True,
+                    "target_evidence": "标题和账号直接出现目标机场",
+                    "tap_bounds": [50, 150, 900, 300],
+                }
+            ],
+        ]
+    )
+
+    async def navigate(*_args, **_kwargs):
+        return True
+
+    async def capture(*_args, **_kwargs):
+        return "QUJD", "shot", "/shot"
+
+    async def analyze(*_args, **_kwargs):
+        return next(screens)
+
+    async def deep_dive(_ctx, _keyword, candidate, _target):
+        dives.append(candidate["fields"]["title"])
+        return True
+
+    class _Context:
+        worker_id = 0
+        logger = __import__("logging").getLogger("stale-scroll-test")
+        state = {
+            "stop_event": asyncio.Event(),
+            "device_id": "device",
+            "app_name": "微信",
+            "project_id": "project",
+            "run_task_id": "run",
+            "target": {
+                "target_id": "target-1",
+                "canonical_name": "目标机场",
+                "aliases": ["目标机场"],
+            },
+            "deep_collect": True,
+            "detail_max_items": 2,
+            "min_score_to_detail": 60,
+            "min_subject_match": 70,
+            "no_new_stop_threshold": 1,
+            "task_def_id": "definition",
+            "dedup_key_fields": ["title", "account"],
+            "source_link_strategy": "wechat_copy_link",
+            "skip_previously_collected": False,
+            "max_item_age_days": 120,
+            "direct_launch_app": False,
+            "search_hint": "",
+            "owner": "test",
+            "swipe_times": 1,
+            "swipe_interval": 0,
+            "parent_task_id": "",
+            "keyword_total": 1,
+            "keywords_completed": 0,
+            "counters": {"duplicates_skipped": 0, "stale_skipped": 0},
+        }
+
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    context = _Context()
+    monkeypatch.setattr(pl, "_run_search_navigation", navigate)
+    monkeypatch.setattr(stage, "_capture_save", capture)
+    monkeypatch.setattr(stage, "_analyze_list", analyze)
+    monkeypatch.setattr(stage, "_deep_dive", deep_dive)
+    monkeypatch.setattr(pl, "_do_swipe", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pl, "obs_log", lambda *_args, **_kwargs: "")
+
+    asyncio.run(
+        stage.handle(
+            type("Item", (), {"payload": {"keyword": "目标"}, "item_id": "1"})(),
+            context,
+        )
+    )
+
+    assert dives == ["目标机场最新采购公告"]
+    assert context.state["counters"]["stale_skipped"] == 1
+
+
 def test_candidate_age_filter_keeps_unknown_dates_and_rejects_old_dates():
     from core.mobile.collect.pipeline import _candidate_age_rejection
 
@@ -1074,10 +1243,21 @@ def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:
         min_score=60,
         min_subject_match=70,
     )
-    edge = policy.review_detail(
+    complete_lower_row = policy.review_detail(
         {
             **base,
             "tap_bounds": [40, 700, 960, 850],
+            "content_kind": "article",
+            "is_article_result": True,
+        },
+        min_score=60,
+        min_subject_match=70,
+    )
+    assert complete_lower_row.accepted is True
+    edge = policy.review_detail(
+        {
+            **base,
+            "tap_bounds": [40, 820, 960, 930],
             "content_kind": "article",
             "is_article_result": True,
         },
@@ -1310,6 +1490,8 @@ def test_deep_dive_hands_source_url_to_browser_archive(monkeypatch):
     assert len(emitted) == 1
     assert emitted[0][0] == "persist"
     payload = emitted[0][1]
+    assert payload["fields"]["title"] == "浏览器全文"
+    assert payload["fields"]["account"] == "测试公众号"
     assert payload["source_document_id"] == "source-doc-1"
     assert payload["source_document_version_id"] == "source-version-1"
     assert payload["contacts"][0]["context"] == "联系人张三 13800138000"

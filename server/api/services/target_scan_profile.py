@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from typing import Any
 
@@ -100,7 +101,7 @@ def _structurally_related(canonical_name: str, alias: str) -> bool:
     if canonical in candidate:
         return candidate.endswith(canonical)
     canonical_core = _normalized_name(_strip_legal_suffix(canonical_name))
-    return bool(
+    if bool(
         canonical_core
         and (
             candidate in canonical_core
@@ -109,6 +110,23 @@ def _structurally_related(canonical_name: str, alias: str) -> bool:
                 and candidate.endswith(canonical_core)
             )
         )
+    ):
+        return True
+
+    # 允许省略名称中间的限定词，但要求首尾身份片段都一致且整体高度相似。
+    # 这覆盖“南京禄口国际机场”/“南京禄口机场”，同时不会把追加的下属部门
+    # 或只有宽泛前缀的机构名称纳入 Target 身份。
+    matcher = SequenceMatcher(None, canonical, candidate)
+    blocks = [block for block in matcher.get_matching_blocks() if block.size]
+    return bool(
+        len(blocks) >= 2
+        and blocks[0].a == 0
+        and blocks[0].b == 0
+        and blocks[0].size >= 2
+        and blocks[-1].a + blocks[-1].size == len(canonical)
+        and blocks[-1].b + blocks[-1].size == len(candidate)
+        and blocks[-1].size >= 2
+        and matcher.ratio() >= 0.75
     )
 
 

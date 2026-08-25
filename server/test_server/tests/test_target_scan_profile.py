@@ -45,6 +45,16 @@ def test_profile_accepts_slash_in_canonical_institution_name() -> None:
     assert profile["search_aliases"][0] == "中国疾病预防控制中心儿少/学校卫生中心"
 
 
+def test_profile_accepts_verified_internal_qualifier_omission() -> None:
+    profile = build_target_scan_profile(
+        canonical_name="南京禄口国际机场",
+        fallback_aliases=["南京禄口机场", "南京机场"],
+    )
+
+    assert "南京禄口机场" in profile["search_aliases"]
+    assert "南京机场" not in profile["search_aliases"]
+
+
 def test_profile_rejects_unrelated_department_from_previous_profile() -> None:
     profile = build_target_scan_profile(
         canonical_name="交通运输部路网监测与应急处置中心",
@@ -90,6 +100,35 @@ def test_profile_upgrade_reuses_fingerprint_when_scan_inputs_are_unchanged() -> 
 
     assert profile["search_aliases"] == previous["search_aliases"]
     assert profile["fingerprint"] == "existing-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_collection_target_exposes_authoritative_scan_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import targets as targets_service
+
+    async def resolve_target(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "target_id": "target-1",
+            "canonical_name": "南京禄口国际机场",
+            "aliases": ["南京禄口国际机场"],
+            "scan_aliases": ["南京禄口国际机场", "南京禄口机场"],
+        }
+
+    monkeypatch.setattr(targets_service, "resolve_target", resolve_target)
+
+    result = await targets_service.resolve_collection_target(
+        object(),
+        task_def={
+            "target_id": "target-1",
+            "target_name": "南京禄口国际机场",
+            "target_type": "company",
+        },
+    )
+
+    assert result is not None
+    assert result["aliases"] == ["南京禄口国际机场", "南京禄口机场"]
 
 
 def test_coverage_requires_completed_status_and_current_profile() -> None:

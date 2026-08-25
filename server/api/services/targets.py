@@ -1250,6 +1250,7 @@ async def resolve_collection_target(
         target_type=str(task_def.get("target_type") or "company"),
         source="mobile_collect_task",
     )
+    relation: dict[str, Any] | None = None
     if target and project_id:
         keywords = [str(item).strip() for item in task_def.get("keywords") or []]
         await targets_dao.link_project_target(
@@ -1282,6 +1283,22 @@ async def resolve_collection_target(
             target_id=target_id,
             target_name=target_name,
         )
+        relation = await targets_dao.get_project_target(
+            db,
+            project_id=project_id,
+            target_id=target_id,
+        )
+    if target:
+        from api.services.target_scan_profile import target_scan_names
+
+        target = {
+            **target,
+            "aliases": target_scan_names(
+                target=target,
+                project_target=relation,
+                fallback_name=str(target.get("canonical_name") or target_name),
+            ),
+        }
     return target
 
 

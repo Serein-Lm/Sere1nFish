@@ -8,7 +8,7 @@ from typing import Protocol
 
 
 _WECHAT_SAFE_TAP_TOP = 140
-_WECHAT_SAFE_TAP_BOTTOM = 780
+_WECHAT_SAFE_TAP_BOTTOM = 900
 
 
 class CandidatePolicy(Protocol):
