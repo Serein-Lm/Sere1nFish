@@ -12,7 +12,10 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import bidding as bidding_dao
 from api.dao import targets as targets_dao
-from api.services.bidding_relevance import filter_bidding_records
+from api.services.bidding_relevance import (
+    associate_project_bidding_records,
+    filter_bidding_records,
+)
 from api.services.company_url import normalize_url
 from api.services.info_collection.tuning import (
     DEFAULT_COPYWRITING_CONCURRENCY,
@@ -672,6 +675,12 @@ class BiddingPipeline:
                 }
             )
 
+        query_meta = {
+            "publish_start": search.publish_start,
+            "publish_end": search.publish_end,
+            "lookback_days": safe_lookback_days,
+            "bid_types": search.bid_types,
+        }
         stored = await bidding_dao.upsert_records_batch(
             self.db,
             records=persistence_records,
@@ -679,12 +688,15 @@ class BiddingPipeline:
             target_id=target_id,
             task_id=task_id,
             query_name=company_name,
-            query_meta={
-                "publish_start": search.publish_start,
-                "publish_end": search.publish_end,
-                "lookback_days": safe_lookback_days,
-                "bid_types": search.bid_types,
-            },
+            query_meta=query_meta,
+        )
+        entity_association = await associate_project_bidding_records(
+            self.db,
+            project_id=project_id,
+            records=persistence_records,
+            origin_target_id=target_id,
+            task_id=task_id,
+            query_meta=query_meta,
         )
 
         scan_result: dict[str, Any] = {
@@ -765,6 +777,7 @@ class BiddingPipeline:
             "coverage_complete": search.coverage_complete,
             "retry_passes": search.retry_passes,
             **stored,
+            "entity_association": entity_association,
             "raw_archived": sum(bool(item.get("raw_content_object_id")) for item in archives),
             "provider_payloads_archived": sum(
                 bool(item.get("provider_payload_object_id")) for item in archives

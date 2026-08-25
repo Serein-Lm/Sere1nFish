@@ -13,7 +13,10 @@ from api.services.bidding_pipeline import (
     BiddingPipeline,
     _extract_contact_candidates,
 )
-from api.services.bidding_relevance import assess_bidding_relevance
+from api.services.bidding_relevance import (
+    assess_bidding_relevance,
+    assess_project_target_bidding_relevance,
+)
 from api.services.source_documents.resources import (
     FetchedResource,
     extract_attachment_text,
@@ -29,6 +32,15 @@ def _stub_target_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
         return {}
 
     monkeypatch.setattr(bidding_module.targets_dao, "get_target", _get_target)
+
+    async def _associate_records(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"matched_targets": 0, "links_total": 0, "matches": []}
+
+    monkeypatch.setattr(
+        bidding_module,
+        "associate_project_bidding_records",
+        _associate_records,
+    )
 
 
 @pytest.mark.asyncio
@@ -338,6 +350,46 @@ def test_bidding_relevance_accepts_alias_or_target_domain() -> None:
         company_name="东部机场集团有限公司",
         target=english_target,
     ).reason == "target_alias_match"
+
+
+def test_project_target_bidding_relevance_uses_only_bare_persisted_aliases() -> None:
+    relation = {
+        "target_id": "nanjing-airport",
+        "target_name": "南京禄口国际机场",
+        "search_terms_by_channel": {
+            "weixin": [
+                "南京禄口国际机场 招标 联系人",
+                "禄口机场",
+                "南京机场",
+            ]
+        },
+    }
+    target = {
+        "canonical_name": "南京禄口国际机场",
+        "root_domains": ["easternairports.com"],
+    }
+    explicit_match = BiddingRecord(
+        record_id="bid-nanjing",
+        title="南京机场主机、存储和网络设备维保项目中标公示",
+    )
+    shared_domain_only = BiddingRecord(
+        record_id="bid-shared-domain",
+        title="航站楼网络设备维保项目中标公示",
+        detail_url="https://bid.easternairports.com/notices/1",
+    )
+
+    decision = assess_project_target_bidding_relevance(
+        explicit_match,
+        relation=relation,
+        target=target,
+    )
+    assert decision.relevant is True
+    assert "南京机场" in decision.matched_aliases
+    assert assess_project_target_bidding_relevance(
+        shared_domain_only,
+        relation=relation,
+        target=target,
+    ).relevant is False
 
 
 @pytest.mark.asyncio

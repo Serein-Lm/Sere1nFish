@@ -54,6 +54,32 @@ _ALIAS_FIELDS = (
 )
 _ASCII_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.IGNORECASE)
 _ASCII_TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+_MAX_DERIVED_TARGETS_PER_RECORD = 2
+_DERIVED_ALIAS_QUERY_MARKERS = (
+    "公众号",
+    "新闻",
+    "公告",
+    "招标",
+    "投标",
+    "中标",
+    "采购",
+    "招商",
+    "合作",
+    "联系",
+    "电话",
+    "手机",
+    "邮箱",
+    "招聘",
+    "投稿",
+    "实习",
+    "校招",
+    "春招",
+    "秋招",
+    "面试",
+    "待遇",
+    "薪资",
+    "工作",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +255,204 @@ def filter_bidding_records(
         else:
             rejected.append((record, decision))
     return accepted, rejected
+
+
+def _project_target_match_document(
+    relation: Mapping[str, Any],
+    target: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge stable identity fields with bare, persisted channel aliases."""
+    merged = dict(target or {})
+    for field in _ALIAS_FIELDS:
+        merged[field] = list(
+            dict.fromkeys(
+                [
+                    *_flatten_text((target or {}).get(field)),
+                    *_flatten_text(relation.get(field)),
+                ]
+            )
+        )
+
+    bare_channel_aliases: list[str] = []
+    channel_terms = relation.get("search_terms_by_channel")
+    if isinstance(channel_terms, Mapping):
+        for values in channel_terms.values():
+            for raw in _flatten_text(values):
+                alias = str(raw or "").strip()
+                normalized = targets_dao.normalize_target_name(alias)
+                if (
+                    not alias
+                    or re.search(r"\s", alias)
+                    or any(marker in alias for marker in _DERIVED_ALIAS_QUERY_MARKERS)
+                    or normalized in _GENERIC_ALIASES
+                    or len(normalized) < 4
+                ):
+                    continue
+                bare_channel_aliases.append(alias)
+    merged["scan_aliases"] = list(
+        dict.fromkeys(
+            [
+                *_flatten_text(merged.get("scan_aliases")),
+                *bare_channel_aliases,
+            ]
+        )
+    )
+    return merged
+
+
+def assess_project_target_bidding_relevance(
+    record: Any,
+    *,
+    relation: Mapping[str, Any],
+    target: Mapping[str, Any] | None = None,
+) -> BiddingRelevanceDecision:
+    """Assess an archived record against another Target in the same project."""
+    company_name = str(
+        relation.get("target_name")
+        or relation.get("display_name")
+        or (target or {}).get("canonical_name")
+        or ""
+    )
+    decision = assess_bidding_relevance(
+        record,
+        company_name=company_name,
+        target=_project_target_match_document(relation, target),
+    )
+    # Shared group domains are not sufficient evidence for a member organization.
+    if not decision.matched_aliases:
+        return BiddingRelevanceDecision(
+            relevant=False,
+            reason="no_explicit_project_target_alias",
+        )
+    return decision
+
+
+async def associate_project_bidding_records(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    records: Sequence[dict[str, Any]],
+    origin_target_id: str,
+    task_id: str = "",
+    query_meta: dict[str, Any] | None = None,
+    apply: bool = True,
+) -> dict[str, Any]:
+    """Persist explicit project-local entity links for already archived records."""
+    normalized_records = [
+        dict(record)
+        for record in records
+        if str(record.get("record_id") or "").strip()
+    ]
+    if not project_id or not normalized_records:
+        return {
+            "applied": apply,
+            "matched_targets": 0,
+            "links_total": 0,
+            "ambiguous_records_skipped": 0,
+            "ambiguous_record_ids": [],
+            "matches": [],
+        }
+
+    relations = await targets_dao.list_project_targets(
+        db,
+        project_id,
+        summary_only=True,
+    )
+    candidate_relations = [
+        relation
+        for relation in relations
+        if str(relation.get("target_id") or "")
+        and str(relation.get("target_id") or "") != origin_target_id
+    ]
+    candidate_ids = [
+        str(relation.get("target_id") or "") for relation in candidate_relations
+    ]
+    target_documents = await (
+        db[TARGETS_COLLECTION]
+        .find({"target_id": {"$in": candidate_ids}}, {"_id": 0})
+        .to_list(length=None)
+    )
+    targets = {
+        str(item.get("target_id") or ""): item
+        for item in target_documents
+    }
+
+    provisional_matches: list[dict[str, Any]] = []
+    for relation in candidate_relations:
+        target_id = str(relation.get("target_id") or "")
+        target_name = str(relation.get("target_name") or "")
+        for record in normalized_records:
+            decision = assess_project_target_bidding_relevance(
+                record,
+                relation=relation,
+                target=targets.get(target_id),
+            )
+            if not decision.relevant:
+                continue
+            record_id = str(record.get("record_id") or "")
+            provisional_matches.append(
+                {
+                    "record_id": record_id,
+                    "record": record,
+                    "target_id": target_id,
+                    "target_name": target_name,
+                    "matched_aliases": list(decision.matched_aliases),
+                }
+            )
+
+    match_counts_by_record: dict[str, int] = {}
+    for item in provisional_matches:
+        record_id = str(item["record_id"])
+        match_counts_by_record[record_id] = match_counts_by_record.get(record_id, 0) + 1
+    ambiguous_record_ids = sorted(
+        record_id
+        for record_id, count in match_counts_by_record.items()
+        if count > _MAX_DERIVED_TARGETS_PER_RECORD
+    )
+    ambiguous = set(ambiguous_record_ids)
+    matches = [
+        item for item in provisional_matches if str(item["record_id"]) not in ambiguous
+    ]
+
+    links_total = 0
+    for relation in candidate_relations:
+        target_id = str(relation.get("target_id") or "")
+        target_matches = [item for item in matches if item["target_id"] == target_id]
+        matched_records = [dict(item["record"]) for item in target_matches]
+        association_by_record = {
+            str(item["record_id"]): {
+                "association_type": "content_alias_match",
+                "matched_aliases": list(item["matched_aliases"]),
+                "origin_target_id": origin_target_id,
+            }
+            for item in target_matches
+        }
+        if not matched_records:
+            continue
+        if apply:
+            links_total += await bidding_dao.upsert_record_links_batch(
+                db,
+                records=matched_records,
+                project_id=project_id,
+                target_id=target_id,
+                task_id=task_id,
+                query_name="",
+                query_meta=query_meta,
+                association_type="content_alias_match",
+                association_by_record=association_by_record,
+            )
+
+    return {
+        "applied": apply,
+        "matched_targets": len({item["target_id"] for item in matches}),
+        "links_total": links_total,
+        "ambiguous_records_skipped": len(ambiguous_record_ids),
+        "ambiguous_record_ids": ambiguous_record_ids,
+        "matches": [
+            {key: value for key, value in item.items() if key != "record"}
+            for item in matches
+        ],
+    }
 
 
 async def reconcile_project_bidding_links(

@@ -133,7 +133,7 @@
 - 信息采集并发预算统一由 MongoDB `collection_runtime` 配置段和 `api.services.info_collection.tuning` 加载、校验与限幅；任务参数只做单次覆盖。浏览器 worker 数必须小于 Chrome 池上限，为公司规范化、公众号和其他并行任务保留容量；小红书搜索并发必须同时受任务上限、关键词数和当前可用账号数约束。
 - 官网来源采集通过统一的 `standard/deep` 策略表达归档意图；大型官网达到预算时必须返回 `partial/truncated` 并保留可续跑断点。提高预算续跑时要重新遍历已归档目录页发现此前未入队文档，不得把硬上限误报为采集完成。
 - 新增 MongoDB collection（如 `fofa_assets`、`company_meta`）先在 `api/db/collections.py` 声明常量，再在 `api.main` 生命周期或 DAO `ensure_indexes` 中幂等建索引。
-- 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，默认固定采集近 30 天的招标预告、招标公告和中标结果；天眼查总开关和时间窗由 MongoDB `collection_runtime` 统一控制，余额不足时自动熔断且不得阻断其他采集通道。由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`。精确的 Project、Target、任务和查询窗口关系写入 `bidding_record_links`，记录上的 `target_ids/project_ids` 仅保留向后兼容；重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。
+- 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，默认固定采集近 30 天的招标预告、招标公告和中标结果；天眼查总开关和时间窗由 MongoDB `collection_runtime` 统一控制，余额不足时自动熔断且不得阻断其他采集通道。由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`。精确的 Project、Target、任务和查询窗口关系写入 `bidding_record_links`，记录上的 `target_ids/project_ids` 仅保留向后兼容；同一公告明确出现项目内成员单位的规范名或可信裸别名时可以增加多个 Target 关系，但共享集团域名和多主体汇总不得作为成员单位归属证据。重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。
 - 控股结构通过 `api.services.company_control` 分层发现并持久化。层级上限、单位总量、投资查询、ICP 查询和后续扫描并发必须分别限幅；默认只查直属子单位，用户显式选择后最多继续一层孙单位。综合扫描启用学者联系时，根 Target 与已选子、孙单位均需按 `target_id` 持久化，关联单位使用独立 `scholar_entities` 检查点，恢复时不得因网站阶段已完成而跳过。恢复任务、渠道词解析和项目 Target 汇总必须复用已保存 lineage，不能重新按名称猜测关系。
 
 ## 前端关键设计规则

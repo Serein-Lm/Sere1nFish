@@ -270,64 +270,124 @@ async def upsert_records_batch(
         )
 
     await db[BIDDING_RECORDS_COLLECTION].bulk_write(operations, ordered=False)
-    link_operations: list[UpdateOne] = []
-    if project_id and target_id:
-        query_window = {
-            key: value
-            for key, value in dict(query_meta or {}).items()
-            if key in {"publish_start", "publish_end", "lookback_days", "bid_types"}
-        }
-        for record_id, fields in prepared.items():
-            link_id = bidding_record_link_id(project_id, target_id, record_id)
-            additions: dict[str, Any] = {}
-            if query_name:
-                additions["query_names"] = query_name
-            if task_id:
-                additions["task_ids"] = task_id
-            if query_window:
-                additions["query_windows"] = query_window
-            type_codes = [
-                str(item)
-                for item in fields.get("bid_type_codes") or []
-                if str(item)
-            ]
-            if type_codes:
-                additions["bid_type_codes"] = {"$each": type_codes}
-            link_operations.append(
-                UpdateOne(
-                    {"link_id": link_id},
-                    {
-                        "$set": {
-                            "link_id": link_id,
-                            "record_id": record_id,
-                            "project_id": project_id,
-                            "target_id": target_id,
-                            "latest_task_id": task_id,
-                            "latest_query_name": query_name,
-                            "latest_query_window": query_window,
-                            "procurement_id": str(fields.get("procurement_id") or ""),
-                            "published_on": str(fields.get("published_on") or ""),
-                            "last_seen_at": now,
-                            "updated_at": now,
-                        },
-                        "$setOnInsert": {"created_at": now, "first_seen_at": now},
-                        "$addToSet": additions,
-                    },
-                    upsert=True,
-                )
-            )
-    if link_operations:
-        await db[BIDDING_RECORD_LINKS_COLLECTION].bulk_write(
-            link_operations,
-            ordered=False,
-        )
+    links_total = await upsert_record_links_batch(
+        db,
+        records=list(prepared.values()),
+        project_id=project_id,
+        target_id=target_id,
+        task_id=task_id,
+        query_name=query_name,
+        query_meta=query_meta,
+    )
     return {
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
         "total": len(prepared),
-        "links_total": len(link_operations),
+        "links_total": links_total,
     }
+
+
+async def upsert_record_links_batch(
+    db: AsyncIOMotorDatabase,
+    *,
+    records: list[dict[str, Any]],
+    project_id: str,
+    target_id: str,
+    task_id: str = "",
+    query_name: str = "",
+    query_meta: dict[str, Any] | None = None,
+    association_type: str = "query_result",
+    association_by_record: dict[str, dict[str, Any]] | None = None,
+) -> int:
+    """Attach archived announcements to one project Target without copying evidence."""
+    if not project_id or not target_id or not records:
+        return 0
+
+    now = _now()
+    query_window = {
+        key: value
+        for key, value in dict(query_meta or {}).items()
+        if key in {"publish_start", "publish_end", "lookback_days", "bid_types"}
+    }
+    link_operations: list[UpdateOne] = []
+    record_ids: list[str] = []
+    associations = association_by_record or {}
+    for fields in records:
+        record_id = str(fields.get("record_id") or "").strip()
+        if not record_id:
+            continue
+        record_ids.append(record_id)
+        additions: dict[str, Any] = {}
+        if query_name:
+            additions["query_names"] = query_name
+        if task_id:
+            additions["task_ids"] = task_id
+        if query_window:
+            additions["query_windows"] = query_window
+        type_codes = [
+            str(item)
+            for item in fields.get("bid_type_codes") or []
+            if str(item)
+        ]
+        if type_codes:
+            additions["bid_type_codes"] = {"$each": type_codes}
+
+        association = dict(associations.get(record_id) or {})
+        matched_aliases = list(
+            dict.fromkeys(
+                str(value).strip()
+                for value in association.get("matched_aliases") or []
+                if str(value).strip()
+            )
+        )
+        link_id = bidding_record_link_id(project_id, target_id, record_id)
+        update: dict[str, Any] = {
+            "$set": {
+                "link_id": link_id,
+                "record_id": record_id,
+                "project_id": project_id,
+                "target_id": target_id,
+                "latest_task_id": task_id,
+                "latest_query_name": query_name,
+                "latest_query_window": query_window,
+                "procurement_id": str(fields.get("procurement_id") or ""),
+                "published_on": str(fields.get("published_on") or ""),
+                "association_type": str(
+                    association.get("association_type") or association_type
+                ),
+                "matched_aliases": matched_aliases,
+                "origin_target_id": str(association.get("origin_target_id") or ""),
+                "last_seen_at": now,
+                "updated_at": now,
+            },
+            "$setOnInsert": {"created_at": now, "first_seen_at": now},
+        }
+        if additions:
+            update["$addToSet"] = additions
+        link_operations.append(
+            UpdateOne({"link_id": link_id}, update, upsert=True)
+        )
+
+    if not link_operations:
+        return 0
+    await db[BIDDING_RECORD_LINKS_COLLECTION].bulk_write(
+        link_operations,
+        ordered=False,
+    )
+    projection_additions: dict[str, Any] = {
+        "project_ids": project_id,
+        "target_ids": target_id,
+    }
+    if query_name and association_type == "query_result":
+        projection_additions["query_names"] = query_name
+    if task_id:
+        projection_additions["task_ids"] = task_id
+    await db[BIDDING_RECORDS_COLLECTION].update_many(
+        {"record_id": {"$in": list(dict.fromkeys(record_ids))}},
+        {"$addToSet": projection_additions},
+    )
+    return len(link_operations)
 
 
 async def remove_record_links(
