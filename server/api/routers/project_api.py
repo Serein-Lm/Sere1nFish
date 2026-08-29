@@ -678,6 +678,7 @@ async def create_company_scan_batch(
         specs=specs,
         requested_by=current_user.username,
         concurrency=tuning.company_scan_concurrency,
+        dispatch_concurrency=tuning.company_dispatch_concurrency,
         aggregate_notification=True,
     )
 
@@ -760,6 +761,7 @@ async def create_company_scan_coverage_batch(
         specs=specs,
         requested_by=current_user.username,
         concurrency=tuning.company_scan_concurrency,
+        dispatch_concurrency=tuning.company_dispatch_concurrency,
         aggregate_notification=True,
     )
     return {"dry_run": False, "plan": plan, "batch": batch}
@@ -840,16 +842,16 @@ async def create_task_with_file(
 
 @router.post("/projects/{project_id}/tasks/list")
 async def list_tasks(project_id: str, body: TaskListRequest | None = None):
-    """列出项目下的任务（分页）"""
+    """列出项目下的轻量任务摘要；完整结果由详情接口按需读取。"""
     if body is None:
         body = TaskListRequest(project_id=project_id)
-    db = get_db()
-    query: dict = {"project_id": project_id}
-    if body.task_type:
-        query["task_type"] = body.task_type
-    total = await db[TASKS_COLLECTION].count_documents(query)
-    cursor = db[TASKS_COLLECTION].find(query, {"_id": 0}).sort("created_at", -1).skip(body.skip).limit(body.limit)
-    tasks = await cursor.to_list(body.limit)
+    tasks, total = await tasks_dao.list_tasks(
+        get_db(),
+        project_id,
+        task_type=str(body.task_type or ""),
+        skip=body.skip,
+        limit=body.limit,
+    )
     return PageResponse.build(
         items=tasks,
         total=total,

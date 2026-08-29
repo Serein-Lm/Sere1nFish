@@ -10,14 +10,16 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from api.auth import get_current_active_user, require_admin, User
+from api.auth import get_current_active_user, require_permission, User
 from api.db.mongodb import get_db
 from api.dao import config as config_dao
 from api.dao import users as users_dao
 from api.utils.config_crypto import is_sensitive_key, mask_secret, mask_sensitive_config
+from api.services.authorization import Permissions
 
 
 router = APIRouter()
+_manage_config = require_permission(Permissions.CONFIG_MANAGE)
 
 
 # ==================== Pydantic 模型 ====================
@@ -316,7 +318,7 @@ async def get_all_configs(_: User = Depends(get_current_active_user)):
 
 
 @router.get("/reveal/status")
-async def get_config_reveal_status(admin: User = Depends(require_admin)):
+async def get_config_reveal_status(admin: User = Depends(_manage_config)):
     """查询配置明文查看二级密码状态。"""
     db = get_db()
     configured = await users_dao.has_config_reveal_password(db)
@@ -348,7 +350,7 @@ async def _verify_reveal_password(
 
 
 @router.post("/reveal")
-async def reveal_configs(body: ConfigRevealRequest, admin: User = Depends(require_admin)):
+async def reveal_configs(body: ConfigRevealRequest, admin: User = Depends(_manage_config)):
     """管理员输入二级密码后查看解密明文配置。"""
     await _verify_reveal_password(body.password, admin)
     db = get_db()
@@ -397,7 +399,7 @@ async def reveal_configs(body: ConfigRevealRequest, admin: User = Depends(requir
 @router.post("/reveal/password")
 async def set_config_reveal_password(
     body: ConfigRevealPasswordUpdate,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(_manage_config),
 ):
     """设置或修改配置明文查看二级密码。"""
     db = get_db()
@@ -423,7 +425,7 @@ async def get_llm_config(_: User = Depends(get_current_active_user)):
 
 
 @router.post("/llm", response_model=LLMConfigOut)
-async def set_llm_config(body: LLMConfigUpdate, _: User = Depends(require_admin)):
+async def set_llm_config(body: LLMConfigUpdate, _: User = Depends(_manage_config)):
     """
     设置 LLM 配置
     
@@ -447,7 +449,7 @@ async def set_llm_config(body: LLMConfigUpdate, _: User = Depends(require_admin)
 
 
 @router.delete("/llm")
-async def delete_llm_config(_: User = Depends(require_admin)):
+async def delete_llm_config(_: User = Depends(_manage_config)):
     """删除 LLM 配置"""
     db = get_db()
     deleted = await config_dao.delete_llm_config(db)
@@ -502,7 +504,7 @@ async def get_config_section(category: str, _: User = Depends(get_current_active
 async def set_config_section(
     category: str,
     body: GenericConfigUpdate,
-    _: User = Depends(require_admin),
+    _: User = Depends(_manage_config),
 ):
     """写入任意配置段，敏感字段会在 DAO 层加密。"""
     db = get_db()
@@ -529,7 +531,7 @@ async def set_config_section(
 
 
 @router.post("/tools/{tool_name}", response_model=ToolConfigOut)
-async def set_tool_config(tool_name: str, body: ToolConfigUpdate, _: User = Depends(require_admin)):
+async def set_tool_config(tool_name: str, body: ToolConfigUpdate, _: User = Depends(_manage_config)):
     """
     设置工具配置
     
@@ -542,7 +544,7 @@ async def set_tool_config(tool_name: str, body: ToolConfigUpdate, _: User = Depe
 
 
 @router.post("/tools/{tool_name}/test")
-async def test_tool_config(tool_name: str, _: User = Depends(require_admin)):
+async def test_tool_config(tool_name: str, _: User = Depends(_manage_config)):
     """
     探测工具 API Key 有效性
 
@@ -556,7 +558,7 @@ async def test_tool_config(tool_name: str, _: User = Depends(require_admin)):
 
 
 @router.delete("/tools/{tool_name}")
-async def delete_tool_config(tool_name: str, _: User = Depends(require_admin)):
+async def delete_tool_config(tool_name: str, _: User = Depends(_manage_config)):
     """删除工具配置"""
     db = get_db()
     deleted = await config_dao.delete_tool_config(db, tool_name)
@@ -578,7 +580,7 @@ async def get_langsmith_config(_: User = Depends(get_current_active_user)):
 
 
 @router.post("/langsmith", response_model=LangSmithConfigOut)
-async def set_langsmith_config(body: LangSmithConfigUpdate, _: User = Depends(require_admin)):
+async def set_langsmith_config(body: LangSmithConfigUpdate, _: User = Depends(_manage_config)):
     """
     设置 LangSmith 配置
     
@@ -597,7 +599,7 @@ async def set_langsmith_config(body: LangSmithConfigUpdate, _: User = Depends(re
 
 
 @router.post("/langsmith/toggle")
-async def toggle_langsmith(enabled: bool, _: User = Depends(require_admin)):
+async def toggle_langsmith(enabled: bool, _: User = Depends(_manage_config)):
     """快速开关 LangSmith"""
     db = get_db()
     await config_dao.set_langsmith_config(db, enabled=enabled)
@@ -605,7 +607,7 @@ async def toggle_langsmith(enabled: bool, _: User = Depends(require_admin)):
 
 
 @router.delete("/langsmith")
-async def delete_langsmith_config(_: User = Depends(require_admin)):
+async def delete_langsmith_config(_: User = Depends(_manage_config)):
     """删除 LangSmith 配置"""
     db = get_db()
     deleted = await config_dao.delete_config(db, "langsmith")
@@ -623,7 +625,7 @@ async def get_langfuse_config(_: User = Depends(get_current_active_user)):
 
 
 @router.post("/langfuse", response_model=LangfuseConfigOut)
-async def set_langfuse_config(body: LangfuseConfigUpdate, _: User = Depends(require_admin)):
+async def set_langfuse_config(body: LangfuseConfigUpdate, _: User = Depends(_manage_config)):
     """
     设置 Langfuse 配置
     
@@ -642,7 +644,7 @@ async def set_langfuse_config(body: LangfuseConfigUpdate, _: User = Depends(requ
 
 
 @router.post("/langfuse/toggle")
-async def toggle_langfuse(enabled: bool, _: User = Depends(require_admin)):
+async def toggle_langfuse(enabled: bool, _: User = Depends(_manage_config)):
     """快速开关 Langfuse"""
     db = get_db()
     await config_dao.set_langfuse_config(db, enabled=enabled)
@@ -650,7 +652,7 @@ async def toggle_langfuse(enabled: bool, _: User = Depends(require_admin)):
 
 
 @router.delete("/langfuse")
-async def delete_langfuse_config(_: User = Depends(require_admin)):
+async def delete_langfuse_config(_: User = Depends(_manage_config)):
     """删除 Langfuse 配置"""
     db = get_db()
     deleted = await config_dao.delete_config(db, "langfuse")
@@ -695,7 +697,7 @@ async def get_dingtalk_config(bot_name: str, _: User = Depends(get_current_activ
 
 
 @router.post("/dingtalk/{bot_name}", response_model=DingTalkConfigOut)
-async def set_dingtalk_config(bot_name: str, body: DingTalkConfigUpdate, _: User = Depends(require_admin)):
+async def set_dingtalk_config(bot_name: str, body: DingTalkConfigUpdate, _: User = Depends(_manage_config)):
     """
     设置钉钉机器人配置
     
@@ -727,7 +729,7 @@ async def set_dingtalk_config(bot_name: str, body: DingTalkConfigUpdate, _: User
 
 
 @router.post("/dingtalk/{bot_name}/toggle")
-async def toggle_dingtalk(bot_name: str, enabled: bool, _: User = Depends(require_admin)):
+async def toggle_dingtalk(bot_name: str, enabled: bool, _: User = Depends(_manage_config)):
     """快速开关钉钉机器人"""
     db = get_db()
     await config_dao.set_dingtalk_config(db, bot_name=bot_name, enabled=enabled)
@@ -738,7 +740,7 @@ async def toggle_dingtalk(bot_name: str, enabled: bool, _: User = Depends(requir
 
 
 @router.delete("/dingtalk/{bot_name}")
-async def delete_dingtalk_config(bot_name: str, _: User = Depends(require_admin)):
+async def delete_dingtalk_config(bot_name: str, _: User = Depends(_manage_config)):
     """删除钉钉机器人配置"""
     db = get_db()
     deleted = await config_dao.delete_dingtalk_config(db, bot_name)
@@ -767,7 +769,7 @@ async def get_dingtalk_stream_status(
 
 
 @router.post("/dingtalk/{bot_name}/test")
-async def test_dingtalk_bot(bot_name: str, _: User = Depends(require_admin)):
+async def test_dingtalk_bot(bot_name: str, _: User = Depends(_manage_config)):
     """
     测试钉钉机器人
     
@@ -794,7 +796,7 @@ async def test_dingtalk_bot(bot_name: str, _: User = Depends(require_admin)):
 # ==================== 导入导出 ====================
 
 @router.post("/import")
-async def import_from_config_json(body: ConfigImportRequest, _: User = Depends(require_admin)):
+async def import_from_config_json(body: ConfigImportRequest, _: User = Depends(_manage_config)):
     """
     旧 config.json 导入入口已下线。
     

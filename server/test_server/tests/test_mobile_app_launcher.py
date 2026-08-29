@@ -109,3 +109,21 @@ def test_launch_rejects_unknown_app() -> None:
 
     assert result.ok is False
     assert result.error == "不支持的应用: 不存在的应用"
+
+
+def test_launch_reuses_verified_launcher_component() -> None:
+    class CountingRunner(_SingleAppRunner):
+        def __init__(self) -> None:
+            self.resolve_calls = 0
+
+        def __call__(self, args: list[str], timeout: int):
+            if "resolve-activity" in args:
+                self.resolve_calls += 1
+            return super().__call__(args, timeout)
+
+    runner = CountingRunner()
+    launcher = AdbAppLauncher(runner=runner, sleep=lambda _: None)
+
+    assert launcher.launch("cache-device", "微信").ok is True
+    assert launcher.launch("cache-device", "微信").ok is True
+    assert runner.resolve_calls == 1

@@ -156,7 +156,18 @@ async def _schedule_recovered_tasks(recovered: list[dict[str, Any]]) -> int:
             recovered_jobs: list[ProjectTaskJob] = jobs,
             recovered_core_concurrency: int = core_concurrency,
             recovered_dispatch_concurrency: int | None = (
-                len(jobs) if mobile_aware else None
+                min(
+                    len(jobs),
+                    max(
+                        core_concurrency,
+                        int(
+                            items[0].get("batch_dispatch_concurrency")
+                            or tuning.company_dispatch_concurrency
+                        ),
+                    ),
+                )
+                if mobile_aware
+                else None
             ),
             recovered_aggregate_notification: bool = aggregate_notification,
         ) -> None:

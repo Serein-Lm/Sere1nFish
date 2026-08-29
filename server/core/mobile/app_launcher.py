@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import subprocess
+import threading
 import time
 from typing import Callable, Literal
 from xml.etree import ElementTree
@@ -59,6 +60,10 @@ class AppLaunchResult:
 
 class AdbAppLauncher:
     """Launch an app and resolve OEM dual-app choosers deterministically."""
+
+    _component_cache: dict[tuple[str, str], tuple[float, str]] = {}
+    _component_cache_lock = threading.Lock()
+    _component_cache_ttl_seconds = 30 * 60
 
     def __init__(
         self,
@@ -115,8 +120,18 @@ class AdbAppLauncher:
         return foreground, False
 
     def _resolve_launcher_component(
-        self, adb_device_id: str, package_name: str
+        self,
+        adb_device_id: str,
+        package_name: str,
+        *,
+        refresh: bool = False,
     ) -> str:
+        cache_key = (adb_device_id, package_name)
+        if not refresh:
+            with self._component_cache_lock:
+                cached = self._component_cache.get(cache_key)
+            if cached and cached[0] > time.monotonic():
+                return cached[1]
         output = self._shell(
             adb_device_id,
             [
@@ -133,8 +148,23 @@ class AdbAppLauncher:
         matches = _COMPONENT_RE.findall(output)
         for package, activity in reversed(matches):
             if package == package_name:
-                return f"{package}/{activity}"
+                component = f"{package}/{activity}"
+                with self._component_cache_lock:
+                    self._component_cache[cache_key] = (
+                        time.monotonic() + self._component_cache_ttl_seconds,
+                        component,
+                    )
+                return component
         raise RuntimeError(f"未找到应用启动 Activity: {package_name}")
+
+    @classmethod
+    def _forget_launcher_component(
+        cls,
+        adb_device_id: str,
+        package_name: str,
+    ) -> None:
+        with cls._component_cache_lock:
+            cls._component_cache.pop((adb_device_id, package_name), None)
 
     def _collapse_system_panels(self, adb_device_id: str) -> None:
         """避免通知栏等系统浮层遮住 OEM 应用选择器。"""
@@ -249,11 +279,25 @@ class AdbAppLauncher:
         try:
             component = self._resolve_launcher_component(adb_device_id, package_name)
             self._collapse_system_panels(adb_device_id)
-            self._shell(
-                adb_device_id,
-                ["am", "start", "-n", component],
-                timeout=15,
-            )
+            try:
+                self._shell(
+                    adb_device_id,
+                    ["am", "start", "-n", component],
+                    timeout=15,
+                )
+            except Exception:
+                # An app update can invalidate a cached launcher Activity.
+                self._forget_launcher_component(adb_device_id, package_name)
+                component = self._resolve_launcher_component(
+                    adb_device_id,
+                    package_name,
+                    refresh=True,
+                )
+                self._shell(
+                    adb_device_id,
+                    ["am", "start", "-n", component],
+                    timeout=15,
+                )
 
             foreground, ready = self._wait_for_package(
                 adb_device_id, package_name, attempts=8

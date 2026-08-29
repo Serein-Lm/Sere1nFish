@@ -90,10 +90,11 @@ async def describe_screen(
     *,
     project_id: str | None = None,
     plan_id: str | None = None,
+    wake: bool = True,
 ) -> str:
     """用视觉模型对当前屏幕做通用描述(供看屏规划/重规划参考)。"""
     mgr = MobileDeviceManager()
-    capture = await capture_ready_screen(device_id, manager=mgr)
+    capture = await capture_ready_screen(device_id, manager=mgr, wake=wake)
     shot = capture.screenshot
     app_config = await get_runtime_app_config()
     llm = create_llm(
@@ -189,7 +190,8 @@ async def run_planned_task(
 ) -> AsyncIterator[dict[str, Any]]:
     """
     规划 + 执行(流式)。关键改进:
-    - 整个计划复用**同一个执行层 agent**,子任务间上下文(历史截图/动作)自动累积;
+    - 每个子任务先尝试确定性工具，只为复杂任务延迟初始化视觉 Agent;
+    - 视觉子任务复用**同一个执行层 agent**,历史截图/动作自动累积;
     - 调用侧可提供已编排子任务,跳过重复规划,失败后仍可看屏重规划;
     - 子任务失败时,看当前屏幕**重规划**剩余步骤(最多 max_replans 次);
     - plan_id 即可作为 /agent/cancel 的 task_id 取消整轮。
@@ -233,7 +235,15 @@ async def run_planned_task(
         },
     )
 
-    wake_result = await wake_device(device_id, stay_on=True)
+    action_handles_wake = bool(
+        compiled_actions
+        and compiled_actions[0].kind in {"wake", "wake_unlock"}
+    )
+    wake_result = (
+        {"ok": True, "skipped": "compiled_action_handles_wake"}
+        if action_handles_wake
+        else await wake_device(device_id, stay_on=True)
+    )
     yield {
         "stage": "device_ready",
         "data": {
@@ -352,7 +362,10 @@ async def run_planned_task(
         if screen_aware and _should_describe_screen_before_plan(goal):
             try:
                 screen_ctx = await describe_screen(
-                    device_id, project_id=project_id, plan_id=plan_id
+                    device_id,
+                    project_id=project_id,
+                    plan_id=plan_id,
+                    wake=False,
                 )
                 yield {"stage": "screen", "data": {"analysis": screen_ctx}}
             except Exception as exc:  # noqa: BLE001
@@ -371,20 +384,7 @@ async def run_planned_task(
         "data": {"plan_id": plan_id, "subtasks": subtasks, "mode": planning_mode},
     }
 
-    try:
-        app_config = await get_runtime_app_config()
-        agent = build_executor_agent(
-            device_id,
-            max_steps=max_steps_per_subtask,
-            app_config=app_config,
-            project_id=str(project_id or ""),
-            task_id=plan_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        yield {"stage": "error", "data": {"message": f"执行层初始化失败: {exc}"}}
-        return
-    register_agent(plan_id, agent, owner=owner)
-
+    agent: Any | None = None
     completed: list[str] = []
     replans = 0
     try:
@@ -412,7 +412,38 @@ async def run_planned_task(
             )
             last_done: dict[str, Any] | None = None
             try:
-                async for event in agent.stream(sub):  # 同一 agent → 记得前面做了什么
+                direct_actions = compile_mobile_actions(sub)
+                if direct_actions:
+                    execution_stream = run_compiled_actions_stream(
+                        device_id,
+                        sub,
+                        direct_actions,
+                        task_id=plan_id,
+                        project_id=project_id,
+                    )
+                else:
+                    if agent is None:
+                        try:
+                            app_config = await get_runtime_app_config()
+                            agent = build_executor_agent(
+                                device_id,
+                                max_steps=max_steps_per_subtask,
+                                app_config=app_config,
+                                project_id=str(project_id or ""),
+                                task_id=plan_id,
+                            )
+                            register_agent(plan_id, agent, owner=owner)
+                        except Exception as exc:  # noqa: BLE001
+                            yield {
+                                "stage": "error",
+                                "data": {"message": f"执行层初始化失败: {exc}"},
+                            }
+                            return
+                    execution_stream = agent.stream(sub)
+
+                async for event in execution_stream:
+                    if event.get("type") == "task_start":
+                        continue
                     public_event = _public_agent_event(event)
                     if public_event is None:
                         continue
@@ -470,7 +501,10 @@ async def run_planned_task(
                 }
                 try:
                     cur = await describe_screen(
-                        device_id, project_id=project_id, plan_id=plan_id
+                        device_id,
+                        project_id=project_id,
+                        plan_id=plan_id,
+                        wake=False,
                     )
                     new_subs = await replan_remaining(goal, completed, sub, cur)
                 except Exception as exc:  # noqa: BLE001
@@ -518,4 +552,5 @@ async def run_planned_task(
             },
         }
     finally:
-        unregister_agent(plan_id)
+        if agent is not None:
+            unregister_agent(plan_id)

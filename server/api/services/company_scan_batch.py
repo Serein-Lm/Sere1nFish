@@ -13,6 +13,10 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.dao import target_relationships as target_relationships_dao
 from api.dao import targets as targets_dao
 from api.dao import tasks as tasks_dao
+from api.services.info_collection.tuning import (
+    MAX_COMPANY_DISPATCH_CONCURRENCY,
+    MAX_COMPANY_SCAN_CONCURRENCY,
+)
 from api.services.target_scan_profile import (
     SCAN_CHANNELS,
     is_scan_coverage_current,
@@ -380,6 +384,7 @@ async def enqueue_company_scan_jobs(
     specs: list[CompanyScanJobSpec],
     requested_by: str,
     concurrency: int,
+    dispatch_concurrency: int | None = None,
     aggregate_notification: bool = True,
 ) -> dict[str, Any]:
     """统一持久化并启动公司扫描任务，调用侧不感知队列实现。"""
@@ -398,6 +403,7 @@ async def enqueue_company_scan_jobs(
             "task_count": 0,
             "task_ids": [],
             "concurrency": 0,
+            "dispatch_concurrency": 0,
             "status": "completed",
         }
     if len(specs) > MAX_COMPANY_SCAN_BATCH_SIZE:
@@ -408,7 +414,18 @@ async def enqueue_company_scan_jobs(
         batch_id = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc)
         total = len(specs)
-        safe_concurrency = max(1, min(int(concurrency or 1), 12, total))
+        safe_concurrency = max(
+            1,
+            min(int(concurrency or 1), MAX_COMPANY_SCAN_CONCURRENCY, total),
+        )
+        safe_dispatch_concurrency = max(
+            safe_concurrency,
+            min(
+                int(dispatch_concurrency or safe_concurrency),
+                MAX_COMPANY_DISPATCH_CONCURRENCY,
+                total,
+            ),
+        )
         documents: list[dict[str, Any]] = []
         jobs: list[ProjectTaskJob] = []
         for index, spec in enumerate(specs, start=1):
@@ -429,6 +446,7 @@ async def enqueue_company_scan_jobs(
                     "batch_index": index,
                     "batch_total": total,
                     "batch_concurrency": safe_concurrency,
+                    "batch_dispatch_concurrency": safe_dispatch_concurrency,
                     "status": "pending",
                     "progress": {},
                     "created_at": now,
@@ -457,7 +475,7 @@ async def enqueue_company_scan_jobs(
                 jobs=jobs,
                 executor=execute_project_task,
                 concurrency=safe_concurrency,
-                dispatch_concurrency=total,
+                dispatch_concurrency=safe_dispatch_concurrency,
                 aggregate_notification=aggregate_notification and total > 1,
             ),
             name=f"task-batch:{batch_id}",
@@ -469,5 +487,6 @@ async def enqueue_company_scan_jobs(
         "task_count": total,
         "task_ids": [job.task_id for job in jobs],
         "concurrency": safe_concurrency,
+        "dispatch_concurrency": safe_dispatch_concurrency,
         "status": "pending",
     }

@@ -13,6 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.routers import (
     auth,
+    rbac,
     projects,
     project_groups,
     xhs,
@@ -77,6 +78,13 @@ async def lifespan(app: FastAPI):
         db = get_db()
         await users_dao.ensure_default_users(db)
         await users_dao.ensure_default_config(db)
+        try:
+            from api.services.authorization import initialize_authorization
+
+            await initialize_authorization(db)
+            logger.info("RBAC 内置角色、授权绑定索引已初始化")
+        except Exception as e:
+            logger.warning(f"RBAC 初始化失败（保留旧管理员兼容权限）: {e}")
         try:
             from core.mobile.easytier import (
                 build_easytier_config_from_env,
@@ -224,9 +232,8 @@ async def lifespan(app: FastAPI):
         from api.services.xhs_runtime import ensure_indexes as ensure_xhs_runtime_indexes
         await ensure_xhs_runtime_indexes(db)
         # tasks
-        await db["tasks"].create_index("task_id")
-        await db["tasks"].create_index([("project_id", 1), ("task_type", 1)])
-        await db["tasks"].create_index([("project_id", 1), ("batch_id", 1)], sparse=True)
+        from api.dao import tasks as tasks_dao
+        await tasks_dao.ensure_indexes(db)
         # contact_profiles — 系统3 人物画像
         from api.dao import contact_profiles as contact_profiles_dao
         await contact_profiles_dao.ensure_indexes(db)
@@ -590,6 +597,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 # 注册路由
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["认证"])
+app.include_router(rbac.router, prefix="/api/v1/rbac", tags=["RBAC"])
 app.include_router(projects.router, prefix="/api/v1/projects", tags=["项目"])
 app.include_router(
     project_groups.router,

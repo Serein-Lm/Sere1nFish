@@ -23,6 +23,19 @@ _NON_COUNTING_RECOVERY_STAGES = {
 _RUNTIME_HEARTBEAT_STALE_SECONDS = 2 * 60
 
 
+async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
+    collection = db[TASKS_COLLECTION]
+    await collection.create_index("task_id")
+    await collection.create_index([("project_id", 1), ("created_at", -1)])
+    await collection.create_index(
+        [("project_id", 1), ("task_type", 1), ("created_at", -1)]
+    )
+    await collection.create_index(
+        [("project_id", 1), ("batch_id", 1)],
+        sparse=True,
+    )
+
+
 def _heartbeat_is_stale(item: dict[str, Any], *, before: datetime) -> bool:
     heartbeat = item.get("heartbeat_at")
     if not isinstance(heartbeat, datetime):
@@ -834,7 +847,30 @@ async def list_tasks(
     total = await db[TASKS_COLLECTION].count_documents(query)
     cursor = (
         db[TASKS_COLLECTION]
-        .find(query, {"_id": 0})
+        .find(
+            query,
+            {
+                "_id": 0,
+                "task_id": 1,
+                "project_id": 1,
+                "task_type": 1,
+                "params.company_name": 1,
+                "batch_id": 1,
+                "batch_index": 1,
+                "batch_total": 1,
+                "batch_concurrency": 1,
+                "batch_dispatch_concurrency": 1,
+                "status": 1,
+                "result_status": 1,
+                "result.status": 1,
+                "progress": 1,
+                "elapsed_ms": 1,
+                "error": 1,
+                "created_at": 1,
+                "updated_at": 1,
+                "completed_at": 1,
+            },
+        )
         .sort("created_at", -1)
         .skip(max(0, int(skip or 0)))
         .limit(bounded_limit)

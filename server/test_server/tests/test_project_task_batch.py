@@ -125,6 +125,7 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
 
     class _Tuning:
         company_scan_concurrency = 2
+        company_dispatch_concurrency = 8
 
         def with_overrides(self, **overrides):
             assert overrides == {"company_scan_concurrency": 2}
@@ -169,6 +170,7 @@ def test_company_scan_batch_api_creates_independent_task_documents(monkeypatch) 
     assert captured_documents[1]["params"]["target_id"] == ""
     assert all(doc["batch_id"] == response["batch_id"] for doc in captured_documents)
     assert all(doc["batch_concurrency"] == 2 for doc in captured_documents)
+    assert all(doc["batch_dispatch_concurrency"] == 2 for doc in captured_documents)
     assert [doc["batch_index"] for doc in captured_documents] == [1, 2]
     assert all("company_scan_concurrency" not in doc["params"] for doc in captured_documents)
     assert captured_coroutines[0][1] == f"task-batch:{response['batch_id']}"
@@ -196,6 +198,115 @@ def test_company_scan_batch_api_rejects_shared_urls(monkeypatch) -> None:
                 current_user=User(username="admin"),
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_company_scan_enqueue_bounds_admitted_runtime_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import company_scan_batch as batch_service
+    from api.services import project_task_batch as project_batch
+    from core import background as background_service
+
+    documents: list[dict] = []
+    scheduled: list[dict] = []
+    spawned = []
+
+    async def insert_tasks(_db, values):
+        documents.extend(values)
+        return len(values)
+
+    def run_batch(**kwargs):
+        scheduled.append(kwargs)
+
+        async def idle():
+            return None
+
+        return idle()
+
+    def spawn(coro, *, name=None):
+        spawned.append((coro, name))
+
+    monkeypatch.setattr(batch_service.tasks_dao, "insert_tasks", insert_tasks)
+    monkeypatch.setattr(project_batch, "run_project_task_batch", run_batch)
+    monkeypatch.setattr(background_service, "spawn_background", spawn)
+    specs = [
+        batch_service.CompanyScanJobSpec(
+            target_id=f"target-{index}",
+            company_name=f"公司 {index}",
+            params={},
+        )
+        for index in range(100)
+    ]
+
+    response = await batch_service.enqueue_company_scan_jobs(
+        object(),
+        project_id="project-1",
+        specs=specs,
+        requested_by="admin",
+        concurrency=6,
+        dispatch_concurrency=24,
+    )
+
+    assert response["concurrency"] == 6
+    assert response["dispatch_concurrency"] == 24
+    assert len(documents) == 100
+    assert all(item["batch_dispatch_concurrency"] == 24 for item in documents)
+    assert scheduled[0]["concurrency"] == 6
+    assert scheduled[0]["dispatch_concurrency"] == 24
+    spawned[0][0].close()
+
+
+@pytest.mark.asyncio
+async def test_task_list_uses_lightweight_projection() -> None:
+    from api.dao import tasks as tasks_dao
+
+    captured: dict = {}
+
+    class Cursor:
+        def sort(self, *_args):
+            return self
+
+        def skip(self, *_args):
+            return self
+
+        def limit(self, *_args):
+            return self
+
+        async def to_list(self, _limit):
+            return [{"task_id": "task-1", "params": {"company_name": "目标公司"}}]
+
+    class Collection:
+        async def count_documents(self, query):
+            captured["count_query"] = query
+            return 1
+
+        def find(self, query, projection):
+            captured["query"] = query
+            captured["projection"] = projection
+            return Cursor()
+
+    class Database:
+        def __getitem__(self, _name):
+            return Collection()
+
+    items, total = await tasks_dao.list_tasks(
+        Database(),
+        "project-1",
+        task_type="company_scan",
+        limit=20,
+    )
+
+    assert total == 1
+    assert items[0]["task_id"] == "task-1"
+    assert captured["query"] == {
+        "project_id": "project-1",
+        "task_type": "company_scan",
+    }
+    assert captured["projection"]["params.company_name"] == 1
+    assert captured["projection"]["result.status"] == 1
+    assert "result" not in captured["projection"]
+    assert "checkpoint" not in captured["projection"]
 
 
 def test_company_scan_allows_automatic_scholar_direction() -> None:

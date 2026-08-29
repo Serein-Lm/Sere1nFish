@@ -1,6 +1,4 @@
-"""
-认证模块 - 使用 MongoDB 持久化存储用户和配置
-"""
+"""认证模块，用户由 MongoDB 持久化，授权交给统一 RBAC 服务。"""
 
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -9,7 +7,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import bcrypt
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.config import get_settings
 from api.auth_store import TOKEN_STORE
@@ -47,11 +45,28 @@ class User(BaseModel):
     username: str
     role: UserRole = UserRole.USER
     disabled: bool = False
+    roles: list[str] = Field(default_factory=list)
+    permission_codes: list[str] = Field(default_factory=list)
+    auth_source: str = "local"
     
     @property
     def is_admin(self) -> bool:
         """是否是管理员"""
-        return self.role == UserRole.ADMIN
+        return self.role == UserRole.ADMIN or self.has_permission("system.admin")
+
+    def has_permission(self, permission: str) -> bool:
+        """Check one resolved RBAC permission without another database lookup."""
+        if self.role == UserRole.ADMIN:
+            return True
+        permissions = set(self.permission_codes)
+        if (
+            "*" in permissions
+            or "system.admin" in permissions
+            or permission in permissions
+        ):
+            return True
+        namespace = permission.partition(".")[0]
+        return f"{namespace}.*" in permissions
 
 
 class UserInDB(User):
@@ -151,11 +166,58 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> Use
     user_doc = await users_dao.get_user(db, username)
     if user_doc is None:
         raise credentials_exception
-    
+
+    legacy_role_value = str(user_doc.get("role") or "user")
+    try:
+        legacy_role = UserRole(legacy_role_value)
+    except ValueError:
+        # RBAC role IDs live in bindings, not in the legacy two-value field.
+        legacy_role = UserRole.USER
+
+    from api.services.authorization import (
+        ExternalIdentity,
+        get_authorization_service,
+    )
+
+    identity_doc = user_doc.get("external_identity")
+    external_identity = None
+    if isinstance(identity_doc, dict):
+        issuer = str(identity_doc.get("issuer") or "").strip()
+        subject = str(identity_doc.get("subject") or "").strip()
+        if issuer and subject:
+            raw_groups = identity_doc.get("groups") or []
+            group_values = (
+                raw_groups
+                if isinstance(raw_groups, (list, tuple, set))
+                else [raw_groups]
+            )
+            external_identity = ExternalIdentity(
+                issuer=issuer,
+                subject=subject,
+                groups=tuple(
+                    str(group).strip()
+                    for group in group_values
+                    if str(group).strip()
+                ),
+            )
+    auth_source = (
+        str(user_doc.get("auth_source") or "local").strip().lower() or "local"
+    )
+    authorization = await get_authorization_service().resolve(
+        db,
+        username=str(user_doc["username"]),
+        legacy_role=legacy_role.value,
+        auth_source=auth_source,
+        external_identity=external_identity,
+    )
+
     return User(
         username=user_doc["username"],
-        role=UserRole(user_doc.get("role", "user")),
+        role=legacy_role,
         disabled=user_doc.get("disabled", False),
+        roles=list(authorization.role_ids),
+        permission_codes=sorted(authorization.permissions),
+        auth_source=auth_source,
     )
 
 
@@ -165,6 +227,11 @@ async def get_current_active_user(
     """获取当前活跃用户"""
     if current_user.disabled:
         raise HTTPException(status_code=400, detail="用户已禁用")
+    if not current_user.permission_codes and not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前身份未映射任何有效权限",
+        )
     return current_user
 
 
@@ -180,6 +247,39 @@ def require_admin(
             detail="需要管理员权限"
         )
     return current_user
+
+
+def require_permission(*permissions: str, any_of: bool = False):
+    """Require resolved RBAC permissions while preserving legacy admin access."""
+    required = tuple(
+        dict.fromkeys(
+            str(permission).strip()
+            for permission in permissions
+            if str(permission).strip()
+        )
+    )
+    if not required:
+        raise ValueError("至少需要一个权限代码")
+
+    def checker(
+        current_user: Annotated[User, Depends(get_current_active_user)],
+    ) -> User:
+        decisions = [
+            current_user.has_permission(permission) for permission in required
+        ]
+        allowed = any(decisions) if any_of else all(decisions)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "message": "权限不足",
+                    "required": list(required),
+                    "mode": "any" if any_of else "all",
+                },
+            )
+        return current_user
+
+    return checker
 
 
 def require_role(*roles: UserRole):

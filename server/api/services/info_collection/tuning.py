@@ -17,6 +17,7 @@ DEFAULT_URL_SCAN_CONCURRENCY = 24
 DEFAULT_COPYWRITING_CONCURRENCY = 6
 DEFAULT_XHS_SEARCH_CONCURRENCY = 1
 DEFAULT_COMPANY_SCAN_CONCURRENCY = 6
+DEFAULT_COMPANY_DISPATCH_CONCURRENCY = 24
 DEFAULT_RECOVERY_GROUP_CONCURRENCY = 3
 DEFAULT_SCHOLAR_CONCURRENCY = 2
 DEFAULT_LLM_CONCURRENCY = 12
@@ -36,6 +37,7 @@ MAX_URL_SCAN_CONCURRENCY = 48
 MAX_COPYWRITING_CONCURRENCY = 12
 MAX_XHS_SEARCH_CONCURRENCY = 8
 MAX_COMPANY_SCAN_CONCURRENCY = 12
+MAX_COMPANY_DISPATCH_CONCURRENCY = 64
 MAX_RECOVERY_GROUP_CONCURRENCY = 6
 MAX_SCHOLAR_CONCURRENCY = 4
 MAX_LLM_CONCURRENCY = 32
@@ -95,6 +97,7 @@ class CollectionRuntimeTuning:
     copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY
     xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY
     company_scan_concurrency: int = DEFAULT_COMPANY_SCAN_CONCURRENCY
+    company_dispatch_concurrency: int = DEFAULT_COMPANY_DISPATCH_CONCURRENCY
     recovery_group_concurrency: int = DEFAULT_RECOVERY_GROUP_CONCURRENCY
     scholar_concurrency: int = DEFAULT_SCHOLAR_CONCURRENCY
     llm_concurrency: int = DEFAULT_LLM_CONCURRENCY
@@ -143,6 +146,11 @@ class CollectionRuntimeTuning:
                 data.get("company_scan_concurrency"),
                 default=DEFAULT_COMPANY_SCAN_CONCURRENCY,
                 maximum=MAX_COMPANY_SCAN_CONCURRENCY,
+            ),
+            company_dispatch_concurrency=_bounded(
+                data.get("company_dispatch_concurrency"),
+                default=DEFAULT_COMPANY_DISPATCH_CONCURRENCY,
+                maximum=MAX_COMPANY_DISPATCH_CONCURRENCY,
             ),
             recovery_group_concurrency=_bounded(
                 data.get("recovery_group_concurrency"),

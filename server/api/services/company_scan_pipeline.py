@@ -3060,6 +3060,11 @@ class CompanyScanPipeline:
                         },
                     ),
                 ))
+            else:
+                url_result.update(
+                    status="skipped",
+                    reason="未发现可供 URL 深扫的存活资产或手工 URL",
+                )
             if website_seed_urls and identity.get("target_id"):
                 from api.services.info_collection.tuning import (
                     get_collection_runtime_tuning,

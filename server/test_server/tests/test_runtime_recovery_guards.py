@@ -54,6 +54,7 @@ async def test_recovered_company_batch_dispatches_all_waiters(
 
     class _Tuning:
         company_scan_concurrency = 3
+        company_dispatch_concurrency = 24
         recovery_group_concurrency = 2
 
     async def _tuning() -> _Tuning:

@@ -12,15 +12,18 @@ from api.auth import (
     Token, User, UserLogin, UserRole, UserCreate, UserUpdate, 
     PasswordChange, LoginKeyChange,
     create_access_token, get_current_active_user, 
-    revoke_access_token, get_raw_token, require_admin,
+    revoke_access_token, get_raw_token, require_permission,
     verify_password,
 )
 from api.config import get_settings
 from api.db.mongodb import get_db
 from api.dao import users as users_dao
+from api.services.authorization import Permissions
 
 router = APIRouter()
 settings = get_settings()
+_manage_users = require_permission(Permissions.USERS_MANAGE)
+_manage_config = require_permission(Permissions.CONFIG_MANAGE)
 
 
 @router.post("/login", response_model=Token)
@@ -78,11 +81,16 @@ async def me(current_user: Annotated[User, Depends(get_current_active_user)]):
     return {
         "username": current_user.username,
         "role": current_user.role,
+        "roles": current_user.roles,
+        "permission_codes": current_user.permission_codes,
+        "auth_source": current_user.auth_source,
         "is_admin": current_user.is_admin,
         "disabled": current_user.disabled,
         "permissions": {
-            "system_management": current_user.is_admin,
-            "user_management": current_user.is_admin,
+            "system_management": current_user.has_permission(Permissions.SYSTEM_ADMIN),
+            "user_management": current_user.has_permission(Permissions.USERS_MANAGE),
+            "config_management": current_user.has_permission(Permissions.CONFIG_MANAGE),
+            "rbac_management": current_user.has_permission(Permissions.RBAC_MANAGE),
         }
     }
 
@@ -108,7 +116,7 @@ async def change_my_password(
 # ============ 系统管理 API（仅管理员） ============
 
 @router.get("/users", tags=["系统管理"])
-async def get_users(admin: Annotated[User, Depends(require_admin)]):
+async def get_users(admin: Annotated[User, Depends(_manage_users)]):
     """获取所有用户列表（仅管理员）"""
     db = get_db()
     users = await users_dao.list_users(db)
@@ -123,7 +131,7 @@ async def get_users(admin: Annotated[User, Depends(require_admin)]):
 @router.post("/users", tags=["系统管理"])
 async def create_new_user(
     user_data: UserCreate,
-    admin: Annotated[User, Depends(require_admin)]
+    admin: Annotated[User, Depends(_manage_users)]
 ):
     """创建新用户（仅管理员）"""
     db = get_db()
@@ -140,7 +148,7 @@ async def create_new_user(
 async def update_existing_user(
     username: str,
     user_data: UserUpdate,
-    admin: Annotated[User, Depends(require_admin)]
+    admin: Annotated[User, Depends(_manage_users)]
 ):
     """更新用户信息（仅管理员）- 可修改用户名、密码、角色、禁用状态"""
     db = get_db()
@@ -161,7 +169,7 @@ async def update_existing_user(
 @router.delete("/users/{username}", tags=["系统管理"])
 async def delete_existing_user(
     username: str,
-    admin: Annotated[User, Depends(require_admin)]
+    admin: Annotated[User, Depends(_manage_users)]
 ):
     """删除用户（仅管理员）"""
     db = get_db()
@@ -181,7 +189,7 @@ class ResetPasswordRequest(BaseModel):
 async def reset_user_password(
     username: str,
     body: ResetPasswordRequest,
-    admin: Annotated[User, Depends(require_admin)]
+    admin: Annotated[User, Depends(_manage_users)]
 ):
     """
     重置用户密码（仅管理员）
@@ -199,7 +207,7 @@ async def reset_user_password(
 @router.post("/change-login-key", tags=["系统管理"])
 async def change_login_key(
     body: LoginKeyChange,
-    admin: Annotated[User, Depends(require_admin)]
+    admin: Annotated[User, Depends(_manage_config)]
 ):
     """修改登录 Key（仅管理员，需验证原 Key）"""
     db = get_db()
@@ -216,7 +224,7 @@ async def change_login_key(
 
 
 @router.get("/login-key", tags=["系统管理"])
-async def get_current_login_key(admin: Annotated[User, Depends(require_admin)]):
+async def get_current_login_key(admin: Annotated[User, Depends(_manage_config)]):
     """获取当前登录 Key（仅管理员）"""
     db = get_db()
     key = await users_dao.get_login_key(db)

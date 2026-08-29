@@ -241,7 +241,16 @@ async def run_task_stream(
     ``task_id`` 可用于 /agent/cancel 取消。
     """
     task_id = task_id or uuid.uuid4().hex[:12]
-    wake_result = await wake_device(device_id, stay_on=True)
+    compiled_actions = compile_mobile_actions(task)
+    action_handles_wake = bool(
+        compiled_actions
+        and compiled_actions[0].kind in {"wake", "wake_unlock"}
+    )
+    wake_result = (
+        {"ok": True, "skipped": "compiled_action_handles_wake"}
+        if action_handles_wake
+        else await wake_device(device_id, stay_on=True)
+    )
     yield {
         "type": "device_ready",
         "data": {
@@ -250,7 +259,6 @@ async def run_task_stream(
             "wake_ok": bool(wake_result.get("ok")),
         },
     }
-    compiled_actions = compile_mobile_actions(task)
     if compiled_actions:
         async for event in run_compiled_actions_stream(
             device_id,

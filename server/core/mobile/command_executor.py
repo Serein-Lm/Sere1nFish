@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -28,6 +27,7 @@ _HOME_RE = re.compile(r"(回到桌面|返回桌面|主屏幕|回首页|回到主
 _BACK_RE = re.compile(r"(返回上一页|返回上页|后退|返回)")
 _UNLOCK_RE = re.compile(r"(解锁|唤醒并解锁|亮屏并解锁)")
 _WAKE_RE = re.compile(r"(唤醒|亮屏|点亮屏幕)")
+_CLONED_APP_RE = re.compile(r"(分身|双开|应用副本)")
 _COMPLEX_INTENT_RE = re.compile(
     r"(搜索|查找|找到|点击|点开|选择|输入|填写|发送|发消息|回复|聊天|联系人|"
     r"订单|购物车|加购|购买|下单|支付|付款|地址|筛选|排序|详情|收藏|关注|"
@@ -95,16 +95,20 @@ def compile_mobile_actions(task: str) -> list[MobileAction] | None:
         return [MobileAction("wake", "唤醒屏幕")]
 
     if app_name and (wants_open or wants_browse):
+        app_instance = "clone" if _CLONED_APP_RE.search(normalized) else "primary"
         actions.append(
             MobileAction(
                 "launch_app",
                 f"打开 {app_name}",
-                {"app_name": app_name},
+                {
+                    "app_name": app_name,
+                    "app_instance": app_instance,
+                },
             )
         )
         if not wants_browse:
             return actions
-        actions.append(MobileAction("wait", "等待应用加载", {"seconds": 1.2}))
+        actions.append(MobileAction("wait", "等待应用加载", {"seconds": 0.35}))
 
     if wants_browse:
         actions.extend(
@@ -149,14 +153,57 @@ def describe_compiled_actions(actions: list[MobileAction]) -> list[str]:
     return [action.label for action in actions]
 
 
-def _execute_action(device_id: str, action: MobileAction) -> tuple[bool, str]:
-    mgr = MobileDeviceManager()
-    dev = mgr.get_device(device_id)
-    adb_device_id = mgr.resolve_adb_device_id(device_id)
+@dataclass(frozen=True)
+class MobileCommandContext:
+    device_id: str
+    adb_device_id: str
+    device: Any
+    app_launcher: AdbAppLauncher
 
-    if action.kind == "launch_app":
-        result = AdbAppLauncher().launch(
-            adb_device_id,
+
+class MobileCommandDispatcher:
+    """Registry-backed deterministic action dispatcher with one device context."""
+
+    def __init__(self, context: MobileCommandContext) -> None:
+        self.context = context
+        self._handlers = {
+            "launch_app": self._launch_app,
+            "swipe": self._swipe,
+            "home": self._home,
+            "back": self._back,
+            "wake": self._wake,
+            "wake_unlock": self._wake_unlock,
+        }
+
+    @classmethod
+    def for_device(cls, device_id: str) -> "MobileCommandDispatcher":
+        manager = MobileDeviceManager()
+        adb_device_id = manager.resolve_adb_device_id(device_id)
+        return cls(
+            MobileCommandContext(
+                device_id=device_id,
+                adb_device_id=adb_device_id,
+                device=manager.get_device(device_id),
+                app_launcher=AdbAppLauncher(),
+            )
+        )
+
+    async def execute(self, action: MobileAction) -> tuple[bool, str]:
+        if action.kind == "wait":
+            seconds = max(0.0, min(float(action.args.get("seconds", 0.5)), 10.0))
+            await asyncio.sleep(seconds)
+            return True, "已等待"
+        handler = self._handlers.get(action.kind)
+        if handler is None:
+            return False, f"未知动作: {action.kind}"
+        try:
+            return await asyncio.to_thread(handler, action)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"动作执行失败: {exc}"
+
+    def _launch_app(self, action: MobileAction) -> tuple[bool, str]:
+        result = self.context.app_launcher.launch(
+            self.context.adb_device_id,
             str(action.args["app_name"]),
             instance=(
                 "clone" if action.args.get("app_instance") == "clone" else "primary"
@@ -169,21 +216,16 @@ def _execute_action(device_id: str, action: MobileAction) -> tuple[bool, str]:
             else f"应用启动失败: {result.error or '未进入前台'}",
         )
 
-    if action.kind == "wait":
-        seconds = float(action.args.get("seconds", 0.5))
-        time.sleep(max(0.0, min(seconds, 10.0)))
-        return True, "已等待"
-
-    if action.kind == "swipe":
+    def _swipe(self, action: MobileAction) -> tuple[bool, str]:
         sx, sy, ex, ey = resolve_swipe(
             int(action.args.get("start_x", 500)),
             int(action.args.get("start_y", 780)),
             int(action.args.get("end_x", 500)),
             int(action.args.get("end_y", 260)),
-            device_id=adb_device_id,
+            device_id=self.context.adb_device_id,
             coord_space="normalized_1000",
         )
-        dev.swipe(
+        self.context.device.swipe(
             sx,
             sy,
             ex,
@@ -193,30 +235,34 @@ def _execute_action(device_id: str, action: MobileAction) -> tuple[bool, str]:
         )
         return True, "已滑动"
 
-    if action.kind == "home":
-        dev.home(delay=0.1)
+    def _home(self, _action: MobileAction) -> tuple[bool, str]:
+        self.context.device.home(delay=0.1)
         return True, "已返回主屏幕"
 
-    if action.kind == "back":
-        dev.back(delay=0.1)
+    def _back(self, _action: MobileAction) -> tuple[bool, str]:
+        self.context.device.back(delay=0.1)
         return True, "已返回上一页"
 
-    if action.kind == "wake":
+    def _wake(self, _action: MobileAction) -> tuple[bool, str]:
         from core.mobile.pool import DevicePool
 
-        result = DevicePool.get_instance().wake(device_id, stay_on=True)
+        result = DevicePool.get_instance().wake(
+            self.context.device_id,
+            stay_on=True,
+        )
         return bool(result.get("ok")), "已唤醒屏幕" if result.get("ok") else str(result)
 
-    if action.kind == "wake_unlock":
+    def _wake_unlock(self, _action: MobileAction) -> tuple[bool, str]:
         from core.mobile.pool import DevicePool
 
-        result = DevicePool.get_instance().wake_and_unlock(device_id, stay_on=True)
+        result = DevicePool.get_instance().wake_and_unlock(
+            self.context.device_id,
+            stay_on=True,
+        )
         return (
             bool(result.get("ok")),
             "已唤醒并尝试解锁" if result.get("ok") else str(result),
         )
-
-    return False, f"未知动作: {action.kind}"
 
 
 async def run_compiled_actions_stream(
@@ -243,8 +289,24 @@ async def run_compiled_actions_stream(
     success = True
     final_message = "任务完成"
     executed_steps = 0
+    try:
+        dispatcher = await asyncio.to_thread(
+            MobileCommandDispatcher.for_device,
+            device_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        yield {
+            "type": "done",
+            "data": {
+                "message": f"设备初始化失败: {exc}",
+                "steps": 0,
+                "success": False,
+                "mode": "compiled_tools",
+            },
+        }
+        return
     for index, action in enumerate(actions, start=1):
-        ok, message = await asyncio.to_thread(_execute_action, device_id, action)
+        ok, message = await dispatcher.execute(action)
         executed_steps = index
         success = success and ok
         final_message = message

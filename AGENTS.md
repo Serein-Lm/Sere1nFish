@@ -99,6 +99,7 @@
 ## 后端关键设计规则
 
 - API router 保持薄层：负责路径、鉴权、请求/响应模型、HTTP 错误码和调用 service/DAO；不要在 router 中堆业务流程。
+- 身份认证与授权必须分层：本地登录与后续 OIDC/SAML SSO adapter 只负责生成统一身份（`issuer/subject/groups`），权限统一由 `api.services.authorization` 解析、`api.dao.rbac` 持久化、`rbac_roles/rbac_bindings` 绑定。外部声明中的角色名不得直接成为系统权限，未映射的 SSO 身份默认无权限；敏感 API 使用 `require_permission` 表达稳定权限语义，不在业务代码里新增用户名、外部组或 `is_admin` 特例。旧 `admin/user` 角色只作迁移兼容。
 - 数据库访问放在 `api/dao/*` 或专门持久化模块中。除非路由刻意保持极薄且逻辑完全局部，否则不要在 router 直接访问 collection。
 - 新增 MongoDB collection 必须先在 `api/db/collections.py` 声明常量，再在应用启动或 DAO `ensure_indexes` 中幂等初始化索引。
 - 共享领域行为放在 `api/services/*` 或 `core/*`。pipeline、auth、device、observability、browser orchestration、runtime config 不要重复实现。
@@ -110,7 +111,7 @@
 - 深度业务方案统一通过 Strategy Agent 与 `api.services.context_resolver.resolve_engagement_context` 构建：先聚合 Finding、Target 深研、网站/应用架构、来源证据、真实人物情报和虚构人设候选，再由 Agent 只补公网缺口，完成职责推断、利益相关方、发送产物、话术和异议应对。事实与推断必须分层，禁止业务模块另写平行聚合逻辑。
 - 钉钉等提前 ACK 的外部渠道必须把执行轮次持久化到 `ai_hub_turns`，回调凭据加密保存；消息写入使用稳定 turn/message ID 保证幂等。热重载中断时保留 `interrupted` 或 `response_ready` 状态，由新进程续跑或只补发结果，禁止只依赖进程内后台任务。
 - 人物方案链路统一为“身份消歧 -> 按新鲜度复用或刷新 OSINT -> 当前时间与热点信号 -> 主动采集/匹配虚构人设 -> 沟通场景 -> 话术 -> 可选产物”。不是每次请求都重新检索：身份一致、信息完整且 30 天内的新鲜记录可直接复用；缺少匹配人设时由 Agent 主动研究公开的行业/岗位通用背景，并按严格 Schema 生成、校验、入库完全虚构且自洽的人设，代码不得硬编码人物样本。事实来源链和生成决策链分别保存，由 service 自动生成稳定 node/edge，前端只消费统一 lineage，不自行推断关联。
-- 手机相关能力通过 `core/mobile/*`、设备池、预约 DAO、mobile router/service 统一接入；不要在业务流程里直接写 ADB、EasyTier 或设备协议细节。
+- 手机相关能力通过 `core/mobile/*`、设备池、预约 DAO、mobile router/service 统一接入；不要在业务流程里直接写 ADB、EasyTier 或设备协议细节。简单动作由 `MobileCommandDispatcher` 按注册处理器直接下发，同一指令批次只解析一次设备上下文；规划层按子任务先尝试确定性工具，只对无法编译的复杂操作延迟初始化并复用视觉 Agent。新增工具通过 dispatcher/registry 扩展，不按业务话术继续堆叠 `if/else` 特例。
 - 手机附件、图片和音频传递统一通过 `api.services.mobile_transfer` 接入：先写私有对象存储留档，再按媒体类型推送到 Android 公共媒体目录并触发媒体扫描；上传临时文件必须在成功、失败和取消分支释放，页面不得直接执行 ADB。
 - 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。
 - 截图、Word 产物、语音上传和受保护下载文件统一通过 `api.storage.ObjectStorageService` 写入；业务集合只保存 `storage_object_id`，不得直接调用 OSS SDK 或拼接 Object Key。读取按对象元数据选择 Provider，允许迁移期本地与 OSS 对象并存。
@@ -130,7 +131,7 @@
 - 公司名规范化、根域名判断等 AI 浏览器能力必须复用 `Sere1nGraph` 的 `create_agent_node` + `chrome-devtools` MCP，禁止另起浏览器；AI 输出必须用结构化 schema（如 `CompanyNormalization`）约束并落库元信息（如 `company_meta`）。
 - 外部资产情报（FOFA/Hunter 等）经 `api.services.asset_intelligence` 统一协议、工厂和 Provider 接入，底层查询复用 `crawler_tools/*_tools.py`；API Key 走 `api.dao.config` 的 tools 分类加密存储。候选 URL 必须先跨来源规范化去重和并发存活探测，再按稳定 `asset_id` 增量 upsert 到 `fofa_assets`。普通任务默认深扫本轮发现的全部存活资产；只有用户显式选择增量扫描时，才仅深扫新增或发生实质变化且存活的资产。已在资产发现阶段完成探活的 URL 必须复用结果，不得在深扫入口重复探活。工具 Key 有效性探测统一走 `api.services.tool_key_test` 分派，各工具校验收敛在其 `validate_key`。
 - 官网公告与附件采集统一通过 `api.services.website_documents` 编排：`website_crawl_tasks` 保存任务与断点，`website_crawl_pages` 保存持久化 URL 队列和逐页终态；发现阶段只跟随已核验官网域名内的栏目、分页、正文和附件，正文与 PDF、DOC/DOCX、XLS/XLSX、ZIP 等附件统一交给 `api.services.source_documents` 归档到私有 OSS 并生成稳定版本。单页失败必须按策略重试并保留可恢复状态，未完成页面、附件归档失败或达到容量上限都不得标记为完整覆盖；恢复任务复用原队列，禁止依赖进程内集合或固定墙钟超时提前结束。
-- 信息采集并发预算统一由 MongoDB `collection_runtime` 配置段和 `api.services.info_collection.tuning` 加载、校验与限幅；任务参数只做单次覆盖。浏览器 worker 数必须小于 Chrome 池上限，为公司规范化、公众号和其他并行任务保留容量；小红书搜索并发必须同时受任务上限、关键词数和当前可用账号数约束。
+- 信息采集并发预算统一由 MongoDB `collection_runtime` 配置段和 `api.services.info_collection.tuning` 加载、校验与限幅；任务参数只做单次覆盖。`company_scan_concurrency` 是实际占用核心采集资源的并发，`company_dispatch_concurrency` 是允许进入运行时并等待资源的任务上限；禁止把整批任务全部提前 dispatch，避免每个等待任务的 heartbeat/控制轮询放大 MongoDB 与事件循环负载。浏览器 worker 数必须小于 Chrome 池上限，为公司规范化、公众号和其他并行任务保留容量；小红书搜索并发必须同时受任务上限、关键词数和当前可用账号数约束。列表 API 只返回展示必需投影，大型 result/checkpoint/证据内容由详情 API 按需读取。
 - 官网来源采集通过统一的 `standard/deep` 策略表达归档意图；大型官网达到预算时必须返回 `partial/truncated` 并保留可续跑断点。提高预算续跑时要重新遍历已归档目录页发现此前未入队文档，不得把硬上限误报为采集完成。
 - 新增 MongoDB collection（如 `fofa_assets`、`company_meta`）先在 `api/db/collections.py` 声明常量，再在 `api.main` 生命周期或 DAO `ensure_indexes` 中幂等建索引。
 - 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，默认固定采集近 30 天的招标预告、招标公告和中标结果；天眼查总开关和时间窗由 MongoDB `collection_runtime` 统一控制，余额不足时自动熔断且不得阻断其他采集通道。由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`。精确的 Project、Target、任务和查询窗口关系写入 `bidding_record_links`，记录上的 `target_ids/project_ids` 仅保留向后兼容；同一公告明确出现项目内成员单位的规范名或可信裸别名时可以增加多个 Target 关系，但共享集团域名和多主体汇总不得作为成员单位归属证据。重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。

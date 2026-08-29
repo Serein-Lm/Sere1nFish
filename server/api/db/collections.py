@@ -49,6 +49,8 @@ URL_SCAN_COPYWRITINGS_COLLECTION = "url_scan_copywritings"
 # 系统管理
 USERS_COLLECTION = "system_users"
 SYSTEM_CONFIG_COLLECTION = "system_config"
+RBAC_ROLES_COLLECTION = "rbac_roles"
+RBAC_BINDINGS_COLLECTION = "rbac_bindings"
 
 # Skills 技能库
 SKILLS_COLLECTION = "skills"

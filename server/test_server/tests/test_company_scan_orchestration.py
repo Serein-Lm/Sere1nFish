@@ -1611,6 +1611,37 @@ async def test_asset_url_scan_propagates_model_capacity_wait(
 
 
 @pytest.mark.asyncio
+async def test_asset_url_scan_marks_empty_url_stage_as_skipped() -> None:
+    pipeline = CompanyScanPipeline(object(), object())
+
+    result = await pipeline._run_asset_and_url_scan(
+        task_id="task-no-assets",
+        project_id="project-1",
+        identity={
+            "input_name": "无官网目标",
+            "normalized_name": "无官网目标",
+            "root_domain": "",
+            "target_id": "target-1",
+            "aliases": [],
+        },
+        url_text="",
+        urls=[],
+        enable_asset_discovery=False,
+        enable_url_scan=True,
+        enable_copywriting=False,
+        min_attention_score=40,
+        fofa_size=20,
+        hunter_size=20,
+        probe_concurrency=8,
+    )
+
+    assert result["url_scan"]["status"] == "skipped"
+    assert "未发现" in result["url_scan"]["reason"]
+    assert result["website_documents"]["status"] == "skipped"
+    assert result["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_wholly_owned_entity_setup_failure_is_aggregated_without_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
