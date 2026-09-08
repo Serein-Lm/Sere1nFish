@@ -72,6 +72,25 @@ def resolve_official_website_roots(
     return normalize_website_root_domains(asset_root_domains)
 
 
+def _requires_initial_core_lease(
+    *,
+    enabled_core_modules: dict[str, bool],
+    target_id: str,
+    refresh_target_identity: bool,
+    enable_wechat: bool,
+    wechat_target_selection_mode: str,
+) -> bool:
+    """Keep pinned mobile-only work out of the browser/LLM resource pool."""
+    if any(enabled_core_modules.values()):
+        return True
+    if not str(target_id or "").strip() or refresh_target_identity:
+        return True
+    return bool(
+        enable_wechat
+        and str(wechat_target_selection_mode or "auto").strip().casefold() != "all"
+    )
+
+
 def should_checkpoint_module(kind: str, outcome: Any) -> bool:
     """Only cache modules whose enabled work reached a complete terminal state."""
     if not isinstance(outcome, dict):
@@ -624,6 +643,13 @@ class CompanyScanPipeline:
         core_lease = get_company_scan_resource_pool(
             company_core_concurrency
         ).lease(task_id=task_id)
+        requires_initial_core_lease = _requires_initial_core_lease(
+            enabled_core_modules=enabled_core_modules,
+            target_id=target_id,
+            refresh_target_identity=refresh_target_identity,
+            enable_wechat=enable_wechat,
+            wechat_target_selection_mode=wechat_target_selection_mode,
+        )
         mobile_task: asyncio.Task[list[Any]] | None = None
         mobile_started = asyncio.Event()
         try:
@@ -633,7 +659,7 @@ class CompanyScanPipeline:
                     "restoring_core",
                     "复用已完成的网站、API 与学者扫描结果...",
                 )
-            else:
+            elif requires_initial_core_lease:
                 await self._update_progress(
                     task_id,
                     "waiting_core",

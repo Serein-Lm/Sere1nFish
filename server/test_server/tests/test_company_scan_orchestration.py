@@ -9,11 +9,52 @@ import pytest
 
 from api.services.company_scan_pipeline import (
     CompanyScanPipeline,
+    _requires_initial_core_lease,
     incomplete_collection_sources,
     related_entity_task_id,
     resolve_official_website_roots,
     should_checkpoint_module,
 )
+
+
+def test_pinned_mobile_only_scan_skips_initial_core_lease() -> None:
+    assert _requires_initial_core_lease(
+        enabled_core_modules={
+            "control_structure": False,
+            "asset_url": False,
+            "xhs": False,
+            "bidding": False,
+            "scholar": False,
+        },
+        target_id="target-1",
+        refresh_target_identity=False,
+        enable_wechat=True,
+        wechat_target_selection_mode="all",
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("target_id", "refresh", "selection_mode", "core_enabled"),
+    [
+        ("", False, "all", False),
+        ("target-1", True, "all", False),
+        ("target-1", False, "auto", False),
+        ("target-1", False, "all", True),
+    ],
+)
+def test_scan_keeps_core_lease_when_identity_or_core_work_needs_it(
+    target_id: str,
+    refresh: bool,
+    selection_mode: str,
+    core_enabled: bool,
+) -> None:
+    assert _requires_initial_core_lease(
+        enabled_core_modules={"asset_url": core_enabled},
+        target_id=target_id,
+        refresh_target_identity=refresh,
+        enable_wechat=True,
+        wechat_target_selection_mode=selection_mode,
+    ) is True
 
 
 def test_subsidiary_xhs_is_disabled_by_default() -> None:
