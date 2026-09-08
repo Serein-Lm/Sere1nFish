@@ -997,6 +997,36 @@ async def test_agent_runtime_transforms_mcp_result_before_model_context() -> Non
 
 
 @pytest.mark.asyncio
+async def test_agent_runtime_drops_undeclared_mcp_tool_arguments() -> None:
+    from Sere1nGraph.graph.agents.runtime import _wrap_tools_with_error_handling
+
+    class Field:
+        alias = None
+
+    class SnapshotInput:
+        model_fields = {"verbose": Field(), "filePath": Field()}
+
+    class FakeTool:
+        name = "take_snapshot"
+        response_format = "content"
+        args_schema = SnapshotInput
+
+        async def coroutine(self, **kwargs):
+            return kwargs
+
+    wrapped = _wrap_tools_with_error_handling([FakeTool()])[0]
+
+    assert await wrapped.coroutine(
+        type="text",
+        verbose=True,
+        filePath="/tmp/snapshot.txt",
+    ) == {
+        "verbose": True,
+        "filePath": "/tmp/snapshot.txt",
+    }
+
+
+@pytest.mark.asyncio
 async def test_extract_with_retry_repairs_schema_invalid_json(monkeypatch) -> None:
     from langchain_core.messages import AIMessage
 

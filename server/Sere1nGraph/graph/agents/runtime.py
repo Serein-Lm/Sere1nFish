@@ -207,6 +207,55 @@ def _wrap_tools_with_error_handling(
     """
     import functools
 
+    def _declared_argument_names(tool: Any) -> frozenset[str]:
+        """Read the public input fields advertised by a LangChain/MCP tool."""
+        names: set[str] = set()
+        schema = getattr(tool, "args_schema", None)
+        fields = getattr(schema, "model_fields", None) or getattr(
+            schema, "__fields__", None
+        )
+        if isinstance(fields, dict):
+            for name, field in fields.items():
+                names.add(str(name))
+                alias = getattr(field, "alias", None)
+                if isinstance(alias, str) and alias:
+                    names.add(alias)
+        if not names:
+            try:
+                arguments = getattr(tool, "args", None)
+            except Exception:
+                arguments = None
+            if isinstance(arguments, dict):
+                names.update(str(name) for name in arguments)
+        return frozenset(names)
+
+    def _sanitize_call_arguments(
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        allowed_names: frozenset[str],
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        """Drop model-invented fields before forwarding a call to MCP."""
+        if not allowed_names:
+            return args, kwargs
+        sanitized_args = args
+        removed: set[str] = set()
+        if args and isinstance(args[0], dict):
+            payload = {
+                key: value for key, value in args[0].items() if key in allowed_names
+            }
+            removed.update(str(key) for key in args[0] if key not in allowed_names)
+            sanitized_args = (payload, *args[1:])
+        sanitized_kwargs = {
+            key: value for key, value in kwargs.items() if key in allowed_names
+        }
+        removed.update(str(key) for key in kwargs if key not in allowed_names)
+        if removed:
+            logger.debug(
+                "[tool-wrapper] 已移除 MCP 工具未声明参数: %s",
+                ", ".join(sorted(removed)),
+            )
+        return sanitized_args, sanitized_kwargs
+
     # 共享的连续错误计数器
     error_state = {
         "consecutive": 0,
@@ -228,10 +277,11 @@ def _wrap_tools_with_error_handling(
         is_artifact = getattr(tool, 'response_format', None) == 'content_and_artifact'
         original_coroutine = getattr(tool, 'coroutine', None)
         original_func = getattr(tool, 'func', None)
+        declared_argument_names = _declared_argument_names(tool)
 
         if original_coroutine:
             @functools.wraps(original_coroutine)
-            async def safe_coroutine(*args, _orig=original_coroutine, _name=tool.name, _art=is_artifact, _es=error_state, **kwargs):
+            async def safe_coroutine(*args, _orig=original_coroutine, _name=tool.name, _art=is_artifact, _es=error_state, _allowed=declared_argument_names, **kwargs):
                 _es["calls"] += 1
                 if max_calls > 0 and _es["calls"] > max_calls:
                     message = (
@@ -247,6 +297,11 @@ def _wrap_tools_with_error_handling(
                             args,
                             kwargs,
                         )
+                    call_args, call_kwargs = _sanitize_call_arguments(
+                        call_args,
+                        call_kwargs,
+                        _allowed,
+                    )
                     if call_guard:
                         blocked = call_guard(_name, call_args, call_kwargs)
                         if blocked:
@@ -302,7 +357,7 @@ def _wrap_tools_with_error_handling(
 
         elif original_func:
             @functools.wraps(original_func)
-            def safe_func(*args, _orig=original_func, _name=tool.name, _art=is_artifact, _es=error_state, **kwargs):
+            def safe_func(*args, _orig=original_func, _name=tool.name, _art=is_artifact, _es=error_state, _allowed=declared_argument_names, **kwargs):
                 _es["calls"] += 1
                 if max_calls > 0 and _es["calls"] > max_calls:
                     message = (
@@ -318,6 +373,11 @@ def _wrap_tools_with_error_handling(
                             args,
                             kwargs,
                         )
+                    call_args, call_kwargs = _sanitize_call_arguments(
+                        call_args,
+                        call_kwargs,
+                        _allowed,
+                    )
                     if call_guard:
                         blocked = call_guard(_name, call_args, call_kwargs)
                         if blocked:
