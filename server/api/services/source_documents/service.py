@@ -43,9 +43,9 @@ from .urls import canonicalize_source_url
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _document_lock_users: defaultdict[str, int] = defaultdict(int)
-_CONTEXT_ANALYSIS_SCHEMA_VERSION = 7
+_CONTEXT_ANALYSIS_SCHEMA_VERSION = 8
 _MEDIA_POLICY_VERSION = 4
-_CONTACT_POLICY_VERSION = 4
+_CONTACT_POLICY_VERSION = 5
 _SOURCE_FIELD_KEYS = {
     "title",
     "account",

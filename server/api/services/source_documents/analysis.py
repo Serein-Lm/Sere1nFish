@@ -357,6 +357,44 @@ def apply_article_scope_cap(subject_match: Any, article_scope: Any) -> int:
     return min(clamp_score(subject_match), _ARTICLE_SCOPE_CAPS[scope])
 
 
+def resolve_review_decision(
+    parsed: dict[str, Any],
+    *,
+    decision_supplied: bool,
+    draft_analysis: dict[str, Any],
+    required_subject_match: int,
+) -> tuple[str, bool]:
+    """Resolve an omitted review decision without weakening explicit rejection."""
+    decision = str(parsed.get("decision") or "reject")
+    if decision == "accept":
+        return "accept", False
+    if decision_supplied:
+        return "reject", False
+
+    review_score, review_subject_match = normalize_scores(
+        parsed.get("relevance_score"),
+        parsed.get("subject_match"),
+    )
+    threshold = max(0, min(100, int(required_subject_match or 0)))
+    mutually_supported = (
+        normalize_article_scope(parsed.get("article_scope")) == "target_focused"
+        and normalize_article_scope(draft_analysis.get("article_scope"))
+        == "target_focused"
+        and apply_article_scope_cap(
+            review_subject_match, parsed.get("article_scope")
+        )
+        >= threshold
+        and apply_article_scope_cap(
+            draft_analysis.get("subject_match"),
+            draft_analysis.get("article_scope"),
+        )
+        >= threshold
+        and review_score >= 50
+        and clamp_score(draft_analysis.get("score")) >= 50
+    )
+    return ("accept", True) if mutually_supported else ("reject", False)
+
+
 def _contact_value_key(value: Any) -> str:
     normalized = unicodedata.normalize("NFKC", str(value or ""))
     return re.sub(r"[\s\-‐‑‒–—()（）]", "", normalized).casefold()
@@ -682,13 +720,26 @@ async def review_article_relevance(
                 timeout=_RELEVANCE_REVIEW_TIMEOUT_SECONDS,
             )
         parsed = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+        fields_set = getattr(result, "model_fields_set", None)
+        decision_supplied = (
+            "decision" in fields_set
+            if fields_set is not None
+            else "decision" in result
+        )
+        decision, decision_inferred = resolve_review_decision(
+            parsed,
+            decision_supplied=decision_supplied,
+            draft_analysis=draft_analysis,
+            required_subject_match=required_subject_match,
+        )
         score, subject_match = normalize_scores(
             parsed.get("relevance_score"),
             parsed.get("subject_match"),
         )
         article_scope = normalize_article_scope(parsed.get("article_scope"))
         return {
-            "decision": str(parsed.get("decision") or "reject"),
+            "decision": decision,
+            "decision_inferred": decision_inferred,
             "article_scope": article_scope,
             "subject_match": apply_article_scope_cap(subject_match, article_scope),
             "score": score,

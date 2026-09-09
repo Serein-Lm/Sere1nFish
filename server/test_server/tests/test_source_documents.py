@@ -363,6 +363,65 @@ def test_contact_attribution_schema_normalizes_provider_collection_wrapper():
     assert parsed.items[0].reason == "官网页脚；明确标注为目标总机"
 
 
+def test_omitted_review_decision_accepts_only_mutually_supported_target_article():
+    from api.services.source_documents.analysis import resolve_review_decision
+
+    decision, inferred = resolve_review_decision(
+        {
+            "article_scope": "target_focused",
+            "subject_match": 95,
+            "relevance_score": 92,
+        },
+        decision_supplied=False,
+        draft_analysis={
+            "article_scope": "target_focused",
+            "subject_match": 94,
+            "score": 90,
+        },
+        required_subject_match=70,
+    )
+
+    assert decision == "accept"
+    assert inferred is True
+
+
+def test_explicit_or_weak_review_rejection_remains_rejected():
+    from api.services.source_documents.analysis import resolve_review_decision
+
+    explicit = resolve_review_decision(
+        {
+            "decision": "reject",
+            "article_scope": "target_focused",
+            "subject_match": 98,
+            "relevance_score": 98,
+        },
+        decision_supplied=True,
+        draft_analysis={
+            "article_scope": "target_focused",
+            "subject_match": 98,
+            "score": 98,
+        },
+        required_subject_match=70,
+    )
+    weak = resolve_review_decision(
+        {
+            "article_scope": "target_focused",
+            "subject_match": 60,
+            "relevance_score": 90,
+        },
+        decision_supplied=False,
+        draft_analysis={
+            "article_scope": "target_focused",
+            "subject_match": 95,
+            "score": 90,
+        },
+        required_subject_match=70,
+    )
+
+    assert explicit == ("reject", False)
+    assert weak == ("reject", False)
+
+
 def test_wechat_canonical_url_discards_tracking_query_and_fragment():
     from api.services.source_documents.urls import canonicalize_source_url
 
