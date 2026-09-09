@@ -80,7 +80,7 @@
 - `Finding` 是从来源证据派生的项目级事实。联系方式 Finding 必须保留 `target_id`、`source_document_id`、`source_document_version_id`、原文 URL、联系方式邻近上下文和证据引用；同一联系方式的多次发现累计 evidence，不覆盖历史来源。来源重分析后必须按稳定 `record_id` 对账：保留仍有效的 evidence，撤销该来源已被新审核拒绝的 evidence，并且只在没有其他来源证据时删除 Finding。跨网站的相同电话、邮箱、微信号和入口 URL 通过稳定 `group_key` 构建逻辑读模型；项目查询、Target 看板和 AI 工具默认返回最高分代表项以及 `finding_ids/source_urls/duplicate_count/evidence_count`，不得通过物理删除或覆盖来源记录实现去重。
 - `FindingContext` 是按 `finding_id` 唯一关联的派生上下文，持久化在 `finding_contexts`。它只能消费已归档的来源版本、Target 场景分析、浏览器结果和 OSS 视觉证据，通过 `api.services.finding_context` 的可恢复队列与独立多模态 Agent 生成；事实、推断、置信度和证据引用必须分层保存。采集流水线只负责排队，不得同步等待 Agent，也不得在页面重复拼装上下文。
 - 虚构人设持久化在 `persons`，AI 先通过 summary 投影筛选，再按 `person_id` 渐进读取完整档案；持续研究保持稳定身份并累加 `profile_version`、`research_rounds` 和来源证据。生成与升级进度独立持久化在 `persona_research_tasks`，进程重启时必须把遗留运行态明确标记为中断。
-- 公众号深采采用“手机发现、浏览器读取”的职责划分：手机只负责应用内搜索、命中文章和复制真实链接；链接交给 `api.services.source_documents` 的 Provider registry，由项目 Chrome 池读取全文和媒体。浏览器读取失败时才回退原有手机逐屏深采。
+- 公众号深采采用“手机发现、浏览器读取”的职责划分：手机只负责应用内搜索、命中文章和复制真实链接；链接交给 `api.services.source_documents` 的 Provider registry，由项目 Chrome 池读取全文和媒体。浏览器读取失败时，必须先把 `source_archive_status/error/next_retry_at` 写入手机采集记录，再由 `api.services.mobile_source_handoff` 使用持久化租约独立补录；额度、限流、浏览器故障和进程重启都不得丢失链接或要求手机重复滚动。只有明确允许回退的非公众号策略才能继续手机逐屏深采。
 - 社交地点图片采集通过 `api.services.social_collection` 统一编排：`SocialCollectionJob` 保存美团/抖音跨平台任务状态并复用现有设备租约与手机采集 pipeline，平台差异收敛在 adapter registry；AI 中枢和钉钉只能通过统一工具创建、查询 Job，不得直接执行 ADB 或绕过设备队列。
 - 社交图片证据持久化在 `social_media_evidence`，按 Project、平台、地点和图片内容哈希稳定去重，并保留 Job、手机记录、搜索词和完整上下文截图关系。图片通过私有对象存储保存；`screen_render_crop` 仅表示手机屏幕渲染区域的无损裁剪，不得表述为平台原始分辨率文件。
 - 来源版本层只保存文章自身事实和证据；ProjectTarget 关联层保存搜索场景和任务分析；手机采集记录保存本次任务结果；前端按项目过滤记录并可按 Target 聚合。禁止在这些层之间复制原始 HTML 或把搜索关键词自动当作公司名。
