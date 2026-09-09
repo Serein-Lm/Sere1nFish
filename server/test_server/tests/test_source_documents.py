@@ -288,6 +288,59 @@ def test_text_analysis_uses_collection_model_and_reports_actual_model(monkeypatc
     assert [call["workload"] for call in calls] == ["collection", "collection"]
 
 
+def test_source_article_schema_normalizes_common_structured_output_drift():
+    from api.models.mobile_collect import ExtractField
+    from api.services.source_documents import analysis
+
+    model = analysis._article_output_model(
+        [
+            ExtractField(
+                name="keyword_hit",
+                description="命中的检索词",
+                type="string",
+            )
+        ]
+    )
+    parsed = model.model_validate(
+        {
+            "keyword_hit": ["国家气象信息中心", "办公室", "电话"],
+            "summary": ["国家气象信息中心", "联系方式公告"],
+            "article_scope": "single_entity",
+            "target_contact_values": "徐拥军 010-68400106",
+            "subject_match": 95,
+            "relevance_score": 90,
+            "score_reason": ["主体明确", "联系方式可归属"],
+        }
+    )
+
+    assert parsed.keyword_hit == "国家气象信息中心；办公室；电话"
+    assert parsed.summary == "国家气象信息中心；联系方式公告"
+    assert parsed.article_scope == "target_focused"
+    assert parsed.target_contact_values == ["徐拥军 010-68400106"]
+    assert parsed.score_reason == "主体明确；联系方式可归属"
+
+
+def test_relevance_review_schema_normalizes_values_without_weakening_rejection():
+    from api.services.source_documents.analysis import ArticleRelevanceReview
+
+    accepted = ArticleRelevanceReview.model_validate(
+        {
+            "decision": "passed",
+            "article_scope": "single-target",
+            "target_contact_values": "010-68400106",
+        }
+    )
+    rejected = ArticleRelevanceReview.model_validate(
+        {"decision": "unexpected", "article_scope": "unexpected"}
+    )
+
+    assert accepted.decision == "accept"
+    assert accepted.article_scope == "target_focused"
+    assert accepted.target_contact_values == ["010-68400106"]
+    assert rejected.decision == "reject"
+    assert rejected.article_scope == "uncertain"
+
+
 def test_wechat_canonical_url_discards_tracking_query_and_fragment():
     from api.services.source_documents.urls import canonicalize_source_url
 

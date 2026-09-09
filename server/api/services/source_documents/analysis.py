@@ -12,11 +12,11 @@ import io
 import json
 import re
 import unicodedata
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from PIL import Image
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field, RootModel, create_model
+from pydantic import BaseModel, BeforeValidator, Field, RootModel, create_model
 
 from Sere1nGraph.graph.agents.runtime import create_llm
 from Sere1nGraph.graph.prompts.loader import load_prompt
@@ -40,12 +40,6 @@ RELEVANCE_REVIEW_PROMPT_SLUG = "source_document/relevance_review"
 CONTACT_ATTRIBUTION_PROMPT_SLUG = "source_document/contact_attribution"
 
 
-_PY_TYPE = {
-    "string": (str | None, None),
-    "number": (float | None, None),
-    "boolean": (bool | None, None),
-    "list": (list[str], ...),
-}
 _RESERVED = {
     "summary",
     "article_scope",
@@ -66,6 +60,88 @@ _CONTACT_CHANNEL_LABELS = {
     "email": "邮箱",
     "wechat": "微信号",
     "qq": "QQ",
+}
+
+
+def _coerce_text(value: Any) -> str | None:
+    """Keep one malformed LLM field from discarding an otherwise valid article."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, (list, tuple, set)):
+        return "；".join(
+            text
+            for item in value
+            if (text := _coerce_text(item)) not in (None, "")
+        )
+    return str(value).strip()
+
+
+def _coerce_required_text(value: Any) -> str:
+    return _coerce_text(value) or ""
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    return [
+        text
+        for item in values
+        if (text := _coerce_text(item)) not in (None, "")
+    ]
+
+
+def normalize_article_scope(value: Any) -> str:
+    scope = (_coerce_text(value) or "uncertain").casefold()
+    normalized = re.sub(r"[\s-]+", "_", scope)
+    aliases = {
+        "single_entity": "target_focused",
+        "single_target": "target_focused",
+        "target_only": "target_focused",
+        "single_entity_focused": "target_focused",
+        "multi_entity": "multi_entity_roundup",
+        "multiple_entities": "multi_entity_roundup",
+        "roundup": "multi_entity_roundup",
+        "单一主体": "target_focused",
+        "主体聚焦": "target_focused",
+        "多主体汇总": "multi_entity_roundup",
+        "顺带提及": "incidental",
+        "不确定": "uncertain",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in _ARTICLE_SCOPE_CAPS else "uncertain"
+
+
+def _coerce_review_decision(value: Any) -> str:
+    normalized = (_coerce_text(value) or "reject").casefold()
+    return "accept" if normalized in {"accept", "accepted", "pass", "passed", "通过"} else "reject"
+
+
+_OptionalText = Annotated[str | None, BeforeValidator(_coerce_text)]
+_RequiredText = Annotated[str, BeforeValidator(_coerce_required_text)]
+_StringList = Annotated[list[str], BeforeValidator(_coerce_string_list)]
+_ArticleScope = Annotated[
+    Literal[
+        "target_focused",
+        "multi_entity_roundup",
+        "incidental",
+        "uncertain",
+    ],
+    BeforeValidator(normalize_article_scope),
+]
+_ReviewDecision = Annotated[
+    Literal["accept", "reject"],
+    BeforeValidator(_coerce_review_decision),
+]
+_PY_TYPE = {
+    "string": (_OptionalText, None),
+    "number": (float | None, None),
+    "boolean": (bool | None, None),
+    "list": (_StringList, ...),
 }
 
 
@@ -103,18 +179,13 @@ class ImageUnderstandingList(RootModel[list[ImageUnderstanding]]):
 
 
 class ArticleRelevanceReview(BaseModel):
-    decision: Literal["accept", "reject"] = "reject"
-    article_scope: Literal[
-        "target_focused",
-        "multi_entity_roundup",
-        "incidental",
-        "uncertain",
-    ] = "uncertain"
+    decision: _ReviewDecision = "reject"
+    article_scope: _ArticleScope = "uncertain"
     subject_match: float = Field(default=0, ge=0, le=100)
     relevance_score: float = Field(default=0, ge=0, le=100)
-    summary: str = ""
-    target_contact_values: list[str] = Field(default_factory=list)
-    reason: str = ""
+    summary: _RequiredText = ""
+    target_contact_values: _StringList = Field(default_factory=list)
+    reason: _RequiredText = ""
 
 
 class ContactAttributionDecision(BaseModel):
@@ -172,26 +243,21 @@ def _article_output_model(fields: list[ExtractField]) -> type[BaseModel]:
     definitions.update(
         {
             "summary": (
-                str,
+                _RequiredText,
                 Field(
                     default="",
                     description="只概括可直接归属于目标实体的事实，不概括无关正文",
                 ),
             ),
             "article_scope": (
-                Literal[
-                    "target_focused",
-                    "multi_entity_roundup",
-                    "incidental",
-                    "uncertain",
-                ],
+                _ArticleScope,
                 Field(
                     default="uncertain",
                     description="目标在整篇文章中的主体范围分类",
                 ),
             ),
             "target_contact_values": (
-                list[str],
+                _StringList,
                 Field(
                     default_factory=list,
                     description="正文明确归属于目标实体的联系方式原值",
@@ -210,7 +276,10 @@ def _article_output_model(fields: list[ExtractField]) -> type[BaseModel]:
                 float,
                 Field(default=0, ge=0, le=100, description="文章对本次搜索目标的价值分"),
             ),
-            "score_reason": (str, Field(default="", description="简短评分依据")),
+            "score_reason": (
+                _RequiredText,
+                Field(default="", description="简短评分依据"),
+            ),
         }
     )
     return create_model("SourceArticleAnalysis", **definitions)  # type: ignore[call-overload]
@@ -245,11 +314,6 @@ def clamp_score(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(0, min(100, round(score)))
-
-
-def normalize_article_scope(value: Any) -> str:
-    scope = str(value or "uncertain").strip()
-    return scope if scope in _ARTICLE_SCOPE_CAPS else "uncertain"
 
 
 def apply_article_scope_cap(subject_match: Any, article_scope: Any) -> int:
