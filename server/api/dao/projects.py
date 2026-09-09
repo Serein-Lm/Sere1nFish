@@ -90,6 +90,7 @@ async def list_projects(
     *,
     group_id: str | None = None,
     search: str = "",
+    related_project_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """列出项目，返回 (items, total)"""
     query: dict[str, Any] = {"archived_at": {"$exists": False}}
@@ -98,10 +99,19 @@ async def list_projects(
     normalized_search = str(search or "").strip()
     if normalized_search:
         pattern = re.escape(normalized_search)
-        query["$or"] = [
+        search_conditions: list[dict[str, Any]] = [
             {"name": {"$regex": pattern, "$options": "i"}},
             {"description": {"$regex": pattern, "$options": "i"}},
         ]
+        related_object_ids: list[ObjectId] = []
+        for project_id in related_project_ids or []:
+            try:
+                related_object_ids.append(ObjectId(project_id))
+            except Exception:
+                continue
+        if related_object_ids:
+            search_conditions.append({"_id": {"$in": related_object_ids}})
+        query["$or"] = search_conditions
     total = await db[PROJECTS_COLLECTION].count_documents(query)
     cursor = db[PROJECTS_COLLECTION].find(query).sort("created_at", -1).skip(skip).limit(limit)
     items = [doc async for doc in cursor]

@@ -97,6 +97,9 @@ export interface CollectRecord {
   source_url?: string | null
   source_document_id?: string
   source_document_version_id?: string
+  source_archive_status?: 'pending' | 'processing' | 'ready' | 'rejected' | string
+  source_archive_error?: string
+  source_archive_next_retry_at?: string
   target_id?: string
   target_name?: string
   browser_screenshot_ids?: string[]

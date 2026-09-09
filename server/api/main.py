@@ -185,15 +185,37 @@ async def lifespan(app: FastAPI):
         from api.dao import finding_contexts as finding_contexts_dao
 
         await finding_contexts_dao.ensure_indexes(db)
-        recovered_finding_contexts = await finding_contexts_dao.recover_interrupted(db)
-        if recovered_finding_contexts:
-            logger.info(
-                "Finding 上下文任务已恢复: %s",
-                recovered_finding_contexts,
-            )
-        from api.services.finding_context import kick_finding_context_worker
+        from api.services.finding_context import (
+            configure_finding_context_runtime,
+            kick_finding_context_worker,
+        )
+        from api.services.runtime_config import get_runtime_config_section
 
-        kick_finding_context_worker(db)
+        finding_context_config = await get_runtime_config_section("finding_context")
+        auto_context_value = finding_context_config.get("auto_generate", False)
+        auto_context_enabled = (
+            auto_context_value
+            if isinstance(auto_context_value, bool)
+            else str(auto_context_value).strip().casefold()
+            in {"1", "true", "yes", "on"}
+        )
+        configure_finding_context_runtime(auto_generate=auto_context_enabled)
+        if auto_context_enabled:
+            recovered_finding_contexts = await finding_contexts_dao.recover_interrupted(db)
+            resumed_finding_contexts = await finding_contexts_dao.resume_deferred_queue(db)
+            if recovered_finding_contexts or resumed_finding_contexts:
+                logger.info(
+                    "Finding 上下文任务已恢复: interrupted=%s deferred=%s",
+                    recovered_finding_contexts,
+                    resumed_finding_contexts,
+                )
+            kick_finding_context_worker(db)
+        else:
+            deferred_finding_contexts = await finding_contexts_dao.defer_automatic_queue(db)
+            logger.info(
+                "Finding 自动上下文整理已关闭: deferred=%s",
+                deferred_finding_contexts,
+            )
         from api.dao import web_tagging as web_tagging_dao
         from api.services.website_records import (
             ensure_indexes as ensure_website_record_indexes,

@@ -106,7 +106,7 @@
 - 通知类能力必须走统一通知 Hook/Service，例如 `api.services.notifications.notify_event` 或 `notify_event_background`。业务流程只表达事件、级别、标题和上下文，不直接 import 钉钉、邮件、Webhook 等具体通道。
 - 配置读取和敏感字段处理应通过 `api.services.runtime_config`、`api.dao.config`、配置加密工具或既有配置入口接入，不在业务模块散落解析逻辑。
 - AI 技能、提示词、模型客户端和 AIGC 能力应通过技能/提示词库、runtime service 或模型适配层接入；业务模块不要直接绑定单一模型供应商。
-- Finding 上下文整理统一通过 `api.services.finding_context` 接入。浏览器和公众号 Finding 共用同一 Agent、Prompt、Schema、DAO 和恢复 worker；图片只按 `storage_object_id` 经统一对象存储读取，输出中的每个叙述、事实、主体、时间线和视觉结论都必须引用允许的证据 ID，未知引用在持久化前丢弃。
+- Finding 上下文整理统一通过 `api.services.finding_context` 接入。浏览器和公众号 Finding 共用同一 Agent、Prompt、Schema、DAO 和恢复 worker；自动生成由 MongoDB `finding_context.auto_generate` 控制并默认关闭，采集只保留 Finding 与来源证据，用户按需整理时才启动 Agent，以避免批量采集产生无必要 Token 消耗；图片只按 `storage_object_id` 经统一对象存储读取，输出中的每个叙述、事实、主体、时间线和视觉结论都必须引用允许的证据 ID，未知引用在持久化前丢弃。
 - 人物 OSINT 是 AI 中枢的一等核心能力：真实人物的公网检索、身份消歧、来源核验、事实/推断分层、画像、公开职业联系方式、沟通方案和话术统一通过独立 OSINT Agent 与 `person_intelligence` 领域层处理。真实人物情报不得写入虚构人设 `persons`；虚构人设只能用于渐进式匹配沟通风格，不能作为真实事实。任何基于真实人物生成的话术都必须保留可追溯公开来源，AI 中枢与钉钉入口复用同一工具、Prompt、Chrome Provider 和持久化服务。
 - 深度业务方案统一通过 Strategy Agent 与 `api.services.context_resolver.resolve_engagement_context` 构建：先聚合 Finding、Target 深研、网站/应用架构、来源证据、真实人物情报和虚构人设候选，再由 Agent 只补公网缺口，完成职责推断、利益相关方、发送产物、话术和异议应对。事实与推断必须分层，禁止业务模块另写平行聚合逻辑。
 - 钉钉等提前 ACK 的外部渠道必须把执行轮次持久化到 `ai_hub_turns`，回调凭据加密保存；消息写入使用稳定 turn/message ID 保证幂等。热重载中断时保留 `interrupted` 或 `response_ready` 状态，由新进程续跑或只补发结果，禁止只依赖进程内后台任务。

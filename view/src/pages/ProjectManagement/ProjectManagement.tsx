@@ -13,6 +13,7 @@ import {
   Select,
   Skeleton,
   Space,
+  Tag,
   Tooltip,
   Typography,
   message,
@@ -59,6 +60,7 @@ export default function ProjectManagement() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [searchMatches, setSearchMatches] = useState<Project[]>([])
   const [activeGroups, setActiveGroups] = useState<string[]>([])
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false)
   const [isGroupManagerOpen, setIsGroupManagerOpen] = useState(false)
@@ -101,15 +103,40 @@ export default function ProjectManagement() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    const keyword = search.trim()
+    if (!keyword) {
+      setSearchMatches([])
+      return undefined
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      listProjects({ page: 1, page_size: 200, search: keyword })
+        .then((result) => {
+          if (!cancelled) setSearchMatches(result.items)
+        })
+        .catch(() => {
+          if (!cancelled) setSearchMatches([])
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [search])
+
   const visibleProjects = useMemo(() => {
     const keyword = search.trim().toLocaleLowerCase()
     if (!keyword) return projects
-    return projects.filter((project) =>
+    const localMatches = projects.filter((project) =>
       [project.name, project.description, project.group_name]
         .filter(Boolean)
         .some((value) => String(value).toLocaleLowerCase().includes(keyword)),
     )
-  }, [projects, search])
+    const merged = new Map(localMatches.map((project) => [project.id, project]))
+    for (const project of searchMatches) merged.set(project.id, project)
+    return [...merged.values()]
+  }, [projects, search, searchMatches])
 
   const sections = useMemo<ProjectSection[]>(() => {
     const grouped = groups.map((group) => ({
@@ -251,6 +278,11 @@ export default function ProjectManagement() {
       <Paragraph className="project-card-desc" ellipsis={{ rows: 2 }}>
         {project.description || '暂无项目描述'}
       </Paragraph>
+      {Boolean(project.matched_target_names?.length) && (
+        <div className="project-card-targets">
+          {project.matched_target_names?.map((name) => <Tag key={name}>{name}</Tag>)}
+        </div>
+      )}
       <div className="project-card-footer">
         <Space size={6} className="project-card-time">
           <ClockCircleOutlined />
@@ -308,7 +340,7 @@ export default function ProjectManagement() {
           autoComplete="off"
           allowClear
           prefix={<SearchOutlined />}
-          placeholder="搜索项目名称、描述或分组"
+          placeholder="搜索项目、分组或 Target"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />

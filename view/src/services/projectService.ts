@@ -22,6 +22,7 @@ export interface Project {
   description: string | null
   group_id: string | null
   group_name: string | null
+  matched_target_names?: string[]
   created_at: string
   updated_at: string
 }

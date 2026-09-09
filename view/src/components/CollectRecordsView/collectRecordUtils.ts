@@ -28,6 +28,8 @@ export interface CollectRecordGroup {
   sourceUrl: string
   sourceDocumentIds: string[]
   sourceDocumentVersionIds: string[]
+  sourceArchiveStatuses: string[]
+  sourceArchiveErrors: string[]
   screenshotUrls: string[]
   browserScreenshotUrls: string[]
   discoveryScreenshotUrls: string[]
@@ -137,6 +139,8 @@ function buildRecordGroup(groupKey: string, records: CollectRecord[]): CollectRe
     sourceUrl,
     sourceDocumentIds: uniqueStrings(records.map((record) => record.source_document_id)),
     sourceDocumentVersionIds: uniqueStrings(records.map((record) => record.source_document_version_id)),
+    sourceArchiveStatuses: uniqueStrings(records.map((record) => record.source_archive_status)),
+    sourceArchiveErrors: uniqueStrings(records.map((record) => record.source_archive_error)),
     screenshotUrls: uniqueStrings(records.flatMap((record) => record.screenshot_urls || [])),
     browserScreenshotUrls: uniqueStrings(records.flatMap((record) => record.browser_screenshot_urls || [])),
     discoveryScreenshotUrls: uniqueStrings(records.flatMap((record) => record.discovery_screenshot_urls || [])),

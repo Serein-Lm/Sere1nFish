@@ -246,3 +246,45 @@ async def recover_interrupted(db: AsyncIOMotorDatabase) -> int:
         },
     )
     return int(result.modified_count or 0)
+
+
+async def defer_automatic_queue(
+    db: AsyncIOMotorDatabase,
+    *,
+    reason: str = "自动上下文整理已关闭，可在详情中按需生成",
+) -> int:
+    """Suspend queued work without deleting completed context data."""
+    now = _now()
+    result = await db[FINDING_CONTEXTS_COLLECTION].update_many(
+        {"status": {"$in": ["pending", "running"]}},
+        {
+            "$set": {
+                "status": "deferred",
+                "error": reason,
+                "updated_at": now,
+            },
+            "$unset": {
+                "started_at": "",
+                "rerun_requested": "",
+                "requested_fingerprint": "",
+            },
+        },
+    )
+    return int(result.modified_count or 0)
+
+
+async def resume_deferred_queue(db: AsyncIOMotorDatabase) -> int:
+    """Resume tasks previously suspended by the runtime switch."""
+    now = _now()
+    result = await db[FINDING_CONTEXTS_COLLECTION].update_many(
+        {"status": "deferred"},
+        {
+            "$set": {
+                "status": "pending",
+                "error": "",
+                "queued_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    return int(result.modified_count or 0)

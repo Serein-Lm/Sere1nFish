@@ -107,6 +107,22 @@
   line-height: 1.55;
 }
 
+.project-card-targets {
+  display: flex;
+  min-height: 24px;
+  margin: -4px 0 12px;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.project-card-targets .ant-tag {
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .project-card-footer {
   display: flex;
   justify-content: space-between;

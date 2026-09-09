@@ -23,6 +23,7 @@ from api.utils.json_extract import extract_json_object
 from api.services.company_url import guess_url_from_company_name
 from api.dao import projects as projects_dao
 from api.dao import project_groups as project_groups_dao
+from api.dao import targets as targets_dao
 from api.dao import web_tagging as web_dao
 from api.schemas.pagination import PageResponse, ProjectListRequest, WebTaggingListRequest
 
@@ -32,7 +33,12 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 init_mongo()
 
 
-def _project_out(doc: dict, *, group_name: str | None = None) -> ProjectOut:
+def _project_out(
+    doc: dict,
+    *,
+    group_name: str | None = None,
+    matched_target_names: list[str] | None = None,
+) -> ProjectOut:
     return ProjectOut(
         id=str(doc.get("_id")),
         name=doc.get("name"),
@@ -41,6 +47,7 @@ def _project_out(doc: dict, *, group_name: str | None = None) -> ProjectOut:
         group_name=group_name,
         target=doc.get("target"),
         contents=doc.get("contents") or [],
+        matched_target_names=matched_target_names or [],
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),
     )
@@ -88,12 +95,17 @@ async def list_projects(body: ProjectListRequest | None = None):
     if body is None:
         body = ProjectListRequest()
     db = get_db()
+    target_matches = await targets_dao.find_project_target_name_matches(
+        db,
+        body.search,
+    )
     docs, total = await projects_dao.list_projects(
         db,
         limit=body.limit,
         skip=body.skip,
         group_id=body.group_id,
         search=body.search,
+        related_project_ids=list(target_matches),
     )
     group_names = await project_groups_dao.get_group_names(
         db,
@@ -104,6 +116,7 @@ async def list_projects(body: ProjectListRequest | None = None):
             _project_out(
                 doc,
                 group_name=group_names.get(str(doc.get("group_id") or "")),
+                matched_target_names=target_matches.get(str(doc.get("_id")), []),
             )
             for doc in docs
         ],

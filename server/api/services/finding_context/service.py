@@ -42,6 +42,17 @@ _MAX_IMAGES = 6
 _WORKER_COUNT = 2
 _worker_task: asyncio.Task[Any] | None = None
 _worker_wakeup = asyncio.Event()
+_auto_generation_enabled = False
+
+
+def configure_finding_context_runtime(*, auto_generate: bool) -> None:
+    """Configure whether collection pipelines may enqueue derived contexts."""
+    global _auto_generation_enabled
+    _auto_generation_enabled = bool(auto_generate)
+
+
+def is_finding_context_auto_generation_enabled() -> bool:
+    return _auto_generation_enabled
 
 
 @dataclass
@@ -715,6 +726,8 @@ def schedule_finding_contexts(
     finding_ids: list[str],
 ) -> asyncio.Task[Any] | None:
     """非阻塞排队入口，采集流水线只需表达“整理这些 Finding”。"""
+    if not _auto_generation_enabled:
+        return None
     ids = _unique([str(value or "").strip() for value in finding_ids])
     if not ids:
         return None

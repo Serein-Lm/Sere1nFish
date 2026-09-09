@@ -194,6 +194,55 @@ def test_project_scope_query_keeps_domain_or_conditions() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_project_list_search_can_include_target_matches() -> None:
+    from bson import ObjectId
+
+    from api.dao import projects
+    from api.db.collections import PROJECTS_COLLECTION
+
+    matching_id = ObjectId("6a9f6f8769cd53f839aa58b0")
+
+    class Cursor:
+        def sort(self, *_args: Any, **_kwargs: Any) -> "Cursor":
+            return self
+
+        def skip(self, *_args: Any, **_kwargs: Any) -> "Cursor":
+            return self
+
+        def limit(self, *_args: Any, **_kwargs: Any) -> "Cursor":
+            return self
+
+        def __aiter__(self):
+            async def iterate():
+                if False:
+                    yield None
+
+            return iterate()
+
+    class Collection:
+        query: dict[str, Any] = {}
+
+        async def count_documents(self, query: dict[str, Any]) -> int:
+            self.query = query
+            return 0
+
+        def find(self, query: dict[str, Any]) -> Cursor:
+            self.query = query
+            return Cursor()
+
+    collection = Collection()
+    db = _FakeDatabase({PROJECTS_COLLECTION: collection})
+
+    await projects.list_projects(
+        db,
+        search="气象局",
+        related_project_ids=[str(matching_id), "invalid"],
+    )
+
+    assert {"_id": {"$in": [matching_id]}} in collection.query["$or"]
+
+
 def test_merge_routes_intentional_target_overlap_once_per_project() -> None:
     from api.services.project_data_merge import MergeDestination, route_destinations
 

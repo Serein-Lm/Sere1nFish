@@ -90,6 +90,22 @@ function renderContacts(group: CollectRecordGroup, limit = 4) {
   )
 }
 
+function renderArchiveStatus(group: CollectRecordGroup) {
+  if (group.sourceDocumentIds.length) {
+    return <Tag color="success" icon={<DatabaseOutlined />}>已归档</Tag>
+  }
+  if (!group.sourceUrl) return <Tag>无原文链接</Tag>
+
+  const statuses = new Set(group.sourceArchiveStatuses)
+  const error = group.sourceArchiveErrors[0]
+  const tag = statuses.has('processing')
+    ? <Tag color="processing">归档中</Tag>
+    : statuses.has('pending')
+      ? <Tag color="warning">待归档</Tag>
+      : <Tag color="warning">待归档</Tag>
+  return error ? <Tooltip title={error}>{tag}</Tooltip> : tag
+}
+
 function uniqueStrings(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))]
 }
@@ -496,9 +512,7 @@ export default function CollectRecordsView({
                   </Space>
                 )
               }
-              return group.sourceUrl
-                ? <Tag color="warning">尚未归档</Tag>
-                : <Tag>无原文链接</Tag>
+              return renderArchiveStatus(group)
             },
           },
         ] as ColumnsType<CollectRecordGroup>)
@@ -585,6 +599,7 @@ export default function CollectRecordsView({
               {showBrowserArchive && group.sourceDocumentIds.length > 0 && (
                 <Tag color="success" icon={<DatabaseOutlined />}>浏览器已归档</Tag>
               )}
+              {showBrowserArchive && group.sourceDocumentIds.length === 0 && renderArchiveStatus(group)}
               {group.sourceDocumentVersionIds.length > 0 && (
                 <Tag>内容版本 {group.sourceDocumentVersionIds.length}</Tag>
               )}

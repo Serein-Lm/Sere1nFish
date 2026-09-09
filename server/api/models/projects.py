@@ -72,6 +72,7 @@ class ProjectOut(BaseModel):
     group_name: str | None = None
     target: str | None = None
     contents: list[str] = Field(default_factory=list)
+    matched_target_names: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

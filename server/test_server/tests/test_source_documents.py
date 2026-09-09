@@ -879,6 +879,18 @@ def test_finding_context_worker_wakes_for_incremental_enqueue(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_finding_context_auto_schedule_respects_runtime_switch(monkeypatch):
+    from api.services.finding_context import service
+
+    def unexpected_spawn(*_args, **_kwargs):
+        raise AssertionError("关闭自动整理后不应创建后台任务")
+
+    monkeypatch.setattr(service, "spawn_background", unexpected_spawn)
+    service.configure_finding_context_runtime(auto_generate=False)
+
+    assert service.schedule_finding_contexts(object(), ["finding-1"]) is None
+
+
 def test_source_document_prompts_reject_multi_entity_roundups():
     from Sere1nGraph.graph.prompts.loader import load_prompt
     from api.services.source_documents.analysis import (

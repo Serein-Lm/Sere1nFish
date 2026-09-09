@@ -1035,14 +1035,11 @@ export default function ProjectDetail() {
         project_id: pid,
         target_id: selectedTargetId || undefined,
         only_incremental: onlyInc,
-        archived_only: true,
+        archived_only: false,
         sort_by: 'value_time',
         limit: 100,
       })
-      const sorted = res.items.filter(
-        (record) => Boolean(record.source_document_id && record.source_url),
-      )
-      setWechatRecords(sorted)
+      setWechatRecords(res.items)
       setWechatRecordsTotal(res.total)
       if (selectedTargetId) void syncProjectTargetSummary(pid, selectedTargetId)
     } catch (e) {

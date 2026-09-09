@@ -1436,6 +1436,46 @@ async def list_project_targets(
     return [doc async for doc in cursor]
 
 
+async def find_project_target_name_matches(
+    db: AsyncIOMotorDatabase,
+    search: str,
+    *,
+    limit: int = 1000,
+) -> dict[str, list[str]]:
+    """Return project IDs and matching Target names for project-list search."""
+    normalized = str(search or "").strip()
+    if not normalized:
+        return {}
+    pattern = re.escape(normalized)
+    cursor = (
+        db[PROJECT_TARGETS_COLLECTION]
+        .find(
+            {
+                "active": {"$ne": False},
+                "$or": [
+                    {"target_name": {"$regex": pattern, "$options": "i"}},
+                    {"display_name": {"$regex": pattern, "$options": "i"}},
+                    {"short_names": {"$regex": pattern, "$options": "i"}},
+                    {"scan_aliases": {"$regex": pattern, "$options": "i"}},
+                ],
+            },
+            {"_id": 0, "project_id": 1, "target_name": 1},
+        )
+        .sort([("updated_at", -1), ("target_name", 1)])
+        .limit(max(1, min(int(limit or 1000), 5000)))
+    )
+    matches: dict[str, list[str]] = {}
+    async for document in cursor:
+        project_id = str(document.get("project_id") or "").strip()
+        target_name = str(document.get("target_name") or "").strip()
+        if not project_id or not target_name:
+            continue
+        names = matches.setdefault(project_id, [])
+        if target_name not in names and len(names) < 6:
+            names.append(target_name)
+    return matches
+
+
 async def update_project_target_batch_tags(
     db: AsyncIOMotorDatabase,
     *,
