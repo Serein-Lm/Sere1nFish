@@ -1206,6 +1206,100 @@ def test_deep_dive_prefers_runtime_extracted_source_url(monkeypatch):
     assert len(emitted) == 1
     assert emitted[0][0] == "persist"
     assert emitted[0][1]["source_url"] == "https://mp.weixin.qq.com/s/runtime-link"
+    assert emitted[0][1]["source_archive_status"] == "pending"
+    assert emitted[0][1]["source_archive_error"] == "浏览器归档暂未完成"
+
+
+def test_mobile_source_handoff_promotes_pending_record_without_using_device(
+    monkeypatch,
+):
+    from api.db.collections import MOBILE_COLLECT_TASKS_COLLECTION, TARGETS_COLLECTION
+    from api.services import mobile_source_handoff as handoff
+
+    captured: dict = {}
+
+    class _LookupCollection:
+        def __init__(self, document):
+            self.document = document
+
+        async def find_one(self, _query, _projection=None):
+            return dict(self.document)
+
+    class _LookupDB:
+        def __init__(self):
+            self.collections = {
+                MOBILE_COLLECT_TASKS_COLLECTION: _LookupCollection(
+                    {
+                        "task_def_id": "task-link",
+                        "extract_fields": [],
+                        "dedup_key_fields": ["title", "account"],
+                        "extract_contact_findings": False,
+                        "min_subject_match": 70,
+                    }
+                ),
+                TARGETS_COLLECTION: _LookupCollection(
+                    {
+                        "target_id": "target-1",
+                        "canonical_name": "目标单位",
+                        "aliases": [],
+                    }
+                ),
+            }
+
+        def __getitem__(self, name):
+            return self.collections[name]
+
+    async def _ingest(_db, **kwargs):
+        captured["ingest"] = kwargs
+        return {
+            "ok": True,
+            "source_url": kwargs["url"],
+            "source_type": "wechat_article",
+            "document_id": "doc-1",
+            "version_id": "version-1",
+            "target_id": "target-1",
+            "target_name": "目标单位",
+            "fields": {"title": "浏览器完整标题", "content": "完整正文"},
+            "score": 95,
+            "subject_match": 95,
+            "contacts": [],
+            "browser_screenshot_ids": ["browser-shot"],
+            "browser_screenshot_urls": ["/storage/browser-shot"],
+        }
+
+    async def _upsert(_db, **kwargs):
+        captured["upsert"] = kwargs
+        return {"record_id": "record-1", "is_new": False, "is_changed": True}
+
+    monkeypatch.setattr(handoff, "ingest_source_url", _ingest)
+    monkeypatch.setattr(handoff.collect_dao, "upsert_record", _upsert)
+
+    result = asyncio.run(
+        handoff.process_mobile_source_handoff(
+            _LookupDB(),
+            {
+                "record_id": "record-1",
+                "task_def_id": "task-link",
+                "project_id": "project-1",
+                "target_id": "target-1",
+                "target_name": "目标单位",
+                "latest_run_task_id": "run-link",
+                "keyword": "目标单位 联系人",
+                "source_url": "https://mp.weixin.qq.com/s/runtime-link",
+                "fields": {"title": "手机列表标题", "account": "测试公众号"},
+                "screenshot_ids": ["phone-shot"],
+                "screenshot_urls": ["/storage/phone-shot"],
+            },
+            worker_id="worker-1",
+        )
+    )
+
+    assert result is True
+    assert captured["ingest"]["min_subject_match"] == 70
+    assert captured["upsert"]["source_archive_status"] == "ready"
+    assert captured["upsert"]["source_document_id"] == "doc-1"
+    assert captured["upsert"]["discovery_fields"]["title"] == "手机列表标题"
+    assert captured["upsert"]["fields"]["title"] == "浏览器完整标题"
 
 
 def test_wechat_candidate_policy_only_accepts_target_article_rows() -> None:

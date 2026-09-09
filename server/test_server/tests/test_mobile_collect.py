@@ -345,6 +345,45 @@ def test_upsert_record_persists_value_and_publish_time_projection():
     )
 
 
+def test_upsert_record_persists_source_handoff_state_and_clears_it_on_success():
+    from api.dao import mobile_collect as dao
+
+    db = _FakeDB()
+
+    async def scenario():
+        pending = await dao.upsert_record(
+            db,
+            task_def_id="wechat-task",
+            project_id="project-1",
+            fields={"title": "待归档文章"},
+            dedup_key_fields=["title"],
+            source_url="https://mp.weixin.qq.com/s/pending",
+            source_archive_status="pending",
+            source_archive_error="模型暂不可用",
+        )
+        ready = await dao.upsert_record(
+            db,
+            task_def_id="wechat-task",
+            project_id="project-1",
+            fields={"title": "待归档文章", "content": "完整正文"},
+            discovery_fields={"title": "待归档文章"},
+            dedup_key_fields=["title"],
+            source_url="https://mp.weixin.qq.com/s/pending",
+            source_document_id="doc-ready",
+            source_document_version_id="version-ready",
+        )
+        return pending, ready
+
+    pending, ready = _run(scenario())
+    collection = db[dao.MOBILE_COLLECT_RECORDS_COLLECTION]
+    record = collection.docs[ready["record_id"]]
+
+    assert pending["record_id"] == ready["record_id"]
+    assert record["source_archive_status"] == "ready"
+    assert "source_archive_error" not in record
+    assert "source_archive_next_retry_at" not in record
+
+
 def test_rejected_source_record_is_hidden_and_can_be_revived():
     from api.dao import mobile_collect as dao
 

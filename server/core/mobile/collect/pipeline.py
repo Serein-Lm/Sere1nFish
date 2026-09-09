@@ -1604,6 +1604,7 @@ class _PersistStage(Stage):
         if (
             min_persist > 0
             and not payload.get("source_document_id")
+            and payload.get("source_archive_status") != "pending"
             and (score or 0) < min_persist
         ):
             return
@@ -1685,7 +1686,15 @@ class _PersistStage(Stage):
             ),
             discovery_fields=(payload.get("discovery_fields") or None),
             contact_count=len(contacts),
+            source_archive_status=str(payload.get("source_archive_status") or ""),
+            source_archive_error=str(payload.get("source_archive_error") or ""),
         )
+        if payload.get("source_archive_status") == "pending":
+            from api.services.mobile_source_handoff import (
+                wake_mobile_source_handoff_worker,
+            )
+
+            wake_mobile_source_handoff_worker()
         counters["total"] += 1
         if result["is_new"]:
             counters["new"] += 1

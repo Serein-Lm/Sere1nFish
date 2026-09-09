@@ -424,6 +424,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"定时调度器启动失败(不影响运行): {e}")
 
+    # 手机发现的真实链接独立重试浏览器归档，不重复占用手机设备。
+    try:
+        from api.services.mobile_source_handoff import MobileSourceHandoffWorker
+
+        MobileSourceHandoffWorker.get_instance().start(get_db())
+        logger.info("手机来源文档补录 worker 已启动")
+    except Exception as e:
+        logger.warning(f"手机来源文档补录 worker 启动失败(不影响运行): {e}")
+
     # 启动时：按数据库配置建立钉钉 Stream Mode 长连接
     try:
         from api.services.dingtalk_stream import DingTalkStreamManager
@@ -508,6 +517,14 @@ async def lifespan(app: FastAPI):
         logger.info("定时调度器已停止")
     except Exception as e:
         logger.warning(f"定时调度器停止失败: {e}")
+
+    try:
+        from api.services.mobile_source_handoff import MobileSourceHandoffWorker
+
+        await MobileSourceHandoffWorker.get_instance().stop()
+        logger.info("手机来源文档补录 worker 已停止")
+    except Exception as e:
+        logger.warning(f"手机来源文档补录 worker 停止失败: {e}")
 
     # 关闭时：在 MongoDB 和浏览器资源仍可用时取消业务后台任务，
     # 让持久任务把 running 原子退回 pending，避免热重载消耗恢复预算。

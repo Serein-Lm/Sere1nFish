@@ -311,6 +311,12 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
             ("score", -1),
         ]
     )
+    await records.create_index(
+        [
+            ("source_archive_status", 1),
+            ("source_archive_next_retry_at", 1),
+        ]
+    )
 
     checkpoints = db[MOBILE_COLLECT_CHECKPOINTS_COLLECTION]
     await checkpoints.create_index(
@@ -843,6 +849,9 @@ async def upsert_record(
     discovery_screenshot_urls: list[str] | None = None,
     discovery_fields: dict[str, Any] | None = None,
     contact_count: int | None = None,
+    source_archive_status: str = "",
+    source_archive_error: str = "",
+    source_archive_retry_after_seconds: int = 120,
 ) -> dict[str, Any]:
     """增量 upsert 一条采集记录。返回 {record_id, is_new, is_changed}。"""
     content_hash = _content_hash(fields, source_url)
@@ -890,6 +899,21 @@ async def upsert_record(
         set_fields["source_document_id"] = source_document_id
     if source_document_version_id:
         set_fields["source_document_version_id"] = source_document_version_id
+    normalized_archive_status = str(source_archive_status or "").strip().casefold()
+    if source_document_id or preserve_source_detail:
+        normalized_archive_status = "ready"
+    if normalized_archive_status in {"pending", "ready", "rejected"}:
+        set_fields["source_archive_status"] = normalized_archive_status
+        set_fields["source_archive_updated_at"] = now
+        if normalized_archive_status == "pending":
+            set_fields["source_archive_error"] = str(source_archive_error or "")[:2000]
+            retry_seconds = max(
+                15,
+                min(int(source_archive_retry_after_seconds or 120), 3600),
+            )
+            set_fields["source_archive_next_retry_at"] = now + timedelta(
+                seconds=retry_seconds
+            )
     if source_document_id:
         archived_discovery_fields = (
             discovery_fields
@@ -982,6 +1006,15 @@ async def upsert_record(
                 "superseded_at": "",
             }
         )
+    if normalized_archive_status in {"ready", "rejected"}:
+        update.setdefault("$unset", {}).update(
+            {
+                "source_archive_error": "",
+                "source_archive_next_retry_at": "",
+                "source_archive_claimed_by": "",
+                "source_archive_lease_until": "",
+            }
+        )
 
     await coll.update_one({"record_id": record_id}, update, upsert=True)
     if legacy_duplicate:
@@ -998,6 +1031,134 @@ async def upsert_record(
                 },
             )
     return {"record_id": record_id, "is_new": is_new, "is_changed": is_changed}
+
+
+async def claim_pending_source_handoff(
+    db: AsyncIOMotorDatabase,
+    *,
+    worker_id: str,
+    lease_seconds: int = 900,
+) -> dict[str, Any] | None:
+    """Atomically lease one retryable phone-to-browser source handoff."""
+    now = _now()
+    lease_until = now + timedelta(seconds=max(60, min(lease_seconds, 3600)))
+    query = {
+        "source_url": {"$type": "string", "$ne": ""},
+        "$and": [
+            {
+                "$or": [
+                    {"source_document_id": {"$exists": False}},
+                    {"source_document_id": ""},
+                ]
+            },
+            {
+                "$or": [
+                    {"superseded_by_record_id": {"$exists": False}},
+                    {"superseded_by_record_id": ""},
+                ]
+            },
+            {
+                "$or": [
+                    {
+                        "source_archive_status": "pending",
+                        "source_archive_next_retry_at": {"$lte": now},
+                    },
+                    {
+                        "source_archive_status": "pending",
+                        "source_archive_next_retry_at": {"$exists": False},
+                    },
+                    {
+                        "source_archive_status": "processing",
+                        "source_archive_lease_until": {"$lte": now},
+                    },
+                ]
+            },
+        ],
+    }
+    return await db[MOBILE_COLLECT_RECORDS_COLLECTION].find_one_and_update(
+        query,
+        {
+            "$set": {
+                "source_archive_status": "processing",
+                "source_archive_claimed_by": worker_id,
+                "source_archive_lease_until": lease_until,
+                "source_archive_updated_at": now,
+            },
+            "$inc": {"source_archive_attempts": 1},
+        },
+        sort=[("source_archive_next_retry_at", 1), ("last_seen", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def defer_source_handoff(
+    db: AsyncIOMotorDatabase,
+    *,
+    record_id: str,
+    worker_id: str,
+    error: str,
+    retry_after_seconds: int,
+) -> bool:
+    """Release a failed handoff back to the durable retry queue."""
+    now = _now()
+    result = await db[MOBILE_COLLECT_RECORDS_COLLECTION].update_one(
+        {
+            "record_id": record_id,
+            "source_archive_claimed_by": worker_id,
+        },
+        {
+            "$set": {
+                "source_archive_status": "pending",
+                "source_archive_error": str(error or "")[:2000],
+                "source_archive_next_retry_at": now
+                + timedelta(seconds=max(15, min(retry_after_seconds, 3600))),
+                "source_archive_updated_at": now,
+            },
+            "$unset": {
+                "source_archive_claimed_by": "",
+                "source_archive_lease_until": "",
+            },
+        },
+    )
+    return bool(result.modified_count)
+
+
+async def reject_source_handoff(
+    db: AsyncIOMotorDatabase,
+    *,
+    record_id: str,
+    worker_id: str,
+    reason: str,
+    source_document_id: str = "",
+) -> bool:
+    """Finish a handoff whose independent relevance review rejected the source."""
+    now = _now()
+    rejection_id = source_document_id or hashlib.sha256(
+        record_id.encode("utf-8")
+    ).hexdigest()[:16]
+    result = await db[MOBILE_COLLECT_RECORDS_COLLECTION].update_one(
+        {
+            "record_id": record_id,
+            "source_archive_claimed_by": worker_id,
+        },
+        {
+            "$set": {
+                "source_archive_status": "rejected",
+                "source_archive_rejection_reason": str(reason or "")[:2000],
+                "source_archive_updated_at": now,
+                "superseded_by_record_id": f"rejected:{rejection_id}",
+                "superseded_reason": "source_relevance_rejected",
+                "superseded_at": now,
+            },
+            "$unset": {
+                "source_archive_error": "",
+                "source_archive_next_retry_at": "",
+                "source_archive_claimed_by": "",
+                "source_archive_lease_until": "",
+            },
+        },
+    )
+    return bool(result.modified_count)
 
 
 async def archive_rejected_source_records(
