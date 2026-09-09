@@ -16,7 +16,14 @@ from typing import Annotated, Any, Literal
 
 from PIL import Image
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, BeforeValidator, Field, RootModel, create_model
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    RootModel,
+    create_model,
+    model_validator,
+)
 
 from Sere1nGraph.graph.agents.runtime import create_llm
 from Sere1nGraph.graph.prompts.loader import load_prompt
@@ -118,7 +125,22 @@ def normalize_article_scope(value: Any) -> str:
 
 def _coerce_review_decision(value: Any) -> str:
     normalized = (_coerce_text(value) or "reject").casefold()
-    return "accept" if normalized in {"accept", "accepted", "pass", "passed", "通过"} else "reject"
+    accepted_values = {
+        "1",
+        "accept",
+        "accepted",
+        "approve",
+        "approved",
+        "pass",
+        "passed",
+        "relevant",
+        "true",
+        "yes",
+        "接受",
+        "相关",
+        "通过",
+    }
+    return "accept" if normalized in accepted_values else "reject"
 
 
 _OptionalText = Annotated[str | None, BeforeValidator(_coerce_text)]
@@ -189,14 +211,27 @@ class ArticleRelevanceReview(BaseModel):
 
 
 class ContactAttributionDecision(BaseModel):
-    candidate_id: str
+    candidate_id: _RequiredText
     belongs_to_target: bool = False
     confidence: int = Field(default=0, ge=0, le=100)
-    reason: str = ""
+    reason: _RequiredText = ""
 
 
 class ContactAttributionBatch(BaseModel):
     items: list[ContactAttributionDecision] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_collection_shape(cls, value: Any) -> Any:
+        """Accept provider collection wrappers while keeping one canonical output."""
+        if isinstance(value, list):
+            return {"items": value}
+        if not isinstance(value, dict) or value.get("items") is not None:
+            return value
+        for key in ("results", "decisions"):
+            if isinstance(value.get(key), list):
+                return {**value, "items": value[key]}
+        return value
 
 
 class ImagePreflightSkip(ValueError):

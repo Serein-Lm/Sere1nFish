@@ -341,6 +341,28 @@ def test_relevance_review_schema_normalizes_values_without_weakening_rejection()
     assert rejected.article_scope == "uncertain"
 
 
+def test_contact_attribution_schema_normalizes_provider_collection_wrapper():
+    from api.services.source_documents.analysis import ContactAttributionBatch
+
+    parsed = ContactAttributionBatch.model_validate(
+        {
+            "results": [
+                {
+                    "candidate_id": "contact_0",
+                    "belongs_to_target": True,
+                    "confidence": 96,
+                    "reason": ["官网页脚", "明确标注为目标总机"],
+                }
+            ]
+        }
+    )
+
+    assert len(parsed.items) == 1
+    assert parsed.items[0].candidate_id == "contact_0"
+    assert parsed.items[0].belongs_to_target is True
+    assert parsed.items[0].reason == "官网页脚；明确标注为目标总机"
+
+
 def test_wechat_canonical_url_discards_tracking_query_and_fragment():
     from api.services.source_documents.urls import canonicalize_source_url
 
