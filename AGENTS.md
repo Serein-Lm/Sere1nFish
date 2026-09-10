@@ -95,6 +95,7 @@
 - Factory/registry/strategy 层负责选择具体实现；调用侧只依赖稳定接口。
 - 配置、通知、AI 模型、技能库、提示词库、设备池、浏览器、观测日志、下载等横切能力必须有统一入口，禁止页面、router 或 pipeline 直接绕过统一层调用底层实现。
 - 新增目录、collection、环境变量、Compose 服务、外部端口或长期运行进程时，同步更新本文或对应模块文档，避免下一次修改反复重新摸索项目结构。
+- 涉及后端边界拆分、大型 pipeline、Router/DAO 迁移、任务执行或分布式能力时，先阅读 `docs/BACKEND_ARCHITECTURE_REVIEW.md`；该文档是当前风险、优先级、迁移顺序和完成标准的审查基线。实现改变了现状、风险等级或阶段状态时必须同步更新，禁止代码与审查结论长期漂移。
 - 一个模块只保留一个主要变更原因。新文件原则上控制在 600 行以内；接近该规模时先按协议、编排、适配器、持久化或纯函数拆分。现有超过 1000 行的遗留模块不得继续无边界增长，触达其新领域能力时应先抽取对应边界，不要求为了行数做一次性高风险重写。
 - 单个函数原则上控制在 80 行以内。长流程应拆为有明确输入输出的 stage，并由 service/runtime 组合；拆分后的函数不能依赖隐式全局变量传递业务状态。
 - `utils` 只容纳无领域状态、可独立测试、可跨模块复用的纯工具，例如规范化、时间、哈希、分页和安全转换。带数据库、网络、配置、权限或业务状态的逻辑属于 DAO/service/adapter，不得把业务耦合转移到万能 `utils.py`。
@@ -105,12 +106,15 @@
 ## 分布式扫描演进约束
 
 - 分布式扫描采用“中心控制面 + 无状态执行节点”。主服务继续拥有身份、RBAC、配置、任务状态、调度和审计；执行节点只按能力领取短租约任务并回传事件、检查点与结果，不直接访问中心 MongoDB/Redis。
+- 当前 Phase 0/1 的稳定入口是 `api.services.distributed_scan.DistributedExecutionGateway`，持久化由 `api.dao.scan_nodes/distributed_work/proxy_profiles` 负责，节点运行时位于 `server/scan_node_agent`。业务 pipeline 只能通过该网关分流，禁止直接创建远端请求、操作节点 collection 或复制调度逻辑。
+- 当前远端 capability 仅为无状态 `http_probe` 与 `browser_probe`。公司 finalizer、Project/Target 关系、SourceDocument/Finding 写入、手机 ADB、AI 中枢及 MongoDB/Redis 均不得下沉到通用扫描节点；新增 capability 必须先稳定版本化输入/输出 Schema 和本机 adapter，再注册到网关与 WorkerRegistry。
+- 分布式执行默认关闭，并通过 MongoDB `distributed_scan.enabled/project_ids` 按 Project 灰度。配置不可达、无健康节点、远端失败或等待超时时，只有策略允许时才能回退既有本机 adapter；调用侧不得自行实现另一套回退。启用前必须先配置明确的 `project_ids`，空列表代表全量项目，不能用于首次灰度。
 - 节点、浏览器和代理统一通过稳定 registry/factory 选择。业务任务只声明所需 capability、资源预算、Target 亲和性和 `proxy_profile_id`，不得写死节点 IP、容器名、Chrome 地址或代理凭据。
 - 跨节点任务必须具备稳定 `work_item_id`、原子认领、租约续期、幂等提交、取消传播和租约过期恢复。节点失联只能导致工作项重新排队，不能把 Project task 误标为完成或丢失已保存检查点。
-- 执行节点只主动出站连接中心 HTTPS/WSS `443`；不得向公网开放 MongoDB、Redis、CDP、VNC、ADB 或内部 worker 端口。节点注册使用一次性 bootstrap token，稳定连接使用可轮换的节点身份和 mTLS/签名挑战。
-- 远程产物通过 `ObjectStorageService` 协议和短时 STS/预签名上传，不向节点分发长期 OSS AK/SK。任务消息只保存 `storage_object_id` 和校验信息，不携带大 HTML、图片或二进制正文。
-- SOCKS5 代理属于独立 `ProxyProvider` 能力：凭据加密存储，运行时按租约解密，支持健康检查、容量、冷却、Target/站点粘性和失败计数。需要代理的任务禁止静默直连回退；浏览器侧优先通过节点 loopback 代理适配器连接带认证的上游，避免凭据进入启动参数和日志。
-- 代理 DNS 策略必须显式配置；公网采集默认使用远端解析以避免 DNS 泄漏，中心 API、对象存储、内网设备和健康探测使用明确 bypass 列表。代理失败、目标站拒绝和节点故障必须使用不同领域错误码。
+- 当前节点协议是节点主动出站访问中心 HTTPS `443` 的长轮询，并使用一次性 bootstrap token、加密保存的可轮换节点密钥、HMAC-SHA256 正文签名、时间窗和 nonce 防重放。WSS 与 mTLS 尚未实现，只能作为兼容增强后续加入，不得在部署或交接中声称已经启用。
+- 当前 probe 不产生远程大对象。后续远程截图、HTML、附件或 OCR 产物必须通过 `ObjectStorageService` 协议和绑定 Project/work 前缀的短时 STS/预签名上传，只回传 `storage_object_id`、SHA-256、大小和 MIME；禁止向节点分发长期 OSS AK/SK，也禁止把大对象塞进工作结果 JSON。
+- SOCKS5 代理属于独立 `ProxyProvider` 能力：当前已实现凭据加密、工作租约、容量、CONNECT 健康检查、失败计数与冷却。`required` 不得静默直连，`best_effort` 回退必须记录观测事件；同一 work item 重试必须复用代理租约记录且受最大尝试次数约束，不能形成永久重试。
+- 当前 HTTP worker 可使用带认证 SOCKS5；浏览器 worker 直接使用 Playwright 每任务代理，带认证 SOCKS5 必须经真实代理验收。Target/站点粘性调度、类别化 bypass/DNS、出口身份检查和 loopback sidecar 尚未完成，实现前不得作为生产保证。
 - 分布式实现和迁移顺序以 `docs/DISTRIBUTED_SCAN_NODES.md` 为准；在持久化租约、幂等结果和观测指标完成前，不允许通过共享数据库或简单 SSH 命令把生产任务分发到远端。
 
 ## 后端关键设计规则
