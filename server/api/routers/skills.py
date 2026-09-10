@@ -7,6 +7,7 @@ Skills 技能库 API
 from __future__ import annotations
 
 import logging
+from pathlib import PurePosixPath
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from api.auth import get_current_active_user, require_admin, User
 from api.db.mongodb import get_db
 from api.dao import skills as skills_dao
+from api.dao import skill_resources as skill_resources_dao
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -66,16 +68,16 @@ class SkillCreate(BaseModel):
     category: str = Field(..., min_length=1)
     description: str = ""
     content_raw: str = ""
-    tags: list[str] = []
-    triggers: list[str] = []
-    anti_triggers: list[str] = []
-    aliases: list[str] = []
-    requires: list[str] = []
-    related: list[str] = []
-    file_signals: list[str] = []
-    risk_signals: list[str] = []
+    tags: list[str] = Field(default_factory=list)
+    triggers: list[str] = Field(default_factory=list)
+    anti_triggers: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    requires: list[str] = Field(default_factory=list)
+    related: list[str] = Field(default_factory=list)
+    file_signals: list[str] = Field(default_factory=list)
+    risk_signals: list[str] = Field(default_factory=list)
     priority: int = 0
-    meta: dict[str, Any] = {}
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class SkillUpdate(BaseModel):
@@ -291,11 +293,17 @@ async def sync_from_files(
     prune_stale: bool = Query(False, description="是否清理不在本地 skills/library 中的旧系统种子"),
     _: User = Depends(require_admin),
 ):
-    """从 Sere1nGraph/graph/skills/library 同步技能文件到数据库。"""
+    """同步项目内置 Skill 与配置的外部 Skill 来源。"""
     db = get_db()
     from scripts.sync_to_db import sync_skills
+    from api.services.skill_library import sync_external_skill_sources
 
     await sync_skills(db, overwrite=overwrite, prune_stale=prune_stale)
+    external = await sync_external_skill_sources(
+        db,
+        overwrite=overwrite,
+        prune_stale=prune_stale,
+    )
     await _refresh_runtime(db)
     result = await skills_dao.list_skills(db, page=1, page_size=1)
     return {
@@ -303,7 +311,105 @@ async def sync_from_files(
         "total": result["total"],
         "overwrite": overwrite,
         "prune_stale": prune_stale,
+        "external": external,
     }
+
+
+@router.get("/sources")
+async def list_skill_sources(
+    _: User = Depends(get_current_active_user),
+):
+    """Return configured source availability without reading package bodies."""
+    from api.services.skill_library import configured_skill_sources
+
+    return {
+        "items": [
+            {
+                "key": source.source_key,
+                "name": source.display_name,
+                "available": source.available(),
+            }
+            for source in configured_skill_sources()
+        ]
+    }
+
+
+@router.post("/sync/external")
+async def sync_external_sources(
+    overwrite: bool = Query(False),
+    prune_stale: bool = Query(False),
+    dry_run: bool = Query(False),
+    _: User = Depends(require_admin),
+):
+    from api.services.skill_library import sync_external_skill_sources
+
+    db = get_db()
+    result = await sync_external_skill_sources(
+        db,
+        overwrite=overwrite,
+        prune_stale=prune_stale,
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        await _refresh_runtime(db)
+    return result
+
+
+async def _resolve_skill(db, skill_id: str) -> dict[str, Any]:
+    skill = await skills_dao.get_skill(db, skill_id)
+    if not skill:
+        skill = await skills_dao.get_skill_by_slug(db, skill_id)
+    if not skill:
+        raise HTTPException(404, "Skill 不存在")
+    return skill
+
+
+def _normalize_resource_path(value: str) -> str:
+    path = PurePosixPath(str(value or "").strip().lstrip("/"))
+    if not str(path) or str(path) == "." or ".." in path.parts:
+        raise HTTPException(400, "资源路径无效")
+    return path.as_posix()
+
+
+@router.get("/detail/{skill_id}/resources")
+async def list_skill_resources(
+    skill_id: str,
+    parent_path: str = Query(default=""),
+    _: User = Depends(get_current_active_user),
+):
+    db = get_db()
+    skill = await _resolve_skill(db, skill_id)
+    normalized_parent = ""
+    if parent_path.strip():
+        normalized_parent = _normalize_resource_path(parent_path)
+    items = await skill_resources_dao.list_children(
+        db,
+        skill_id=str(skill["skill_id"]),
+        parent_path=normalized_parent,
+    )
+    return {"items": items, "parent_path": normalized_parent}
+
+
+@router.get("/detail/{skill_id}/resources/content")
+async def get_skill_resource_content(
+    skill_id: str,
+    path: str = Query(..., min_length=1),
+    _: User = Depends(get_current_active_user),
+):
+    db = get_db()
+    skill = await _resolve_skill(db, skill_id)
+    resource = await skill_resources_dao.get_resource(
+        db,
+        skill_id=str(skill["skill_id"]),
+        path=_normalize_resource_path(path),
+    )
+    if not resource:
+        raise HTTPException(404, "Skill 资源不存在")
+    if resource.get("kind") != "file":
+        raise HTTPException(400, "目录没有可读取正文")
+    if "content" not in resource:
+        raise HTTPException(415, "该资源不是可读取文本")
+    return resource
 
 
 @router.get("/detail/{skill_id}")
@@ -312,12 +418,7 @@ async def get_skill(
     _: User = Depends(get_current_active_user),
 ):
     db = get_db()
-    skill = await skills_dao.get_skill(db, skill_id)
-    if not skill:
-        skill = await skills_dao.get_skill_by_slug(db, skill_id)
-    if not skill:
-        raise HTTPException(404, "Skill 不存在")
-    return skill
+    return await _resolve_skill(db, skill_id)
 
 
 @router.post("", status_code=201)
@@ -393,6 +494,7 @@ async def delete_skill(
     _: User = Depends(require_admin),
 ):
     db = get_db()
+    await skill_resources_dao.delete_skill_resources(db, skill_id)
     ok = await skills_dao.delete_skill(db, skill_id)
     if not ok:
         raise HTTPException(404, "Skill 不存在")
@@ -482,8 +584,8 @@ class BatchReviewRequest(BaseModel):
 
 class BatchTagRequest(BaseModel):
     skill_ids: list[str] = Field(..., min_length=1, max_length=100)
-    add_tags: list[str] = []
-    remove_tags: list[str] = []
+    add_tags: list[str] = Field(default_factory=list)
+    remove_tags: list[str] = Field(default_factory=list)
 
 
 @router.post("/batch/delete")
@@ -494,6 +596,7 @@ async def batch_delete(
     db = get_db()
     deleted = 0
     for sid in body.skill_ids:
+        await skill_resources_dao.delete_skill_resources(db, sid)
         if await skills_dao.delete_skill(db, sid):
             deleted += 1
     await _refresh_runtime(db)

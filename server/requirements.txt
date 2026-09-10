@@ -19,6 +19,7 @@ psutil>=5.9.0
 
 # 配置
 pydantic-settings>=2.0.0
+PyYAML>=6.0.2
 
 # MongoDB
 motor>=3.6.0

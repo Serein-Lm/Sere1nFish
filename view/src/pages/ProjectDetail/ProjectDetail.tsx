@@ -64,6 +64,7 @@ import CollectRecordsView from '../../components/CollectRecordsView/CollectRecor
 import { groupCollectRecordsBySource } from '../../components/CollectRecordsView/collectRecordUtils'
 import AuthenticatedImage from '../../components/AuthenticatedImage'
 import CopyLinkButton, { CopyableLink, CopyableText } from '../../components/CopyLinkButton'
+import SkillSelector from '../../components/SkillSelector'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
 import {
   createTargetResearch,
@@ -1508,6 +1509,8 @@ export default function ProjectDetail() {
       targetSearchQuery,
       targetBatchTag,
     )
+    // Filters are passed explicitly; recreating this stateful fetcher would retrigger the request loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, project, targetPage, targetPageSize, targetSearchQuery, targetBatchTag])
 
   useEffect(() => {
@@ -5773,6 +5776,10 @@ export default function ProjectDetail() {
                   setTaskSubmitting(true)
                   const taskType = values.task_type as TaskType
                   const params: Record<string, unknown> = {}
+                  const selectedSkillIds = Array.isArray(values.selected_skill_ids)
+                    ? values.selected_skill_ids.map(String).filter(Boolean)
+                    : []
+                  if (selectedSkillIds.length) params.selected_skill_ids = selectedSkillIds
                   let companyNames: string[] = []
                   if (taskType === 'company_scan') {
                     companyNames = parseCompanyNames(values.company_names)
@@ -6417,6 +6424,31 @@ export default function ProjectDetail() {
                       </>
                     )
                     return null
+                  }}
+                </Form.Item>
+                <Form.Item noStyle shouldUpdate={(prev, cur) => (
+                  prev.task_type !== cur.task_type
+                  || prev.enable_copywriting !== cur.enable_copywriting
+                  || prev.enable_scan !== cur.enable_scan
+                )}>
+                  {({ getFieldValue }) => {
+                    const taskType = getFieldValue('task_type') as TaskType
+                    const supportsSkills = taskType === 'company_scan'
+                      || taskType === 'url_scan'
+                      || taskType === 'fofa_collect'
+                    const isEnabled = taskType === 'fofa_collect'
+                      ? getFieldValue('enable_scan') !== false
+                      : getFieldValue('enable_copywriting') !== false
+                    if (!supportsSkills || !isEnabled) return null
+                    return (
+                      <Form.Item
+                        name="selected_skill_ids"
+                        label="任务 Skills"
+                        extra="Agent 先读取 Skill 索引，再按需加载正文、参考资料和脚本说明。留空时使用自动路由。"
+                      >
+                        <SkillSelector placeholder="选择本次任务可用的 Skills" />
+                      </Form.Item>
+                    )
                   }}
                 </Form.Item>
               </Form>

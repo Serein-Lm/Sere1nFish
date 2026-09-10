@@ -782,6 +782,15 @@
   min-width: 0;
 }
 
+.ai-hub-skill-picker {
+  width: clamp(132px, 18vw, 240px);
+  min-width: 132px;
+}
+
+.ai-hub-skill-picker .ant-select-selector {
+  min-height: 30px !important;
+}
+
 .sender-footer .ant-btn-text {
   color: var(--text-secondary);
   transition: all 0.2s ease;
@@ -1056,6 +1065,10 @@
   .sender-footer > .ant-flex:first-child {
     width: 100%;
     column-gap: 4px !important;
+  }
+
+  .ai-hub-skill-picker {
+    width: min(100%, 220px);
   }
 
   .chat-sender .ant-sender-switch,

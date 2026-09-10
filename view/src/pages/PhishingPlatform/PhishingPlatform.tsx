@@ -71,6 +71,7 @@ import {
 import { downloadWithAuth } from '../../services/http'
 import { getFindingDetail } from '../../services/taskService'
 import DataReferencePicker, { type DataReference } from './DataReferencePicker'
+import SkillSelector from '../../components/SkillSelector'
 import './PhishingPlatform.css'
 
 const Switch = Sender.Switch
@@ -437,6 +438,7 @@ export default function PhishingPlatform() {
   const [toolCatalog, setToolCatalog] = useState<HubToolCatalog | null>(null)
   const [toolCatalogLoading, setToolCatalogLoading] = useState(false)
   const [inputValue, setInputValue] = useState('')
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isNarrowViewport())
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatListRef = useRef<HTMLDivElement>(null)
@@ -636,6 +638,14 @@ export default function PhishingPlatform() {
           artifacts: Array.isArray(m.meta?.artifacts) ? m.meta.artifacts as Artifact[] : [],
         })),
       )
+      const latestSkillSelection = [...ordered].reverse().find(
+        (item) => item.role === 'user' && Array.isArray(item.meta?.selected_skill_ids),
+      )?.meta?.selected_skill_ids
+      setSelectedSkillIds(
+        Array.isArray(latestSkillSelection)
+          ? latestSkillSelection.map(String).filter(Boolean)
+          : [],
+      )
       await loadArtifactList(cid)
     } catch (error) {
       console.error('加载会话失败:', error)
@@ -772,6 +782,7 @@ export default function PhishingPlatform() {
     conversationId?: string,
     references: Array<Record<string, unknown>> = [],
     displayQuery?: string,
+    selectedSkills: string[] = [],
   ) => {
     const updateMessage = (updates: Partial<Message>) => {
       setMessages(prev => prev.map(msg =>
@@ -793,7 +804,11 @@ export default function PhishingPlatform() {
       workflow,
       query: userPrompt,
       conversation_id: conversationId,
-      options: { references, display_query: displayQuery },
+      options: {
+        references,
+        display_query: displayQuery,
+        selected_skill_ids: selectedSkills,
+      },
     }
 
     try {
@@ -881,6 +896,7 @@ export default function PhishingPlatform() {
 
     const refsSnapshot = dataRefs
     const artifactRefsSnapshot = artifactRefs
+    const skillIdsSnapshot = [...selectedSkillIds]
     const visibleRefLabels = [
       ...refsSnapshot.map(r => r.label),
       ...artifactRefsSnapshot.map(r => r.title),
@@ -933,6 +949,7 @@ export default function PhishingPlatform() {
       conversationId,
       persistedReferences,
       userMessage.content,
+      skillIdsSnapshot,
     )
   }
 
@@ -1463,6 +1480,13 @@ export default function PhishingPlatform() {
                   >
                     {dataRefs.length > 0 ? `引用数据(${dataRefs.length})` : '引用数据'}
                   </Switch>
+                  <SkillSelector
+                    value={selectedSkillIds}
+                    onChange={setSelectedSkillIds}
+                    disabled={isRequesting}
+                    className="ai-hub-skill-picker"
+                    placeholder="Skills"
+                  />
                 </Flex>
                 <Flex align="center">
                   <Tooltip title="能力目录">

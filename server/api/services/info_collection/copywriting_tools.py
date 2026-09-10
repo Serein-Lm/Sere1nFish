@@ -131,6 +131,25 @@ class AgentCopywritingTool:
     async def generate(self, request: CopywritingRequest) -> CopywritingResult:
         from core.observability import observation_context
         from langchain_core.messages import HumanMessage
+        from api.services.skill_library.selection import (
+            compose_selection_instruction,
+            skill_selection,
+            validate_selected_skill_ids,
+        )
+
+        try:
+            selected_skill_ids = validate_selected_skill_ids(
+                request.options.get("selected_skill_ids")
+                or request.options.get("selected_skills")
+            )
+        except ValueError as exc:
+            return CopywritingResult(
+                source=request.source,
+                project_id=request.project_id,
+                task_id=request.task_id,
+                target_id=request.target_id,
+                meta={"error": str(exc)},
+            )
 
         try:
             agent = await self._get_agent()
@@ -157,6 +176,7 @@ class AgentCopywritingTool:
                     parse_error,
                     retry_number=attempt_index,
                 )
+            prompt = compose_selection_instruction(prompt, selected_skill_ids)
             try:
                 with observation_context(
                     project_id=request.project_id,
@@ -165,7 +185,8 @@ class AgentCopywritingTool:
                     agent="copywriting",
                     task_type=request.source,
                 ):
-                    raw = await agent({"messages": [HumanMessage(content=prompt)]})
+                    with skill_selection(selected_skill_ids):
+                        raw = await agent({"messages": [HumanMessage(content=prompt)]})
             except Exception as exc:
                 return CopywritingResult(
                     source=request.source,
@@ -235,5 +256,6 @@ class AgentCopywritingTool:
                 "count": len(copywritings),
                 "attempts": attempts,
                 "format_retries": max(0, attempts - 1),
+                "selected_skill_ids": selected_skill_ids,
             },
         )

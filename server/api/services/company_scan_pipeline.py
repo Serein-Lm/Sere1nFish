@@ -208,6 +208,7 @@ class _ProfileCopywritingStage(Stage):
         db: Any,
         pipeline_owner: Any,
         target_id: str = "",
+        selected_skill_ids: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
@@ -216,6 +217,7 @@ class _ProfileCopywritingStage(Stage):
         self.db = db
         self.pipeline_owner = pipeline_owner
         self.target_id = target_id
+        self.selected_skill_ids = tuple(selected_skill_ids or ())
         super().__init__(concurrency=concurrency)
 
     async def on_setup(self, state: dict[str, Any]) -> None:
@@ -260,7 +262,11 @@ class _ProfileCopywritingStage(Stage):
                 target_id=user_id,
                 target=profile,
                 context=context,
-                options={"url": url, "response_model": FindingCopywriting},
+                options={
+                    "url": url,
+                    "response_model": FindingCopywriting,
+                    "selected_skill_ids": list(self.selected_skill_ids),
+                },
             )
         )
         if not result.ok:
@@ -312,9 +318,16 @@ class _ProfileCopywritingStage(Stage):
 class CompanyScanPipeline:
     """综合公司扫描流水线"""
 
-    def __init__(self, db: AsyncIOMotorDatabase, app_config: Any):
+    def __init__(
+        self,
+        db: AsyncIOMotorDatabase,
+        app_config: Any,
+        *,
+        selected_skill_ids: list[str] | tuple[str, ...] | None = None,
+    ):
         self.db = db
         self.app_config = app_config
+        self.selected_skill_ids = tuple(selected_skill_ids or ())
 
     # ══════════════════════════════════════
     # 主入口
@@ -2272,6 +2285,7 @@ class CompanyScanPipeline:
                 min_attention_score=min_attention_score,
                 scan_concurrency=max(1, min(int(scan_concurrency), 3)),
                 copywriting_concurrency=max(1, min(int(copywriting_concurrency), 2)),
+                selected_skill_ids=list(self.selected_skill_ids),
             )
         except Exception as exc:  # noqa: BLE001
             from core.llm_capacity import LLMCapacityUnavailableError
@@ -3238,6 +3252,7 @@ class CompanyScanPipeline:
             scan_concurrency=scan_concurrency,
             copywriting_concurrency=copywriting_concurrency,
             target_context=target_context,
+            selected_skill_ids=list(self.selected_skill_ids),
         )
         if scan_result.get("status") == "error":
             raise RuntimeError(str(scan_result.get("error") or "URL 深度扫描失败"))
@@ -3445,6 +3460,7 @@ class CompanyScanPipeline:
             db=self.db,
             pipeline_owner=self,
             target_id=target_id,
+            selected_skill_ids=self.selected_skill_ids,
         )
         pipe = await run_stream_pipeline(
             stages=[stream_stage(stage)],

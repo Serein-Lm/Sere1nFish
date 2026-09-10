@@ -35,6 +35,7 @@ async def run_fofa_collect(
     url_probe_concurrency: int = DEFAULT_URL_PROBE_CONCURRENCY,
     url_scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
     copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
+    selected_skill_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """保留旧 task_type/API，内部改走统一多 Provider 资产情报服务。"""
     from api.dao import targets as targets_dao
@@ -142,6 +143,7 @@ async def run_fofa_collect(
                 probe_concurrency=url_probe_concurrency,
                 scan_concurrency=url_scan_concurrency,
                 copywriting_concurrency=copywriting_concurrency,
+                selected_skill_ids=selected_skill_ids,
             )
             if scan_result.get("status") == "error":
                 raise RuntimeError(str(scan_result.get("error") or "资产深度扫描失败"))

@@ -22,7 +22,32 @@ def list_available_skills() -> str:
     """列出所有 skill 索引（Layer 1）"""
     from ..skills.registry import get_skill_registry
     registry = get_skill_registry()
-    return registry.get_index_prompt()
+    from api.services.skill_library.selection import current_selected_skill_ids
+
+    selected = current_selected_skill_ids()
+    prompt = registry.get_index_prompt(selected)
+    if selected is not None:
+        return "本轮用户显式选择的 Skill：\n" + (prompt or "（无可用 Skill）")
+    return prompt
+
+
+def _selection_error(skill_id: str) -> str:
+    from api.services.skill_library.selection import current_selected_skill_ids
+
+    selected = current_selected_skill_ids()
+    if selected is not None and skill_id not in selected:
+        return f"Skill '{skill_id}' 不在本轮用户选择范围内。"
+    return ""
+
+
+def _load_enabled_skill(skill_id: str):
+    from ..skills.registry import get_skill_registry
+
+    registry = get_skill_registry()
+    index = registry.get_index(skill_id)
+    if index is None or not index.enabled:
+        return None
+    return registry.load_skill(skill_id)
 
 
 @tool(
@@ -36,9 +61,10 @@ def list_available_skills() -> str:
 )
 def load_skill(skill_id: str) -> str:
     """加载 skill 完整指令（Layer 2）"""
-    from ..skills.registry import get_skill_registry
-    registry = get_skill_registry()
-    skill = registry.load_skill(skill_id)
+    selection_error = _selection_error(skill_id)
+    if selection_error:
+        return selection_error
+    skill = _load_enabled_skill(skill_id)
     if not skill:
         return f"Skill '{skill_id}' 不存在。请先调用 list_available_skills 查看可用 skills。"
 
@@ -47,6 +73,12 @@ def load_skill(skill_id: str) -> str:
         parts.append(
             f"\n\n## 可用案例文件（用 load_skill_reference 加载）:\n"
             + "\n".join(f"- {ref}" for ref in skill.references)
+        )
+    other_resources = [path for path in skill.resources if path not in skill.references]
+    if other_resources:
+        parts.append(
+            "\n\n## 可用支持资源（用 load_skill_resource 按需加载）:\n"
+            + "\n".join(f"- {path}" for path in other_resources[:120])
         )
     return "\n".join(parts)
 
@@ -62,9 +94,10 @@ def load_skill(skill_id: str) -> str:
 )
 def load_skill_reference(skill_id: str, reference_name: str) -> str:
     """加载 skill 案例文件（Layer 3）"""
-    from ..skills.registry import get_skill_registry
-    registry = get_skill_registry()
-    skill = registry.load_skill(skill_id)
+    selection_error = _selection_error(skill_id)
+    if selection_error:
+        return selection_error
+    skill = _load_enabled_skill(skill_id)
     if not skill:
         return f"Skill '{skill_id}' 不存在。"
 
@@ -73,8 +106,39 @@ def load_skill_reference(skill_id: str, reference_name: str) -> str:
         available = ", ".join(skill.references) if skill.references else "无"
         return f"案例文件 '{reference_name}' 不存在。可用文件: {available}"
 
+    if len(content) > 40_000:
+        return content[:40_000] + "\n\n[资源正文已在 40000 字符处截断，请只读取任务需要的更具体资源。]"
+    return content
+
+
+@tool(
+    "load_skill_resource",
+    description=(
+        "按需读取 Skill 包内的脚本、模板说明、规范或其他文本资源。"
+        "先调用 load_skill 查看资源路径，再传入 skill_id 与 resource_path；"
+        "不要一次读取无关资源。"
+    ),
+)
+def load_skill_resource(skill_id: str, resource_path: str) -> str:
+    selection_error = _selection_error(skill_id)
+    if selection_error:
+        return selection_error
+    skill = _load_enabled_skill(skill_id)
+    if not skill:
+        return f"Skill '{skill_id}' 不存在。"
+    content = skill.load_resource(resource_path)
+    if not content:
+        available = ", ".join(skill.resources[:80]) if skill.resources else "无"
+        return f"资源 '{resource_path}' 不存在或不是文本。可用资源: {available}"
+    if len(content) > 40_000:
+        return content[:40_000] + "\n\n[资源正文已在 40000 字符处截断。]"
     return content
 
 
 # 工具列表，供 factory 使用
-SKILL_TOOLS = [list_available_skills, load_skill, load_skill_reference]
+SKILL_TOOLS = [
+    list_available_skills,
+    load_skill,
+    load_skill_reference,
+    load_skill_resource,
+]

@@ -350,6 +350,8 @@ async def list_skills(
     projection = {"_id": 0}
     if not include_content:
         projection["content_raw"] = 0
+        projection["meta.reference_contents"] = 0
+        projection["meta.resource_contents"] = 0
 
     col = db[SKILLS_COLLECTION]
     total = await col.count_documents(q)
@@ -385,7 +387,13 @@ async def list_skills_by_category(
         q["status"] = status
 
     cursor = db[SKILLS_COLLECTION].find(
-        q, {"_id": 0, "content_raw": 0}
+        q,
+        {
+            "_id": 0,
+            "content_raw": 0,
+            "meta.reference_contents": 0,
+            "meta.resource_contents": 0,
+        },
     ).sort([("category", ASCENDING), ("priority", DESCENDING)])
 
     result: dict[str, list[dict[str, Any]]] = {}

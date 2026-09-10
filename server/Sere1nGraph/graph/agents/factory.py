@@ -747,8 +747,10 @@ async def create_copywriting_agent(
             + ANALYSIS_TOOLS
         ),
         middleware=[
-            ToolCallLimitMiddleware(run_limit=1, exit_behavior="continue"),
-            ModelCallLimitMiddleware(run_limit=3, exit_behavior="end"),
+            # Progressive Skill disclosure needs room for index, instruction and
+            # one or more supporting resources before the final response.
+            ToolCallLimitMiddleware(run_limit=6, exit_behavior="continue"),
+            ModelCallLimitMiddleware(run_limit=5, exit_behavior="end"),
         ],
         mcp_server_name=None,
         output_mode=output_mode,

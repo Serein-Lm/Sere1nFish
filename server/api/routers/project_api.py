@@ -80,9 +80,23 @@ async def _normalize_xhs_target_params(
     params.update(target_ref)
 
 
+def _normalize_selected_skill_params(params: dict[str, Any]) -> None:
+    """Normalize an optional request-scoped Skill selection to approved slugs."""
+    from api.services.skill_library.selection import validate_selected_skill_ids
+
+    raw_selection = params.get("selected_skill_ids")
+    if raw_selection is None:
+        raw_selection = params.get("selected_skills")
+    if raw_selection is not None:
+        params["selected_skill_ids"] = validate_selected_skill_ids(raw_selection)
+    params.pop("selected_skills", None)
+
+
 def _validate_company_scan_params(params: dict[str, Any]) -> None:
     """Validate optional company-scan modules before creating task records."""
     from api.dao.targets import normalize_batch_tags
+
+    _normalize_selected_skill_params(params)
 
     if "target_batch_tags" in params:
         params["target_batch_tags"] = normalize_batch_tags(
@@ -209,6 +223,7 @@ async def _dispatch_url_scan(task_id: str, project_id: str, params: dict):
         scan_concurrency=tuning.url_scan_concurrency,
         copywriting_concurrency=tuning.copywriting_concurrency,
         enable_copywriting=params.get("enable_copywriting", True),
+        selected_skill_ids=params.get("selected_skill_ids", []),
     )
     if result.get("status") == "error":
         raise RuntimeError(str(result.get("error") or "URL 扫描失败"))
@@ -266,7 +281,11 @@ async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
         copywriting_concurrency=params.get("copywriting_concurrency"),
         xhs_search_concurrency=params.get("xhs_search_concurrency"),
     )
-    pipeline = CompanyScanPipeline(db, runtime_config)
+    pipeline = CompanyScanPipeline(
+        db,
+        runtime_config,
+        selected_skill_ids=params.get("selected_skill_ids", []),
+    )
     result = await pipeline.run_pipeline(
         task_id=task_id, project_id=project_id,
         company_name=params.get("company_name", ""),
@@ -367,6 +386,7 @@ async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
         url_probe_concurrency=tuning.url_probe_concurrency,
         url_scan_concurrency=tuning.url_scan_concurrency,
         copywriting_concurrency=tuning.copywriting_concurrency,
+        selected_skill_ids=params.get("selected_skill_ids", []),
     )
 
 async def _dispatch_scholar_contact(task_id: str, project_id: str, params: dict):
@@ -467,6 +487,7 @@ class CompanyScanCoverageRequest(BaseModel):
     bidding_max_records: int = Field(default=10, ge=1, le=20)
     bidding_lookback_days: int = Field(default=30, ge=1, le=30)
     enable_copywriting: bool = True
+    selected_skill_ids: list[str] = Field(default_factory=list, max_length=32)
     company_scan_concurrency: int | None = Field(default=None, ge=1, le=12)
     dry_run: bool = True
 
@@ -549,6 +570,11 @@ async def create_task(
     project = await projects_dao.get_project(db, project_id)
     if not project:
         raise HTTPException(404, "项目不存在")
+
+    try:
+        _normalize_selected_skill_params(req.params)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     if req.task_type == "xhs_search":
         try:
@@ -700,6 +726,11 @@ async def create_company_scan_coverage_batch(
     db = get_db()
     if not await projects_dao.get_project(db, project_id):
         raise HTTPException(404, "项目不存在")
+    skill_params = {"selected_skill_ids": req.selected_skill_ids}
+    try:
+        _normalize_selected_skill_params(skill_params)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     try:
         plan = await plan_company_scan_coverage(
             db,
@@ -714,6 +745,7 @@ async def create_company_scan_coverage_batch(
             bidding_max_records=req.bidding_max_records,
             bidding_lookback_days=req.bidding_lookback_days,
             enable_copywriting=req.enable_copywriting,
+            selected_skill_ids=skill_params.get("selected_skill_ids", []),
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -795,6 +827,11 @@ async def create_task_with_file(
         params = json.loads(params_json) if params_json.strip() else {}
     except json.JSONDecodeError:
         params = {}
+
+    try:
+        _normalize_selected_skill_params(params)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     if task_type == "xhs_search":
         try:

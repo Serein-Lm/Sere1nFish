@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SkillPhase(str, Enum):
@@ -66,8 +66,7 @@ class SkillIndex(BaseModel):
     # Layer 2/3 的路径（相对于 skills/ 目录）
     skill_dir: str = Field(default="", description="skill 目录路径")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class Skill(BaseModel):
@@ -84,6 +83,11 @@ class Skill(BaseModel):
     reference_contents: dict[str, str] = Field(
         default_factory=dict,
         description="数据库来源的 reference 内容，文件来源为空",
+    )
+    resources: list[str] = Field(default_factory=list, description="Skill 包内全部资源路径")
+    resource_contents: dict[str, str] = Field(
+        default_factory=dict,
+        description="数据库快照中的按需资源正文",
     )
 
     # ── 便捷属性 ──
@@ -112,8 +116,30 @@ class Skill(BaseModel):
         """Layer 3: 按需加载某个 reference 文件"""
         if ref_name in self.reference_contents:
             return self.reference_contents[ref_name]
+        candidates = [
+            ref_name,
+            f"reference/{ref_name}",
+            f"references/{ref_name}",
+        ]
+        for candidate in candidates:
+            if candidate in self.resource_contents:
+                return self.resource_contents[candidate]
         from pathlib import Path
         ref_path = Path(self.index.skill_dir) / "references" / ref_name
         if ref_path.exists():
             return ref_path.read_text(encoding="utf-8")
+        return ""
+
+    def load_resource(self, resource_path: str) -> str:
+        """Layer 3: load any text resource captured from the Skill package."""
+        normalized = str(resource_path or "").strip().lstrip("/")
+        if not normalized or ".." in normalized.split("/"):
+            return ""
+        if normalized in self.resource_contents:
+            return self.resource_contents[normalized]
+        from pathlib import Path
+
+        resource = Path(self.index.skill_dir) / normalized
+        if resource.is_file():
+            return resource.read_text(encoding="utf-8")
         return ""

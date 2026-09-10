@@ -340,12 +340,14 @@ class _CopywritingStage(Stage):
         pipeline_owner: "UrlScanPipeline",
         score_threshold: int = 60,
         source: str = "web_tagging",
+        selected_skill_ids: list[str] | None = None,
     ) -> None:
         self.project_id = project_id
         self.task_id = task_id
         self.pipeline_owner = pipeline_owner
         self.score_threshold = score_threshold
         self.source = source
+        self.selected_skill_ids = list(selected_skill_ids or [])
         super().__init__(concurrency=concurrency)
 
     async def handle(self, item: Item, ctx) -> None:
@@ -370,12 +372,17 @@ class _CopywritingStage(Stage):
             f"label={finding.get('label','')[:30]}"
         )
         t0 = _time.time()
+        request_kwargs: dict[str, Any] = {
+            "project_id": self.project_id,
+            "task_id": self.task_id,
+        }
+        if self.selected_skill_ids:
+            request_kwargs["selected_skill_ids"] = self.selected_skill_ids
         request = self.pipeline_owner.build_copywriting_request(
             finding,
             site_ctx,
             siblings,
-            project_id=self.project_id,
-            task_id=self.task_id,
+            **request_kwargs,
         )
         result = await copywriting_tool.generate(request)
         if not result.ok:
@@ -854,6 +861,7 @@ class UrlScanPipeline:
         *,
         project_id: str = "",
         task_id: str = "",
+        selected_skill_ids: list[str] | None = None,
     ):
         """Build the normalized copywriting tool request for one finding."""
         from api.services.info_collection import CopywritingRequest
@@ -879,7 +887,11 @@ class UrlScanPipeline:
             target_id=finding_id,
             target=finding,
             context=context,
-            options={"url": url, "response_model": FindingCopywriting},
+            options={
+                "url": url,
+                "response_model": FindingCopywriting,
+                "selected_skill_ids": list(selected_skill_ids or []),
+            },
         )
 
     async def generate_copywriting_for_finding(
@@ -952,6 +964,7 @@ class UrlScanPipeline:
         target_context: dict[str, Any] | None = None,
         agent_timeout_seconds: int | None = None,
         enable_asset_triage: bool | None = None,
+        selected_skill_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         完整流水线：url.txt → 探活 → 扫描 → 提取 → 话术生成 → 存储。
@@ -1423,6 +1436,7 @@ class UrlScanPipeline:
                     else 101
                 ),
                 source=source,
+                selected_skill_ids=selected_skill_ids,
             )
 
             def _on_pipeline_ready(pipe):

@@ -40,6 +40,7 @@ x-backend-env: &backend-env
   MOBILE_AGENT_ANDROID_URL: ${MOBILE_AGENT_ANDROID_URL:-}
   MOBILE_AGENT_ADB_PORT: ${MOBILE_AGENT_ADB_PORT:-5555}
   DOWNLOADS_ROOT: /srv/downloads
+  EXTERNAL_SKILLS_DIR: /opt/sere1nfish-skills
 
 x-high-ulimits: &high-ulimits
   nofile:
@@ -103,6 +104,7 @@ services:
       <<: *backend-env
     volumes:
       - ./server:/app
+      - ${SKILLS_HOST_DIR:-/root/skills}:/opt/sere1nfish-skills:ro
     depends_on:
       mongo:
         condition: service_healthy
@@ -138,6 +140,7 @@ services:
     volumes:
       - ./server:/app
       - ${DOWNLOADS_DIR:-./downloads}:/srv/downloads:ro
+      - ${SKILLS_HOST_DIR:-/root/skills}:/opt/sere1nfish-skills:ro
       - adb_keys:/root/.android
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

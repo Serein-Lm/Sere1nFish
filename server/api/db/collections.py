@@ -56,6 +56,7 @@ RBAC_BINDINGS_COLLECTION = "rbac_bindings"
 SKILLS_COLLECTION = "skills"
 SKILL_CATEGORIES_COLLECTION = "skill_categories"
 SKILL_TAGS_COLLECTION = "skill_tags"
+SKILL_RESOURCES_COLLECTION = "skill_resources"
 
 # Prompts 提示词库
 PROMPTS_COLLECTION = "prompts"

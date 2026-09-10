@@ -278,8 +278,10 @@ async def lifespan(app: FastAPI):
         await mobile_execution_leases_dao.ensure_indexes(db)
         # Skills / Prompts 技能库与提示词库索引
         from api.dao import skills as skills_dao
+        from api.dao import skill_resources as skill_resources_dao
         from api.dao import prompts as prompts_dao
         await skills_dao.ensure_indexes(db)
+        await skill_resources_dao.ensure_indexes(db)
         await prompts_dao.ensure_indexes(db)
         from api.services.library_runtime import refresh_ai_libraries
         library_counts = await refresh_ai_libraries(db, seed_if_empty=True)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, type Key, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useCallback, type Key } from 'react'
 import {
   Row,
   Col,
@@ -18,7 +18,6 @@ import {
   Empty,
   Spin,
   Tabs,
-  Tree,
   Badge,
   Typography,
   Space,
@@ -44,7 +43,6 @@ import {
   AppstoreOutlined,
   TagsOutlined,
   FolderOutlined,
-  FileMarkdownOutlined,
   SaveOutlined,
 } from '@ant-design/icons'
 import XMarkdown from '@ant-design/x-markdown'
@@ -72,6 +70,7 @@ import {
   type SkillListParams,
 } from '../../services/skillService'
 import { getCurrentUser, type CurrentUser } from '../../services/authService'
+import SkillLibraryTree, { type ResourcePreview } from './SkillLibraryTree'
 import './SkillsManagement.css'
 
 const { Title, Paragraph, Text } = Typography
@@ -106,6 +105,7 @@ export default function SkillsManagement() {
   const [editorLoading, setEditorLoading] = useState(false)
   const [editorSaving, setEditorSaving] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [resourcePreview, setResourcePreview] = useState<ResourcePreview | null>(null)
   const [treeForm] = Form.useForm()
   const skillEditorContent = Form.useWatch('content_raw', treeForm) || ''
 
@@ -304,7 +304,8 @@ export default function SkillsManagement() {
       ...(source?.meta || {}),
       phases,
     }
-    const { phases: _phases, ...payload } = values
+    const payload = { ...values }
+    delete payload.phases
     return {
       ...payload,
       meta,
@@ -314,7 +315,7 @@ export default function SkillsManagement() {
     }
   }
 
-  const setTreeEditorValues = (skill: Skill | null) => {
+  const setTreeEditorValues = useCallback((skill: Skill | null) => {
     if (!skill) {
       treeForm.resetFields()
       treeForm.setFieldsValue({
@@ -344,7 +345,7 @@ export default function SkillsManagement() {
       priority: skill.priority,
       phases: Array.isArray(skill.meta?.phases) ? skill.meta.phases : [],
     })
-  }
+  }, [categories, treeForm])
 
   const startTreeCreate = () => {
     setSelectedTreeSkill(null)
@@ -352,14 +353,11 @@ export default function SkillsManagement() {
     setTreeEditorValues(null)
   }
 
-  const selectTreeSkill = async (key: string) => {
-    const parts = key.split(':')
-    const skillId = parts[0] === 'skill' || parts[0] === 'folder' ? parts[1] : ''
-    if (!skillId) return
+  const selectTreeSkill = async (skill: Skill, key: string) => {
     setTreeSelectedKeys([key])
     setEditorLoading(true)
     try {
-      const detailSkill = await getSkillDetail(skillId)
+      const detailSkill = await getSkillDetail(skill.skill_id)
       setSelectedTreeSkill(detailSkill)
       setTreeEditorValues(detailSkill)
     } catch {
@@ -376,7 +374,8 @@ export default function SkillsManagement() {
       const payload = buildSkillPayload(values, selectedTreeSkill)
       let saved: Skill
       if (selectedTreeSkill) {
-        const { slug: _slug, ...updatePayload } = payload
+        const updatePayload = { ...payload }
+        delete updatePayload.slug
         saved = await updateSkill(selectedTreeSkill.skill_id, updatePayload as Parameters<typeof updateSkill>[1])
         message.success('技能已更新')
       } else {
@@ -412,7 +411,7 @@ export default function SkillsManagement() {
     if (activeTab === 'tree' && !selectedTreeSkill && !treeForm.getFieldValue('slug')) {
       setTreeEditorValues(null)
     }
-  }, [activeTab, categories, selectedTreeSkill, treeForm])
+  }, [activeTab, selectedTreeSkill, setTreeEditorValues, treeForm])
 
   const handleSubmit = async () => {
     try {
@@ -420,7 +419,8 @@ export default function SkillsManagement() {
       setSubmitting(true)
       const payload = buildSkillPayload(values, editing)
       if (editing) {
-        const { slug: _slug, ...updatePayload } = payload
+        const updatePayload = { ...payload }
+        delete updatePayload.slug
         await updateSkill(editing.skill_id, updatePayload as Parameters<typeof updateSkill>[1])
         message.success('技能已更新')
       } else {
@@ -551,184 +551,7 @@ export default function SkillsManagement() {
     [tags]
   )
 
-  type SkillTreeNode = {
-    title: ReactNode
-    key: string
-    children?: SkillTreeNode[]
-    selectable?: boolean
-    isLeaf?: boolean
-  }
-
   const getCategoryId = (category: SkillCategory) => category.category_id || category.id || category.slug
-
-  const phaseOptions = [
-    { value: 'scenario', label: 'scenario 场景构建' },
-    { value: 'script', label: 'script 话术生成' },
-    { value: 'objection', label: 'objection 质疑应对' },
-    { value: 'finalize', label: 'finalize 整合输出' },
-  ]
-
-  const getSkillPhases = (skill: Skill) => {
-    const phases = skill.meta?.phases
-    return Array.isArray(phases) ? phases.map(String).filter(Boolean) : []
-  }
-
-  const getSkillReferences = (skill: Skill) => {
-    const refs = skill.meta?.reference_contents
-    if (refs && typeof refs === 'object' && !Array.isArray(refs)) {
-      return Object.keys(refs as Record<string, unknown>).sort()
-    }
-    return []
-  }
-
-  const renderSkillFolderTitle = (skill: Skill) => (
-    <span className="library-tree-folder">
-      <FolderOutlined />
-      <span>{skill.slug}</span>
-      <Text type="secondary">{skill.name}</Text>
-      {getSkillPhases(skill).map((phase) => (
-        <Tag key={phase} bordered={false}>
-          {phase}
-        </Tag>
-      ))}
-      <Tag color={statusMeta(skill.status).color} bordered={false}>
-        {statusMeta(skill.status).label}
-      </Tag>
-    </span>
-  )
-
-  const renderSkillLeafTitle = (skill: Skill, label = 'SKILL.md') => (
-    <span className="library-tree-leaf">
-      <FileMarkdownOutlined />
-      <span>{label}</span>
-      <Text type="secondary">{skill.name}</Text>
-    </span>
-  )
-
-  const skillTreeData = useMemo<SkillTreeNode[]>(() => {
-    const sortedSkills = [...treeSkills].sort((a, b) => a.slug.localeCompare(b.slug))
-    const phaseChildren = phaseOptions.map((phase) => ({
-      key: `phase:${phase.value}`,
-      title: (
-        <span className="library-tree-category">
-          <FolderOutlined />
-          <span>{phase.label}</span>
-        </span>
-      ),
-      selectable: false,
-      children: sortedSkills
-        .filter((skill) => getSkillPhases(skill).includes(phase.value))
-        .map((skill) => ({
-          key: `skill:${skill.skill_id}:phase:${phase.value}`,
-          title: renderSkillLeafTitle(skill, skill.slug),
-          isLeaf: true,
-        })),
-    }))
-
-    const libraryChildren = sortedSkills.map((skill) => {
-      const refs = getSkillReferences(skill)
-      const children: SkillTreeNode[] = [
-        {
-          key: `skill:${skill.skill_id}:skill-md`,
-          title: (
-            <span className="library-tree-leaf">
-              <FileMarkdownOutlined />
-              <span>SKILL.md</span>
-              <Tag bordered={false}>Layer 2</Tag>
-            </span>
-          ),
-          isLeaf: true,
-        },
-      ]
-
-      if (refs.length > 0) {
-        children.push({
-          key: `refs:${skill.skill_id}`,
-          title: (
-            <span className="library-tree-category">
-              <FolderOutlined />
-              <span>references</span>
-              <Tag bordered={false}>Layer 3</Tag>
-            </span>
-          ),
-          selectable: false,
-          children: refs.map((ref) => ({
-            key: `skill:${skill.skill_id}:ref:${ref}`,
-            title: (
-              <span className="library-tree-leaf">
-                <FileMarkdownOutlined />
-                <span>{ref}</span>
-              </span>
-            ),
-            isLeaf: true,
-          })),
-        })
-      }
-
-      return {
-        key: `folder:${skill.skill_id}`,
-        title: renderSkillFolderTitle(skill),
-        children,
-      }
-    })
-
-    return [
-      {
-        key: 'progressive-disclosure',
-        title: (
-          <span className="library-tree-category">
-            <FolderOutlined />
-            <span>progressive-disclosure</span>
-          </span>
-        ),
-        selectable: false,
-        children: [
-          {
-            key: 'layer:1',
-            title: (
-              <span className="library-tree-category">
-                <FolderOutlined />
-                <span>Layer 1 · SkillIndex 常驻索引</span>
-              </span>
-            ),
-            selectable: false,
-            children: phaseChildren,
-          },
-          {
-            key: 'layer:2',
-            title: (
-              <span className="library-tree-category">
-                <FileMarkdownOutlined />
-                <span>Layer 2 · SKILL.md 触发后加载</span>
-              </span>
-            ),
-            selectable: false,
-          },
-          {
-            key: 'layer:3',
-            title: (
-              <span className="library-tree-category">
-                <FolderOutlined />
-                <span>Layer 3 · references 二次按需加载</span>
-              </span>
-            ),
-            selectable: false,
-          },
-        ],
-      },
-      {
-        key: 'skills-library-root',
-        title: (
-          <span className="library-tree-category">
-            <FolderOutlined />
-            <span>skills/library</span>
-          </span>
-        ),
-        selectable: false,
-        children: libraryChildren,
-      },
-    ]
-  }, [treeSkills])
 
   const canEditTreeSkill =
     !selectedTreeSkill || isAdmin || selectedTreeSkill.created_by === currentUser?.username
@@ -974,21 +797,13 @@ export default function SkillsManagement() {
                   </Tooltip>
                 </Space>
               </div>
-              <Spin spinning={treeLoading}>
-                {skillTreeData.length > 0 ? (
-                  <Tree
-                    key={`skills-tree-${categories.length}-${treeSkills.length}`}
-                    showLine
-                    blockNode
-                    defaultExpandAll
-                    selectedKeys={treeSelectedKeys}
-                    treeData={skillTreeData}
-                    onSelect={(keys) => selectTreeSkill(String(keys[0] || ''))}
-                  />
-                ) : (
-                  <Empty description="暂无技能" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                )}
-              </Spin>
+              <SkillLibraryTree
+                skills={treeSkills}
+                loading={treeLoading}
+                selectedKeys={treeSelectedKeys}
+                onSelectSkill={(skill, key) => void selectTreeSkill(skill, key)}
+                onPreviewResource={setResourcePreview}
+              />
             </aside>
 
             <section className="library-editor-pane">
@@ -1342,6 +1157,26 @@ export default function SkillsManagement() {
         <div className="skill-preview-modal">
           {skillEditorContent ? <XMarkdown content={skillEditorContent} /> : <Empty description="暂无内容" />}
         </div>
+      </Modal>
+
+      <Modal
+        title={resourcePreview
+          ? `${resourcePreview.skill.slug}/${resourcePreview.resource.path}`
+          : 'Skill 资源'}
+        open={Boolean(resourcePreview)}
+        onCancel={() => setResourcePreview(null)}
+        footer={null}
+        width="min(1100px, 92vw)"
+        destroyOnHidden
+      >
+        {resourcePreview && (
+          <div className="skill-resource-preview">
+            {/markdown/i.test(resourcePreview.resource.content_type)
+              || /\.md$/i.test(resourcePreview.resource.name)
+              ? <XMarkdown content={resourcePreview.resource.content || ''} />
+              : <pre>{resourcePreview.resource.content || ''}</pre>}
+          </div>
+        )}
       </Modal>
 
       {/* ===== 详情抽屉 ===== */}

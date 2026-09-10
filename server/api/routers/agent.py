@@ -131,9 +131,26 @@ async def stream(
     conversation_id = (request.conversation_id or "").strip()
     owner = getattr(current_user, "username", "") or ""
     request_options = request.options or {}
+    from api.services.skill_library.selection import (
+        compose_selection_instruction,
+        skill_selection,
+        validate_selected_skill_ids,
+    )
+
+    try:
+        selected_skill_ids = validate_selected_skill_ids(
+            request_options.get("selected_skill_ids")
+            or request_options.get("selected_skills")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     display_query = str(request_options.get("display_query") or request.query)
     references = normalize_references(request_options.get("references"))
     execution_query = compose_reference_query(request.query, references)
+    execution_query = compose_selection_instruction(
+        execution_query,
+        selected_skill_ids,
+    )
 
     # 会话留存：先落库 user query（会话存在且属于当前用户才留存）
     if conversation_id:
@@ -145,6 +162,7 @@ async def stream(
             role="user",
             content=display_query,
             workflow=request.workflow,
+            meta={"selected_skill_ids": selected_skill_ids},
         )
         # 首条消息用 query 作为会话标题
         if not conv.get("message_count") and (not conv.get("title") or conv.get("title") == "新会话"):
@@ -180,12 +198,12 @@ async def stream(
                 project_id=project_id,
                 channel="web",
                 references=references,
-            ) as artifact_run:
+            ) as artifact_run, skill_selection(selected_skill_ids):
                 async for event in execute_stream(
                     workflow=request.workflow,
                     query=execution_query,
                     app_config=app_config,
-                    options=request.options,
+                    options={**request.options, "selected_skill_ids": selected_skill_ids},
                 ):
                     _extract_final_text(event, sections)
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -212,6 +230,7 @@ async def stream(
                             meta={
                                 "artifacts": list(artifact_run.created) if artifact_run else [],
                                 "references": references,
+                                "selected_skill_ids": selected_skill_ids,
                             },
                         )
                     except Exception:

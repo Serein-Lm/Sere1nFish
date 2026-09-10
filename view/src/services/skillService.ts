@@ -20,6 +20,7 @@ export interface Skill {
   file_signals: string[]
   risk_signals: string[]
   priority: number
+  enabled?: boolean
   status: SkillStatus
   version: number
   created_by: string
@@ -60,6 +61,23 @@ export interface SkillTag {
   description: string
 }
 
+export type SkillResourceKind = 'directory' | 'file'
+
+export interface SkillResource {
+  skill_id: string
+  path: string
+  parent_path: string
+  name: string
+  kind: SkillResourceKind
+  role: 'instruction' | 'reference' | 'script' | 'template' | 'resource' | string
+  content_type: string
+  size: number
+  content_hash: string
+  content?: string
+  created_at?: string
+  updated_at?: string
+}
+
 export interface SkillCreateRequest {
   slug: string
   name: string
@@ -78,7 +96,7 @@ export interface SkillCreateRequest {
   meta?: Record<string, unknown>
 }
 
-export interface SkillUpdateRequest extends Partial<SkillCreateRequest> {}
+export type SkillUpdateRequest = Partial<SkillCreateRequest>
 
 export interface SkillListParams {
   category?: string
@@ -118,6 +136,30 @@ export async function getSkillsStats(): Promise<SkillStatsResponse> {
 
 export async function getSkillDetail(idOrSlug: string): Promise<Skill> {
   return apiFetch<Skill>(`/v1/skills/detail/${encodeURIComponent(idOrSlug)}`, { method: 'GET' })
+}
+
+export async function listSkillResources(
+  idOrSlug: string,
+  parentPath = '',
+): Promise<{ items: SkillResource[]; parent_path: string }> {
+  const qs = new URLSearchParams()
+  if (parentPath) qs.set('parent_path', parentPath)
+  const query = qs.toString()
+  return apiFetch<{ items: SkillResource[]; parent_path: string }>(
+    `/v1/skills/detail/${encodeURIComponent(idOrSlug)}/resources${query ? `?${query}` : ''}`,
+    { method: 'GET' },
+  )
+}
+
+export async function getSkillResource(
+  idOrSlug: string,
+  path: string,
+): Promise<SkillResource> {
+  const qs = new URLSearchParams({ path })
+  return apiFetch<SkillResource>(
+    `/v1/skills/detail/${encodeURIComponent(idOrSlug)}/resources/content?${qs.toString()}`,
+    { method: 'GET' },
+  )
 }
 
 export async function createSkill(data: SkillCreateRequest): Promise<Skill> {

@@ -274,6 +274,7 @@ export interface StreamRequest {
     project_id?: string
     references?: Array<Record<string, unknown>>
     display_query?: string
+    selected_skill_ids?: string[]
   }
   context?: {
     conversationId?: string

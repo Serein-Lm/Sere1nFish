@@ -78,6 +78,8 @@ class SkillRegistry:
         self._skills_base_dir: Optional[Path] = None
         self._bodies: dict[str, str] = {}
         self._reference_contents: dict[str, dict[str, str]] = {}
+        self._resource_contents: dict[str, dict[str, str]] = {}
+        self._resource_roles: dict[str, dict[str, str]] = {}
 
     # ── 注册 ──
 
@@ -90,6 +92,8 @@ class SkillRegistry:
         self._index.clear()
         self._bodies.clear()
         self._reference_contents.clear()
+        self._resource_contents.clear()
+        self._resource_roles.clear()
 
     @staticmethod
     def _parse_phases(raw: Any) -> list[SkillPhase]:
@@ -116,6 +120,25 @@ class SkillRegistry:
                 if str(name).strip() and content is not None
             }
         return {}
+
+    @staticmethod
+    def _parse_resources(meta: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+        raw = meta.get("resource_contents") or {}
+        contents: dict[str, str] = {}
+        roles: dict[str, str] = {}
+        if not isinstance(raw, dict):
+            return contents, roles
+        for path, value in raw.items():
+            normalized = str(path or "").strip()
+            if not normalized:
+                continue
+            if isinstance(value, dict):
+                contents[normalized] = str(value.get("content") or "")
+                roles[normalized] = str(value.get("role") or "resource")
+            elif value is not None:
+                contents[normalized] = str(value)
+                roles[normalized] = "resource"
+        return contents, roles
 
     def register_from_document(self, doc: dict[str, Any]) -> Optional[SkillIndex]:
         """从 MongoDB skill 文档注册 Layer 1，并缓存 Layer 2/3。"""
@@ -145,6 +168,9 @@ class SkillRegistry:
         self.register(idx)
         self._bodies[slug] = str(doc.get("content_raw") or "")
         self._reference_contents[slug] = self._parse_references(meta)
+        resources, resource_roles = self._parse_resources(meta)
+        self._resource_contents[slug] = resources
+        self._resource_roles[slug] = resource_roles
         return idx
 
     def load_from_documents(self, docs: list[dict[str, Any]]) -> int:
@@ -265,7 +291,13 @@ class SkillRegistry:
         skill_dir = Path(idx.skill_dir) if idx.skill_dir else None
         body = self._bodies.get(skill_id, "")
         ref_map = self._reference_contents.get(skill_id, {})
+        resource_map = self._resource_contents.get(skill_id, {})
+        resource_roles = self._resource_roles.get(skill_id, {})
         refs: list[str] = sorted(ref_map)
+        refs.extend(
+            path for path in sorted(resource_map)
+            if resource_roles.get(path) == "reference" and path not in refs
+        )
 
         if not body and skill_dir and skill_dir.exists():
             skill_md = skill_dir / "SKILL.md"
@@ -282,6 +314,8 @@ class SkillRegistry:
             body=body,
             references=refs,
             reference_contents=ref_map,
+            resources=sorted(resource_map),
+            resource_contents=resource_map,
         )
 
     def load_skills_for_phase(
@@ -322,7 +356,7 @@ class SkillRegistry:
             summary["by_category"][cat.value] = len(self.list_by_category(cat))
         return summary
 
-    def get_index_prompt(self) -> str:
+    def get_index_prompt(self, skill_ids: set[str] | frozenset[str] | None = None) -> str:
         """
         生成 Layer 1 索引 prompt — 供 LLM 查看所有可用 skills
 
@@ -330,6 +364,10 @@ class SkillRegistry:
         """
         lines = []
         for s in self.list_all():
+            if not s.enabled:
+                continue
+            if skill_ids is not None and s.id not in skill_ids:
+                continue
             phases_str = ",".join(
                 p.value if isinstance(p, SkillPhase) else p for p in s.phases
             )

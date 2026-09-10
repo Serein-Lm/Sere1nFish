@@ -196,6 +196,7 @@ async def plan_company_scan_coverage(
     bidding_max_records: int = 10,
     bidding_lookback_days: int = 30,
     enable_copywriting: bool = True,
+    selected_skill_ids: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """按当前画像指纹规划根 Target 缺失渠道，结果可直接进入统一队列。"""
     channels = normalize_required_channels(required_channels)
@@ -350,6 +351,7 @@ async def plan_company_scan_coverage(
             "subsidiary_scan_limit": safe_subsidiary_limit,
             "skip_completed_subsidiaries": True,
             "enable_copywriting": bool(enable_copywriting),
+            "selected_skill_ids": list(selected_skill_ids or []),
             "incremental_scan": False,
         }
         items.append(

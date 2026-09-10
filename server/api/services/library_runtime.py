@@ -44,6 +44,8 @@ CORE_SKILLS_WITH_REFERENCES = {
     "wechat",
 }
 
+EXTERNAL_DOCUMENT_SKILL_SLUGS = {"docx", "pdf", "pptx", "xlsx"}
+
 CORE_PROMPT_SLUGS = {
     "asset_triage/asset_triage",
     "bid_collect/bid_collect",
@@ -108,7 +110,11 @@ async def seed_libraries_if_required(db: AsyncIOMotorDatabase) -> dict[str, int]
     from api.db.collections import SKILLS_COLLECTION, PROMPTS_COLLECTION
     from scripts.sync_to_db import sync_prompts, sync_skills
 
-    result = {"skills_seeded": 0, "prompts_seeded": 0}
+    result = {
+        "skills_seeded": 0,
+        "external_skills_seeded": 0,
+        "prompts_seeded": 0,
+    }
     skill_filter = {"slug": {"$in": list(CORE_SKILL_SLUGS)}}
     prompt_filter = {"slug": {"$in": list(CORE_PROMPT_SLUGS)}}
     reference_filter = {
@@ -121,6 +127,17 @@ async def seed_libraries_if_required(db: AsyncIOMotorDatabase) -> dict[str, int]
     ):
         await sync_skills(db, overwrite=False)
         result["skills_seeded"] = await db[SKILLS_COLLECTION].count_documents(skill_filter)
+    # External sources are converged on every startup. The operation is
+    # idempotent and also restores missing resource manifests for existing
+    # Skill documents without overwriting edits made in the database.
+    from api.services.skill_library import (
+        sync_embedded_reference_resources,
+        sync_external_skill_sources,
+    )
+
+    external = await sync_external_skill_sources(db, overwrite=False)
+    result["external_skills_seeded"] = int(external.get("created") or 0)
+    await sync_embedded_reference_resources(db)
     if await db[PROMPTS_COLLECTION].count_documents(prompt_filter) < len(CORE_PROMPT_SLUGS):
         await sync_prompts(db, overwrite=False)
         result["prompts_seeded"] = await db[PROMPTS_COLLECTION].count_documents(prompt_filter)
@@ -141,6 +158,17 @@ async def refresh_skill_runtime(db: AsyncIOMotorDatabase) -> int:
         include_content=True,
     )
     docs: list[dict[str, Any]] = result.get("items", [])
+    from api.dao import skill_resources as resources_dao
+
+    runtime_resources = await resources_dao.runtime_resources(
+        db,
+        [str(doc.get("skill_id") or "") for doc in docs if doc.get("skill_id")],
+    )
+    for doc in docs:
+        resources = runtime_resources.get(str(doc.get("skill_id") or ""), {})
+        if resources:
+            meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
+            doc["meta"] = {**meta, "resource_contents": resources}
     return get_skill_registry().load_from_documents(docs)
 
 
@@ -167,7 +195,11 @@ async def refresh_ai_libraries(
     seeded = (
         await seed_libraries_if_required(db)
         if seed_if_empty
-        else {"skills_seeded": 0, "prompts_seeded": 0}
+        else {
+            "skills_seeded": 0,
+            "external_skills_seeded": 0,
+            "prompts_seeded": 0,
+        }
     )
     skills = await refresh_skill_runtime(db)
     prompts = await refresh_prompt_runtime(db)

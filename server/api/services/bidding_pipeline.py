@@ -545,6 +545,7 @@ class BiddingPipeline:
         min_attention_score: int = 40,
         scan_concurrency: int = DEFAULT_URL_SCAN_CONCURRENCY,
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
+        selected_skill_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         from core.observability import obs_log
         from api.services.tianyancha_runtime import get_tianyancha_runtime_policy
@@ -730,6 +731,7 @@ class BiddingPipeline:
                 enable_copywriting=enable_copywriting,
                 copywriting_score_threshold=70,
                 max_copywritings_per_url=1,
+                selected_skill_ids=selected_skill_ids,
             )
             scan_result.update(
                 status=url_result.get("status"),
