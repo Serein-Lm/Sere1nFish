@@ -8,12 +8,12 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form, Query
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field
 
 from api.auth import User, get_current_active_user
@@ -22,9 +22,17 @@ from api.dao import projects as projects_dao
 from api.dao import findings as findings_dao
 from api.dao import tasks as tasks_dao
 from api.dao.project_scope import project_scope_query
-from api.services.project_task_runtime import (
-    execute_project_task,
-    register_task_dispatchers,
+from api.db.collections import TASKS_COLLECTION
+from api.services.project_tasks import register_default_project_task_dispatchers
+from api.services.project_tasks.service import (
+    ProjectNotFoundError,
+    UnsupportedProjectTaskError,
+    list_project_task_types,
+    submit_project_task,
+)
+from api.services.project_tasks.validation import (
+    normalize_company_scan_params,
+    normalize_selected_skill_params,
 )
 from api.schemas.pagination import (
     PageResponse,
@@ -33,7 +41,6 @@ from api.schemas.pagination import (
     ProjectNotesListRequest,
     ProjectProfilesListRequest,
 )
-from core.background import spawn_background
 from core.logger import get_logger
 
 logger = get_logger("project_api")
@@ -41,8 +48,7 @@ logger = get_logger("project_api")
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 init_mongo()
-
-TASKS_COLLECTION = "tasks"
+register_default_project_task_dispatchers()
 
 
 def _project_note_out(doc: dict[str, Any]) -> dict[str, Any]:
@@ -59,403 +65,6 @@ def _project_note_out(doc: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-async def _normalize_xhs_target_params(
-    db: Any,
-    *,
-    project_id: str,
-    params: dict[str, Any],
-) -> None:
-    """Canonicalize the optional project Target used by an XHS search task."""
-    target_id = str(params.get("target_id") or "").strip()
-    if not target_id:
-        params.pop("target_name", None)
-        return
-    from api.services.targets import require_project_target
-
-    target_ref = await require_project_target(
-        db,
-        project_id=project_id,
-        target_id=target_id,
-    )
-    params.update(target_ref)
-
-
-def _normalize_selected_skill_params(params: dict[str, Any]) -> None:
-    """Normalize an optional request-scoped Skill selection to approved slugs."""
-    from api.services.skill_library.selection import validate_selected_skill_ids
-
-    raw_selection = params.get("selected_skill_ids")
-    if raw_selection is None:
-        raw_selection = params.get("selected_skills")
-    if raw_selection is not None:
-        params["selected_skill_ids"] = validate_selected_skill_ids(raw_selection)
-    params.pop("selected_skills", None)
-
-
-def _validate_company_scan_params(params: dict[str, Any]) -> None:
-    """Validate optional company-scan modules before creating task records."""
-    from api.dao.targets import normalize_batch_tags
-
-    _normalize_selected_skill_params(params)
-
-    if "target_batch_tags" in params:
-        params["target_batch_tags"] = normalize_batch_tags(
-            params.get("target_batch_tags")
-        )
-
-    website_collection_mode = str(
-        params.get("website_collection_mode") or "deep"
-    ).strip().casefold()
-    if website_collection_mode not in {"standard", "deep"}:
-        raise ValueError("官网归档模式必须为 standard 或 deep")
-    params["website_collection_mode"] = website_collection_mode
-
-    if "bidding_lookback_days" in params:
-        try:
-            bidding_lookback_days = int(params.get("bidding_lookback_days") or 30)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("招投标回溯天数必须为 1 到 30") from exc
-        if not 1 <= bidding_lookback_days <= 30:
-            raise ValueError("招投标回溯天数必须为 1 到 30")
-        params["bidding_lookback_days"] = bidding_lookback_days
-
-    if "website_required_path_segments" in params:
-        from api.services.website_documents import (
-            normalize_required_path_segments,
-        )
-
-        params["website_required_path_segments"] = (
-            normalize_required_path_segments(
-                params.get("website_required_path_segments")
-            )
-        )
-
-    if "website_root_domains" in params:
-        from api.services.website_documents import (
-            normalize_website_root_domains,
-        )
-
-        params["website_root_domains"] = normalize_website_root_domains(
-            params.get("website_root_domains")
-        )
-
-    if params.get("enable_control_structure", False) or any(
-        key in params
-        for key in (
-            "control_max_depth",
-            "subsidiary_scan_limit",
-            "skip_completed_subsidiaries",
-        )
-    ):
-        try:
-            control_max_depth = int(params.get("control_max_depth") or 1)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("全资单位层级必须为 1 或 2") from exc
-        if control_max_depth not in {1, 2}:
-            raise ValueError("全资单位层级必须为 1 或 2")
-        params["control_max_depth"] = control_max_depth
-        try:
-            subsidiary_scan_limit = int(
-                params.get("subsidiary_scan_limit") or 12
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("关联单位补扫数量必须为 1 到 100") from exc
-        if not 1 <= subsidiary_scan_limit <= 100:
-            raise ValueError("关联单位补扫数量必须为 1 到 100")
-        params["subsidiary_scan_limit"] = subsidiary_scan_limit
-        params["skip_completed_subsidiaries"] = bool(
-            params.get("skip_completed_subsidiaries", True)
-        )
-
-    if params.get("enable_wechat", False):
-        from api.services.wechat_collection import normalize_wechat_app_instance
-        from api.services.wechat_target_selection import (
-            normalize_wechat_selection_mode,
-        )
-
-        params["wechat_app_instance"] = normalize_wechat_app_instance(
-            params.get("wechat_app_instance", "primary")
-        )
-        params["wechat_target_selection_mode"] = (
-            normalize_wechat_selection_mode(
-                params.get("wechat_target_selection_mode", "auto")
-            )
-        )
-
-    if params.get("enable_scholar", True):
-        direction = str(params.get("scholar_direction") or "").strip()
-        if direction:
-            params["scholar_direction"] = direction
-        else:
-            params.pop("scholar_direction", None)
-        unit_en = str(params.get("scholar_unit_en") or "").strip()
-        if unit_en:
-            params["scholar_unit_en"] = unit_en
-        else:
-            params.pop("scholar_unit_en", None)
-
-
-# ═══════════════════════════════════════════
-# Pipeline 分发器（原 tasks.py，已合并到此）
-# ═══════════════════════════════════════════
-
-async def _dispatch_url_scan(task_id: str, project_id: str, params: dict):
-    from api.services.info_collection.tuning import get_collection_runtime_tuning
-    from api.services.url_scan_pipeline import UrlScanPipeline
-    from api.services.runtime_config import get_runtime_app_config
-
-    url_content = params.get("url_text", "")
-    urls = params.get("urls", [])
-    if urls:
-        url_content = "\n".join(urls)
-    db = get_db()
-    runtime_config = await get_runtime_app_config()
-    tuning = (await get_collection_runtime_tuning()).with_overrides(
-        url_probe_concurrency=params.get("url_probe_concurrency"),
-        url_scan_concurrency=params.get("url_scan_concurrency"),
-        copywriting_concurrency=params.get("copywriting_concurrency"),
-    )
-    pipeline = UrlScanPipeline(db, runtime_config)
-    result = await pipeline.run_pipeline(
-        task_id=task_id, project_id=project_id, url_content=url_content,
-        min_attention_score=params.get("min_attention_score", 40),
-        probe_concurrency=tuning.url_probe_concurrency,
-        scan_concurrency=tuning.url_scan_concurrency,
-        copywriting_concurrency=tuning.copywriting_concurrency,
-        enable_copywriting=params.get("enable_copywriting", True),
-        selected_skill_ids=params.get("selected_skill_ids", []),
-    )
-    if result.get("status") == "error":
-        raise RuntimeError(str(result.get("error") or "URL 扫描失败"))
-
-async def _dispatch_xhs_search(task_id: str, project_id: str, params: dict):
-    from api.services.xhs_pipeline import run_xhs_pipeline
-    from api.services.runtime_config import get_runtime_app_config
-
-    db = get_db()
-    await _normalize_xhs_target_params(db, project_id=project_id, params=params)
-    runtime_config = await get_runtime_app_config()
-    await run_xhs_pipeline(
-        db=db, app_config=runtime_config, task_id=task_id, project_id=project_id,
-        keyword=params.get("keyword", ""), max_notes=params.get("max_notes", 20),
-        attention_threshold=params.get("attention_threshold", 60),
-        target_id=str(params.get("target_id") or ""),
-        target_name=str(params.get("target_name") or ""),
-    )
-
-async def _dispatch_douyin_search(task_id: str, project_id: str, params: dict):
-    from api.services.douyin_pipeline import run_douyin_pipeline
-    from api.services.runtime_config import get_runtime_app_config
-
-    db = get_db()
-    runtime_config = await get_runtime_app_config()
-    await run_douyin_pipeline(
-        db=db, app_config=runtime_config, project_id=project_id,
-        keyword=params.get("keyword", ""), max_videos=params.get("max_videos", 20),
-        publish_time=params.get("publish_time", 0), task_id=task_id,
-    )
-
-async def _dispatch_web_tagging(task_id: str, project_id: str, params: dict):
-    from api.services.web_tagging_pipeline import run_web_tagging_pipeline
-    from api.services.runtime_config import get_runtime_app_config
-
-    db = get_db()
-    runtime_config = await get_runtime_app_config()
-    await run_web_tagging_pipeline(
-        db=db, app_config=runtime_config, project_id=project_id,
-        company_name=params.get("company_name", ""), max_urls=params.get("max_urls", 50),
-        max_tagging_urls=params.get("max_tagging_urls", 10), task_id=task_id,
-    )
-
-async def _dispatch_company_scan(task_id: str, project_id: str, params: dict):
-    from api.services.company_scan_pipeline import CompanyScanPipeline
-    from api.services.info_collection.tuning import get_collection_runtime_tuning
-    from api.services.runtime_config import get_runtime_app_config
-
-    db = get_db()
-    runtime_config = await get_runtime_app_config()
-    tuning = (await get_collection_runtime_tuning()).with_overrides(
-        asset_probe_concurrency=params.get("asset_probe_concurrency"),
-        url_probe_concurrency=params.get("url_probe_concurrency"),
-        url_scan_concurrency=params.get("url_scan_concurrency"),
-        copywriting_concurrency=params.get("copywriting_concurrency"),
-        xhs_search_concurrency=params.get("xhs_search_concurrency"),
-    )
-    pipeline = CompanyScanPipeline(
-        db,
-        runtime_config,
-        selected_skill_ids=params.get("selected_skill_ids", []),
-    )
-    result = await pipeline.run_pipeline(
-        task_id=task_id, project_id=project_id,
-        company_name=params.get("company_name", ""),
-        target_id=str(params.get("target_id") or ""),
-        refresh_target_identity=bool(params.get("refresh_target_identity", False)),
-        batch_id=str(params.get("_batch_id") or ""),
-        target_batch_tags=params.get("target_batch_tags", []),
-        url_text=params.get("url_text", ""), urls=params.get("urls", []),
-        enable_url_scan=params.get("enable_url_scan", True),
-        enable_asset_discovery=params.get("enable_asset_discovery", True),
-        enable_xhs=params.get("enable_xhs", False),
-        enable_subsidiary_xhs=params.get("enable_subsidiary_xhs", False),
-        enable_subsidiary_bidding=params.get("enable_subsidiary_bidding", False),
-        xhs_target_selection_mode=params.get("xhs_target_selection_mode", "auto"),
-        xhs_manual_targets=params.get("xhs_manual_targets", []),
-        enable_bidding=params.get("enable_bidding", False),
-        enable_bidding_visual_analysis=params.get(
-            "enable_bidding_visual_analysis"
-        ),
-        bidding_page_size=max(1, min(int(params.get("bidding_page_size") or 20), 20)),
-        bidding_max_records=max(
-            1,
-            min(int(params.get("bidding_max_records") or 20), 20),
-        ),
-        bidding_lookback_days=max(
-            1,
-            min(int(params.get("bidding_lookback_days") or 30), 30),
-        ),
-        enable_wechat=params.get("enable_wechat", False),
-        wechat_device_id=params.get("wechat_device_id", ""),
-        wechat_app_instance=params.get("wechat_app_instance", "primary"),
-        wechat_target_selection_mode=params.get(
-            "wechat_target_selection_mode", "auto"
-        ),
-        enable_scholar=params.get("enable_scholar", True),
-        scholar_direction=params.get("scholar_direction", ""),
-        scholar_unit_en=params.get("scholar_unit_en", ""),
-        scholar_limit=max(1, min(int(params.get("scholar_limit") or 10), 50)),
-        enable_copywriting=params.get("enable_copywriting", True),
-        xhs_max_notes=params.get("xhs_max_notes") or params.get("max_notes", 20),
-        xhs_attention_threshold=params.get("xhs_attention_threshold") or params.get("attention_threshold", 60),
-        min_attention_score=params.get("min_attention_score", 40),
-        profile_copywriting_threshold=params.get("profile_copywriting_threshold", 60),
-        fofa_size=params.get("fofa_size", 200),
-        hunter_size=params.get("hunter_size", 200),
-        asset_probe_concurrency=tuning.asset_probe_concurrency,
-        incremental_scan=params.get("incremental_scan", False),
-        url_probe_concurrency=tuning.url_probe_concurrency,
-        url_scan_concurrency=tuning.url_scan_concurrency,
-        copywriting_concurrency=tuning.copywriting_concurrency,
-        xhs_search_concurrency=tuning.xhs_search_concurrency,
-        enable_control_structure=params.get("enable_control_structure", False),
-        control_max_depth=max(1, min(int(params.get("control_max_depth") or 1), 2)),
-        control_max_entities=max(1, min(int(params.get("control_max_entities") or 100), 500)),
-        control_lookup_concurrency=max(1, min(int(params.get("control_lookup_concurrency") or 4), 12)),
-        control_icp_concurrency=max(1, min(int(params.get("control_icp_concurrency") or 6), 20)),
-        control_scan_concurrency=max(1, min(int(params.get("control_scan_concurrency") or 1), 12)),
-        subsidiary_scan_limit=max(
-            1, min(int(params.get("subsidiary_scan_limit") or 12), 100)
-        ),
-        skip_completed_subsidiaries=params.get(
-            "skip_completed_subsidiaries", True
-        ),
-        company_core_concurrency=tuning.company_scan_concurrency,
-        website_collection_mode=params.get("website_collection_mode", "deep"),
-        website_root_domains=params.get("website_root_domains", []),
-        website_required_path_segments=params.get(
-            "website_required_path_segments", []
-        ),
-        requested_by=str(params.get("_requested_by") or ""),
-    )
-    if result.get("status") == "error":
-        raise RuntimeError(str(result.get("error") or "综合公司扫描失败"))
-    return result
-
-async def _dispatch_fofa_collect(task_id: str, project_id: str, params: dict):
-    from api.services.fofa_collect import run_fofa_collect
-    from api.services.info_collection.tuning import get_collection_runtime_tuning
-    from api.services.runtime_config import get_runtime_app_config
-
-    db = get_db()
-    runtime_config = await get_runtime_app_config()
-    tuning = (await get_collection_runtime_tuning()).with_overrides(
-        asset_probe_concurrency=params.get("probe_concurrency"),
-        url_probe_concurrency=params.get("url_probe_concurrency"),
-        url_scan_concurrency=params.get("url_scan_concurrency"),
-        copywriting_concurrency=params.get("copywriting_concurrency"),
-    )
-    await run_fofa_collect(
-        db=db, app_config=runtime_config, task_id=task_id, project_id=project_id,
-        company_name=params.get("company_name", ""),
-        fofa_size=params.get("fofa_size", 200),
-        hunter_size=params.get("hunter_size", 200),
-        enable_scan=params.get("enable_scan", True),
-        min_attention_score=params.get("min_attention_score", 40),
-        probe_concurrency=tuning.asset_probe_concurrency,
-        incremental_scan=params.get("incremental_scan", False),
-        url_probe_concurrency=tuning.url_probe_concurrency,
-        url_scan_concurrency=tuning.url_scan_concurrency,
-        copywriting_concurrency=tuning.copywriting_concurrency,
-        selected_skill_ids=params.get("selected_skill_ids", []),
-    )
-
-async def _dispatch_scholar_contact(task_id: str, project_id: str, params: dict):
-    from api.services.scholar_contact_pipeline import run_scholar_contact_collect
-    from api.services.runtime_config import get_runtime_app_config
-
-    db = get_db()
-    runtime_config = await get_runtime_app_config()
-    return await run_scholar_contact_collect(
-        db, runtime_config, task_id=task_id, project_id=project_id,
-        target_id=params.get("target_id", ""),
-        unit=params.get("unit", ""), direction=params.get("direction", ""),
-        unit_en=params.get("unit_en", ""), limit=params.get("limit", 10),
-        enable_chrome_pmc=params.get("enable_chrome_pmc", False),
-        dry_run=params.get("dry_run", False),
-        bulk=params.get("bulk", False),
-        max_articles=params.get("max_articles", 2000),
-    )
-
-async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict):
-    from api.services.mobile_collect_pipeline import _dispatch_mobile_collect as _run
-
-    return await _run(task_id, project_id, params)
-
-
-async def _dispatch_target_research(task_id: str, project_id: str, params: dict):
-    from api.services.runtime_config import get_runtime_app_config
-    from api.services.target_research import run_target_research
-
-    return await run_target_research(
-        get_db(),
-        await get_runtime_app_config(),
-        task_id=task_id,
-        project_id=project_id,
-        target_id=str(params.get("target_id") or ""),
-        max_related_targets=int(params.get("max_related_targets") or 8),
-        scan_discovered_targets=bool(params.get("scan_discovered_targets", True)),
-        rescan_root=bool(params.get("rescan_root", False)),
-        force_refresh=bool(params.get("force_refresh", True)),
-        scan_params=dict(params.get("scan_params") or {}),
-        requested_by=str(params.get("_requested_by") or ""),
-    )
-
-
-async def _dispatch_social_media_collect(
-    task_id: str,
-    project_id: str,
-    params: dict,
-):
-    from api.services.social_collection import execute_social_collection_job
-
-    return await execute_social_collection_job(task_id, project_id, params)
-
-TASK_DISPATCHERS: dict[str, Any] = {
-    "url_scan": _dispatch_url_scan,
-    "xhs_search": _dispatch_xhs_search,
-    "douyin_search": _dispatch_douyin_search,
-    "web_tagging": _dispatch_web_tagging,
-    "company_scan": _dispatch_company_scan,
-    "fofa_collect": _dispatch_fofa_collect,
-    "scholar_contact": _dispatch_scholar_contact,
-    "mobile_collect": _dispatch_mobile_collect,
-    "target_research": _dispatch_target_research,
-    "social_media_collect": _dispatch_social_media_collect,
-}
-register_task_dispatchers(TASK_DISPATCHERS)
-
-
-# ═══════════════════════════════════════════
 # 项目下的任务
 # ═══════════════════════════════════════════
 
@@ -557,77 +166,27 @@ async def list_project_bidding_records(
 async def create_task(
     project_id: str,
     req: TaskCreateRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_active_user),
 ):
-    """下发任务（嵌套在项目下）"""
-    dispatcher = TASK_DISPATCHERS.get(req.task_type)
-    if not dispatcher:
-        raise HTTPException(400, f"不支持的 task_type: {req.task_type}")
-
-    db = get_db()
-    # 验证项目存在
-    project = await projects_dao.get_project(db, project_id)
-    if not project:
-        raise HTTPException(404, "项目不存在")
-
+    """下发任务（嵌套在项目下）。"""
     try:
-        _normalize_selected_skill_params(req.params)
-    except ValueError as exc:
+        return await submit_project_task(
+            get_db(),
+            project_id=project_id,
+            task_type=req.task_type,
+            params=req.params,
+            requested_by=current_user.username,
+        )
+    except ProjectNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (UnsupportedProjectTaskError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    if req.task_type == "xhs_search":
-        try:
-            await _normalize_xhs_target_params(
-                db,
-                project_id=project_id,
-                params=req.params,
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
 
-    if req.task_type == "company_scan":
-        try:
-            _validate_company_scan_params(req.params)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    if req.task_type == "company_scan" and req.params.get("enable_wechat", False):
-        from api.services.wechat_collection import ensure_wechat_task_definition
-
-        try:
-            await ensure_wechat_task_definition(
-                db,
-                project_id=project_id,
-                device_id=str(req.params.get("wechat_device_id") or ""),
-                app_instance=str(
-                    req.params.get("wechat_app_instance") or "primary"
-                ),
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    task_id = uuid.uuid4().hex[:12]
-    runtime_params = {**req.params, "_requested_by": current_user.username}
-    task_doc = {
-        "task_id": task_id,
-        "project_id": project_id,
-        "task_type": req.task_type,
-        "params": req.params,
-        "requested_by": current_user.username,
-        "status": "pending",
-        "progress": {},
-        "created_at": datetime.now(),
-        "updated_at": datetime.now(),
-    }
-    await db[TASKS_COLLECTION].insert_one(task_doc)
-
-    spawn_background(
-        execute_project_task(task_id, project_id, req.task_type, runtime_params),
-        name=f"task:{task_id}",
-    )
-
-    return {"task_id": task_id, "task_type": req.task_type, "status": "pending"}
+@router.get("/project-task-types")
+async def get_project_task_types():
+    """返回统一注册的任务能力，供前端和外部 Agent 查询。"""
+    return {"items": list_project_task_types()}
 
 
 @router.post("/projects/{project_id}/tasks/company-scan-batch")
@@ -660,7 +219,7 @@ async def create_company_scan_batch(
     shared_params = dict(req.params)
     shared_params.pop("company_name", None)
     try:
-        _validate_company_scan_params(shared_params)
+        normalize_company_scan_params(shared_params)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     requested_concurrency = shared_params.pop("company_scan_concurrency", None)
@@ -728,7 +287,7 @@ async def create_company_scan_coverage_batch(
         raise HTTPException(404, "项目不存在")
     skill_params = {"selected_skill_ids": req.selected_skill_ids}
     try:
-        _normalize_selected_skill_params(skill_params)
+        normalize_selected_skill_params(skill_params)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
@@ -773,7 +332,7 @@ async def create_company_scan_coverage_batch(
     for item in plan["items"]:
         params = dict(item.get("params") or {})
         try:
-            _validate_company_scan_params(params)
+            normalize_company_scan_params(params)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         specs.append(
@@ -802,79 +361,33 @@ async def create_company_scan_coverage_batch(
 @router.post("/projects/{project_id}/tasks/upload")
 async def create_task_with_file(
     project_id: str,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     task_type: str = Form(...),
     params_json: str = Form(default="{}"),
     current_user: User = Depends(get_current_active_user),
 ):
-    """带文件上传的任务下发"""
-    import json
-
-    dispatcher = TASK_DISPATCHERS.get(task_type)
-    if not dispatcher:
-        raise HTTPException(400, f"不支持的 task_type: {task_type}")
-
-    db = get_db()
-    project = await projects_dao.get_project(db, project_id)
-    if not project:
-        raise HTTPException(404, "项目不存在")
-
+    """带文件上传的任务下发。"""
     content = await file.read()
     file_text = content.decode("utf-8", errors="ignore")
-
     try:
         params = json.loads(params_json) if params_json.strip() else {}
-    except json.JSONDecodeError:
-        params = {}
-
+        if not isinstance(params, dict):
+            raise ValueError("params_json 必须是 JSON 对象")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(400, f"params_json 格式无效: {exc}") from exc
     try:
-        _normalize_selected_skill_params(params)
-    except ValueError as exc:
+        return await submit_project_task(
+            get_db(),
+            project_id=project_id,
+            task_type=task_type,
+            params=params,
+            requested_by=current_user.username,
+            file_text=file_text,
+        )
+    except ProjectNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (UnsupportedProjectTaskError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
-
-    if task_type == "xhs_search":
-        try:
-            await _normalize_xhs_target_params(
-                db,
-                project_id=project_id,
-                params=params,
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    if task_type == "company_scan":
-        try:
-            _validate_company_scan_params(params)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    FILE_FIELD_MAP = {"url_scan": "url_text", "company_scan": "url_text"}
-    field_name = FILE_FIELD_MAP.get(task_type)
-    if field_name:
-        params[field_name] = file_text
-
-    task_id = uuid.uuid4().hex[:12]
-    runtime_params = {**params, "_requested_by": current_user.username}
-    task_doc = {
-        "task_id": task_id,
-        "project_id": project_id,
-        "task_type": task_type,
-        "params": params,
-        "requested_by": current_user.username,
-        "status": "pending",
-        "progress": {},
-        "created_at": datetime.now(),
-        "updated_at": datetime.now(),
-    }
-    await db[TASKS_COLLECTION].insert_one(task_doc)
-
-    spawn_background(
-        execute_project_task(task_id, project_id, task_type, runtime_params),
-        name=f"task:{task_id}",
-    )
-
-    return {"task_id": task_id, "task_type": task_type, "status": "pending"}
 
 
 @router.post("/projects/{project_id}/tasks/list")

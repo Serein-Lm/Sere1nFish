@@ -111,6 +111,48 @@ const TASK_TUNING_FORM_DEFAULTS = {
   company_scan_concurrency: TASK_TUNING_DEFAULTS.company_scan_concurrency,
 }
 
+const TASK_FORM_INITIAL_VALUES = {
+  task_type: 'company_scan',
+  asset_scan_mode: 'full',
+  website_collection_mode: 'deep',
+  website_root_domains: [],
+  website_required_path_segments: [],
+  refresh_target_identity: false,
+  enable_asset_discovery: true,
+  enable_url_scan: true,
+  enable_xhs: false,
+  enable_subsidiary_xhs: false,
+  xhs_target_selection_mode: 'auto',
+  xhs_attention_threshold: 60,
+  enable_bidding: false,
+  enable_subsidiary_bidding: false,
+  enable_bidding_visual_analysis: true,
+  bidding_page_size: 20,
+  bidding_max_records: 20,
+  bidding_lookback_days: 30,
+  enable_wechat: false,
+  wechat_app_instance: 'primary',
+  wechat_target_selection_mode: 'auto',
+  enable_scholar: true,
+  scholar_limit: 10,
+  enable_copywriting: true,
+  profile_copywriting_threshold: 60,
+  enable_control_structure: false,
+  control_max_depth: 1,
+  subsidiary_scan_limit: 12,
+  skip_completed_subsidiaries: true,
+  enable_scan: true,
+  xhs_max_notes: 20,
+  min_attention_score: 40,
+  fofa_size: 200,
+  hunter_size: 200,
+  control_max_entities: 100,
+  control_lookup_concurrency: 4,
+  control_icp_concurrency: 6,
+  control_scan_concurrency: 1,
+  ...TASK_TUNING_FORM_DEFAULTS,
+}
+
 const TASK_SOURCE_LABELS: Record<string, string> = {
   web_tagging_url_scan: '网站深扫',
   bidding_url_scan: '招投标页面',
@@ -4873,7 +4915,18 @@ export default function ProjectDetail() {
                   高分 {target.high_score_finding_count || 0}
                 </Tag>
                 {populatedModules.map((module) => (
-                  <Tag key={module.tab}>{module.label} {target[module.countKey] || 0}</Tag>
+                  <Button
+                    key={module.tab}
+                    type="link"
+                    size="small"
+                    className="target-compact-module-link"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      openTargetModule(target.target_id, module.tab)
+                    }}
+                  >
+                    {module.label} {target[module.countKey] || 0}
+                  </Button>
                 ))}
                 <Text type="secondary">资产 {target.alive_asset_count || 0}/{target.asset_count || 0}</Text>
                 {taskStatus ? <Tag color={taskStatus.color}>{taskStatus.text}</Tag> : null}
@@ -5855,6 +5908,13 @@ export default function ProjectDetail() {
                     }
                     params.enable_url_scan = values.enable_url_scan ?? true
                     params.website_collection_mode = values.website_collection_mode ?? 'deep'
+                    params.refresh_target_identity = values.refresh_target_identity ?? false
+                    if (Array.isArray(values.website_root_domains) && values.website_root_domains.length) {
+                      params.website_root_domains = values.website_root_domains
+                    }
+                    if (Array.isArray(values.website_required_path_segments) && values.website_required_path_segments.length) {
+                      params.website_required_path_segments = values.website_required_path_segments
+                    }
                     params.enable_asset_discovery = values.enable_asset_discovery ?? true
                     params.enable_xhs = values.enable_xhs ?? false
                     params.enable_subsidiary_xhs = Boolean(values.enable_xhs && values.enable_subsidiary_xhs)
@@ -5866,6 +5926,10 @@ export default function ProjectDetail() {
                         .filter(Boolean)
                     }
                     params.enable_bidding = values.enable_bidding ?? false
+                    params.enable_subsidiary_bidding = Boolean(
+                      values.enable_bidding && values.enable_subsidiary_bidding,
+                    )
+                    params.enable_bidding_visual_analysis = values.enable_bidding_visual_analysis ?? true
                     if (values.bidding_page_size) params.bidding_page_size = values.bidding_page_size
                     if (values.bidding_max_records) params.bidding_max_records = values.bidding_max_records
                     if (values.bidding_lookback_days) params.bidding_lookback_days = values.bidding_lookback_days
@@ -5883,12 +5947,18 @@ export default function ProjectDetail() {
                       if (values.scholar_limit) params.scholar_limit = values.scholar_limit
                     }
                     params.enable_copywriting = values.enable_copywriting ?? true
+                    if (values.profile_copywriting_threshold != null) {
+                      params.profile_copywriting_threshold = values.profile_copywriting_threshold
+                    }
                     params.enable_control_structure = values.enable_control_structure ?? false
                     params.control_max_depth = values.control_max_depth ?? 1
                     params.subsidiary_scan_limit = values.subsidiary_scan_limit ?? 12
                     params.skip_completed_subsidiaries = values.skip_completed_subsidiaries ?? true
                     params.incremental_scan = values.asset_scan_mode === 'incremental'
                     if (values.xhs_max_notes) params.xhs_max_notes = values.xhs_max_notes
+                    if (values.xhs_attention_threshold != null) {
+                      params.xhs_attention_threshold = values.xhs_attention_threshold
+                    }
                     if (values.min_attention_score != null) params.min_attention_score = values.min_attention_score
                     if (values.fofa_size) params.fofa_size = values.fofa_size
                     if (values.hunter_size) params.hunter_size = values.hunter_size
@@ -5985,7 +6055,7 @@ export default function ProjectDetail() {
               width={640}
               className="project-modal"
             >
-              <Form form={taskForm} layout="vertical" initialValues={{ task_type: 'company_scan', asset_scan_mode: 'full', website_collection_mode: 'deep', enable_asset_discovery: true, enable_url_scan: true, enable_xhs: false, enable_subsidiary_xhs: false, xhs_target_selection_mode: 'auto', enable_bidding: false, bidding_page_size: 20, bidding_max_records: 20, bidding_lookback_days: 30, enable_wechat: false, wechat_app_instance: 'primary', wechat_target_selection_mode: 'auto', enable_scholar: true, scholar_limit: 10, enable_copywriting: true, enable_control_structure: false, control_max_depth: 1, subsidiary_scan_limit: 12, skip_completed_subsidiaries: true, enable_scan: true, xhs_max_notes: 20, min_attention_score: 40, fofa_size: 200, hunter_size: 200, control_max_entities: 100, control_lookup_concurrency: 4, control_icp_concurrency: 6, control_scan_concurrency: 1, ...TASK_TUNING_FORM_DEFAULTS }}>
+              <Form form={taskForm} layout="vertical" initialValues={TASK_FORM_INITIAL_VALUES}>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -6081,6 +6151,22 @@ export default function ProjectDetail() {
                             </Form.Item>
                             <Form.Item name="enable_bidding" valuePropName="checked" noStyle>
                               <Checkbox>招投标采集（近30天预告、公告和中标结果，默认关闭）</Checkbox>
+                            </Form.Item>
+                            <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_bidding !== cur.enable_bidding}>
+                              {({ getFieldValue }) => (
+                                <Space orientation="vertical" size={4} style={{ paddingLeft: 24 }}>
+                                  <Form.Item name="enable_bidding_visual_analysis" valuePropName="checked" noStyle>
+                                    <Checkbox disabled={!getFieldValue('enable_bidding')}>
+                                      归档详情页和附件并进入统一视觉分析
+                                    </Checkbox>
+                                  </Form.Item>
+                                  <Form.Item name="enable_subsidiary_bidding" valuePropName="checked" noStyle>
+                                    <Checkbox disabled={!getFieldValue('enable_bidding')}>
+                                      同时采集已选子、孙单位招投标
+                                    </Checkbox>
+                                  </Form.Item>
+                                </Space>
+                              )}
                             </Form.Item>
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (
@@ -6238,6 +6324,55 @@ export default function ProjectDetail() {
                             { label: '标准归档', value: 'standard' },
                           ]} />
                         </Form.Item>
+                        <Collapse
+                          ghost
+                          size="small"
+                          items={[{
+                            key: 'advanced-scan-options',
+                            label: '高级扫描选项',
+                            children: (
+                              <>
+                                <Form.Item name="refresh_target_identity" valuePropName="checked">
+                                  <Checkbox>忽略既有公司身份缓存并重新规范化 Target</Checkbox>
+                                </Form.Item>
+                                <Form.Item
+                                  name="website_root_domains"
+                                  label="指定官网根域"
+                                  extra="只覆盖本次任务的官网范围；输入域名后回车。"
+                                >
+                                  <Select
+                                    mode="tags"
+                                    tokenSeparators={[',', '，', '\n']}
+                                    placeholder="如 cma.gov.cn"
+                                  />
+                                </Form.Item>
+                                <Form.Item
+                                  name="website_required_path_segments"
+                                  label="必须深入的路径"
+                                  extra="用于客服、公告、采购等入口；输入路径片段后回车。"
+                                >
+                                  <Select
+                                    mode="tags"
+                                    tokenSeparators={[',', '，', '\n']}
+                                    placeholder="如 /service/ 或 /notice/"
+                                  />
+                                </Form.Item>
+                                <Row gutter={16}>
+                                  <Col xs={24} sm={12}>
+                                    <Form.Item name="xhs_attention_threshold" label="小红书关注度阈值">
+                                      <InputNumber min={0} max={100} style={{ width: '100%' }} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24} sm={12}>
+                                    <Form.Item name="profile_copywriting_threshold" label="画像话术阈值">
+                                      <InputNumber min={0} max={100} style={{ width: '100%' }} />
+                                    </Form.Item>
+                                  </Col>
+                                </Row>
+                              </>
+                            ),
+                          }]}
+                        />
                         <Row gutter={16}>
                           <Col xs={24} sm={6}>
                             <Form.Item name="control_max_entities" label="关联单位总上限" tooltip="子单位和孙单位共用此上限，优先保留层级更近的单位">

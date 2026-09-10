@@ -56,6 +56,17 @@ async def insert_tasks(
     return len(result.inserted_ids)
 
 
+async def insert_task(
+    db: AsyncIOMotorDatabase,
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist one task document without leaking MongoDB IDs to callers."""
+    stored = dict(document)
+    await db[TASKS_COLLECTION].insert_one(stored)
+    stored.pop("_id", None)
+    return stored
+
+
 async def get_task(
     db: AsyncIOMotorDatabase,
     *,

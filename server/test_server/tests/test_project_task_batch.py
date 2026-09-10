@@ -310,26 +310,26 @@ async def test_task_list_uses_lightweight_projection() -> None:
 
 
 def test_company_scan_allows_automatic_scholar_direction() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     params = {"enable_scholar": True}
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
     assert "scholar_direction" not in params
 
     params = {"enable_scholar": True, "scholar_direction": "  金融科技  "}
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
     assert params["scholar_direction"] == "金融科技"
 
 
 def test_company_scan_validates_wechat_target_selection_mode() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     params = {"enable_wechat": True}
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
     assert params["wechat_target_selection_mode"] == "auto"
 
     with pytest.raises(ValueError, match="auto 或 all"):
-        _validate_company_scan_params(
+        normalize_company_scan_params(
             {
                 "enable_wechat": True,
                 "wechat_target_selection_mode": "manual",
@@ -338,56 +338,56 @@ def test_company_scan_validates_wechat_target_selection_mode() -> None:
 
 
 def test_company_scan_validates_control_relation_depth() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     params = {"enable_control_structure": True, "control_max_depth": "2"}
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
     assert params["control_max_depth"] == 2
 
     with pytest.raises(ValueError, match="必须为 1 或 2"):
-        _validate_company_scan_params(
+        normalize_company_scan_params(
             {"enable_control_structure": True, "control_max_depth": 3}
         )
 
 
 def test_company_scan_validates_website_collection_mode() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     params: dict = {}
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
     assert params["website_collection_mode"] == "deep"
 
     params = {"website_collection_mode": " DEEP "}
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
     assert params["website_collection_mode"] == "deep"
 
     with pytest.raises(ValueError, match="standard 或 deep"):
-        _validate_company_scan_params({"website_collection_mode": "unbounded"})
+        normalize_company_scan_params({"website_collection_mode": "unbounded"})
 
 
 def test_company_scan_validates_bidding_lookback_days() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     params = {"bidding_lookback_days": "7"}
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
     assert params["bidding_lookback_days"] == 7
 
     with pytest.raises(ValueError, match="必须为 1 到 30"):
-        _validate_company_scan_params({"bidding_lookback_days": 31})
+        normalize_company_scan_params({"bidding_lookback_days": 31})
 
 
 def test_company_scan_normalizes_website_path_scope() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     params = {"website_required_path_segments": [" /AH/ ", "ah"]}
 
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
 
     assert params["website_required_path_segments"] == ["ah"]
 
 
 def test_company_scan_normalizes_official_website_roots() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     params = {
         "website_root_domains": [
@@ -396,24 +396,24 @@ def test_company_scan_normalizes_official_website_roots() -> None:
         ]
     }
 
-    _validate_company_scan_params(params)
+    normalize_company_scan_params(params)
 
     assert params["website_root_domains"] == ["express-sn.com"]
 
 
 def test_company_scan_rejects_invalid_official_website_root() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     with pytest.raises(ValueError, match="无效的官网根域名"):
-        _validate_company_scan_params(
+        normalize_company_scan_params(
             {"website_root_domains": ["https://example.com:8443/"]}
         )
 
 
 def test_company_scan_rejects_invalid_website_path_scope() -> None:
-    from api.routers.project_api import _validate_company_scan_params
+    from api.services.project_tasks.validation import normalize_company_scan_params
 
     with pytest.raises(ValueError, match="无效的官网路径段"):
-        _validate_company_scan_params(
+        normalize_company_scan_params(
             {"website_required_path_segments": ["ah/other"]}
         )

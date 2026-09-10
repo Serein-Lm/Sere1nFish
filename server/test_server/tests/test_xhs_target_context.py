@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from api.dao import targets as targets_dao
-from api.routers.project_api import _normalize_xhs_target_params
+from api.services.project_tasks.validation import normalize_xhs_target_params
 from api.services.targets import require_project_target
 
 
@@ -50,7 +50,7 @@ def test_xhs_target_params_replace_client_name_with_project_name(monkeypatch) ->
     params = {"target_id": "target-1", "target_name": "客户端名称", "keyword": "关键词"}
 
     asyncio.run(
-        _normalize_xhs_target_params(None, project_id="project-1", params=params)
+        normalize_xhs_target_params(None, project_id="project-1", params=params)
     )
 
     assert params == {
@@ -64,7 +64,7 @@ def test_xhs_target_params_drop_unscoped_name() -> None:
     params = {"target_name": "自由文本公司", "keyword": "关键词"}
 
     asyncio.run(
-        _normalize_xhs_target_params(None, project_id="project-1", params=params)
+        normalize_xhs_target_params(None, project_id="project-1", params=params)
     )
 
     assert params == {"keyword": "关键词"}

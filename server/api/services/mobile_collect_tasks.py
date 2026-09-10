@@ -8,7 +8,7 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import mobile_collect as collect_dao
-from api.db.collections import TASKS_COLLECTION
+from api.dao import tasks as tasks_dao
 from api.services.project_task_runtime import execute_project_task
 from core.background import spawn_background
 
@@ -59,7 +59,7 @@ async def start_mobile_collect_task(
         document["requested_by"] = requested_by
     if schedule_id:
         document["schedule_id"] = schedule_id
-    await db[TASKS_COLLECTION].insert_one(document)
+    await tasks_dao.insert_task(db, document)
     spawn_background(
         execute_project_task(task_id, project_id, "mobile_collect", params),
         name=f"mobile_collect:{task_id}",

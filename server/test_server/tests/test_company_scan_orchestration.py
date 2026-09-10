@@ -377,7 +377,7 @@ async def test_scholar_collection_uses_shared_pipeline_adapter(
 async def test_standalone_scholar_dispatcher_returns_collection_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.routers import project_api
+    from api.services.project_tasks import dispatchers
     from api.services import runtime_config, scholar_contact_pipeline
 
     summary = {
@@ -394,11 +394,11 @@ async def test_standalone_scholar_dispatcher_returns_collection_summary(
         assert kwargs["dry_run"] is True
         return summary
 
-    monkeypatch.setattr(project_api, "get_db", lambda: object())
+    monkeypatch.setattr(dispatchers, "get_db", lambda: object())
     monkeypatch.setattr(runtime_config, "get_runtime_app_config", get_config)
     monkeypatch.setattr(scholar_contact_pipeline, "run_scholar_contact_collect", collect)
 
-    result = await project_api._dispatch_scholar_contact(
+    result = await dispatchers.dispatch_scholar_contact(
         "task-1",
         "project-1",
         {
