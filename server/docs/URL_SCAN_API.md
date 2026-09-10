@@ -1,313 +1,203 @@
-# URL 扫描 + 话术生成 API 文档
+# URL 扫描 API
 
-## 概述
+## 范围
 
-上传 url.txt → URL 标准化 → 探活 → Agent 扫描网站 → 提取信息节点 → 每个节点生成话术 → JSON 存储
+URL 扫描负责 URL 规范化、并发探活、浏览器读取、结构化分析、来源证据归档和 Finding 写入。话术生成是可选阶段；FindingContext 默认不自动生成，只在用户显式整理时运行。
 
-Base URL: `/api/v1`
+统一任务契约见 [UNIFIED_TASK_API.md](./UNIFIED_TASK_API.md)。本文只描述 `url_scan` 的调用和结果读取。
+
+所有接口前缀为 `/api/v1`，均需登录。
 
 ## 下发任务
 
-### 方式 1: JSON 提交
+### JSON
 
-`POST /api/v1/tasks/create`
+`POST /api/v1/projects/{project_id}/tasks`
 
 ```json
 {
-  "project_id": "proj_001",
   "task_type": "url_scan",
   "params": {
-    "urls": ["https://example.com", "https://target.cn", "target2.com"],
+    "urls": [
+      "https://example.com",
+      "https://example.org/contact"
+    ],
+    "min_attention_score": 40,
+    "enable_copywriting": false,
+    "selected_skill_ids": []
+  }
+}
+```
+
+也可使用每行一个 URL 的文本：
+
+```json
+{
+  "task_type": "url_scan",
+  "params": {
+    "url_text": "https://example.com\nhttps://example.org/contact",
     "min_attention_score": 40
   }
 }
 ```
 
-或传文本内容：
+`urls` 与 `url_text` 至少提供一个；同时存在时使用 `urls`。
 
-```json
-{
-  "project_id": "proj_001",
-  "task_type": "url_scan",
-  "params": {
-    "url_text": "https://example.com\nhttps://target.cn\ntarget2.com",
-    "min_attention_score": 40
-  }
-}
-```
+成功响应：
 
-`urls` 和 `url_text` 二选一，`urls` 优先。
-
-**响应**:
-```json
-{"task_id": "a1b2c3d4e5f6", "task_type": "url_scan", "status": "pending"}
-```
-
-### 方式 2: 上传文件
-
-`POST /api/v1/tasks/upload`（multipart/form-data）
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `file` | File | 是 | .txt 文件，每行一个 URL |
-| `project_id` | string | 是 | 项目 ID |
-| `task_type` | string | 是 | 固定 `url_scan` |
-| `params_json` | string | 否 | 其他参数 JSON（如 `{"min_attention_score": 40}`） |
-
-**响应**: 同上
-
-## 查询端点
-
-### GET /api/v1/tasks?project_id=xxx&task_type=url_scan
-
-列出某项目的任务。
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `project_id` | string | 是 | 项目 ID |
-| `task_type` | string | 否 | 按任务类型过滤 |
-
-### GET /api/v1/tasks/{task_id}
-
-获取任务状态（轮询用）。
-
-### GET /api/v1/tasks/{task_id}/findings?include_safe=false
-
-获取任务的信息节点。
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `include_safe` | bool | false | 是否返回无风险 URL 列表 |
-
-**响应**:
-```json
-{
-  "findings": [
-    {
-      "finding_id": "a1b2c3d4e5f6",
-      "url": "https://example.com",
-      "type": "hr_contact",
-      "attention_score": 80,
-      "...": "..."
-    }
-  ],
-  "safe_count": 3,
-  "safe_urls": ["https://safe1.com", "https://safe2.com", "https://safe3.com"]
-}
-```
-
-- `findings`: 有风险的 findings，按 `attention_score` 降序排列
-- `safe_count`: 无风险 URL 数量（始终返回）
-- `safe_urls`: 仅当 `include_safe=true` 时返回
-
-前端建议：
-- 默认展示 findings 列表（有风险的）
-- 底部显示"N 个无风险站点"折叠区域
-- 用户点击展开时，带 `include_safe=true` 重新请求
-
-### GET /api/v1/findings/{finding_id}/copywriting
-
-获取单个信息节点的话术。
-
-### DELETE /api/v1/tasks/{task_id}
-
-删除单个任务及其关联数据（findings、copywritings、scan_results）。
-
-**响应**:
 ```json
 {
   "task_id": "a1b2c3d4e5f6",
-  "deleted": true,
-  "deleted_findings": 5,
-  "deleted_copywritings": 3
+  "task_type": "url_scan",
+  "status": "pending"
 }
 ```
 
-### DELETE /api/v1/tasks?project_id=xxx&task_type=&status=
+### 文件上传
 
-批量删除任务。
+`POST /api/v1/projects/{project_id}/tasks/upload`
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `project_id` | string | 是 | 项目 ID |
-| `task_type` | string | 否 | 按任务类型过滤 |
-| `status` | string | 否 | 按状态过滤（如 `error`、`completed`） |
+`multipart/form-data` 字段：
 
-**响应**:
-```json
-{
-  "deleted_count": 3,
-  "task_ids": ["id1", "id2", "id3"]
-}
+| 字段 | 必填 | 说明 |
+|---|---:|---|
+| `file` | 是 | 文本文件，每行一个 URL |
+| `task_type` | 是 | 固定为 `url_scan` |
+| `params_json` | 否 | JSON 对象字符串 |
+
+示例：
+
+```bash
+curl -k \
+  -H "Authorization: Bearer $TOKEN" \
+  -F 'file=@urls.txt' \
+  -F 'task_type=url_scan' \
+  -F 'params_json={"min_attention_score":40,"enable_copywriting":false}' \
+  "https://127.0.0.1/api/v1/projects/$PROJECT_ID/tasks/upload"
 ```
 
-## 观测层端点
+`params_json` 不是合法 JSON 对象时返回 `400`。
 
-### GET /api/v1/stats/global — 全局统计
-### GET /api/v1/stats/project/{project_id} — 项目级统计
-### GET /api/v1/stats/task/{task_id} — 任务级统计
-### GET /api/v1/stats/hierarchy?project_id= — 层级视图（看板用）
-### GET /api/v1/stats/records?project_id=&task_id=&limit=50 — 原始记录
+## 参数
 
-## Skills 端点
+| 参数 | 默认 | 说明 |
+|---|---:|---|
+| `urls` | `[]` | URL 数组 |
+| `url_text` | `""` | 每行一个 URL 的文本 |
+| `min_attention_score` | `40` | Finding 最低关注分 |
+| `enable_copywriting` | `true` | 是否在扫描后生成话术；批量采集建议关闭 |
+| `selected_skill_ids` | `[]` | 显式 Skill；空数组表示运行时按场景选择 |
+| `url_probe_concurrency` | 运行时配置 | 单任务探活并发覆盖值 |
+| `url_scan_concurrency` | 运行时配置 | 单任务浏览器扫描并发覆盖值 |
+| `copywriting_concurrency` | 运行时配置 | 单任务话术并发覆盖值 |
 
-### GET /api/v1/skills — 列出所有 skills（Layer 1 索引）
-### GET /api/v1/skills/{skill_id} — 获取 skill 完整内容
+所有并发值最终由 `collection_runtime` 限幅。客户端不能依赖请求值被原样采用。
 
-## 数据模型
+## 状态与控制
 
-### UrlScanTask — 任务状态
+### 任务详情
 
-```json
-{
-  "task_id": "string",
-  "project_id": "string",
-  "total_urls": 10,
-  "alive_urls": 7,
-  "scanned_urls": 5,
-  "total_findings": 12,
-  "total_copywritings": 8,
-  "status": "pending | probing | scanning | generating | completed | error",
-  "error": null,
-  "updated_at": "2026-03-26T12:00:00"
-}
-```
+`GET /api/v1/projects/{project_id}/tasks/{task_id}`
 
-### InfoFinding — 信息节点（一个 URL 可产出多个）
+任务详情包含持久化 `status`、`progress`、参数、错误和结果。常见阶段状态可能包含 `pending`、探活、扫描、生成、完成、暂停或错误；调用方应把未知非终态作为“仍在处理”，不要硬编码完整枚举。
 
-```json
-{
-  "finding_id": "a1b2c3d4e5f6",
-  "url": "https://example.com",
-  "domain": "example.com",
-  "site_name": "示例公司",
-  "entity_name": "示例科技有限公司",
-  "summary": "企业官网，提供XX服务",
-  "type": "hr_contact | business_contact | customer_service | tech_support | social_media | download | form | other",
-  "channel": "email | phone | wechat | qq | form | app | other",
-  "role": "hr | sales | support | admin | developer | unknown",
-  "label": "简历投递",
-  "value": "hr@example.com",
-  "context": "首页 Footer > 联系我们 > 招聘合作模块",
-  "evidence": "页面显示：简历投递 hr@example.com",
-  "attention_score": 80,
-  "attention_reason": "可直接触达的招聘渠道"
-}
-```
+### 任务列表
 
-### FindingCopywriting — 话术（每个信息节点独立生成）
-
-前端根据 `finding_channel` 和 `scripts[].channel` 渲染不同 UI 组件。
+`POST /api/v1/projects/{project_id}/tasks/list`
 
 ```json
 {
-  "finding_id": "a1b2c3d4e5f6",
-  "url": "https://example.com",
-  "finding_type": "hr_contact",
-  "finding_channel": "email",
-  "finding_label": "简历投递",
-  "finding_value": "hr@example.com",
-  "scenario": {
-    "scenario_name": "猎头推荐高薪岗位",
-    "target_background": "...",
-    "scenario_overview": "...",
-    "faked_identity": {
-      "name": "张明",
-      "company": "锐才猎头",
-      "company_desc": "...",
-      "position": "高级猎头顾问",
-      "background": "...",
-      "personality": "..."
-    },
-    "logic_chain": [
-      {"step": 1, "channel": "email", "action": "发送候选人推荐邮件", "fallback": "电话跟进"},
-      {"step": 2, "channel": "phone", "action": "电话确认收到", "fallback": null},
-      {"step": 3, "channel": "wechat", "action": "微信发送简历压缩包", "fallback": "邮件发送"}
-    ],
-    "risk_notes": "..."
-  },
-  "scripts": [
-    {
-      "channel": "email",
-      "dialogue": [],
-      "email_template": "发件人: 张明 <zhangming@ruicai.com>\n主题: ...\n\n正文...",
-      "key_points": ["发件人域名要可信", "主题包含岗位名"]
-    },
-    {
-      "channel": "wechat",
-      "dialogue": [
-        {"role": "attacker", "content": "您好，我是锐才猎头的张明...", "tactic": "互惠原则"},
-        {"role": "target", "content": "什么机会？", "tactic": null}
-      ],
-      "email_template": null,
-      "key_points": ["好友验证消息建议", "备注名建议"]
-    },
-    {
-      "channel": "phone",
-      "dialogue": [
-        {"role": "attacker", "content": "喂，您好，请问是XX公司的李总吗？", "tactic": "确认身份"},
-        {"role": "target", "content": "是的，你是？", "tactic": null}
-      ],
-      "email_template": null,
-      "key_points": ["语气专业冷静", "30秒内建立身份"]
-    }
-  ],
-  "payload": {
-    "archive_name": "候选人简历汇总_2026Q1.zip",
-    "exe_name": "简历汇总表.pdf.exe",
-    "icon_disguise": "PDF图标",
-    "compression_method": "zip_double",
-    "password": "hr2026",
-    "notes": "第一层包含真实PDF和伪装exe"
-  },
-  "objections": [
-    {
-      "objection": "你怎么知道我邮箱的？",
-      "response": "您的邮箱在贵公司官网招聘页面公开的",
-      "tactic": "合理化",
-      "context_note": "目标邮箱来源于官网公开信息，可直接说明"
-    }
-  ],
-  "target_analysis": "目标为HR，对简历文件有天然打开习惯...",
-  "psychology_strategy": "核心策略：互惠原则（提供高薪岗位信息）+ 紧迫感（HC即将关闭）",
-  "case_reference": "参考案例：猎头推荐（recruitment-cases.md）",
-  "loaded_skills": ["base-scenario", "email", "wechat", "phone", "recruitment", "payload"],
-  "status": "completed",
-  "error": null
+  "project_id": "project-id",
+  "task_type": "url_scan",
+  "page": 1,
+  "page_size": 20
 }
 ```
 
-## 前端渲染指南
+返回 `{items,total,page,page_size}`。列表只包含展示所需投影，完整 result/checkpoint 必须通过任务详情按需读取。
 
-### 渠道类型 → UI 组件映射
+### 暂停与恢复
 
-| `scripts[].channel` | 渲染方式 |
-|---------------------|---------|
-| `wechat` | 微信聊天气泡（绿色/白色，区分 attacker/target） |
-| `email` | 邮件卡片（发件人/主题/正文/签名） |
-| `phone` | 电话对话（📞/📱 图标区分双方） |
-| `sms` | 短信气泡 |
-| `intranet` | 内部通知卡片 |
-
-### 心理策略标签
-
-每条 `dialogue[].tactic` 和 `objections[].tactic` 都是心理策略名称，前端可渲染为彩色标签：
-
-| tactic | 颜色建议 |
-|--------|---------|
-| 互惠原则 | 蓝色 |
-| 权威效应 | 紫色 |
-| 紧迫感 | 红色 |
-| 社会认同 | 绿色 |
-| 虚荣心 | 金色 |
-| 合理化 | 灰色 |
-
-### 层级结构
-
+```text
+POST /api/v1/projects/{project_id}/tasks/{task_id}/pause
+POST /api/v1/projects/{project_id}/tasks/{task_id}/resume
 ```
-项目
-  └── 任务（UrlScanTask）
-        └── URL 扫描结果（UrlScanResult）
-              └── 信息节点（InfoFinding）× N
-                    └── 话术（FindingCopywriting）× 1
+
+恢复沿用原 `task_id` 和持久化检查点；前端不能通过新建重复任务模拟恢复。
+
+### 删除
+
+```text
+DELETE /api/v1/projects/{project_id}/tasks/{task_id}
+DELETE /api/v1/projects/{project_id}/tasks?status=error
 ```
+
+删除任务会同步清理其项目级 Finding、话术、Token 记录和任务日志。来源文档的全局身份及仍被其他场景引用的证据不得按任务误删。
+
+## Findings
+
+### 分页查询
+
+`POST /api/v1/projects/{project_id}/findings`
+
+```json
+{
+  "project_id": "project-id",
+  "task_id": "a1b2c3d4e5f6",
+  "target_id": "",
+  "source": "",
+  "type": "",
+  "min_score": 40,
+  "sort": "score_desc",
+  "include_safe": false,
+  "summary_only": true,
+  "page": 1,
+  "page_size": 20
+}
+```
+
+- 路径中的 `project_id` 是实际查询边界。
+- `task_id` 同时匹配任务及其子任务关联。
+- `summary_only=true` 用于列表，详情另行读取。
+- `include_safe=true` 时附加最多 500 条无 Finding URL；默认关闭以控制响应体积。
+
+### 项目摘要与详情
+
+```text
+GET /api/v1/projects/{project_id}/findings/summary
+GET /api/v1/findings/{finding_id}
+GET /api/v1/findings/{finding_id}/copywriting
+GET /api/v1/findings/{finding_id}/context
+POST /api/v1/findings/{finding_id}/context/organize
+```
+
+Finding 必须保留 `target_id`、来源文档及版本 ID、原文 URL、邻近上下文和证据引用。相同联系方式通过稳定 `group_key` 在读模型聚合，不能通过覆盖或物理删除来源 Finding 实现去重。
+
+## 来源与证据
+
+扫描成功后，来源按以下层次保存：
+
+```text
+SourceDocument             规范 URL 的全局身份
+SourceDocumentVersion      稳定正文哈希对应的不可变版本
+SourceDocumentLink         Project/Target/Task 场景关系
+Finding                    从版本证据派生的项目事实
+FindingContext             用户按需生成的结构化上下文
+```
+
+原始 HTML、渲染 DOM、截图、原图和结构化来源 JSON 通过 `ObjectStorageService` 保存到私有对象存储。业务集合只保存 `storage_object_id`；前端通过鉴权 API 或短时签名 URL 读取。
+
+## Skill 加载
+
+`selected_skill_ids` 会在任务入库前按数据库运行时索引校验，最多 32 个。Agent 先加载索引，再按场景读取正文和所需资源；禁止把完整 Skill 资源树一次性写入 Prompt。
+
+接口和同步细节见 [SKILL_SYSTEM_API.md](./SKILL_SYSTEM_API.md)。
+
+## 验证要求
+
+- 空 URL、未知 Skill 和无效并发参数返回明确 `400`。
+- 同一 URL 的 `http/https` 及规范化变体按既有 canonical 规则归并。
+- 已完成的探活结果在深扫入口复用，不重复探活。
+- 页面失败、空截图、附件失败与目标站拒绝使用不同错误语义并保留恢复点。
+- 重跑同一来源版本不会重复写 Finding evidence；重分析会按稳定记录 ID 对账。
+- 列表响应不携带大型结果和证据正文。
