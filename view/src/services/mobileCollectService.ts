@@ -174,6 +174,45 @@ export interface ScheduleDef {
   updated_at?: string
 }
 
+export type MobileMonitorScope = 'target' | 'official_account'
+
+export interface MobileMonitor {
+  monitor_id: string
+  schedule_id: string
+  task_def_id: string
+  name: string
+  channel: 'wechat_official' | string
+  project_id: string
+  target_id: string
+  target_name: string
+  scope: MobileMonitorScope
+  official_accounts: string[]
+  device_id: string
+  app_instance: AppInstance
+  trigger: TriggerDef
+  enabled: boolean
+  task_status: string
+  last_run_task_id?: string | null
+  last_run_at?: string | null
+  last_status?: string | null
+  last_error?: string | null
+  next_run?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface MobileMonitorInput {
+  name?: string
+  project_id: string
+  target_id: string
+  device_id: string
+  scope: MobileMonitorScope
+  official_accounts?: string[]
+  app_instance?: AppInstance
+  trigger: TriggerDef
+  enabled: boolean
+}
+
 export interface CollectPreset {
   preset_id: string
   title: string
@@ -305,6 +344,50 @@ export function deleteSchedule(scheduleId: string) {
   return apiFetch<{ ok: boolean }>(`${BASE}/schedules/${encodeURIComponent(scheduleId)}`, {
     method: 'DELETE',
   })
+}
+
+// ── Target / 公众号增量监控 ─────────────────────────────
+
+export function listMobileMonitors(params: { project_id?: string; target_id?: string } = {}) {
+  const query = new URLSearchParams()
+  if (params.project_id) query.set('project_id', params.project_id)
+  if (params.target_id) query.set('target_id', params.target_id)
+  const suffix = query.size ? `?${query.toString()}` : ''
+  return apiFetch<{ items: MobileMonitor[]; total: number }>(`${BASE}/monitors${suffix}`)
+}
+
+export function createMobileMonitor(payload: MobileMonitorInput) {
+  return apiFetch<MobileMonitor>(`${BASE}/monitors`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateMobileMonitor(
+  monitorId: string,
+  payload: Partial<Pick<
+    MobileMonitorInput,
+    'name' | 'device_id' | 'official_accounts' | 'app_instance' | 'trigger' | 'enabled'
+  >>,
+) {
+  return apiFetch<MobileMonitor>(`${BASE}/monitors/${encodeURIComponent(monitorId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function runMobileMonitor(monitorId: string) {
+  return apiFetch<{ task_id: string; task_def_id: string; status: string }>(
+    `${BASE}/monitors/${encodeURIComponent(monitorId)}/run`,
+    { method: 'POST' },
+  )
+}
+
+export function deleteMobileMonitor(monitorId: string) {
+  return apiFetch<{ ok: boolean; monitor_id: string }>(
+    `${BASE}/monitors/${encodeURIComponent(monitorId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 // ── 预设模板 ────────────────────────────────────────────

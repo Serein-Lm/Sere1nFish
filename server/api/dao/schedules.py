@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReturnDocument
 
 from api.db.collections import TASK_SCHEDULES_COLLECTION
 
@@ -103,6 +104,19 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await coll.create_index("schedule_id", unique=True)
     await coll.create_index([("enabled", 1), ("next_run", 1)])
     await coll.create_index("target_id")
+    await coll.create_index(
+        "metadata.monitor_key",
+        unique=True,
+        partialFilterExpression={"metadata.monitor_key": {"$type": "string"}},
+    )
+    await coll.create_index(
+        [
+            ("metadata.kind", 1),
+            ("metadata.project_id", 1),
+            ("metadata.scope_target_id", 1),
+            ("created_at", -1),
+        ]
+    )
 
 
 async def create_schedule(
@@ -113,6 +127,7 @@ async def create_schedule(
     target_id: str,
     trigger: dict[str, Any],
     enabled: bool = True,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     schedule_id = "sch_" + uuid.uuid4().hex[:16]
     now = _now()
@@ -125,6 +140,7 @@ async def create_schedule(
         "enabled": enabled,
         "last_run": None,
         "next_run": compute_next_run(trigger) if enabled else None,
+        "metadata": dict(metadata or {}),
         "created_at": now,
         "updated_at": now,
     }
@@ -140,12 +156,27 @@ async def get_schedule(db: AsyncIOMotorDatabase, schedule_id: str) -> dict[str, 
 
 
 async def list_schedules(
-    db: AsyncIOMotorDatabase, *, target_id: str | None = None
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str | None = None,
+    target_type: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    limit: int = 500,
 ) -> list[dict[str, Any]]:
     query: dict[str, Any] = {}
     if target_id:
         query["target_id"] = target_id
-    cursor = db[TASK_SCHEDULES_COLLECTION].find(query, {"_id": 0}).sort("created_at", -1)
+    if target_type:
+        query["target_type"] = target_type
+    for key, value in (metadata or {}).items():
+        if key and value is not None:
+            query[f"metadata.{key}"] = value
+    cursor = (
+        db[TASK_SCHEDULES_COLLECTION]
+        .find(query, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(max(1, min(int(limit), 2_000)))
+    )
     return [doc async for doc in cursor]
 
 
@@ -177,6 +208,83 @@ async def list_due(db: AsyncIOMotorDatabase) -> list[dict[str, Any]]:
         {"enabled": True, "next_run": {"$lte": _now()}}, {"_id": 0}
     )
     return [doc async for doc in cursor]
+
+
+async def claim_due(
+    db: AsyncIOMotorDatabase,
+    *,
+    lease_owner: str,
+    lease_seconds: int = 120,
+) -> dict[str, Any] | None:
+    """Atomically lease the earliest due schedule for one scheduler instance."""
+    now = _now()
+    lease_until = now + timedelta(seconds=max(30, int(lease_seconds)))
+    return await db[TASK_SCHEDULES_COLLECTION].find_one_and_update(
+        {
+            "enabled": True,
+            "next_run": {"$lte": now},
+            "$or": [
+                {"lease_until": {"$exists": False}},
+                {"lease_until": None},
+                {"lease_until": {"$lte": now}},
+            ],
+        },
+        {
+            "$set": {
+                "lease_owner": lease_owner,
+                "lease_until": lease_until,
+                "updated_at": now,
+            }
+        },
+        sort=[("next_run", 1), ("schedule_id", 1)],
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def complete_claim(
+    db: AsyncIOMotorDatabase,
+    *,
+    schedule_id: str,
+    lease_owner: str,
+    status: str,
+    error: str = "",
+) -> bool:
+    """Advance and release one claimed schedule without touching another owner."""
+    schedule = await db[TASK_SCHEDULES_COLLECTION].find_one(
+        {"schedule_id": schedule_id, "lease_owner": lease_owner},
+        {"_id": 0},
+    )
+    if not schedule:
+        return False
+    now = _now()
+    enabled = bool(schedule.get("enabled"))
+    try:
+        next_run = (
+            compute_next_run(dict(schedule.get("trigger") or {}), after=now)
+            if enabled
+            else None
+        )
+    except (TypeError, ValueError) as exc:
+        enabled = False
+        next_run = None
+        status = "invalid_trigger"
+        error = str(exc)
+    result = await db[TASK_SCHEDULES_COLLECTION].update_one(
+        {"schedule_id": schedule_id, "lease_owner": lease_owner},
+        {
+            "$set": {
+                "enabled": enabled,
+                "last_run": now,
+                "last_status": str(status or "unknown"),
+                "last_error": str(error or "")[:2_000],
+                "next_run": next_run,
+                "updated_at": now,
+            },
+            "$unset": {"lease_owner": "", "lease_until": ""},
+        },
+    )
+    return bool(result.modified_count)
 
 
 async def mark_ran(db: AsyncIOMotorDatabase, schedule_id: str) -> None:

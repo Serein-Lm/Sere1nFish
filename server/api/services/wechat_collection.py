@@ -38,8 +38,14 @@ def normalize_wechat_app_instance(value: Any) -> str:
     return normalized
 
 
-def _company_wechat_defaults(*, app_instance: str = "primary") -> dict[str, Any]:
-    """Build the complete WeChat article profile used by company scans."""
+def build_company_wechat_task_profile(
+    *, app_instance: str = "primary"
+) -> dict[str, Any]:
+    """Build the complete WeChat article profile used by company scans.
+
+    This is the stable configuration entry for callers that need the same
+    phone-discovery/browser-handoff behavior without copying pipeline fields.
+    """
     normalized_instance = normalize_wechat_app_instance(app_instance)
     task = get_preset_task("wechat_official")
     task.update(
@@ -82,7 +88,7 @@ def _wechat_definition_patch(
     app_instance: str = "primary",
 ) -> dict[str, Any]:
     """Repair link fields and keep system company scans within phone limits."""
-    defaults = _company_wechat_defaults(app_instance=app_instance)
+    defaults = build_company_wechat_task_profile(app_instance=app_instance)
     patch: dict[str, Any] = {}
     if str(task_def.get("app_instance") or "primary") != defaults["app_instance"]:
         patch["app_instance"] = defaults["app_instance"]
@@ -239,7 +245,7 @@ async def _ensure_wechat_task_definition(
         )
 
     payload = CollectTaskDef(
-        **_company_wechat_defaults(app_instance=app_instance),
+        **build_company_wechat_task_profile(app_instance=app_instance),
         project_id=project_id,
         device_id=device_id,
     ).model_dump()
@@ -362,7 +368,7 @@ async def run_company_wechat_collection(
         project_id=project_id,
         task_def_id=task_def_id,
         runtime_overrides={
-            **_company_wechat_defaults(app_instance=normalized_instance),
+            **build_company_wechat_task_profile(app_instance=normalized_instance),
             "project_id": project_id,
             "target_id": target_id,
             "target_name": target_name,

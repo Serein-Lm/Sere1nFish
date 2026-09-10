@@ -6,28 +6,43 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.auth import User, get_current_active_user
-from api.db.collections import TASKS_COLLECTION
 from api.db.mongodb import get_db
 from api.dao import mobile_collect as collect_dao
 from api.dao import schedules as schedules_dao
 from api.models.mobile_collect import (
     CollectTaskDef,
     CollectTaskUpdate,
+    MobileMonitorCreate,
+    MobileMonitorUpdate,
     RecordsListRequest,
     ScheduleCreate,
     ScheduleUpdate,
 )
-from api.services.project_task_runtime import execute_project_task
+from api.services import scheduling
+from api.services.mobile_collect_tasks import (
+    MobileCollectTaskBusyError,
+    MobileCollectTaskNotFoundError,
+    start_mobile_collect_task,
+)
+from api.services.mobile_monitoring import (
+    MobileMonitorBusyError,
+    MobileMonitorConflictError,
+    MobileMonitorNotFoundError,
+    create_monitor,
+    delete_monitor,
+    get_monitor,
+    list_monitors,
+    run_monitor_now,
+    update_monitor,
+)
 from core.mobile.collect import request_stop
 from core.mobile.collect.presets import PRESETS
 from core.mobile.collect.source_links import list_source_link_strategies
-from core.background import spawn_background
 from core.logger import get_logger
 
 logger = get_logger("mobile_collect_router")
@@ -163,37 +178,16 @@ async def run_task(
 ):
     """手动启动一次采集(创建统一任务并异步运行)。"""
     db = get_db()
-    task_def = await collect_dao.get_task_def(db, task_def_id)
-    if not task_def:
-        raise HTTPException(404, "采集任务定义不存在")
-    if task_def.get("status") == "running":
-        raise HTTPException(409, "该采集任务正在运行中")
-
-    project_id = task_def.get("project_id") or ""
-    params = {
-        "task_def_id": task_def_id,
-        "_requested_by": current_user.username,
-    }
-    task_id = uuid.uuid4().hex[:12]
-    await db[TASKS_COLLECTION].insert_one(
-        {
-            "task_id": task_id,
-            "project_id": project_id,
-            "task_type": _TASK_TYPE,
-            "params": params,
-            "requested_by": current_user.username,
-            "status": "pending",
-            "progress": {},
-            "trigger": "manual",
-            "created_at": datetime.now(),
-            "updated_at": datetime.now(),
-        }
-    )
-    spawn_background(
-        execute_project_task(task_id, project_id, _TASK_TYPE, params),
-        name=f"mobile_collect:{task_id}",
-    )
-    return {"task_id": task_id, "task_def_id": task_def_id, "status": "pending"}
+    try:
+        return await start_mobile_collect_task(
+            db,
+            task_def_id=task_def_id,
+            requested_by=current_user.username,
+        )
+    except MobileCollectTaskNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except MobileCollectTaskBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/tasks/{task_def_id}/stop")
@@ -298,48 +292,116 @@ async def list_schedules(target_id: str | None = None):
 @router.post("/schedules")
 async def create_schedule(payload: ScheduleCreate):
     db = get_db()
-    task_def = await collect_dao.get_task_def(db, payload.target_id)
-    if not task_def:
-        raise HTTPException(404, "目标采集任务定义不存在")
-    trigger = payload.trigger.model_dump()
     try:
-        schedules_dao.validate_trigger(trigger)
+        return await scheduling.create_schedule(
+            db,
+            name=payload.name,
+            target_type=_TASK_TYPE,
+            target_id=payload.target_id,
+            trigger=payload.trigger.model_dump(),
+            enabled=payload.enabled,
+        )
+    except scheduling.ScheduleTargetNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, f"触发器无效: {exc}") from exc
-    doc = await schedules_dao.create_schedule(
-        db,
-        name=payload.name,
-        target_type=_TASK_TYPE,
-        target_id=payload.target_id,
-        trigger=trigger,
-        enabled=payload.enabled,
-    )
-    return doc
 
 
 @router.patch("/schedules/{schedule_id}")
 async def update_schedule(schedule_id: str, payload: ScheduleUpdate):
     db = get_db()
-    existing = await schedules_dao.get_schedule(db, schedule_id)
-    if not existing:
-        raise HTTPException(404, "调度不存在")
-    patch = payload.model_dump(exclude_none=True)
-    if "trigger" in patch:
-        try:
-            schedules_dao.validate_trigger(patch["trigger"])
-        except ValueError as exc:
-            raise HTTPException(400, f"触发器无效: {exc}") from exc
-    doc = await schedules_dao.update_schedule(db, schedule_id, patch)
-    return doc
+    try:
+        return await scheduling.update_schedule(
+            db, schedule_id, payload.model_dump(exclude_none=True)
+        )
+    except scheduling.ScheduleNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, f"触发器无效: {exc}") from exc
 
 
 @router.delete("/schedules/{schedule_id}")
 async def delete_schedule(schedule_id: str):
     db = get_db()
-    deleted = await schedules_dao.delete_schedule(db, schedule_id)
-    if not deleted:
-        raise HTTPException(404, "调度不存在")
+    try:
+        await scheduling.delete_schedule(db, schedule_id)
+    except scheduling.ScheduleNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
     return {"ok": True, "schedule_id": schedule_id}
+
+
+# ── Target / 公众号增量监控 ─────────────────────────────
+
+@router.get("/monitors")
+async def list_mobile_monitors(
+    project_id: str = "",
+    target_id: str = "",
+):
+    items = await list_monitors(
+        get_db(),
+        project_id=project_id.strip(),
+        target_id=target_id.strip(),
+    )
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/monitors")
+async def create_mobile_monitor(payload: MobileMonitorCreate):
+    try:
+        return await create_monitor(get_db(), payload)
+    except MobileMonitorConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/monitors/{monitor_id}")
+async def get_mobile_monitor(monitor_id: str):
+    try:
+        return await get_monitor(get_db(), monitor_id)
+    except MobileMonitorNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.patch("/monitors/{monitor_id}")
+async def update_mobile_monitor(
+    monitor_id: str,
+    payload: MobileMonitorUpdate,
+):
+    try:
+        return await update_monitor(get_db(), monitor_id, payload)
+    except MobileMonitorNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (MobileMonitorConflictError, MobileMonitorBusyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/monitors/{monitor_id}/run")
+async def run_mobile_monitor(
+    monitor_id: str,
+    current_user: User = Depends(get_current_active_user),
+):
+    try:
+        return await run_monitor_now(
+            get_db(), monitor_id, requested_by=current_user.username
+        )
+    except MobileMonitorNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except MobileMonitorBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.delete("/monitors/{monitor_id}")
+async def delete_mobile_monitor(monitor_id: str):
+    try:
+        await delete_monitor(get_db(), monitor_id)
+    except MobileMonitorNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except MobileMonitorBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "monitor_id": monitor_id}
 
 
 # ── 预设模板 ────────────────────────────────────────────

@@ -16,6 +16,35 @@
   margin-top: 1px;
 }
 
+.mobile-monitor-panel {
+  min-width: 0;
+}
+
+.mobile-monitor-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.mobile-monitor-secondary {
+  max-width: 240px;
+  overflow: hidden;
+  color: var(--ant-color-text-secondary, #8c8c8c);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-monitor-error {
+  display: block;
+  max-width: 170px;
+  overflow: hidden;
+  color: var(--ant-color-error, #ff4d4f);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 600px) {
   .mobile-collect-field-row {
     grid-template-columns: minmax(0, 1fr) 84px 32px;

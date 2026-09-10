@@ -15,6 +15,7 @@ import Popconfirm from 'antd/es/popconfirm'
 import Empty from 'antd/es/empty'
 import Spin from 'antd/es/spin'
 import Dropdown from 'antd/es/dropdown'
+import Tabs from 'antd/es/tabs'
 import message from 'antd/es/message'
 import type { ColumnsType } from 'antd/es/table'
 import {
@@ -57,6 +58,7 @@ import {
 import { getDevices, type SimpleDevice } from '../../services/mobileService'
 import CollectRecordsView from '../../components/CollectRecordsView/CollectRecordsView'
 import { CopyableLink } from '../../components/CopyLinkButton'
+import MobileMonitorPanel from './components/MobileMonitorPanel'
 import './MobileCollect.css'
 
 const NOTIFY_OPTIONS = [
@@ -104,6 +106,7 @@ function statusTag(status?: string) {
 }
 
 export default function MobileCollect() {
+  const [activeSection, setActiveSection] = useState<'tasks' | 'monitors'>('tasks')
   const [tasks, setTasks] = useState<CollectTaskDef[]>([])
   const [loading, setLoading] = useState(false)
   const [devices, setDevices] = useState<SimpleDevice[]>([])
@@ -492,32 +495,44 @@ export default function MobileCollect() {
 
   return (
     <div style={{ padding: 16 }}>
-      <Card
-        title="手机采集任务"
-        extra={
-          <Space>
-            <Button icon={<ReloadOutlined />} onClick={loadTasks}>
-              刷新
-            </Button>
-            <Dropdown menu={presetMenu} disabled={!presets.length}>
-              <Button>从预设创建</Button>
-            </Dropdown>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate()}>
-              新建任务
-            </Button>
-          </Space>
-        }
-      >
-        <Table
-          rowKey="task_def_id"
-          loading={loading}
-          columns={columns}
-          dataSource={tasks}
-          locale={{ emptyText: <Empty description="暂无采集任务，点击右上角新建" /> }}
-          pagination={{ pageSize: 10, hideOnSinglePage: true }}
-          scroll={{ x: 1270 }}
-        />
-      </Card>
+      <Tabs
+        activeKey={activeSection}
+        onChange={(key) => setActiveSection(key as 'tasks' | 'monitors')}
+        items={[
+          { key: 'tasks', label: '任务定义' },
+          { key: 'monitors', label: '增量监控' },
+        ]}
+      />
+      {activeSection === 'tasks' ? (
+        <Card
+          title="手机采集任务"
+          extra={
+            <Space>
+              <Button icon={<ReloadOutlined />} onClick={loadTasks}>
+                刷新
+              </Button>
+              <Dropdown menu={presetMenu} disabled={!presets.length}>
+                <Button>从预设创建</Button>
+              </Dropdown>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate()}>
+                新建任务
+              </Button>
+            </Space>
+          }
+        >
+          <Table
+            rowKey="task_def_id"
+            loading={loading}
+            columns={columns}
+            dataSource={tasks}
+            locale={{ emptyText: <Empty description="暂无采集任务，点击右上角新建" /> }}
+            pagination={{ pageSize: 10, hideOnSinglePage: true }}
+            scroll={{ x: 1270 }}
+          />
+        </Card>
+      ) : (
+        <MobileMonitorPanel devices={devices} />
+      )}
 
       {/* 编辑抽屉 */}
       <Drawer

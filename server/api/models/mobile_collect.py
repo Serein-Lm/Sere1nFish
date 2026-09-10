@@ -7,11 +7,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 NotifyOn = Literal["new", "changed", "both", "none"]
 AppInstance = Literal["primary", "clone"]
+MonitorScope = Literal["target", "official_account"]
 
 
 class ExtractField(BaseModel):
@@ -309,6 +310,79 @@ class ScheduleUpdate(BaseModel):
     name: str | None = None
     trigger: TriggerDef | None = None
     enabled: bool | None = None
+
+
+class MobileMonitorCreate(BaseModel):
+    """创建一个以现有手机采集流水线执行的增量监控。"""
+
+    name: str = Field(default="", max_length=120)
+    project_id: str = Field(min_length=1, max_length=64)
+    target_id: str = Field(min_length=1, max_length=64)
+    device_id: str = Field(min_length=1, max_length=160)
+    scope: MonitorScope = Field(default="target")
+    official_accounts: list[str] = Field(default_factory=list, max_length=20)
+    app_instance: AppInstance = Field(default="primary")
+    trigger: TriggerDef = Field(description="监控触发器")
+    enabled: bool = Field(default=True)
+
+    @field_validator("name", "project_id", "target_id", "device_id")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized and value != "":
+            raise ValueError("字段不能为空")
+        return normalized
+
+    @field_validator("official_accounts")
+    @classmethod
+    def _normalize_accounts(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = str(value or "").strip()
+            key = normalized.casefold()
+            if not normalized or key in seen:
+                continue
+            if len(normalized) > 100:
+                raise ValueError("公众号名称不能超过 100 个字符")
+            seen.add(key)
+            result.append(normalized)
+        return result
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> "MobileMonitorCreate":
+        if self.scope == "official_account" and not self.official_accounts:
+            raise ValueError("指定公众号监控至少需要一个公众号名称")
+        if self.scope == "target" and self.official_accounts:
+            raise ValueError("Target 监控不能同时填写指定公众号")
+        return self
+
+
+class MobileMonitorUpdate(BaseModel):
+    """更新监控运行参数；Project、Target 和监控范围保持稳定。"""
+
+    name: str | None = Field(default=None, max_length=120)
+    device_id: str | None = Field(default=None, min_length=1, max_length=160)
+    official_accounts: list[str] | None = Field(default=None, max_length=20)
+    app_instance: AppInstance | None = None
+    trigger: TriggerDef | None = None
+    enabled: bool | None = None
+
+    @field_validator("name", "device_id")
+    @classmethod
+    def _strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip()
+
+    @field_validator("official_accounts")
+    @classmethod
+    def _normalize_optional_accounts(
+        cls, values: list[str] | None
+    ) -> list[str] | None:
+        if values is None:
+            return None
+        return MobileMonitorCreate._normalize_accounts(values)
 
 
 class RecordsListRequest(BaseModel):

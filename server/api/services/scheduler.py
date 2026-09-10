@@ -8,21 +8,19 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import uuid
-from datetime import datetime
-from typing import Any
 
-from api.db.collections import TASKS_COLLECTION
 from api.db.mongodb import get_db
 from api.dao import schedules as schedules_dao
-from api.dao import mobile_collect as collect_dao
-from api.services.project_task_runtime import execute_project_task
-from core.background import spawn_background
+from api.services.scheduling import trigger_schedule
 from core.logger import get_logger
 
 logger = get_logger("scheduler")
 
 _SCAN_INTERVAL_SECONDS = 15
+_MAX_CLAIMS_PER_SCAN = 50
+_CLAIM_LEASE_SECONDS = 120
 
 
 class TaskScheduler:
@@ -33,6 +31,7 @@ class TaskScheduler:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex[:12]}"
 
     @classmethod
     def get_instance(cls) -> "TaskScheduler":
@@ -70,56 +69,46 @@ class TaskScheduler:
 
     async def _scan_once(self) -> None:
         db = get_db()
-        due = await schedules_dao.list_due(db)
-        for schedule in due:
+        for _ in range(_MAX_CLAIMS_PER_SCAN):
+            schedule = await schedules_dao.claim_due(
+                db,
+                lease_owner=self._lease_owner,
+                lease_seconds=_CLAIM_LEASE_SECONDS,
+            )
+            if not schedule:
+                break
+            status = "failed"
+            error = ""
             try:
-                await self._trigger(db, schedule)
+                result = await trigger_schedule(db, schedule)
+                status = result.status
+                if result.message:
+                    logger.info(
+                        "调度结果 schedule=%s status=%s message=%s",
+                        schedule.get("schedule_id"),
+                        result.status,
+                        result.message,
+                    )
+                if result.task_id:
+                    logger.notice(
+                        "定时触发采集任务 | schedule=%s task=%s",
+                        schedule.get("schedule_id"),
+                        result.task_id,
+                    )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"触发调度失败 schedule={schedule.get('schedule_id')}: {exc}")
+                error = str(exc)
+                logger.warning(
+                    "触发调度失败 schedule=%s: %s",
+                    schedule.get("schedule_id"),
+                    exc,
+                )
             finally:
-                # 无论触发成功与否都推进 next_run, 避免持续重触发。
-                await schedules_dao.mark_ran(db, schedule["schedule_id"])
-
-    async def _trigger(self, db: Any, schedule: dict[str, Any]) -> None:
-        target_type = schedule.get("target_type", "mobile_collect")
-        target_id = schedule["target_id"]
-
-        if target_type != "mobile_collect":
-            logger.warning(f"不支持的调度目标类型: {target_type}")
-            return
-
-        task_def = await collect_dao.get_task_def(db, target_id)
-        if not task_def:
-            logger.warning(f"调度目标采集任务不存在, 跳过: {target_id}")
-            return
-        # 目标任务正在运行则跳过本次触发, 避免同设备重叠执行。
-        if task_def.get("status") == "running":
-            logger.info(f"采集任务运行中, 跳过定时触发: {target_id}")
-            return
-
-        # 通过统一任务入口创建并异步运行(等同手动启动)。
-        project_id = task_def.get("project_id") or ""
-        params = {"task_def_id": target_id, "scheduled_by": schedule["schedule_id"]}
-        task_id = uuid.uuid4().hex[:12]
-        await db[TASKS_COLLECTION].insert_one(
-            {
-                "task_id": task_id,
-                "project_id": project_id,
-                "task_type": target_type,
-                "params": params,
-                "status": "pending",
-                "progress": {},
-                "trigger": "schedule",
-                "schedule_id": schedule["schedule_id"],
-                "created_at": datetime.now(),
-                "updated_at": datetime.now(),
-            }
-        )
-        spawn_background(
-            execute_project_task(task_id, project_id, target_type, params),
-            name=f"scheduled:{task_id}",
-        )
-        logger.notice(
-            f"定时触发采集任务 | schedule={schedule['schedule_id']} "
-            f"def={target_id} task={task_id}"
-        )
+                # Every claim advances once, including busy/failed attempts, so a
+                # broken target cannot be retriggered every 15 seconds.
+                await schedules_dao.complete_claim(
+                    db,
+                    schedule_id=str(schedule.get("schedule_id") or ""),
+                    lease_owner=self._lease_owner,
+                    status=status,
+                    error=error,
+                )

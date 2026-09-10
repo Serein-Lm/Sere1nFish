@@ -408,6 +408,24 @@ async def get_task_def(db: AsyncIOMotorDatabase, task_def_id: str) -> dict[str, 
     )
 
 
+async def get_task_defs_by_ids(
+    db: AsyncIOMotorDatabase, task_def_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Fetch task definitions in one query for monitor/list projections."""
+    normalized = list(dict.fromkeys(str(item or "").strip() for item in task_def_ids))
+    normalized = [item for item in normalized if item]
+    if not normalized:
+        return {}
+    cursor = db[MOBILE_COLLECT_TASKS_COLLECTION].find(
+        {"task_def_id": {"$in": normalized}},
+        {"_id": 0},
+    )
+    return {
+        str(document.get("task_def_id") or ""): document
+        async for document in cursor
+    }
+
+
 async def list_task_defs(
     db: AsyncIOMotorDatabase, *, project_id: str | None = None, limit: int = 200
 ) -> list[dict[str, Any]]:
