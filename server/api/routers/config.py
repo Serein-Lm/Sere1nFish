@@ -314,6 +314,7 @@ async def get_all_configs(_: User = Depends(get_current_active_user)):
         "xhs_crawler": masked_configs.get("xhs_crawler"),
         "douyin_crawler": masked_configs.get("douyin_crawler"),
         "object_storage": masked_configs.get("object_storage"),
+        "distributed_scan": masked_configs.get("distributed_scan"),
     }
 
 
@@ -393,6 +394,7 @@ async def reveal_configs(body: ConfigRevealRequest, admin: User = Depends(_manag
         "xhs_crawler": configs.get("xhs_crawler"),
         "douyin_crawler": configs.get("douyin_crawler"),
         "object_storage": configs.get("object_storage"),
+        "distributed_scan": configs.get("distributed_scan"),
     }
 
 

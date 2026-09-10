@@ -66,6 +66,16 @@ PROMPT_TAGS_COLLECTION = "prompt_tags"
 # 统一任务
 TASKS_COLLECTION = "tasks"
 
+# 分布式扫描控制面。节点仅通过 HTTPS 长轮询租约协议访问这些领域能力，
+# 不允许直接连接 MongoDB/Redis。
+SCAN_NODES_COLLECTION = "scan_nodes"
+SCAN_NODE_BOOTSTRAP_TOKENS_COLLECTION = "scan_node_bootstrap_tokens"
+SCAN_NODE_NONCES_COLLECTION = "scan_node_nonces"
+DISTRIBUTED_WORK_ITEMS_COLLECTION = "distributed_work_items"
+DISTRIBUTED_WORK_EVENTS_COLLECTION = "distributed_work_events"
+PROXY_PROFILES_COLLECTION = "proxy_profiles"
+PROXY_LEASES_COLLECTION = "proxy_leases"
+
 # 手机采集任务框架 — 自定义任务定义 / 增量结果 / 定时调度
 MOBILE_COLLECT_TASKS_COLLECTION = "mobile_collect_tasks"
 MOBILE_COLLECT_RECORDS_COLLECTION = "mobile_collect_records"

@@ -8,6 +8,8 @@
 
 本轮先处理了风险最高且重复最明显的项目任务入口：JSON 下发、文件下发、任务类型选择、参数校验、持久化和后台启动已汇入统一 service；各任务实现由声明式 registry 选择。`project_api.py` 从 1626 行降到 1139 行，任务入口具备独立契约测试。
 
+本轮进一步落地了分布式扫描的 Phase 0/1，而不是把现有大型 pipeline 复制到远端：新增统一执行网关、节点注册与鉴权、持久化工作租约、结果校验、SOCKS5 配置/租约和独立节点 Agent。现有资产发现中的 HTTP 探活与浏览器兜底探活已接入网关；数据库开关默认关闭，配置不可达时也明确保持本机执行，因此原扫描路径和结果契约不变。
+
 没有发现需要暂停当前扫描任务的 P0 数据损坏问题。后续拆分应保持小步迁移，不能为了目录整洁重写正在工作的采集 pipeline。
 
 ## 当前基线
@@ -23,6 +25,7 @@
 - 任务执行：`api.services.project_task_runtime` 的认领、心跳、暂停和恢复。
 - 任务提交：`api.services.project_tasks` 的 registry、validation、dispatcher 与 service。
 - AI 观测：统一 observation context 与 token tracker。
+- 分布式执行：`api.services.distributed_scan` 网关、registry、work/proxy lease 和节点协议。
 
 ### 规模热点
 
@@ -95,6 +98,23 @@ command/service
 
 “小工具统一复用”不等于把所有逻辑放进 `utils.py`。纯规范化、哈希、时间和分页可进入 util；涉及 Mongo、网络、权限、模型、设备或领域状态的功能必须留在 DAO/service/adapter。
 
+### P1：分布式边界必须停留在无状态能力层（本轮已建立）
+
+已完成的边界：
+
+- `DistributedExecutionGateway` 是业务调用侧唯一入口；feature flag、Project 灰度、批次、等待和本机回退都收敛在网关。
+- `NodeRegistryService` 只处理一次性 bootstrap、节点身份、心跳和令牌轮换。
+- `work_service` 只处理工作排队、租约、单调事件、结果提交、取消和恢复。
+- `proxy_service` 只处理 SOCKS5 配置、CONNECT 健康、容量、冷却和随工作续期的租约；浏览器 loopback sidecar 与类别化 DNS/bypass 明确留在后续阶段。
+- `scan_node_agent.WorkerRegistry` 只按 capability 选择 worker，不访问 Project、Target、MongoDB 或 Redis。
+- HTTP 与浏览器 probe 的远端结果先按版本化白名单校验；URL 集合、结果大小和 OSS 引用不满足租约时拒绝提交。
+
+当前没有远程化公司 finalizer、Target 关系写入、Finding 写入、手机 ADB 和 AI 对话。这些仍由主服务持有，避免形成跨节点多写者和网络耦合。
+
+### P2：分布式加速不能成为主链路单点（本轮已修复）
+
+分布式配置默认 `enabled=false`。启用后仍按 `project_ids` 灰度；没有健康节点、节点超时或配置中心暂时不可用时，仅在策略允许时回退现有本机 adapter。`proxy_mode=required` 永远不允许直连回退。这个规则由网关和代理 service 强制执行，不由各 pipeline 自行判断。
+
 ## 分阶段拆分顺序
 
 ### 阶段 A：任务边界（已完成）
@@ -129,9 +149,25 @@ command/service
 3. DAO 只处理稳定查询和索引。
 4. 通过投影版本保持旧前端字段兼容。
 
-### 阶段 E：分布式执行
+### 阶段 E：分布式执行（Phase 0/1 已完成）
 
-在阶段 B/C 的 stage 输入输出和持久化租约稳定后，再按 `DISTRIBUTED_SCAN_NODES.md` 接远程节点。不能先把当前大函数复制到远端进程，否则只会把耦合变成网络耦合。
+已完成：
+
+1. 节点、工作项、事件、代理配置和代理租约 collection 及索引。
+2. 一次性节点引导、令牌加密/摘要存储、HMAC 请求签名与 nonce 防重放、心跳、drain/disable 和轮换。
+3. 90 秒工作租约、续期、过期重排、最大尝试次数、取消传播和幂等完成。
+4. HTTP/浏览器 probe worker、Docker 节点模板和管理端真实状态页。
+5. 资产发现 HTTP 探活及浏览器兜底通过统一网关按 Project 灰度。
+
+后续迁移顺序仍受阶段 B/C 约束：先稳定 stage schema，再逐项增加 `resource_parse`、`website_page`、`ocr` 等 capability。不能把 `company_scan_pipeline` 或手机主循环整体复制到节点。
+
+## 本轮验证
+
+- `test_distributed_scan.py` 覆盖配置限幅、本机兼容回退、代理 required 约束、代理重试租约复用、最大尝试次数、工作幂等、结果 URL 白名单、HMAC nonce 防重放和节点身份文件权限。
+- 既有 `test_asset_intelligence.py` 全量回归，确认网关接入没有改变本机探活、HTTP/HTTPS 选择和浏览器恢复行为。
+- 使用真实 FastAPI、MongoDB 和 HTTPS 路由完成 `bootstrap -> register -> heartbeat -> lease -> started -> execute -> completed`，并在完成后清理验证数据。
+- 扫描节点 Docker build context 已限制在独立 Agent 目录，避免把整个后端工作区和运行数据发送给 Docker daemon。
+- 前端 TypeScript/Vite 构建及 Chrome DevTools 桌面/窄屏验收属于发布必检项。
 
 ## 每次拆分的完成标准
 

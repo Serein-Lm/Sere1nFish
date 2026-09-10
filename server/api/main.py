@@ -43,6 +43,8 @@ from api.routers import (
     deepfake,
     media_output,
     social_collection,
+    distributed_scan,
+    distributed_scan_node,
 )
 from api.config import get_settings
 from api.auth import get_current_active_user, User
@@ -391,6 +393,17 @@ async def lifespan(app: FastAPI):
         from api.dao import social_collection as social_collection_dao
         await social_collection_dao.ensure_indexes(db)
         await schedules_dao.ensure_indexes(db)
+        # 分布式扫描控制面：节点、工作租约、事件和 SOCKS5 代理租约。
+        from api.dao import distributed_work as distributed_work_dao
+        from api.dao import proxy_profiles as proxy_profiles_dao
+        from api.dao import scan_nodes as scan_nodes_dao
+
+        await scan_nodes_dao.ensure_indexes(db)
+        await distributed_work_dao.ensure_indexes(db)
+        await proxy_profiles_dao.ensure_indexes(db)
+        from api.services.distributed_scan.settings import ensure_default_settings
+
+        await ensure_default_settings(db)
         logger.info("核心集合索引已确认")
     except Exception as e:
         logger.warning(f"索引创建失败（不影响运行）: {e}")
@@ -415,6 +428,15 @@ async def lifespan(app: FastAPI):
             )
     except Exception as e:
         logger.warning(f"中断任务运行态清理失败(不影响启动): {e}")
+
+    # 节点状态、工作租约和代理租约均由持久化维护循环回收。
+    try:
+        from api.services.distributed_scan import DistributedScanRuntime
+
+        DistributedScanRuntime.get_instance().start(get_db())
+        logger.info("分布式扫描租约维护已启动")
+    except Exception as e:
+        logger.warning(f"分布式扫描租约维护启动失败(不影响运行): {e}")
 
     # 启动时:恢复设备独占预约到内存资源池(系统1 持久化)
     try:
@@ -480,6 +502,14 @@ async def lifespan(app: FastAPI):
         logger.warning(f"百炼流式 TTS 预热失败(不影响运行): {e}")
 
     yield
+
+    try:
+        from api.services.distributed_scan import DistributedScanRuntime
+
+        await DistributedScanRuntime.get_instance().stop()
+        logger.info("分布式扫描租约维护已停止")
+    except Exception as e:
+        logger.warning(f"分布式扫描租约维护停止失败: {e}")
 
     # 关闭时：先释放全双工会话和流式 TTS 连接池。
     try:
@@ -680,6 +710,8 @@ app.include_router(dingtalk.router, prefix="/api/v1/dingtalk", tags=["钉钉机�
 app.include_router(source_documents.router, prefix="/api/v1", tags=["来源文档与目标"])
 app.include_router(deepfake.router, prefix="/api/v1/deepfake", tags=["Deepfake"])
 app.include_router(media_output.router, prefix="/api/v1/media-output", tags=["远端媒体输出"])
+app.include_router(distributed_scan.router, prefix="/api/v1")
+app.include_router(distributed_scan_node.router, prefix="/api/v1")
 
 
 @app.get("/")

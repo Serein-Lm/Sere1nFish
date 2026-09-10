@@ -103,10 +103,28 @@ class AssetIntelligenceService:
                 if _candidate_matches_domain_scope(candidate, identity.domains)
             ]
         urls = list(dict.fromkeys(item.canonical_url for item in merged if item.canonical_url))
-        probe_by_url = await self.probe.probe(
-            urls,
-            concurrency=max(1, min(probe_concurrency, 128)),
-            timeout=max(1.0, min(probe_timeout, 30.0)),
+        from api.services.distributed_scan import DistributedExecutionGateway
+
+        gateway = DistributedExecutionGateway(self.db)
+        probe_concurrency = max(1, min(probe_concurrency, 128))
+        probe_timeout = max(1.0, min(probe_timeout, 30.0))
+
+        async def _local_http_probe(batch: list[str]) -> dict[str, dict[str, Any]]:
+            return await self.probe.probe(
+                batch,
+                concurrency=probe_concurrency,
+                timeout=probe_timeout,
+            )
+
+        probe_by_url = await gateway.execute_url_batches(
+            kind="http_probe",
+            urls=urls,
+            project_id=project_id,
+            task_id=task_id,
+            target_id=identity.target_id,
+            timeout=probe_timeout,
+            concurrency=probe_concurrency,
+            local_batch=_local_http_probe,
         ) if urls else {}
         for candidate in merged:
             probe = probe_by_url.get(candidate.canonical_url)
@@ -125,10 +143,24 @@ class AssetIntelligenceService:
                 and self.browser_probe.supports(candidate.canonical_url)
             )
         )
-        browser_probe_by_url = await self.browser_probe.probe(
-            unresolved_urls,
-            concurrency=max(1, int(probe_concurrency)),
-            timeout=max(10.0, min(probe_timeout * 2, 30.0)),
+        browser_timeout = max(10.0, min(probe_timeout * 2, 30.0))
+
+        async def _local_browser_probe(batch: list[str]) -> dict[str, dict[str, Any]]:
+            return await self.browser_probe.probe(
+                batch,
+                concurrency=probe_concurrency,
+                timeout=browser_timeout,
+            )
+
+        browser_probe_by_url = await gateway.execute_url_batches(
+            kind="browser_probe",
+            urls=unresolved_urls,
+            project_id=project_id,
+            task_id=task_id,
+            target_id=identity.target_id,
+            timeout=browser_timeout,
+            concurrency=probe_concurrency,
+            local_batch=_local_browser_probe,
         ) if unresolved_urls else {}
         browser_recovered = 0
         for candidate in merged:

@@ -71,6 +71,7 @@ APP_CONFIG_SECTIONS = {
     "notifications",
     "object_storage",
     "deepfake",
+    "distributed_scan",
 }
 
 LLM_RUNTIME_MODEL_KEYS = {

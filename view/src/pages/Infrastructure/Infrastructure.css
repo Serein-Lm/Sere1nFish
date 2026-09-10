@@ -1,72 +1,121 @@
 .infrastructure {
-  padding: 24px;
+  padding: 20px 24px 32px;
 }
 
-.email-list {
+.infra-header {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-height: 300px;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.email-item-new {
-  padding: 12px;
-  background: var(--accent-color);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-fast) ease;
-}
-
-.email-item-new:hover {
-  background: var(--glass-bg);
-  border-color: var(--primary-color);
-  transform: translateX(4px);
-}
-
-.email-info-main {
-  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 4px;
+  gap: 16px;
+  margin-bottom: 16px;
 }
 
-.email-address-text {
-  font-family: 'Monaco', monospace;
+.infra-header h2 {
+  margin: 0 0 2px;
+  font-size: 24px;
+  letter-spacing: 0;
+}
+
+.infra-alert {
+  margin-bottom: 12px;
+}
+
+.infra-stats {
+  margin-bottom: 12px;
+}
+
+.infra-stats .ant-card {
+  height: 100%;
+  border-radius: 6px;
+}
+
+.infra-stats .ant-statistic-title {
   font-size: 13px;
-  color: var(--text-primary);
 }
 
-.email-meta-info {
-  font-size: 11px;
+.infra-stats .ant-statistic-content {
+  font-size: 24px;
 }
 
-.feature-tips {
-  margin-top: 16px;
+.infra-main-panel {
+  border-radius: 6px;
+}
+
+.infra-toolbar {
+  min-height: 44px;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.infra-filter-toolbar {
+  justify-content: flex-start;
+}
+
+.infra-primary-cell {
+  display: flex;
+  min-width: 0;
   flex-direction: column;
-  gap: 10px;
+  gap: 2px;
 }
 
-.tip-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
+.infra-primary-cell .ant-typography,
+.infra-mono {
+  max-width: 100%;
 }
 
-.tip-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--primary-color);
-  opacity: 0.5;
+.infra-primary-cell .ant-typography:last-child,
+.infra-mono,
+.infra-secret,
+.infra-code,
+.infra-json {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.infra-code,
+.infra-json {
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: #f7f8fa;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.infra-json {
+  margin-top: 16px;
+  max-height: calc(100vh - 260px);
+  font-size: 12px;
+}
+
+.infra-secret {
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 768px) {
   .infrastructure {
-    padding: 16px;
+    padding: 14px 12px 24px;
+  }
+
+  .infra-header h2 {
+    font-size: 21px;
+  }
+
+  .infra-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .infra-toolbar > .ant-btn {
+    width: 100%;
+  }
+
+  .infra-stats .ant-statistic-content {
+    font-size: 20px;
   }
 }

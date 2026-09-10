@@ -1,0 +1,33 @@
+version: "3.3"
+
+services:
+  scan-node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+    restart: unless-stopped
+    shm_size: "2gb"
+    environment:
+      SCAN_CONTROL_PLANE_URL: ${SCAN_CONTROL_PLANE_URL}
+      SCAN_NODE_BOOTSTRAP_TOKEN: ${SCAN_NODE_BOOTSTRAP_TOKEN}
+      SCAN_NODE_NAME: ${SCAN_NODE_NAME}
+      SCAN_NODE_LABELS: ${SCAN_NODE_LABELS}
+      SCAN_NODE_HTTP_SLOTS: ${SCAN_NODE_HTTP_SLOTS}
+      SCAN_NODE_BROWSER_SLOTS: ${SCAN_NODE_BROWSER_SLOTS}
+      SCAN_NODE_CA_BUNDLE: ${SCAN_NODE_CA_BUNDLE}
+    volumes:
+      - scan-node-state:/var/lib/sere1nfish-node
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  scan-node-state:

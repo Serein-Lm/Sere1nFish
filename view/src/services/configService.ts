@@ -62,6 +62,7 @@ export interface AllConfig {
   douyin_crawler?: ConfigSection
   object_storage?: ConfigSection
   deepfake?: ConfigSection
+  distributed_scan?: ConfigSection
 }
 
 export interface ConfigRevealStatus {
