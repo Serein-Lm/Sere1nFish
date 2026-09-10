@@ -1,15 +1,14 @@
-import { useCallback, useState, useEffect, useRef } from 'react'
+import { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Bubble, Sender, Welcome, ThoughtChain, Prompts } from '@ant-design/x'
-import type { BubbleListProps, SenderProps, PromptsProps } from '@ant-design/x'
+import { Bubble, Sender, ThoughtChain } from '@ant-design/x'
+import type { BubbleListProps, SenderProps } from '@ant-design/x'
 import type { GetRef } from 'antd'
 import XMarkdown from '@ant-design/x-markdown'
-import { Flex, Space, Button, Divider, Dropdown, message, Popconfirm, Spin, Empty, Tooltip, Tag, Drawer, Badge, Collapse, Alert, Segmented, Input } from 'antd'
+import { Flex, Space, Button, Divider, Dropdown, message, Spin, Empty, Tooltip, Tag, Drawer, Collapse, Alert, Segmented, Input } from 'antd'
 import type { MenuProps } from 'antd'
 import { 
   RobotOutlined, 
   UserOutlined, 
-  ShareAltOutlined, 
   ThunderboltOutlined,
   PaperClipOutlined,
   SearchOutlined,
@@ -22,24 +21,9 @@ import {
   ProfileOutlined,
   FileImageOutlined,
   FileTextOutlined,
-  BulbOutlined,
-  PlusOutlined,
-  MessageOutlined,
-  DeleteOutlined,
-  FileWordOutlined,
-  FileMarkdownOutlined,
-  FileExcelOutlined,
-  FilePdfOutlined,
-  FileUnknownOutlined,
-  AudioOutlined,
-  VideoCameraOutlined,
   DatabaseOutlined,
   ProjectOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  InboxOutlined,
   LinkOutlined,
-  HistoryOutlined,
 } from '@ant-design/icons'
 import { 
   agentService, 
@@ -56,7 +40,6 @@ import {
   formatArtifactSize,
   type EntityRef,
   type Artifact,
-  type ArtifactFormatKey,
   type HubToolCatalog,
   type ExecutionState,
   type StreamRequest,
@@ -72,6 +55,13 @@ import { downloadWithAuth } from '../../services/http'
 import { getFindingDetail } from '../../services/taskService'
 import DataReferencePicker, { type DataReference } from './DataReferencePicker'
 import SkillSelector from '../../components/SkillSelector'
+import AIHubArtifactIcon from './components/AIHubArtifactIcon'
+import AIHubConversationRail from './components/AIHubConversationRail'
+import AIHubEmptyState from './components/AIHubEmptyState'
+import AIHubWorkspaceHeader, {
+  type AIHubLayoutMode,
+} from './components/AIHubWorkspaceHeader'
+import AIHubWorkspaceInspector from './components/AIHubWorkspaceInspector'
 import './PhishingPlatform.css'
 
 const Switch = Sender.Switch
@@ -82,23 +72,6 @@ const isNarrowViewport = () => typeof window !== 'undefined'
   && window.matchMedia('(max-width: 768px)').matches
 const AIHubInput = (props: React.ComponentProps<typeof Input.TextArea>) => (
   <Input.TextArea {...props} id="ai-hub-query" name="ai_hub_query" aria-label="AI 中枢问题" />
-)
-
-const ARTIFACT_FORMAT_ICONS: Record<ArtifactFormatKey, React.ReactNode> = {
-  word: <FileWordOutlined />,
-  markdown: <FileMarkdownOutlined />,
-  spreadsheet: <FileExcelOutlined />,
-  pdf: <FilePdfOutlined />,
-  data: <DatabaseOutlined />,
-  image: <FileImageOutlined />,
-  audio: <AudioOutlined />,
-  video: <VideoCameraOutlined />,
-  text: <FileTextOutlined />,
-  file: <FileUnknownOutlined />,
-}
-
-const artifactIcon = (artifact: Artifact) => (
-  ARTIFACT_FORMAT_ICONS[getArtifactPresentation(artifact).key]
 )
 
 interface Message {
@@ -315,112 +288,12 @@ const SwitchTextStyle = {
   alignItems: 'center',
 }
 
-// 欢迎页 Prompts 配置
-const welcomePrompts: PromptsProps['items'] = [
-  {
-    key: 'query',
-    label: (
-      <Space>
-        <DatabaseOutlined style={{ color: '#1890FF' }} />
-        <span>数据查询</span>
-      </Space>
-    ),
-    description: '实时查库：项目 / 任务 / 发现',
-    children: [
-      {
-        key: 'query-1',
-        description: '当前平台有哪些项目？',
-      },
-      {
-        key: 'query-2',
-        description: '看看某个项目最近的任务日志有没有报错',
-      },
-      {
-        key: 'query-3',
-        description: '列出关注度最高的目标 finding',
-      },
-    ],
-  },
-  {
-    key: 'analysis',
-    label: (
-      <Space>
-        <SearchOutlined style={{ color: '#13C2C2' }} />
-        <span>情报分析</span>
-      </Space>
-    ),
-    description: '态势分析：看板 / 资产 / 对比',
-    children: [
-      {
-        key: 'analysis-1',
-        description: '给我某个项目的综合态势看板',
-      },
-      {
-        key: 'analysis-2',
-        description: '对比多个项目的发现数量和进展',
-      },
-      {
-        key: 'analysis-3',
-        description: '列出某项目的网络资产测绘结果',
-      },
-    ],
-  },
-  {
-    key: 'persona',
-    label: (
-      <Space>
-        <BulbOutlined style={{ color: '#FAAD14' }} />
-        <span>人设与话术</span>
-      </Space>
-    ),
-    description: '人设库 / 联系人 / 社工话术',
-    children: [
-      {
-        key: 'persona-1',
-        description: '在人设库里搜索某个目标人物的背景',
-      },
-      {
-        key: 'persona-2',
-        description: '手机上采集了哪些联系人画像？',
-      },
-      {
-        key: 'persona-3',
-        description: '基于某人物背景生成一套社工话术',
-      },
-    ],
-  },
-  {
-    key: 'artifact',
-    label: (
-      <Space>
-        <FileWordOutlined style={{ color: '#722ED1' }} />
-        <span>多格式产物</span>
-      </Space>
-    ),
-    description: '导出 Word、Markdown、JSON、CSV 等产物',
-    children: [
-      {
-        key: 'artifact-1',
-        description: '把某个人物的背景整理成 Word 文档给我下载',
-      },
-      {
-        key: 'artifact-2',
-        description: '把项目态势总结同时导出为 Word 和 JSON',
-      },
-      {
-        key: 'artifact-3',
-        description: '导出某 finding 的话术包为 Word 文档',
-      },
-    ],
-  },
-]
-
 export default function PhishingPlatform() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [messages, setMessages] = useState<Message[]>([])
   const [isRequesting, setIsRequesting] = useState(false)
-  const [deepThink, setDeepThink] = useState(true)
+  const [autoExpandExecution, setAutoExpandExecution] = useState(false)
   const [activeAgentKey, setActiveAgentKey] = useState<string | null>(null)
   const [slotConfig, setSlotConfig] = useState<typeof AgentInfo[string] | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -440,6 +313,7 @@ export default function PhishingPlatform() {
   const [inputValue, setInputValue] = useState('')
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isNarrowViewport())
+  const [layoutMode, setLayoutMode] = useState<AIHubLayoutMode>('chat')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatListRef = useRef<HTMLDivElement>(null)
   const scrollToTopRef = useRef(false)
@@ -579,7 +453,10 @@ export default function PhishingPlatform() {
   useEffect(() => {
     const media = window.matchMedia('(max-width: 768px)')
     const handleViewportChange = (event: MediaQueryListEvent) => {
-      if (event.matches) setSidebarCollapsed(true)
+      if (event.matches) {
+        setSidebarCollapsed(true)
+        setLayoutMode('chat')
+      }
     }
     media.addEventListener('change', handleViewportChange)
     return () => media.removeEventListener('change', handleViewportChange)
@@ -742,15 +619,19 @@ export default function PhishingPlatform() {
     return { key: file, icon, label }
   })
 
-  // Agent 选择点击
-  const agentItemClick: MenuProps['onClick'] = (item) => {
-    setActiveAgentKey(item.key)
+  const selectAgent = (agentKey: string) => {
+    const config = AgentInfo[agentKey]
+    if (!config) return
+    setActiveAgentKey(agentKey)
     try {
-      setSlotConfig(JSON.parse(JSON.stringify(AgentInfo[item.key])))
+      setSlotConfig(JSON.parse(JSON.stringify(config)))
     } catch (error) {
       console.error(error)
     }
   }
+
+  // Agent 选择点击
+  const agentItemClick: MenuProps['onClick'] = (item) => selectAgent(item.key)
 
   // 文件引用点击
   const fileItemClick: MenuProps['onClick'] = (item) => {
@@ -963,6 +844,26 @@ export default function PhishingPlatform() {
       artifact => artifact.artifact_id !== focusedArtifact.artifact_id,
     )]
     : artifacts
+  const activeConversationTitle = useMemo(
+    () => conversations.find(
+      (conversation) => conversation.conversation_id === activeConversationId,
+    )?.title || '新会话',
+    [activeConversationId, conversations],
+  )
+  const latestExecutionState = useMemo(
+    () => [...messages].reverse().find(
+      (item) => item.role === 'assistant' && item.executionState,
+    )?.executionState,
+    [messages],
+  )
+  const referenceCount = dataRefs.length + artifactRefs.length
+
+  const openArtifactDrawer = () => {
+    setArtifactsOpen(true)
+    const nextScope = activeConversationId ? artifactScope : 'all'
+    setArtifactScope(nextScope)
+    void loadArtifactList(activeConversationId, nextScope)
+  }
 
   // Bubble.List 角色配置
   const roles: BubbleListProps['role'] = {
@@ -1032,7 +933,8 @@ export default function PhishingPlatform() {
         const entityRefs = parseEntityRefs(artifactText)
         
         // 当前消息的展开状态，默认全部展开（执行中）或全部折叠（完成后）
-        const currentExpandedKeys = msg.expandedKeys ?? (msg.status === 'success' ? [] : allKeys)
+        const currentExpandedKeys = msg.expandedKeys
+          ?? (autoExpandExecution && msg.status !== 'success' ? allKeys : [])
         
         // 更新展开状态的处理函数
         const handleExpand = (keys: string[]) => {
@@ -1084,7 +986,7 @@ export default function PhishingPlatform() {
                     const presentation = getArtifactPresentation(artifact)
                     return (
                       <div key={artifact.artifact_id} className="message-artifact-item">
-                        {artifactIcon(artifact)}
+                        <AIHubArtifactIcon artifact={artifact} />
                         <span className="message-artifact-title">{artifact.title}</span>
                         <Tag color={presentation.color}>{presentation.label}</Tag>
                         <Tooltip title="在新问题中引用">
@@ -1097,7 +999,7 @@ export default function PhishingPlatform() {
                         </Tooltip>
                         <Button
                           size="small"
-                          icon={artifactIcon(artifact)}
+                          icon={<AIHubArtifactIcon artifact={artifact} />}
                           onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
                         >
                           下载
@@ -1141,235 +1043,39 @@ export default function PhishingPlatform() {
   return (
     <div className="phishing-platform fade-in">
       <div className="phishing-layout">
-        {!sidebarCollapsed && (
-          <button
-            type="button"
-            className="conversation-sidebar-backdrop"
-            aria-label="关闭对话历史"
-            onClick={() => setSidebarCollapsed(true)}
-          />
-        )}
-        <aside className={`conversation-sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
-          {sidebarCollapsed ? (
-            <div
-              className="conversation-sidebar-rail"
-              onClick={() => setSidebarCollapsed(false)}
-              role="button"
-              title="展开对话历史"
-            >
-              <Tooltip title="新建会话" placement="right">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<PlusOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    handleNewConversation()
-                  }}
-                  disabled={isRequesting}
-                />
-              </Tooltip>
-              <div className="conversation-sidebar-rail-tab">
-                <MenuUnfoldOutlined />
-                <span className="conversation-sidebar-rail-text">对话历史</span>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="conversation-sidebar-header">
-                <span className="conversation-sidebar-title">对话历史</span>
-                <Space size={4}>
-                  <Tooltip title="新建会话">
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<PlusOutlined />}
-                      onClick={handleNewConversation}
-                      disabled={isRequesting}
-                    />
-                  </Tooltip>
-                  <Tooltip title="收起">
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<MenuFoldOutlined />}
-                      onClick={() => setSidebarCollapsed(true)}
-                    />
-                  </Tooltip>
-                </Space>
-              </div>
-              <div className="conversation-list">
-                {convLoading ? (
-                  <div className="conversation-loading"><Spin size="small" /></div>
-                ) : conversations.length === 0 ? (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="暂无会话"
-                    style={{ marginTop: 40 }}
-                  />
-                ) : (
-                  <div>
-                    {conversations.map(conv => (
-                      <div
-                        key={conv.conversation_id}
-                        className={`conversation-item${conv.conversation_id === activeConversationId ? ' active' : ''}`}
-                        onClick={() => selectConversation(conv.conversation_id)}
-                      >
-                        <MessageOutlined className="conversation-item-icon" />
-                        <span className="conversation-item-title">{conv.title || '新会话'}</span>
-                        <Popconfirm
-                          title="删除该会话？"
-                          okText="删除"
-                          cancelText="取消"
-                          onConfirm={(e) => {
-                            e?.stopPropagation()
-                            handleDeleteConversation(conv.conversation_id)
-                          }}
-                          onCancel={(e) => e?.stopPropagation()}
-                        >
-                          <Button
-                            type="text"
-                            size="small"
-                            className="conversation-item-delete"
-                            icon={<DeleteOutlined />}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        </Popconfirm>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </aside>
+        <AIHubConversationRail
+          conversations={conversations}
+          activeConversationId={activeConversationId}
+          loading={convLoading}
+          collapsed={sidebarCollapsed}
+          disabled={isRequesting}
+          onCollapsedChange={setSidebarCollapsed}
+          onNew={handleNewConversation}
+          onSelect={(conversationId) => void selectConversation(conversationId)}
+          onDelete={(conversationId) => void handleDeleteConversation(conversationId)}
+        />
         <div className="chat-container">
-        <div className="chat-toolbar">
-          <Tooltip title="对话历史">
-            <Button
-              className="mobile-history-button"
-              size="small"
-              icon={<HistoryOutlined />}
-              onClick={() => setSidebarCollapsed(false)}
-            />
-          </Tooltip>
-          <Space size={8}>
-            <Tooltip title="查看 Agent、Prompt、工具和查询接口审计">
-              <Button size="small" icon={<ApiOutlined />} onClick={openCapabilities}>
-                能力目录
-              </Button>
-            </Tooltip>
-            <Tooltip title={activeConversationId ? '查看当前会话产物' : '查看全部 AI 产物'}>
-              <Badge count={artifacts.length} size="small" overflowCount={99}>
-                <Button
-                  size="small"
-                  icon={<InboxOutlined />}
-                  onClick={() => {
-                    setArtifactsOpen(true)
-                    const nextScope = activeConversationId ? artifactScope : 'all'
-                    setArtifactScope(nextScope)
-                    loadArtifactList(activeConversationId, nextScope)
-                  }}
-                >
-                  AI 产物
-                </Button>
-              </Badge>
-            </Tooltip>
-          </Space>
-        </div>
+          <AIHubWorkspaceHeader
+            title={activeConversationTitle}
+            requesting={isRequesting}
+            messageCount={messages.length}
+            artifactCount={artifacts.length}
+            referenceCount={referenceCount}
+            skillCount={selectedSkillIds.length}
+            layoutMode={layoutMode}
+            onLayoutModeChange={setLayoutMode}
+            onShowHistory={() => setSidebarCollapsed(false)}
+            onShowCapabilities={() => void openCapabilities()}
+            onShowArtifacts={openArtifactDrawer}
+          />
+          <div className={`ai-hub-workspace-grid mode-${layoutMode}`}>
+            <section className="ai-hub-conversation-pane">
         <div className="chat-list" ref={chatListRef}>
           {messages.length === 0 ? (
-            <Flex vertical className="welcome-container slide-up" gap={24} align="center" justify="center">
-              <Welcome
-                variant="borderless"
-                icon="https://mdn.alipayobjects.com/huamei_iwk9zp/afts/img/A*s5sNRo5LjfQAAAAAAAAAAAAADgCCAQ/fmt.webp"
-                title="AI 中枢"
-                description="综合个人助手：实时查库、路由分发、生成建议与话术，并可导出多格式产物。输入需求后，AI 会自动调用对应专家，并展示可审计的执行进度和阶段输出。"
-                className="scale-in"
-                extra={
-                  <Space>
-                    <Button icon={<ShareAltOutlined />} type="text" className="hover-float">分享</Button>
-                  </Space>
-                }
-              />
-              <Prompts
-                title="✨ 快速开始"
-                items={welcomePrompts}
-                wrap
-                fadeInLeft
-                className="slide-up stagger-1"
-                styles={{
-                  list: { 
-                    justifyContent: 'center', 
-                    maxWidth: 800,
-                    gap: 16,
-                  },
-                  item: {
-                    flex: 'none',
-                    width: 'calc(50% - 8px)',
-                  },
-                }}
-                onItemClick={(info) => {
-                  const description = info.data.description as string
-                  if (description) {
-                    handleSend(description)
-                  }
-                }}
-              />
-              {/* 快捷功能按钮 */}
-              <Flex gap={12} wrap="wrap" justify="center" className="quick-actions slide-up stagger-2">
-                <Button 
-                  icon={<MailOutlined />} 
-                  className="hover-float"
-                  onClick={() => {
-                    setActiveAgentKey('phishing_email')
-                    setSlotConfig(JSON.parse(JSON.stringify(AgentInfo['phishing_email'])))
-                  }}
-                >
-                  钓鱼邮件
-                </Button>
-                <Button 
-                  icon={<GlobalOutlined />}
-                  className="hover-float"
-                  onClick={() => {
-                    setActiveAgentKey('website_clone')
-                    setSlotConfig(JSON.parse(JSON.stringify(AgentInfo['website_clone'])))
-                  }}
-                >
-                  网站克隆
-                </Button>
-                <Button 
-                  icon={<PhoneOutlined />}
-                  className="hover-float"
-                  onClick={() => {
-                    setActiveAgentKey('social_engineering')
-                    setSlotConfig(JSON.parse(JSON.stringify(AgentInfo['social_engineering'])))
-                  }}
-                >
-                  社工话术
-                </Button>
-                <Button 
-                  icon={<SearchOutlined />}
-                  className="hover-float"
-                  onClick={() => {
-                    setActiveAgentKey('deep_search')
-                    setSlotConfig(JSON.parse(JSON.stringify(AgentInfo['deep_search'])))
-                  }}
-                >
-                  深度搜索
-                </Button>
-                <Button 
-                  icon={<CodeOutlined />}
-                  className="hover-float"
-                  onClick={() => {
-                    setActiveAgentKey('ai_code')
-                    setSlotConfig(JSON.parse(JSON.stringify(AgentInfo['ai_code'])))
-                  }}
-                >
-                  代码生成
-                </Button>
-              </Flex>
-            </Flex>
+            <AIHubEmptyState
+              onPrompt={(prompt) => void handleSend(prompt)}
+              onAgent={selectAgent}
+            />
           ) : (
             <>
               <Bubble.List
@@ -1403,7 +1109,7 @@ export default function PhishingPlatform() {
                 <Tag
                   key={`artifact:${artifact.artifact_id}`}
                   color="cyan"
-                  icon={artifactIcon(artifact)}
+                  icon={<AIHubArtifactIcon artifact={artifact} />}
                   closable
                   onClose={() => setArtifactRefs(prev => prev.filter(
                     item => item.artifact_id !== artifact.artifact_id,
@@ -1432,7 +1138,7 @@ export default function PhishingPlatform() {
               }
             } : undefined}
             slotConfig={slotConfig?.slotConfig}
-            placeholder="输入你的需求，AI 将展示完整的思维过程..."
+            placeholder="输入需求，Enter 发送"
             autoSize={{ minRows: 3, maxRows: 6 }}
             className="chat-sender"
             suffix={false}
@@ -1441,18 +1147,18 @@ export default function PhishingPlatform() {
                 <Flex gap="small" align="center">
                   <Button style={IconStyle} type="text" icon={<PaperClipOutlined />} />
                   <Switch
-                    value={deepThink}
+                    value={autoExpandExecution}
                     checkedChildren={
                       <>
-                        深度思考：<span style={SwitchTextStyle}>开启</span>
+                        展开过程：<span style={SwitchTextStyle}>开启</span>
                       </>
                     }
                     unCheckedChildren={
                       <>
-                        深度思考：<span style={SwitchTextStyle}>关闭</span>
+                        展开过程：<span style={SwitchTextStyle}>关闭</span>
                       </>
                     }
-                    onChange={(checked: boolean) => setDeepThink(checked)}
+                    onChange={(checked: boolean) => setAutoExpandExecution(checked)}
                     icon={<ThunderboltOutlined />}
                   />
                   <Dropdown
@@ -1501,6 +1207,21 @@ export default function PhishingPlatform() {
             onCancel={handleCancel}
           />
         </div>
+            </section>
+            {layoutMode === 'split' && (
+              <AIHubWorkspaceInspector
+                executionState={latestExecutionState}
+                artifacts={artifacts}
+                artifactsLoading={artifactsLoading}
+                onReloadArtifacts={() => void loadArtifactList(activeConversationId)}
+                onReferenceArtifact={handleReferenceArtifact}
+                onDownloadArtifact={(artifact) => void handleDownloadArtifact(
+                  artifact.download_url,
+                  artifact.filename,
+                )}
+              />
+            )}
+          </div>
         </div>
       </div>
       <DataReferencePicker
@@ -1630,7 +1351,7 @@ export default function PhishingPlatform() {
               const size = formatArtifactSize(artifact.size)
               return (
                 <div className="artifact-drawer-item" key={artifact.artifact_id}>
-                  <div className="artifact-file-icon">{artifactIcon(artifact)}</div>
+                  <div className="artifact-file-icon"><AIHubArtifactIcon artifact={artifact} /></div>
                   <div className="artifact-drawer-body">
                     <div className="artifact-drawer-title">{artifact.title}</div>
                     <Space className="artifact-drawer-description" size={6} wrap>
@@ -1657,7 +1378,7 @@ export default function PhishingPlatform() {
                     <Tooltip title={`下载 ${presentation.label}`} key="download">
                       <Button
                         type="text"
-                        icon={artifactIcon(artifact)}
+                        icon={<AIHubArtifactIcon artifact={artifact} />}
                         onClick={() => handleDownloadArtifact(artifact.download_url, artifact.filename)}
                       />
                     </Tooltip>
