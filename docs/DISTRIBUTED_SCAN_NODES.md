@@ -270,7 +270,7 @@ Phase 3 会增加仅监听 `127.0.0.1` 的 sidecar（如 sing-box/等价适配�
 
 ### Phase 4：stage 级分布
 
-- 在公司扫描与手机交接 pipeline stage 化后，扩展资源解析、OCR 等能力。
+- 公司扫描与手机采集的本机 Plan、runtime、registry 和 stage contract 已完成；后续按稳定 contract 扩展资源解析、官网页面、OCR 等无状态能力，不迁移 finalizer 和领域写入。
 - 手机 ADB 和公众号应用内发现仍保留在设备所在节点，通过已有设备租约调度；不与通用浏览器节点混为一类。
 
 ## 验收与回滚

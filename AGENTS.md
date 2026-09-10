@@ -124,6 +124,9 @@
 - 数据库访问放在 `api/dao/*` 或专门持久化模块中。除非路由刻意保持极薄且逻辑完全局部，否则不要在 router 直接访问 collection。
 - 新增 MongoDB collection 必须先在 `api/db/collections.py` 声明常量，再在应用启动或 DAO `ensure_indexes` 中幂等初始化索引。
 - 共享领域行为放在 `api/services/*` 或 `core/*`。pipeline、auth、device、observability、browser orchestration、runtime config 不要重复实现。
+- 公司综合扫描的稳定执行链是 `CompanyScanPlan -> CompanyScanRuntime -> CompanyStageRegistry -> CompanySourceStageRegistry/RelatedSourceRegistry -> checkpoint/finalizer`。`CompanyScanPipeline.run_pipeline` 只保留兼容入口和渠道 adapter 注入；新增来源必须实现并注册 Stage，不得在入口、runtime 或 finalizer 中增加渠道名 `if/else`。
+- 手机采集的稳定执行链是 `MobileCollectPlan -> planning -> MobileCollectRuntime -> MobileStageRegistry -> keyword/detail/persist/notify`。runtime 只持有运行实例、超时、停止、检查点、父任务进度和终态投影；导航、平台策略、候选审核、详情交接和证据持久化分别由对应 adapter/stage 负责。新增手机渠道或动作通过 registry/dispatcher 扩展，不得把长业务循环写回 `core/mobile/collect/pipeline.py`。
+- Runtime 只负责生命周期、阶段顺序、资源租约、恢复决策、取消和统一观测，不实现渠道业务；Stage 只消费显式 plan/context 并返回稳定结果，不自行创建第二套任务状态或猜测前序完成状态。跨 Stage 共享字段增加时先更新版本化 contract 和结果 projector，再补 registry/runtime 契约测试。
 - 通知类能力必须走统一通知 Hook/Service，例如 `api.services.notifications.notify_event` 或 `notify_event_background`。业务流程只表达事件、级别、标题和上下文，不直接 import 钉钉、邮件、Webhook 等具体通道。
 - 配置读取和敏感字段处理应通过 `api.services.runtime_config`、`api.dao.config`、配置加密工具或既有配置入口接入，不在业务模块散落解析逻辑。
 - AI 技能、提示词、模型客户端和 AIGC 能力应通过技能/提示词库、runtime service 或模型适配层接入；业务模块不要直接绑定单一模型供应商。

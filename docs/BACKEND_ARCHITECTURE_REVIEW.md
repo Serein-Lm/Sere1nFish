@@ -10,6 +10,8 @@
 
 本轮进一步落地了分布式扫描的 Phase 0/1，而不是把现有大型 pipeline 复制到远端：新增统一执行网关、节点注册与鉴权、持久化工作租约、结果校验、SOCKS5 配置/租约和独立节点 Agent。现有资产发现中的 HTTP 探活与浏览器兜底探活已接入网关；数据库开关默认关闭，配置不可达时也明确保持本机执行，因此原扫描路径和结果契约不变。
 
+本轮同时完成公司综合扫描和手机采集的编排 stage 化。公司扫描现在由版本化 `CompanyScanPlan`、`CompanyScanRuntime`、有序 workflow registry、来源/关联单位 registry、checkpoint repository 和 finalizer 组成；手机采集由版本化 `MobileCollectPlan`、planning、`MobileCollectRuntime`、声明式流式 DAG 以及导航、关键词、详情、持久化 stage 组成。原 public API、任务参数、结果投影和检查点身份保持兼容，旧千行编排体已从默认执行路径删除。
+
 没有发现需要暂停当前扫描任务的 P0 数据损坏问题。后续拆分应保持小步迁移，不能为了目录整洁重写正在工作的采集 pipeline。
 
 ## 当前基线
@@ -31,8 +33,8 @@
 
 | 模块 | 行数 | 主要职责混合 | 优先级 |
 | --- | ---: | --- | --- |
-| `api/services/company_scan_pipeline.py` | 3783 | 公司身份、渠道编排、恢复、通知、汇总 | P1 |
-| `core/mobile/collect/pipeline.py` | 2374 | 导航、候选判断、详情、证据、状态 | P1 |
+| `api/services/company_scan_pipeline.py` | 922 | 兼容 facade 与本机 adapter 薄入口；编排和大型渠道实现已迁入 `company_scan/*` | P2 |
+| `core/mobile/collect/pipeline.py` | 426 | 兼容入口、设备原语注入与 Stage adapter | P2 |
 | `api/services/targets.py` | 2240 | Target 命令、查询、聚合、迁移兼容 | P1 |
 | `api/routers/mobile.py` | 2197 | HTTP、ADB/流控制、设备行为 | P1 |
 | `browser_manager/provider.py` | 1934 | 池、容器、会话、健康和协议 | P2 |
@@ -44,11 +46,9 @@
 
 ## 主要发现
 
-### P1：大型 pipeline 的阶段边界仍是隐式的
+### P1：大型 pipeline 的阶段边界（本轮已完成）
 
-`company_scan_pipeline` 和手机采集 pipeline 已有阶段概念，但较多状态通过大对象和内部函数传递。修改单一渠道时容易触发整条 pipeline 回归。
-
-目标结构：
+`company_scan_pipeline` 和手机采集 pipeline 的执行顺序、恢复、资源租约与结果投影已经从渠道实现中分离。稳定结构为：
 
 ```text
 command/service
@@ -59,7 +59,15 @@ command/service
   -> result projector
 ```
 
-每个 stage 使用带版本的输入/输出 schema，只读取所需状态；恢复逻辑由 runtime 统一决定，stage 不自行猜测前序是否完成。
+已落地边界：
+
+1. `CompanyScanPlan` 和 `MobileCollectPlan` 提供版本化、可校验的执行输入。
+2. 公司 workflow、根来源和关联单位来源分别通过 registry 注册；渠道增加不修改 runtime 顺序分支。
+3. 公司恢复判断与渠道覆盖写入归 `CompanyScanCheckpointRepository`，终态持久化、通知和清理归 terminal stage。
+4. 手机 runtime 持有运行实例、超时、检查点提交、父任务进度和终态投影；流式 stage graph 由 `MobileStageRegistry` 校验后构建。
+5. 手机确定性导航、视觉回退、关键词扫描、详情核验/链接交接、持久化和通知均有独立实现边界。
+
+保留的 `company_scan_pipeline.py` 和手机 `pipeline.py` 是向后兼容 facade 与依赖注入入口，不再拥有跨渠道生命周期。公司资产/URL、XHS、关联单位、学者和画像实现已拆到独立 adapter/stage；后续 P2 只需随触达继续收敛剩余小型兼容 helper，不得改变现有 stage contract，也不再阻塞分布式无状态 capability 的演进。
 
 ### P1：部分 Router 仍直接访问 MongoDB
 
@@ -124,23 +132,25 @@ command/service
 - 前端暴露既有完整扫描参数。
 - 保留运行中任务的持久化语义。
 
-### 阶段 B：公司扫描 stage 化
+### 阶段 B：公司扫描 stage 化（已完成）
 
-1. 抽出 `CompanyScanPlan` 与参数 schema。
-2. 把 identity、assets、website、wechat、scholar、bidding、control 变成注册 stage。
-3. 把渠道检查点读写收敛到 checkpoint repository。
-4. 把汇总和通知移到 finalizer。
-5. 对暂停、恢复、单渠道失败和重复执行建立契约测试。
+1. 已抽出 `CompanyScanPlan`、`CompanyScanContext` 与恢复状态 contract。
+2. identity、assets/website、wechat、scholar、bidding、control 和 XHS 已成为注册 stage。
+3. 根来源与关联单位来源使用独立 registry，并保留核心资源和手机资源并行语义。
+4. 渠道检查点、覆盖状态、恢复兼容判断已收敛到 checkpoint repository。
+5. 汇总、通知、错误语义、移动任务 join 和资源清理已移到 terminal/runtime 层。
+6. 已用既有恢复/编排回归与 registry/runtime 契约测试覆盖顺序、失败、恢复和重复注册。
 
-一次只迁移一个 stage；新旧实现并行时由 registry 配置选择，不在业务代码中写渠道名称分支。
+以后新增来源只实现 Stage 协议并注册；不得在 `run_pipeline` 或 runtime 中增加渠道名称分支。
 
-### 阶段 C：手机采集 runtime 分离
+### 阶段 C：手机采集 runtime 分离（已完成）
 
-1. 导航与确定性动作归 `MobileCommandDispatcher`。
-2. 平台搜索策略归 adapter。
-3. 候选评分、详情审查、链接交接分别成为 stage。
-4. 截图/证据写入统一 evidence service。
-5. 设备租约、ADB 恢复和任务恢复由 runtime 持有。
+1. public 入口只构建 `MobileCollectPlan` 并交给 `MobileCollectRuntime`。
+2. Target/关键词/断点种子解析归 planning，运行态和终态结果归 state projector。
+3. 流式 `collect -> persist -> notify` 图由 registry 声明、校验和构建。
+4. 确定性搜索与视觉 Agent 回退归 navigation runtime；候选、详情和来源交接分别归 keyword/detail stage。
+5. 运行实例停止信号、总时限、关键词检查点、父任务进度、失败判断和终态观测由 runtime 持有。
+6. 设备动作仍通过已有 dispatcher/manager 注入；平台搜索差异仍通过 adapter registry 选择。
 
 ### 阶段 D：Target 命令与读模型
 
@@ -159,10 +169,14 @@ command/service
 4. HTTP/浏览器 probe worker、Docker 节点模板和管理端真实状态页。
 5. 资产发现 HTTP 探活及浏览器兜底通过统一网关按 Project 灰度。
 
-后续迁移顺序仍受阶段 B/C 约束：先稳定 stage schema，再逐项增加 `resource_parse`、`website_page`、`ocr` 等 capability。不能把 `company_scan_pipeline` 或手机主循环整体复制到节点。
+阶段 B/C 的本机 contract 已稳定。后续按 stage 输入输出逐项增加 `resource_parse`、`website_page`、`ocr` 等无状态 capability；仍不能把 company facade、手机主循环或 finalizer 整体复制到节点。
 
 ## 本轮验证
 
+- 公司/手机/公众号/任务服务主回归 `259 passed`；资产、官网文档、招投标、学者、XHS 与流式框架回归 `145 passed`。
+- `test_pipeline_e2e.py` 是依赖运行环境 `app_config/db` fixture 的手工在线脚本，当前仓库未提供这两个 fixture，因此不计入自动化通过数。
+- 公司编排/恢复与新增 runtime contract 回归覆盖 Plan 版本、Stage 顺序、恢复检查点、单渠道重跑和 fail-fast。
+- 手机采集/搜索导航与新增 runtime contract 回归覆盖声明式 DAG、确定性/视觉导航、详情交接、持久化、停止信号和失败清理。
 - `test_distributed_scan.py` 覆盖配置限幅、本机兼容回退、代理 required 约束、代理重试租约复用、最大尝试次数、工作幂等、结果 URL 白名单、HMAC nonce 防重放和节点身份文件权限。
 - 既有 `test_asset_intelligence.py` 全量回归，确认网关接入没有改变本机探活、HTTP/HTTPS 选择和浏览器恢复行为。
 - 使用真实 FastAPI、MongoDB 和 HTTPS 路由完成 `bootstrap -> register -> heartbeat -> lease -> started -> execute -> completed`，并在完成后清理验证数据。

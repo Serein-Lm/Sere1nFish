@@ -1,0 +1,391 @@
+"""Planning and registered stages for related company entities."""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+from api.services.company_scan.checkpoints import CompanyScanCheckpointRepository
+from api.services.company_scan.contracts import CompanyScanContext
+
+
+class RelatedEntityPlanningStage:
+    name = "related_entity_plan"
+
+    async def run(self, ctx: CompanyScanContext) -> None:
+        from api.services.target_scan_profile import (
+            load_project_descendant_scan_entities,
+            select_subsidiary_scan_scope,
+        )
+
+        discovered = list(ctx.result["control_structure"].get("entities") or [])
+        stored = await load_project_descendant_scan_entities(
+            ctx.db,
+            project_id=ctx.plan.project_id,
+            root_target_id=ctx.target_id,
+            max_depth=ctx.plan.control_max_depth,
+        )
+        ctx.wholly_owned_entities = self._merge_entities(discovered, stored)
+        ctx.result["control_structure"].update(
+            entities=ctx.wholly_owned_entities,
+            stored_entities_loaded=len(stored),
+        )
+        channels = self._requested_channels(ctx)
+        scope = {
+            "selected": [],
+            "skipped": [],
+            "requested_channels": channels,
+            "selected_count": 0,
+            "skipped_count": len(ctx.wholly_owned_entities),
+        }
+        if ctx.wholly_owned_entities and channels:
+            scope = await select_subsidiary_scan_scope(
+                ctx.db,
+                project_id=ctx.plan.project_id,
+                entities=ctx.wholly_owned_entities,
+                channels=channels,
+                max_entities=ctx.plan.subsidiary_scan_limit,
+                skip_completed=ctx.plan.skip_completed_subsidiaries,
+            )
+        ctx.subsidiary_scope = scope
+        ctx.result["control_structure"]["scan_policy"].update(
+            selected_count=int(scope.get("selected_count") or 0),
+            skipped_count=int(scope.get("skipped_count") or 0),
+            requested_channels=list(scope.get("requested_channels") or []),
+        )
+        await self._select_child_xhs(ctx)
+
+    @staticmethod
+    def _merge_entities(
+        discovered: list[dict[str, Any]],
+        stored: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        by_target = {
+            str(entity.get("target_id") or ""): entity
+            for entity in stored
+            if str(entity.get("target_id") or "")
+        }
+        for entity in discovered:
+            target_id = str(entity.get("target_id") or "")
+            if not target_id:
+                continue
+            prior = by_target.get(target_id, {})
+            by_target[target_id] = {
+                **prior,
+                **entity,
+                "aliases": list(entity.get("aliases") or prior.get("aliases") or []),
+                "scan_profile": dict(
+                    entity.get("scan_profile") or prior.get("scan_profile") or {}
+                ),
+            }
+        return sorted(
+            by_target.values(),
+            key=lambda item: (
+                int(item.get("relation_depth") or 1),
+                str(item.get("name") or "").casefold(),
+            ),
+        )
+
+    @staticmethod
+    def _requested_channels(ctx: CompanyScanContext) -> list[str]:
+        plan = ctx.plan
+        return [
+            *(["website"] if plan.enable_asset_discovery or plan.enable_url_scan else []),
+            *(["xhs"] if plan.subsidiary_xhs_enabled else []),
+            *(["bidding"] if plan.subsidiary_bidding_enabled else []),
+            *(["scholar"] if plan.enable_scholar else []),
+        ]
+
+    async def _select_child_xhs(self, ctx: CompanyScanContext) -> None:
+        entities = list(ctx.subsidiary_scope.get("selected") or [])
+        if not entities or not ctx.plan.subsidiary_xhs_enabled or ctx.xhs_selector is None:
+            return
+        from api.services.xhs_target_selection import (
+            XhsTargetCandidate,
+            merge_xhs_target_selection_results,
+        )
+
+        candidates = [
+            XhsTargetCandidate(
+                target_id=str(entity.get("target_id") or ""),
+                target_name=str(entity.get("name") or "").strip(),
+                aliases=ctx.owner._dedupe_text(
+                    [
+                        str(entity.get("name") or ""),
+                        *[str(item) for item in entity.get("aliases") or []],
+                    ]
+                ),
+                root_domain=str(entity.get("root_domain") or ""),
+                context={
+                    "registration_status": str(entity.get("registration_status") or ""),
+                    "icp_domains": list(entity.get("icp_domains") or []),
+                    "relation_type": "wholly_owned_direct_investment",
+                    "relation_depth": int(entity.get("relation_depth") or 1),
+                    "parent_target_name": str(
+                        entity.get("parent_target_name") or ctx.normalized_name
+                    ),
+                },
+            )
+            for entity in entities
+            if str(entity.get("target_id") or "")
+            and str(entity.get("name") or "").strip()
+        ]
+        selection = await ctx.xhs_selector.select(
+            candidates,
+            project_id=ctx.plan.project_id,
+            task_id=ctx.plan.task_id,
+        )
+        ctx.xhs_selection_result = (
+            merge_xhs_target_selection_results(ctx.xhs_selection_result, selection)
+            if ctx.xhs_selection_result is not None
+            else selection
+        )
+        ctx.result["xhs"]["selection"] = ctx.xhs_selection_result.model_dump(
+            mode="json"
+        )
+        ctx.child_xhs_decisions = {
+            item.target_id: item.model_dump(mode="json")
+            for item in selection.decisions
+        }
+
+
+class RelatedSourceStage(ABC):
+    name: str = ""
+
+    @abstractmethod
+    def enabled(self, ctx: CompanyScanContext) -> bool:
+        ...
+
+    @abstractmethod
+    async def run(self, ctx: CompanyScanContext) -> dict[str, Any]:
+        ...
+
+
+class WhollyOwnedCollectionStage(RelatedSourceStage):
+    name = "wholly_owned_entities"
+
+    def enabled(self, ctx: CompanyScanContext) -> bool:
+        if self.name in ctx.recovery.checkpoint_results:
+            return True
+        selected = list(ctx.subsidiary_scope.get("selected") or [])
+        selected_xhs = any(
+            item.get("should_collect_xhs")
+            for item in ctx.child_xhs_decisions.values()
+        )
+        plan = ctx.plan
+        return bool(
+            selected
+            and (
+                plan.enable_asset_discovery
+                or plan.enable_url_scan
+                or selected_xhs
+                or plan.subsidiary_bidding_enabled
+            )
+        )
+
+    async def run(self, ctx: CompanyScanContext) -> dict[str, Any]:
+        checkpoint = ctx.recovery.checkpoint_results.get(self.name)
+        if checkpoint is not None:
+            return dict(checkpoint)
+        plan = ctx.plan
+        return await ctx.owner._scan_wholly_owned_entities(
+            task_id=plan.task_id,
+            project_id=plan.project_id,
+            entities=list(ctx.subsidiary_scope.get("selected") or []),
+            enable_asset_discovery=plan.enable_asset_discovery,
+            enable_url_scan=plan.enable_url_scan,
+            enable_copywriting=plan.enable_copywriting,
+            enable_xhs=plan.subsidiary_xhs_enabled,
+            xhs_max_notes=plan.xhs_max_notes,
+            xhs_attention_threshold=plan.xhs_attention_threshold,
+            min_attention_score=plan.min_attention_score,
+            profile_copywriting_threshold=plan.profile_copywriting_threshold,
+            fofa_size=plan.fofa_size,
+            hunter_size=plan.hunter_size,
+            asset_probe_concurrency=plan.asset_probe_concurrency,
+            incremental_scan=plan.incremental_scan,
+            url_probe_concurrency=plan.url_probe_concurrency,
+            url_scan_concurrency=plan.url_scan_concurrency,
+            copywriting_concurrency=plan.copywriting_concurrency,
+            xhs_search_concurrency=plan.xhs_search_concurrency,
+            entity_concurrency=plan.control_scan_concurrency,
+            enable_bidding=plan.subsidiary_bidding_enabled,
+            bidding_page_size=plan.bidding_page_size,
+            bidding_max_records=plan.bidding_max_records,
+            bidding_lookback_days=plan.bidding_lookback_days,
+            xhs_decisions=ctx.child_xhs_decisions,
+            website_collection_mode=plan.website_collection_mode,
+        )
+
+
+class RelatedScholarStage(RelatedSourceStage):
+    name = "scholar_entities"
+
+    def enabled(self, ctx: CompanyScanContext) -> bool:
+        if self.name in ctx.recovery.checkpoint_results:
+            return True
+        return bool(
+            ctx.plan.enable_scholar
+            and any(
+                "scholar" in (entity.get("scan_channels") or [])
+                for entity in ctx.subsidiary_scope.get("selected") or []
+            )
+        )
+
+    async def run(self, ctx: CompanyScanContext) -> dict[str, Any]:
+        checkpoint = ctx.recovery.checkpoint_results.get(self.name)
+        if checkpoint is not None:
+            return dict(checkpoint)
+        entities = [
+            entity
+            for entity in ctx.subsidiary_scope.get("selected") or []
+            if "scholar" in (entity.get("scan_channels") or [])
+        ]
+        return await ctx.owner._scan_scholar_entities(
+            task_id=ctx.plan.task_id,
+            project_id=ctx.plan.project_id,
+            entities=entities,
+            manual_direction=ctx.plan.scholar_direction,
+            limit=ctx.plan.scholar_limit,
+            entity_concurrency=ctx.plan.control_scan_concurrency,
+        )
+
+
+class RelatedSourceRegistry:
+    def __init__(self) -> None:
+        self._stages: dict[str, RelatedSourceStage] = {}
+
+    def register(self, stage: RelatedSourceStage) -> "RelatedSourceRegistry":
+        if not stage.name or stage.name in self._stages:
+            raise ValueError(f"关联单位 Stage 重复或为空: {stage.name}")
+        self._stages[stage.name] = stage
+        return self
+
+    def active(self, ctx: CompanyScanContext) -> list[RelatedSourceStage]:
+        return [stage for stage in self._stages.values() if stage.enabled(ctx)]
+
+    @classmethod
+    def default(cls) -> "RelatedSourceRegistry":
+        return (
+            cls()
+            .register(WhollyOwnedCollectionStage())
+            .register(RelatedScholarStage())
+        )
+
+
+class RelatedSourceRuntimeStage:
+    name = "related_sources"
+
+    def __init__(
+        self,
+        registry: RelatedSourceRegistry,
+        checkpoints: CompanyScanCheckpointRepository,
+    ) -> None:
+        self.registry = registry
+        self.checkpoints = checkpoints
+
+    async def run(self, ctx: CompanyScanContext) -> None:
+        stages = self.registry.active(ctx)
+        if not stages:
+            return
+        await ctx.owner._update_progress(
+            ctx.plan.task_id,
+            "waiting_core",
+            "等待资源采集全资关联单位...",
+        )
+        await ctx.core_lease.acquire()
+        try:
+            await ctx.owner._update_progress(
+                ctx.plan.task_id,
+                "followup_collection",
+                "采集全资关联单位...",
+            )
+            jobs = [(stage.name, stage.run(ctx)) for stage in stages]
+            outcomes = await ctx.owner._gather_named_jobs(
+                jobs,
+                on_completed=lambda kind, outcome: self.checkpoints.record(
+                    ctx, kind, outcome
+                ),
+            )
+            for (kind, _operation), outcome in zip(jobs, outcomes):
+                if isinstance(outcome, BaseException):
+                    ctx.result["sub_errors"].append(f"{kind}: {outcome}")
+                    raise outcome
+                self._apply(ctx, kind, outcome)
+        finally:
+            ctx.core_lease.release()
+
+    @staticmethod
+    def _apply(ctx: CompanyScanContext, kind: str, outcome: dict[str, Any]) -> None:
+        if kind == "wholly_owned_entities":
+            _apply_wholly_owned_result(ctx, outcome)
+        elif kind == "scholar_entities":
+            _apply_related_scholar_result(ctx, outcome)
+
+
+def _apply_wholly_owned_result(
+    ctx: CompanyScanContext,
+    outcome: dict[str, Any],
+) -> None:
+    scanned = {
+        str(item.get("target_id") or ""): item
+        for item in outcome.get("entities") or []
+    }
+    skipped = {
+        str(item.get("target_id") or ""): item
+        for item in ctx.subsidiary_scope.get("skipped") or []
+    }
+    merged: list[dict[str, Any]] = []
+    for entity in ctx.wholly_owned_entities:
+        target_id = str(entity.get("target_id") or "")
+        if target_id in scanned:
+            merged.append(scanned[target_id])
+            continue
+        skipped_entity = skipped.get(target_id) or {}
+        merged.append(
+            {
+                **entity,
+                "scan": {
+                    "status": "skipped",
+                    "reason": str(skipped_entity.get("skip_reason") or "not_selected"),
+                    "coverage": dict(skipped_entity.get("scan_coverage") or {}),
+                },
+            }
+        )
+    ctx.result["control_structure"].update(
+        entities=merged,
+        scan_summary=outcome["summary"],
+    )
+    ctx.result["control_structure"]["errors"].extend(outcome["errors"])
+    ctx.result["profile_copywritings"]["count"] = int(
+        outcome["summary"].get("profile_copywritings") or 0
+    )
+
+
+def _apply_related_scholar_result(
+    ctx: CompanyScanContext,
+    outcome: dict[str, Any],
+) -> None:
+    summary = dict(outcome.get("summary") or {})
+    scholar = ctx.result["scholar"]
+    scholar.update(
+        descendant_status=outcome.get("status") or "completed",
+        descendant_entities_total=int(summary.get("entities") or 0),
+        descendant_entities_completed=int(summary.get("completed") or 0),
+        descendant_articles_total=int(summary.get("articles_total") or 0),
+        descendant_verified_articles_total=int(
+            summary.get("verified_articles_total") or 0
+        ),
+        descendant_contacts_total=int(summary.get("contacts_total") or 0),
+        related_entities=list(outcome.get("entities") or []),
+    )
+    for field in (
+        "articles_total",
+        "verified_articles_total",
+        "unverified_articles_total",
+        "contacts_total",
+        "corresponding_count",
+    ):
+        scholar[field] = int(scholar.get(field) or 0) + int(summary.get(field) or 0)
+    ctx.result["sub_errors"].extend(
+        str(error) for error in outcome.get("errors") or []
+    )
