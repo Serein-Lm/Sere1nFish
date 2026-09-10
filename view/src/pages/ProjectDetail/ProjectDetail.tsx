@@ -788,6 +788,7 @@ export default function ProjectDetail() {
   const [wechatOnlyIncremental, setWechatOnlyIncremental] = useState(false)
   const [projectTargets, setProjectTargets] = useState<ProjectTargetSummary[]>([])
   const [projectTargetOptions, setProjectTargetOptions] = useState<ProjectTargetOption[]>([])
+  const [projectTargetOptionsLoading, setProjectTargetOptionsLoading] = useState(false)
   const [targetBatchOptions, setTargetBatchOptions] = useState<ProjectTargetBatchOption[]>([])
   const [targetBranches, setTargetBranches] = useState<Record<string, ProjectTargetSummary[]>>({})
   const [targetBranchLoading, setTargetBranchLoading] = useState<Record<string, boolean>>({})
@@ -814,6 +815,9 @@ export default function ProjectDetail() {
   })
   const targetTreeRestoreRef = useRef<TargetTreeViewState | null>(null)
   const targetOptionsRequestRef = useRef(0)
+  const targetOptionsLoadedRef = useRef(false)
+  const targetOptionsPromiseRef = useRef<Promise<void> | null>(null)
+  const targetBatchOptionsRequestRef = useRef(0)
   const targetSummaryRequestRef = useRef<Record<string, number>>({})
   const targetSummaryPendingRef = useRef<Set<string>>(new Set())
   const [targetSummaryLoading, setTargetSummaryLoading] = useState(false)
@@ -986,19 +990,48 @@ export default function ProjectDetail() {
     }
   }
 
-  const fetchProjectTargetOptions = async (pid: string) => {
+  const fetchProjectTargetOptions = async (pid: string, force = false) => {
+    if (!force && targetOptionsLoadedRef.current) return
+    if (!force && targetOptionsPromiseRef.current) {
+      await targetOptionsPromiseRef.current
+      return
+    }
     const requestId = ++targetOptionsRequestRef.current
+    setProjectTargetOptionsLoading(true)
+    const request = (async () => {
+      try {
+        const result = await listProjectTargetOptions(pid)
+        if (requestId === targetOptionsRequestRef.current) {
+          setProjectTargetOptions(result.items)
+          targetOptionsLoadedRef.current = true
+        }
+      } catch (error) {
+        console.error('加载项目 Target 索引失败:', error)
+      } finally {
+        if (requestId === targetOptionsRequestRef.current) {
+          setProjectTargetOptionsLoading(false)
+        }
+      }
+    })()
+    targetOptionsPromiseRef.current = request
     try {
-      const [result, batches] = await Promise.all([
-        listProjectTargetOptions(pid),
-        listProjectTargetBatches(pid),
-      ])
-      if (requestId === targetOptionsRequestRef.current) {
-        setProjectTargetOptions(result.items)
+      await request
+    } finally {
+      if (targetOptionsPromiseRef.current === request) {
+        targetOptionsPromiseRef.current = null
+      }
+    }
+  }
+
+  const fetchTargetBatchOptions = async (pid: string) => {
+    const requestId = ++targetBatchOptionsRequestRef.current
+    try {
+      const batches = await listProjectTargetBatches(pid)
+      if (requestId === targetBatchOptionsRequestRef.current) {
         setTargetBatchOptions(batches.items)
       }
     } catch (error) {
-      console.error('加载项目 Target 索引失败:', error)
+      console.error('加载 Target 批次失败:', error)
     }
   }
 
@@ -1404,6 +1437,7 @@ export default function ProjectDetail() {
       setWebsitePageSize(10)
       setProjectTargets([])
       setProjectTargetOptions([])
+      setProjectTargetOptionsLoading(false)
       setTargetBatchOptions([])
       setTargetBranches({})
       setTargetBranchLoading({})
@@ -1429,6 +1463,9 @@ export default function ProjectDetail() {
       targetTreeRestoreRef.current = null
       targetRequestRef.current += 1
       targetOptionsRequestRef.current += 1
+      targetOptionsLoadedRef.current = false
+      targetOptionsPromiseRef.current = null
+      targetBatchOptionsRequestRef.current += 1
       targetSummaryRequestRef.current = {}
       targetSummaryPendingRef.current = new Set()
       setTargetSummaryLoading(false)
@@ -1436,10 +1473,7 @@ export default function ProjectDetail() {
         const data = await getProject(projectId)
         if (!cancelled) {
           setProject(data)
-          void Promise.all([
-            fetchProjectTargetOptions(projectId),
-            fetchDashboard(projectId),
-          ])
+          void fetchTargetBatchOptions(projectId)
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : '加载失败'
@@ -1453,6 +1487,7 @@ export default function ProjectDetail() {
           setWebsitePageSize(10)
           setProjectTargets([])
           setProjectTargetOptions([])
+          setProjectTargetOptionsLoading(false)
           setTargetBatchOptions([])
           setTargetBranches({})
           setTargetBranchLoading({})
@@ -1530,10 +1565,14 @@ export default function ProjectDetail() {
           }
           break
         case 'website':
-          await fetchRecords(projectId, 1, websitePageSize, websiteTargetId)
+          await Promise.all([
+            fetchProjectTargetOptions(projectId),
+            fetchRecords(projectId, 1, websitePageSize, websiteTargetId),
+          ])
           break
         case 'xiaohongshu':
           await Promise.all([
+            fetchProjectTargetOptions(projectId),
             fetchXhsNotes(projectId, 1, 10, xhsTargetId),
             fetchXhsProfiles(projectId, 1, 10, xhsTargetId),
           ])
@@ -1546,21 +1585,33 @@ export default function ProjectDetail() {
           ])
           break
         case 'wechat':
-          await fetchWechatRecords(projectId, wechatOnlyIncremental, wechatTargetId)
+          await Promise.all([
+            fetchProjectTargetOptions(projectId),
+            fetchWechatRecords(projectId, wechatOnlyIncremental, wechatTargetId),
+          ])
           break
         case 'bidding':
-          await fetchBiddingRecords(projectId, 1, biddingPageSize, biddingTargetId)
+          await Promise.all([
+            fetchProjectTargetOptions(projectId),
+            fetchBiddingRecords(projectId, 1, biddingPageSize, biddingTargetId),
+          ])
           break
         case 'mobile':
-          await fetchMobileArtifacts(projectId)
+          await Promise.all([
+            fetchProjectTargetOptions(projectId),
+            fetchMobileArtifacts(projectId),
+          ])
           break
         case 'scholars':
-          await fetchScholarContacts(
-            projectId,
-            scholarOnlyCorresponding,
-            scholarOnlyVerified,
-            scholarTargetId,
-          )
+          await Promise.all([
+            fetchProjectTargetOptions(projectId),
+            fetchScholarContacts(
+              projectId,
+              scholarOnlyCorresponding,
+              scholarOnlyVerified,
+              scholarTargetId,
+            ),
+          ])
           break
         case 'tasks':
           await fetchTasks(projectId)
@@ -1588,6 +1639,7 @@ export default function ProjectDetail() {
       const [configResult, poolResult] = await Promise.allSettled([
         getConfigSection('collection_runtime'),
         getPool(),
+        projectId ? fetchProjectTargetOptions(projectId) : Promise.resolve(),
       ])
       if (configResult.status === 'fulfilled') {
         const { config } = configResult.value
@@ -2872,6 +2924,7 @@ export default function ProjectDetail() {
           <Text type="secondary">按项目 Target 查看对应网站扫描结果</Text>
           <Select
             value={websiteTargetId}
+            loading={projectTargetOptionsLoading}
             showSearch
             optionFilterProp="label"
             prefix={<FilterOutlined />}
@@ -3001,6 +3054,7 @@ export default function ProjectDetail() {
         <div className="xhs-content-header" style={{ gap: 8, flexWrap: 'wrap' }}>
           <Select
             value={xhsTargetId}
+            loading={projectTargetOptionsLoading}
             placeholder="选择 Target"
             showSearch
             optionFilterProp="label"
@@ -3547,6 +3601,7 @@ export default function ProjectDetail() {
           <Space>
             <Select
               value={wechatTargetId}
+              loading={projectTargetOptionsLoading}
               showSearch
               optionFilterProp="label"
               placeholder="选择 Target"
@@ -3706,6 +3761,7 @@ export default function ProjectDetail() {
           <Space wrap>
             <Select
               value={scholarTargetId}
+              loading={projectTargetOptionsLoading}
               showSearch
               optionFilterProp="label"
               placeholder="选择 Target"
@@ -3891,6 +3947,7 @@ export default function ProjectDetail() {
           <Space wrap>
             <Select
               value={biddingTargetId}
+              loading={projectTargetOptionsLoading}
               showSearch
               optionFilterProp="label"
               placeholder="选择 Target"
@@ -4249,6 +4306,7 @@ export default function ProjectDetail() {
     blurFocusedTabPaneElement()
     applyTargetScope(targetId)
     void syncProjectTargetSummary(projectId, targetId)
+    void fetchProjectTargetOptions(projectId)
     loadedTabsRef.current.add(tab)
     setActiveTab(tab)
     if (tab === 'website') {
@@ -4977,7 +5035,8 @@ export default function ProjectDetail() {
                     targetSearchQuery,
                     targetBatchTag,
                   )
-                  void fetchProjectTargetOptions(projectId)
+                  void fetchProjectTargetOptions(projectId, true)
+                  void fetchTargetBatchOptions(projectId)
                 }
               }}
             >
@@ -5055,7 +5114,7 @@ export default function ProjectDetail() {
           <Tag>{targetBatchTag ? `${projectTargetTotal}/${allProjectTargetTotal}` : projectTargetTotal}</Tag>
         </Space>
       ),
-      children: renderTargetDashboard(),
+      children: activeTab === 'targets' ? renderTargetDashboard() : null,
     },
     ...(selectedTarget ? [
     {
@@ -5066,7 +5125,7 @@ export default function ProjectDetail() {
           概览
         </Space>
       ),
-      children: renderTargetOverview(),
+      children: activeTab === 'target' ? renderTargetOverview() : null,
     },
     {
       key: 'website' as TabKey,
@@ -5077,7 +5136,7 @@ export default function ProjectDetail() {
           <Tag>{loadedTabsRef.current.has('website') ? taggingTotal : selectedTarget.website_count}</Tag>
         </Space>
       ),
-      children: renderWebsiteContent(),
+      children: activeTab === 'website' ? renderWebsiteContent() : null,
     },
     {
       key: 'xiaohongshu' as TabKey,
@@ -5088,7 +5147,7 @@ export default function ProjectDetail() {
           <Tag>{selectedTarget.xhs_count}</Tag>
         </Space>
       ),
-      children: renderXiaohongshuContent(),
+      children: activeTab === 'xiaohongshu' ? renderXiaohongshuContent() : null,
     },
     ...(SHOW_DOUYIN_TAB ? [{
       key: 'douyin' as TabKey,
@@ -5098,7 +5157,7 @@ export default function ProjectDetail() {
           抖音
         </Space>
       ),
-      children: renderDouyinContent(),
+      children: activeTab === 'douyin' ? renderDouyinContent() : null,
     }] : []),
     {
       key: 'wechat' as TabKey,
@@ -5109,7 +5168,7 @@ export default function ProjectDetail() {
           <Tag>{loadedTabsRef.current.has('wechat') ? wechatRecordsTotal : selectedTarget.wechat_count}</Tag>
         </Space>
       ),
-      children: renderWechatContent(),
+      children: activeTab === 'wechat' ? renderWechatContent() : null,
     },
     {
       key: 'bidding' as TabKey,
@@ -5120,7 +5179,7 @@ export default function ProjectDetail() {
           <Tag>{loadedTabsRef.current.has('bidding') ? biddingRecordsTotal : selectedTarget.bidding_count}</Tag>
         </Space>
       ),
-      children: renderBiddingContent(),
+      children: activeTab === 'bidding' ? renderBiddingContent() : null,
     },
     ...(SHOW_MOBILE_OPERATIONS_TAB ? [{
       key: 'mobile' as TabKey,
@@ -5130,7 +5189,7 @@ export default function ProjectDetail() {
           手机操作
         </Space>
       ),
-      children: renderMobileContent(),
+      children: activeTab === 'mobile' ? renderMobileContent() : null,
     }] : []),
     {
       key: 'scholars' as TabKey,
@@ -5141,7 +5200,7 @@ export default function ProjectDetail() {
           <Tag>{loadedTabsRef.current.has('scholars') ? scholarContactsTotal : selectedTarget.scholar_contact_count}</Tag>
         </Space>
       ),
-      children: renderScholarsContent(),
+      children: activeTab === 'scholars' ? renderScholarsContent() : null,
     },
     ] : []),
     {
@@ -5153,7 +5212,7 @@ export default function ProjectDetail() {
           <Tag>{loadedTabsRef.current.has('tasks') ? tasksTotal : (dashboardData?.tasks.total ?? tasks.length)}</Tag>
         </Space>
       ),
-      children: (
+      children: activeTab === 'tasks' ? (
         <>
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12, gap: 8 }}>
             <Button
@@ -5382,7 +5441,7 @@ export default function ProjectDetail() {
           ]}
         />
         </>
-      ),
+      ) : null,
     },
     {
       key: 'stats' as TabKey,
@@ -5392,7 +5451,7 @@ export default function ProjectDetail() {
           统计
         </Space>
       ),
-      children: projectStatsLoading ? <Skeleton active /> : !projectStats ? <Empty description="暂无统计数据" /> : (
+      children: activeTab !== 'stats' ? null : projectStatsLoading ? <Skeleton active /> : !projectStats ? <Empty description="暂无统计数据" /> : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* 总览 — 全部字段 */}
           <Row gutter={16}>
@@ -5717,6 +5776,7 @@ export default function ProjectDetail() {
                 >
                   <Select
                     showSearch
+                    loading={projectTargetOptionsLoading}
                     optionFilterProp="label"
                     placeholder={projectTargetOptions.length ? '选择要补采小红书的公司' : '当前项目暂无可选目标'}
                     options={projectTargetOptions.map((target) => ({
@@ -6318,6 +6378,7 @@ export default function ProjectDetail() {
                         >
                           <Select
                             showSearch
+                            loading={projectTargetOptionsLoading}
                             optionFilterProp="label"
                             placeholder={projectTargetOptions.length ? '选择要补采的公司' : '当前项目暂无可选目标'}
                             options={projectTargetOptions.map((target) => ({
