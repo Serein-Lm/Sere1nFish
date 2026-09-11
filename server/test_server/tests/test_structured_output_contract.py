@@ -7,7 +7,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from Sere1nGraph.graph.agents.runtime import GuardedChatOpenAI
 
@@ -15,6 +15,10 @@ from Sere1nGraph.graph.agents.runtime import GuardedChatOpenAI
 class ResearchPlan(BaseModel):
     strategy: str
     missions: list[str]
+
+
+class BoundedPlan(BaseModel):
+    persona_count: int = Field(ge=1, le=8)
 
 
 @pytest.mark.parametrize("input_kind", ["text", "messages", "prompt"])
@@ -120,3 +124,79 @@ def test_schemaless_json_mode_keeps_existing_input(monkeypatch):
     monkeypatch.setattr(ChatOpenAI, "with_structured_output", lambda *a, **kw: RunnableLambda(lambda x: x))
     model = GuardedChatOpenAI(model="test", api_key="test")
     assert model.with_structured_output(method="json_mode").invoke("json please") == "json please"
+
+
+@pytest.mark.parametrize("async_call", [False, True])
+@pytest.mark.asyncio
+async def test_invalid_count_is_corrected_once_with_field_feedback(monkeypatch, async_call):
+    calls = []
+
+    def generate(_self, messages, **kwargs):
+        calls.append(messages)
+        count = 12 if len(calls) == 1 else 6
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(
+            content=json.dumps({"persona_count": count}),
+            additional_kwargs={"parsed": {"persona_count": count}},
+        ))])
+
+    async def agenerate(*args, **kwargs):
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(ChatOpenAI, "_generate", generate)
+    monkeypatch.setattr(ChatOpenAI, "_agenerate", agenerate)
+    model = GuardedChatOpenAI(model="test", api_key="test")
+    structured = model.with_structured_output(BoundedPlan)
+    result = await structured.ainvoke("计划") if async_call else structured.invoke("计划")
+    assert result.persona_count == 6
+    assert len(calls) == 2
+    assert "persona_count" in calls[1][0].content
+    assert "less than or equal to 8" in calls[1][0].content
+    assert calls[0][-1].content == calls[1][-1].content == "计划"
+
+
+def test_validation_retry_is_bounded_and_does_not_retry_transport_errors(monkeypatch):
+    calls = 0
+    failure = "validation"
+
+    def generate(_self, messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        if failure == "transport":
+            raise RuntimeError("connection unavailable")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(
+            content='{"persona_count":12}', additional_kwargs={"parsed": {"persona_count": 12}},
+        ))])
+
+    monkeypatch.setattr(ChatOpenAI, "_generate", generate)
+    model = GuardedChatOpenAI(model="test", api_key="test")
+    structured = model.with_structured_output(BoundedPlan)
+    with pytest.raises(ValidationError):
+        structured.invoke("计划")
+    assert calls == 2
+    calls, failure = 0, "transport"
+    with pytest.raises(RuntimeError, match="connection unavailable"):
+        structured.invoke("计划")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_streaming_remains_streamed_and_closes_on_cancel(monkeypatch):
+    from langchain_core.runnables import RunnableGenerator
+
+    closed = []
+
+    async def stream(inputs):
+        async for messages in inputs:
+            assert '"required"' in messages[0].content
+            try:
+                yield {"persona_count": 1}
+                yield {"persona_count": 6}
+            finally:
+                closed.append(True)
+
+    monkeypatch.setattr(ChatOpenAI, "with_structured_output", lambda *a, **kw: RunnableGenerator(stream))
+    model = GuardedChatOpenAI(model="test", api_key="test")
+    stream = model.with_structured_output(BoundedPlan).astream("计划")
+    assert await anext(stream) == {"persona_count": 1}
+    await stream.aclose()
+    assert closed == [True]
