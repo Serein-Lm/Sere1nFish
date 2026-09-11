@@ -337,17 +337,17 @@ class Pipeline:
             return
         put_task = asyncio.create_task(queue.put(item))
         fatal_task = asyncio.create_task(self._fatal_event.wait())
-        done, pending = await asyncio.wait(
-            {put_task, fatal_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            done, _pending = await asyncio.wait(
+                {put_task, fatal_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (put_task, fatal_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(put_task, fatal_task, return_exceptions=True)
         if fatal_task in done and self._fatal_event.is_set():
-            if not put_task.done():
-                put_task.cancel()
-                await asyncio.gather(put_task, return_exceptions=True)
             self._raise_fatal_error()
         await put_task
         self._raise_fatal_error()

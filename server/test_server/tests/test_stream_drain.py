@@ -58,3 +58,28 @@ async def test_drain_rejects_undeclared_downstream():
 
     pipeline = Pipeline().add(Producer())
     await pipeline.run(seeds=[1], entry="producer")
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_backpressured_cleans_queue_put_and_fatal_waiters():
+    entered = asyncio.Event()
+    baseline = asyncio.all_tasks()
+
+    class Blocking(Stage):
+        name = "blocking"
+        concurrency = 1
+        queue_maxsize = 1
+
+        async def handle(self, item, ctx):
+            entered.set()
+            await asyncio.Event().wait()
+
+    pipeline = Pipeline().add(Blocking())
+    running = asyncio.create_task(pipeline.run(seeds=range(100), entry="blocking"))
+    await asyncio.wait_for(entered.wait(), 1)
+    await asyncio.sleep(0.01)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    await asyncio.sleep(0)
+    assert not (asyncio.all_tasks() - baseline)
