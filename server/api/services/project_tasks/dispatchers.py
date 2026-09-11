@@ -275,7 +275,7 @@ async def dispatch_target_research(
         task_id=task_id,
         project_id=project_id,
         target_id=str(params.get("target_id") or ""),
-        max_related_targets=int(params.get("max_related_targets") or 8),
+        max_related_targets=int(params.get("max_related_targets", 8)),
         scan_discovered_targets=bool(params.get("scan_discovered_targets", True)),
         rescan_root=bool(params.get("rescan_root", False)),
         force_refresh=bool(params.get("force_refresh", True)),

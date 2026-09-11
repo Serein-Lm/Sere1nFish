@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from api.services.target_research import (
     _build_navigation_evidence_observer,
+    _build_research_repair_context,
     _bounded_related_target_limit,
     _candidate_scan_params,
     _eligible_related_targets,
@@ -26,6 +27,66 @@ from api.services.target_research import (
     _with_target_identity_default,
     run_target_research,
 )
+
+
+def test_target_research_repair_context_contains_bounded_browser_evidence() -> None:
+    context = _build_research_repair_context(
+        [
+            "https://official.example.cn/about",
+            "https://government.example.cn/unit",
+        ],
+        {
+            "https://official.example.cn/about": {
+                "title": "机构官网",
+                "text": "开头事实 " + ("业务信息 " * 500) + "页尾联系方式",
+            },
+            "https://government.example.cn/unit": {
+                "title": "政府公开信息",
+                "text": "主管单位确认该机构身份",
+            },
+        },
+    )
+
+    assert "https://official.example.cn/about" in context
+    assert "https://government.example.cn/unit" in context
+    assert "开头事实" in context
+    assert "页尾联系方式" in context
+    assert len(context) <= 11_500
+
+
+@pytest.mark.asyncio
+async def test_target_research_dispatch_preserves_zero_expansion_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import target_research as research_service
+    from api.services import runtime_config
+    from api.services.project_tasks import dispatchers
+
+    captured: dict = {}
+
+    async def get_runtime_app_config():
+        return SimpleNamespace()
+
+    async def run_research(_db, _config, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(dispatchers, "get_db", lambda: object())
+    monkeypatch.setattr(runtime_config, "get_runtime_app_config", get_runtime_app_config)
+    monkeypatch.setattr(research_service, "run_target_research", run_research)
+
+    result = await dispatchers.dispatch_target_research(
+        "task-1",
+        "project-1",
+        {
+            "target_id": "target-1",
+            "max_related_targets": 0,
+            "scan_discovered_targets": False,
+        },
+    )
+
+    assert result == {"ok": True}
+    assert captured["max_related_targets"] == 0
 
 
 def test_related_target_scan_disables_costly_mobile_and_bidding_by_default() -> None:

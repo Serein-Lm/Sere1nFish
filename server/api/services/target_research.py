@@ -708,6 +708,32 @@ def _build_navigation_evidence_observer(
     return observe
 
 
+def _build_research_repair_context(
+    urls: list[str],
+    browser_pages: dict[str, dict[str, str]],
+) -> str:
+    """Build a bounded evidence ledger for schema repair without another browse."""
+    sections = [
+        "以下正文由本轮浏览器实际打开并读取。只能使用这些页面中的事实；"
+        "sources 必须逐项使用对应 URL，搜索结果页不得作为来源。"
+    ]
+    for url in urls[:4]:
+        page = browser_pages.get(url) or {}
+        body = re.sub(r"\s+", " ", str(page.get("text") or "")).strip()
+        if len(body) > 2400:
+            body = f"{body[:1800]} ... {body[-550:]}"
+        sections.append(
+            "\n".join(
+                [
+                    f"URL: {url}",
+                    f"标题: {str(page.get('title') or '')[:300]}",
+                    f"正文: {body or '页面正文为空'}",
+                ]
+            )
+        )
+    return "\n\n".join(sections)[:11_500]
+
+
 def _extract_navigated_urls(raw: dict[str, Any]) -> set[str]:
     urls: set[str] = set()
     observe = _build_navigation_evidence_observer(urls)
@@ -1631,14 +1657,12 @@ async def run_target_research(
                     return await extract_with_retry(
                         raw,
                         worker_config,
-                        max_retries=1,
+                        max_retries=2,
                         system_prompt=prompt,
                         validator=validate_research_payload,
-                        repair_context=(
-                            "以下 URL 由本轮浏览器实际打开并读取。sources、evidence、联系方式、"
-                            "关键人物和关联 Target 只能引用其中的正文 URL；Bing 等搜索结果页只用于"
-                            "发现候选，不得作为来源。至少选择两个正文来源：\n"
-                            + "\n".join(content_urls)
+                        repair_context=_build_research_repair_context(
+                            content_urls,
+                            attempt_pages,
                         ),
                         model_workload="collection",
                     )
