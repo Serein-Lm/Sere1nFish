@@ -27,6 +27,7 @@ from api.services.url_security import assert_public_http_url
 from browser_manager.provider import get_browser_provider
 from core.logger import get_logger
 from Sere1nGraph.graph.tools.mcp import build_mcp_connections
+from Sere1nGraph.graph.tools.mcp_session import McpRecoveryExhausted, RecoveringMcpSession
 
 
 logger = get_logger("persona_research_browser")
@@ -206,10 +207,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 
 
 async def _call_mcp(session: Any, name: str, arguments: dict[str, Any]) -> str:
-    result = await asyncio.wait_for(
-        session.call_tool(name, arguments),
-        timeout=MCP_CALL_TIMEOUT_SECONDS,
-    )
+    result = await session.call_tool(name, arguments)
     if bool(getattr(result, "isError", False)):
         raise RuntimeError(f"Chrome MCP {name} 调用失败：{_mcp_result_text(result)}")
     return _mcp_result_text(result)
@@ -253,6 +251,8 @@ class ChromeDevtoolsPersonaResearchBrowser:
             for source in persona_search_sources():
                 try:
                     found = await self._search_candidates(session, source, query)
+                except McpRecoveryExhausted:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     logger.info(
                         "[persona_research_browser] task=%s search=%s query=%s failed: %s: %s",
@@ -390,6 +390,8 @@ class ChromeDevtoolsPersonaResearchBrowser:
                 pages.append(page)
                 if len(pages) >= TARGET_READABLE_PAGES:
                     break
+            except McpRecoveryExhausted:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.info(
                     "[persona_research_browser] task=%s candidate=%s skipped: %s: %s",
@@ -434,9 +436,13 @@ class ChromeDevtoolsPersonaResearchBrowser:
             connections = build_mcp_connections(
                 worker_config,
                 server_names="chrome-devtools",
+                server_profile="readonly_research",
             )
             client = MultiServerMCPClient(connections)
-            async with client.session("chrome-devtools") as session:
+            async with RecoveringMcpSession(
+                client, "chrome-devtools", call_timeout=MCP_CALL_TIMEOUT_SECONDS,
+                task_id=task_id,
+            ) as session:
                 buckets = await self._discover(session, queries, task_id=task_id)
                 candidates = _round_robin_candidates(
                     buckets,

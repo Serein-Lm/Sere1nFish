@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from contextlib import asynccontextmanager
 from typing import Any, Callable, AsyncGenerator, Literal, Sequence
 
 from langchain_openai import ChatOpenAI
@@ -29,6 +28,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from ..config.models import AppConfig
 from .streaming import process_agent_stream, console_event_handler, process_agent_stream_sse
 from .structured_output import with_schema_instructions
+from ..tools.mcp_session import bounded_mcp_session as _bounded_mcp_session
 
 from core.async_runtime import await_with_hard_timeout, consume_task_result
 from core.logger import get_logger
@@ -61,69 +61,6 @@ def _consume_task_result(task: asyncio.Future[Any]) -> None:
 async def _await_tool_call(call: Any, timeout: float) -> Any:
     """限制第三方工具调用时长，不等待不响应取消的底层协程。"""
     return await await_with_hard_timeout(call, timeout)
-
-
-@asynccontextmanager
-async def _bounded_mcp_session(
-    client: MultiServerMCPClient,
-    server_name: str,
-    *,
-    close_timeout: float = 10,
-):
-    """由专属 task 持有 MCP 上下文，保证 AnyIO 在同一 task 中进出。"""
-    loop = asyncio.get_running_loop()
-    session_ready: asyncio.Future[Any] = loop.create_future()
-    close_requested = asyncio.Event()
-
-    async def _session_owner() -> None:
-        try:
-            async with client.session(server_name) as session:
-                if not session_ready.done():
-                    session_ready.set_result(session)
-                await close_requested.wait()
-        except BaseException as exc:
-            if not session_ready.done():
-                session_ready.set_exception(exc)
-                return
-            raise
-
-    owner = asyncio.create_task(
-        _session_owner(),
-        name=f"mcp-session:{server_name}",
-    )
-    try:
-        session = await session_ready
-    except BaseException:
-        owner.cancel()
-        await asyncio.gather(owner, return_exceptions=True)
-        raise
-
-    body_error: BaseException | None = None
-    try:
-        yield session
-    except BaseException as exc:
-        body_error = exc
-        raise
-    finally:
-        close_requested.set()
-        try:
-            await _await_tool_call(owner, close_timeout)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "MCP stdio 会话关闭超过 %.0fs，已取消会话 owner | server=%s",
-                close_timeout,
-                server_name,
-            )
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
-            if body_error is None:
-                raise
-            logger.warning(
-                "MCP stdio 会话清理失败，保留原始 Agent 异常 | server=%s",
-                server_name,
-                exc_info=True,
-            )
 
 
 def _requires_initial_evidence_tool(messages: list[Any]) -> bool:
