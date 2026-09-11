@@ -28,6 +28,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 from ..config.models import AppConfig
 from .streaming import process_agent_stream, console_event_handler, process_agent_stream_sse
+from .structured_output import with_schema_instructions
 
 from core.async_runtime import await_with_hard_timeout, consume_task_result
 from core.logger import get_logger
@@ -145,6 +146,10 @@ class RequireEvidenceToolMiddleware(AgentMiddleware):
 
 class GuardedChatOpenAI(ChatOpenAI):
     """Route every async model request through the process-wide capacity guard."""
+
+    def with_structured_output(self, schema: Any = None, **kwargs: Any):
+        structured = super().with_structured_output(schema, **kwargs)
+        return with_schema_instructions(structured, schema, self._convert_input)
 
     async def _agenerate(self, *args: Any, **kwargs: Any):
         async with get_global_llm_capacity_guard().lease():
