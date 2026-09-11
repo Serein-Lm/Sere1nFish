@@ -335,10 +335,21 @@ def test_target_research_preserves_control_threshold_metadata() -> None:
         "relation_depth": 1,
         "ownership_percent": 59.6611,
         "minimum_ownership_percent": 50.0,
+        "relation": {
+            "relation_depth": 1,
+            "ownership_percent": 51.0,
+            "provider_company_id": "provider-company-1",
+            "registration_status": "active",
+            "source_urls": ["https://official.example.cn/disclosure"],
+        },
     })
 
     assert relation is not None
     assert relation["minimum_ownership_percent"] == 50.0
+    assert relation["ownership_percent"] == 59.6611
+    assert relation["provider_company_id"] == "provider-company-1"
+    assert relation["registration_status"] == "active"
+    assert relation["source_urls"] == ["https://official.example.cn/disclosure"]
 
 
 def test_shared_government_portal_scan_is_path_scoped() -> None:

@@ -1064,8 +1064,21 @@ def _expanded_batch_tags(
 
 
 def _preserved_relation(relation: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not relation or int(relation.get("relation_depth") or 0) <= 0:
+    relation_details = (
+        dict(relation.get("relation") or {})
+        if relation and isinstance(relation.get("relation"), dict)
+        else {}
+    )
+    depth = (relation or {}).get("relation_depth")
+    if depth is None:
+        depth = relation_details.get("relation_depth")
+    if not relation or int(depth or 0) <= 0:
         return None
+    preserved = {
+        str(field): value
+        for field, value in relation_details.items()
+        if str(field).strip() and value is not None
+    }
     fields = (
         "root_target_id",
         "root_target_name",
@@ -1079,7 +1092,14 @@ def _preserved_relation(relation: dict[str, Any] | None) -> dict[str, Any] | Non
         "lineage_target_ids",
         "lineage_target_names",
     )
-    return {field: relation.get(field) for field in fields if relation.get(field) is not None}
+    preserved.update(
+        {
+            field: relation.get(field)
+            for field in fields
+            if relation.get(field) is not None
+        }
+    )
+    return preserved
 
 
 async def _latest_scan_params(
