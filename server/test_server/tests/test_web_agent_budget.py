@@ -1,4 +1,8 @@
 from Sere1nGraph.graph.agents.factory import (
+    COMPANY_NORMALIZE_MCP_TOOL_LIMIT,
+    COMPANY_NORMALIZE_MCP_TOOLS,
+    COMPANY_NORMALIZE_MODEL_CALL_LIMIT,
+    COMPANY_NORMALIZE_RUNTIME_POLICY,
     DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT,
     WEB_TAGGING_RUNTIME_POLICY,
 )
@@ -96,6 +100,34 @@ def test_web_agent_factory_scales_model_call_limit(monkeypatch) -> None:
     assert captured["mcp_tool_limit"] == 5
     assert WEB_TAGGING_RUNTIME_POLICY in captured["system_prompt"]
     assert getattr(captured["middleware"][0], "run_limit", None) == 9
+
+
+def test_company_normalize_agent_has_bounded_read_only_runtime(monkeypatch) -> None:
+    import asyncio
+    import Sere1nGraph.graph.agents.factory as factory
+
+    captured = {}
+
+    def fake_create_agent_node(**kwargs):
+        captured.update(kwargs)
+        return "agent"
+
+    monkeypatch.setattr(factory, "create_agent_node", fake_create_agent_node)
+    result = asyncio.run(factory.create_company_normalize_agent(object()))
+
+    assert result == "agent"
+    assert captured["model_workload"] == "collection"
+    assert captured["builtin_tools"] == []
+    assert captured["mcp_tool_names"] == COMPANY_NORMALIZE_MCP_TOOLS
+    assert captured["mcp_tool_limit"] == COMPANY_NORMALIZE_MCP_TOOL_LIMIT
+    assert captured["mcp_server_profile"] == "readonly_research"
+    assert captured["parallel_tool_calls"] is False
+    assert captured["max_attempts"] == 1
+    assert captured["timeout"] == 120
+    assert COMPANY_NORMALIZE_RUNTIME_POLICY in captured["system_prompt"]
+    assert [
+        getattr(item, "run_limit", None) for item in captured["middleware"]
+    ] == [COMPANY_NORMALIZE_MCP_TOOL_LIMIT, COMPANY_NORMALIZE_MODEL_CALL_LIMIT]
 
 
 def test_web_tagging_discards_label_only_contact_entries() -> None:

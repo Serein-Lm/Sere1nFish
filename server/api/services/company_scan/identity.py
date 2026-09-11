@@ -10,7 +10,7 @@ from api.services.company_scan.contracts import CompanyScanContext
 
 
 logger = get_logger("company_scan.identity")
-COMPANY_NORMALIZE_TIMEOUT_SECONDS = 300
+COMPANY_NORMALIZE_TIMEOUT_SECONDS = 150
 COMPANY_ROUTER_TIMEOUT_SECONDS = 120
 
 

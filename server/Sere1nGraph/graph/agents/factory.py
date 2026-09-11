@@ -27,10 +27,13 @@ from .runtime import (
     create_agent_node,
     create_llm,
 )
-from ..tools.builtin import tianyancha_get_domain, tianyancha_get_bids
+from ..tools.builtin import tianyancha_get_bids
 
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT = 6
+COMPANY_NORMALIZE_MCP_TOOLS = ("navigate_page", "evaluate_script")
+COMPANY_NORMALIZE_MCP_TOOL_LIMIT = 4
+COMPANY_NORMALIZE_MODEL_CALL_LIMIT = 6
 PERSONA_RESEARCH_MCP_TOOLS = ("navigate_page", "evaluate_script")
 TARGET_RESEARCH_MCP_TOOLS = ("navigate_page", "take_snapshot")
 PERSONA_RESEARCH_MCP_TOOL_LIMIT = 24
@@ -56,6 +59,14 @@ PERSONA_RESEARCH_RUNTIME_POLICY = """
 - 单个页面读取返回 `Tool ... error` 时，记录该 URL 并立即切换到不同域名；不得在同一页面重复读取。
 - 每个 URL 最多导航两次。维护来源证据账本，不要反复读取已经获得的页面内容。
 - 实际读取 8 个跨站点有效正文来源并形成至少 12 条有 URL 关联的具体洞察后，立即输出最终 JSON。
+"""
+COMPANY_NORMALIZE_RUNTIME_POLICY = """
+# 紧凑公司规范化运行策略
+
+- 本 Agent 只负责通过公开网页核验法定名称、官网与搜索别名；ICP 备案由上层 Service 在本 Agent 结束后统一查询和交叉验证，不要尝试调用天眼查工具。
+- 运行时只提供 `navigate_page` 与 `evaluate_script`，最多调用 4 次。优先直接打开 Bing 搜索结果页，再读取搜索结果；只有结论仍不明确时才打开一个最可信的官网候选并读取一次。
+- 页面读取由运行时固定为紧凑的只读正文与链接提取，不得自定义脚本、点击、提交表单、读取 Cookie 或本地存储。
+- 同一 URL 最多导航两次；工具失败后不要重复调用相同动作。获得法定名称和官网候选后立即输出最终 JSON。
 """
 TARGET_RESEARCH_RUNTIME_POLICY = """
 # 只读深研浏览策略
@@ -448,24 +459,41 @@ async def create_company_normalize_agent(
     """
     创建公司名规范化 Agent。
 
-    能力：AI 浏览器搜索（cn.bing.com）+ 天眼查 ICP 交叉验证，
-    输出规范化公司全称与根域名（结构化 JSON，由 CompanyNormalization 约束）。
+    能力：使用受限 Chrome 检索规范化公司全称与官网候选。
+    天眼查 ICP 由上层 Service 统一交叉验证，避免 Agent 重复计费查询。
     复用 create_agent_node + chrome-devtools MCP，不另起浏览器。
     """
     return create_agent_node(
         app_config=app_config,
         model_workload="collection",
-        system_prompt=load_prompt("company_normalize/company_normalize"),
-        builtin_tools=[tianyancha_get_domain],
+        system_prompt=(
+            f"{load_prompt('company_normalize/company_normalize')}\n\n"
+            f"{COMPANY_NORMALIZE_RUNTIME_POLICY}"
+        ),
+        builtin_tools=[],
         middleware=[
-            SummarizationMiddleware(
-                model=create_llm(app_config, workload="collection"),
-                trigger=("tokens", 3000),
-                keep=("messages", 8),
+            ToolCallLimitMiddleware(
+                run_limit=COMPANY_NORMALIZE_MCP_TOOL_LIMIT,
+                exit_behavior="continue",
+            ),
+            ModelCallLimitMiddleware(
+                run_limit=COMPANY_NORMALIZE_MODEL_CALL_LIMIT,
+                exit_behavior="end",
             ),
         ],
         mcp_server_name=server_name,
+        mcp_server_profile="readonly_research",
+        parallel_tool_calls=False,
         output_mode=output_mode,
+        timeout=120,
+        mcp_tool_limit=COMPANY_NORMALIZE_MCP_TOOL_LIMIT,
+        mcp_tool_timeout=20,
+        mcp_error_limit=2,
+        max_attempts=1,
+        mcp_call_transform=_standardize_research_browser_call,
+        mcp_call_guard=_build_persona_research_guard(),
+        mcp_tool_names=COMPANY_NORMALIZE_MCP_TOOLS,
+        mcp_result_transform=_compact_persona_research_result,
     )
 
 
