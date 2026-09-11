@@ -1,6 +1,7 @@
 """Fictional persona completeness and evidence checks, without inventing facts."""
 from __future__ import annotations
 
+import re
 from typing import Any, Sequence
 
 
@@ -61,6 +62,22 @@ def _research_evidence_has_gap(value: Any) -> bool:
         _contains_marker(payload.get(field), _RESEARCH_GAP_MARKERS)
         for field in ("dimension", "finding", "applicability")
     )
+
+
+def _summary_age_issues(profile: dict[str, Any]) -> list[str]:
+    name = str(profile.get("name") or "").strip()
+    age = profile.get("age")
+    if not name or not isinstance(age, int) or isinstance(age, bool):
+        return []
+    match = re.search(
+        re.escape(name)
+        + r"[，,、\s]+(?:(?:男性|女性|男|女)[，,、\s]+)?"
+        + r"(?:(?:设定年龄|设定为|现年|年龄为)\s*)?(\d{1,3})\s*岁(?!时|那年)",
+        str(profile.get("summary") or ""),
+    )
+    if match and int(match.group(1)) != age:
+        return [f"summary 人物年龄{match.group(1)}岁与age字段{age}岁不一致"]
+    return []
 
 
 def _profile_quality_issues(profile: dict[str, Any]) -> list[str]:
@@ -130,4 +147,5 @@ def _profile_quality_issues(profile: dict[str, Any]) -> list[str]:
         issues.append("summary 未形成可独立检索的具体首层摘要")
     if len(str(profile.get("background") or "").strip()) < 80:
         issues.append("background 缺少完整职业与生活时间线")
+    issues.extend(_summary_age_issues(profile))
     return issues
