@@ -174,7 +174,6 @@ def _runtime_state(
         "keyword_total": len(seeds.seed_specs),
         "keywords_completed": seeds.completed_count,
         "keywords_processed": seeds.completed_count,
-        "checkpoint_candidates": {},
         "details_attempted": 0,
         "details_accepted": 0,
         "detailed_record_keys": set(),

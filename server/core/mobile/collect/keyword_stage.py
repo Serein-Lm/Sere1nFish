@@ -33,6 +33,7 @@ class KeywordStageState:
     emitted: int = 0
     details_attempted: int = 0
     details_accepted: int = 0
+    persist_failures_before: int = 0
     no_new_streak: int = 0
     seen_keys: set[str] = field(default_factory=set)
     candidate_rejections: dict[str, tuple[str, str]] = field(default_factory=dict)
@@ -64,6 +65,9 @@ class MobileKeywordStageRunner:
         run = await self._build_state(item, ctx)
         if run.stopped:
             return
+        if run.checkpoint_key and not run.shared.get("dry_run"):
+            metrics = await run.ctx.drain("persist")
+            run.persist_failures_before = int(metrics.get("failed") or 0)
         await self._mark_checkpoint(run, "running")
         if not await self._navigate(run):
             await self._fail_navigation(run)
@@ -431,12 +435,10 @@ class MobileKeywordStageRunner:
         stats = self._checkpoint_stats(run)
         await self._mark_checkpoint(run, "captured", stats=stats)
         if run.checkpoint_key and not run.shared.get("dry_run"):
-            run.shared.setdefault("checkpoint_candidates", {})[run.checkpoint_key] = {
-                "checkpoint_key": run.checkpoint_key,
-                "keyword": run.keyword,
-                "target_id": run.checkpoint_target_id,
-                "stats": stats,
-            }
+            metrics = await run.ctx.drain("persist")
+            if int(metrics.get("failed") or 0) == run.persist_failures_before:
+                await self._mark_checkpoint(run, "completed", stats=stats)
+                run.shared["keywords_completed"] = int(run.shared.get("keywords_completed") or 0) + 1
         run.shared["keywords_processed"] = int(run.shared.get("keywords_processed") or 0) + 1
         await self._publish_keyword_progress(run)
 

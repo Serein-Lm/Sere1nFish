@@ -5,7 +5,6 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from api.dao import mobile_collect as collect_dao
 from core.logger import get_logger
 from core.mobile.collect.contracts import MobileCollectExecution, MobileCollectPlan
 from core.mobile.collect.planning import resolve_collection_target, resolve_keyword_plan
@@ -165,32 +164,11 @@ class MobileCollectRuntime:
         state["counters"]["persist_failed"] = persist_failed
         if self.plan.dry_run:
             state["keywords_completed"] = int(state.get("keywords_processed") or 0)
-        elif not execution.timed_out and persist_failed == 0:
-            await self._commit_keyword_checkpoints(execution)
         return {
             "collect_failed": collect_failed,
             "persist_failed": persist_failed,
             "all_failed": bool(collect_received and collect_succeeded == 0),
         }
-
-    async def _commit_keyword_checkpoints(
-        self,
-        execution: MobileCollectExecution,
-    ) -> None:
-        state = execution.state
-        for candidate in state.get("checkpoint_candidates", {}).values():
-            await collect_dao.mark_keyword_checkpoint(
-                self.plan.db,
-                run_task_id=self.plan.run_task_id,
-                task_def_id=self.plan.task_def_id,
-                definition_fingerprint=execution.seeds.definition_fingerprint,
-                checkpoint_key=str(candidate.get("checkpoint_key") or ""),
-                keyword=str(candidate.get("keyword") or ""),
-                target_id=str(candidate.get("target_id") or ""),
-                status="completed",
-                stats=dict(candidate.get("stats") or {}),
-            )
-            state["keywords_completed"] = int(state.get("keywords_completed") or 0) + 1
 
     @staticmethod
     def _raise_terminal_failure(

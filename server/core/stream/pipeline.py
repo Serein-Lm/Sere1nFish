@@ -171,6 +171,17 @@ class Pipeline:
             m = self._runtime[src_stage].metrics
             m.emitted[stage_name] = m.emitted.get(stage_name, 0) + 1
 
+    async def drain_downstream(self, source: str, stage: str) -> dict[str, Any]:
+        """Drain a declared direct downstream without closing its workers."""
+        upstream = self._runtime.get(source)
+        downstream = self._runtime.get(stage)
+        if upstream is None or downstream is None:
+            raise RuntimeError("pipeline 未运行或 Stage 不存在")
+        if stage not in upstream.downstream:
+            raise ValueError(f"{stage} 不是 {source} 的直接下游")
+        await self._wait_queue_or_fatal(downstream.queue)
+        return downstream.metrics.as_dict()
+
     # ── 运行 ──────────────────────────────────────────
     async def run(
         self,
@@ -348,13 +359,16 @@ class Pipeline:
             return
         join_task = asyncio.create_task(queue.join())
         fatal_task = asyncio.create_task(self._fatal_event.wait())
-        done, pending = await asyncio.wait(
-            {join_task, fatal_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            done, _pending = await asyncio.wait(
+                {join_task, fatal_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (join_task, fatal_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(join_task, fatal_task, return_exceptions=True)
         if fatal_task in done and self._fatal_event.is_set():
             self._raise_fatal_error()
         await join_task

@@ -68,3 +68,11 @@ class Context:
         else:
             item = Item(payload=payload, meta=dict(meta or {}))
         await self.pipeline._emit(stage, item, src_stage=self.stage_name)
+
+    async def drain(self, stage: str) -> dict[str, Any]:
+        """Wait for queued downstream work and return its completed metrics.
+
+        This keeps the downstream workers concurrent. A producer can use the
+        boundary to commit a durable checkpoint after all of its outputs finish.
+        """
+        return await self.pipeline.drain_downstream(self.stage_name, stage)
