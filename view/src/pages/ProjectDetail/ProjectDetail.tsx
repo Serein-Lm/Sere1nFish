@@ -5264,7 +5264,7 @@ export default function ProjectDetail() {
         <Space>
           <ThunderboltOutlined />
           任务
-          <Tag>{loadedTabsRef.current.has('tasks') ? tasksTotal : (dashboardData?.tasks.total ?? tasks.length)}</Tag>
+          {loadedTabsRef.current.has('tasks') ? <Tag>{tasksTotal}</Tag> : null}
         </Space>
       ),
       children: activeTab === 'tasks' ? (
