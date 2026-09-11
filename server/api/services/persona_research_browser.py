@@ -29,7 +29,7 @@ SEARCH_QUERY_LIMIT = 4
 SEARCH_RESULTS_PER_QUERY = 24
 TARGET_READABLE_PAGES = 12
 MIN_READABLE_PAGES = 8
-MAX_CANDIDATE_ATTEMPTS = 24
+MAX_CANDIDATE_ATTEMPTS = 48
 MAX_PAGES_PER_HOST = 2
 MCP_CALL_TIMEOUT_SECONDS = 24
 NAVIGATION_TIMEOUT_MS = 12_000
@@ -343,6 +343,55 @@ class ChromeDevtoolsPersonaResearchBrowser:
             query=candidate.query,
         )
 
+    async def _read_candidates(
+        self,
+        session: Any,
+        candidates: Sequence[ResearchCandidate],
+        *,
+        excluded: set[str],
+        task_id: str,
+    ) -> list[ResearchPage]:
+        pages: list[ResearchPage] = []
+        seen_urls = set(excluded)
+        attempted_urls: set[str] = set()
+        host_counts: dict[str, int] = {}
+        for candidate in candidates:
+            if len(attempted_urls) >= MAX_CANDIDATE_ATTEMPTS:
+                break
+            identity = research_url_identity(candidate.url)
+            host = (urlsplit(candidate.url).hostname or "").lower().rstrip(".")
+            if (
+                not identity
+                or identity in seen_urls
+                or identity in attempted_urls
+                or host_counts.get(host, 0) >= MAX_PAGES_PER_HOST
+            ):
+                continue
+            attempted_urls.add(identity)
+            try:
+                page = await self._read_page(session, candidate)
+                identity = research_url_identity(page.url)
+                host = (urlsplit(page.url).hostname or "").lower().rstrip(".")
+                if (
+                    not identity
+                    or identity in seen_urls
+                    or not host
+                    or _host_matches(host, _SEARCH_HOST_SUFFIXES)
+                    or host_counts.get(host, 0) >= MAX_PAGES_PER_HOST
+                ):
+                    continue
+                seen_urls.add(identity)
+                host_counts[host] = host_counts.get(host, 0) + 1
+                pages.append(page)
+                if len(pages) >= TARGET_READABLE_PAGES:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "[persona_research_browser] task=%s candidate=%s skipped: %s: %s",
+                    task_id, candidate.url, type(exc).__name__, exc,
+                )
+        return pages
+
     async def collect(
         self,
         app_config: Any,
@@ -388,41 +437,9 @@ class ChromeDevtoolsPersonaResearchBrowser:
                     buckets,
                     offset=candidate_offset,
                 )
-                pages: list[ResearchPage] = []
-                seen_urls = set(excluded)
-                host_counts: dict[str, int] = {}
-                attempts = 0
-                for candidate in candidates:
-                    if attempts >= MAX_CANDIDATE_ATTEMPTS:
-                        break
-                    candidate_identity = research_url_identity(candidate.url)
-                    if not candidate_identity or candidate_identity in seen_urls:
-                        continue
-                    attempts += 1
-                    try:
-                        page = await self._read_page(session, candidate)
-                        identity = research_url_identity(page.url)
-                        host = (urlsplit(page.url).hostname or "").lower().rstrip(".")
-                        if (
-                            not identity
-                            or identity in seen_urls
-                            or not host
-                            or _host_matches(host, _SEARCH_HOST_SUFFIXES)
-                            or host_counts.get(host, 0) >= MAX_PAGES_PER_HOST
-                        ):
-                            continue
-                        seen_urls.add(identity)
-                        host_counts[host] = host_counts.get(host, 0) + 1
-                        pages.append(page)
-                        if len(pages) >= TARGET_READABLE_PAGES:
-                            break
-                    except Exception as exc:  # noqa: BLE001
-                        logger.info(
-                            "[persona_research_browser] task=%s candidate=%s skipped: %s",
-                            task_id,
-                            candidate.url,
-                            exc,
-                        )
+                pages = await self._read_candidates(
+                    session, candidates, excluded=excluded, task_id=task_id,
+                )
         finally:
             try:
                 await provider.release_cdp_endpoint(lease_id)
