@@ -65,6 +65,11 @@ def validate_researched_persona(payload: dict[str, Any]) -> dict[str, Any]:
         "other_social": [],
     }
     profile["company_root_domain"] = ""
+    from api.services.persona_quality import _profile_quality_issues
+
+    issues = _profile_quality_issues(profile)
+    if issues:
+        raise ValueError("人设资料不完整：" + "；".join(issues[:12]))
     return profile
 
 
