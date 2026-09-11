@@ -36,6 +36,8 @@ class CompanyScanCheckpointRepository:
         )
         for module in retryable:
             checkpoints.pop(module, None)
+        if "xhs" not in checkpoints:
+            checkpoints.pop("profile_copywriting", None)
 
         resume = dict(raw.get("resume") or {})
         restore_core, restored_identity = await self._restore_core_identity(

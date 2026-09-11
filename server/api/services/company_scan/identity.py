@@ -455,10 +455,16 @@ class CompanyIdentityStage:
             manual_targets=ctx.result["xhs"]["selection"]["manual_targets"],
         )
         recovery = ctx.recovery
+        if "xhs" in recovery.checkpoint_results:
+            ctx.root_xhs_enabled = True
+            ctx.result["xhs"]["root_selected"] = True
+            ctx.result["xhs"]["status"] = "pending"
+            ctx.result["xhs"]["selection"].update(status="restored", error=None)
+            return
         if recovery.restore_core_context and "xhs" not in recovery.retryable_core_modules:
-            ctx.root_xhs_enabled = "xhs" in recovery.checkpoint_results
-            ctx.result["xhs"]["root_selected"] = ctx.root_xhs_enabled
-            ctx.result["xhs"]["status"] = "pending" if ctx.root_xhs_enabled else "skipped"
+            ctx.root_xhs_enabled = False
+            ctx.result["xhs"]["root_selected"] = False
+            ctx.result["xhs"]["status"] = "skipped"
             ctx.result["xhs"]["selection"].update(status="restored", error=None)
             return
         selection = await ctx.xhs_selector.select(

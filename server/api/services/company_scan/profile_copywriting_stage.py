@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from api.db.collections import PROFILE_COPYWRITINGS_COLLECTION
 from core.stream import Item, RetryPolicy, Stage
 
 
@@ -81,8 +80,14 @@ class ProfileCopywritingStage(Stage):
                 f"error={result.meta.get('error', '')}"
             )
             return
-        for generated in result.copywritings:
-            await self._persist_generated(dict(generated), user_id, url, ctx)
+        for variant_index, generated in enumerate(result.copywritings):
+            await self._persist_generated(
+                dict(generated),
+                user_id,
+                url,
+                variant_index,
+                ctx,
+            )
         ctx.logger.info(
             f"[profile-cw-w{ctx.worker_id}] 完成 user={user_id} "
             f"count={result.count} "
@@ -113,8 +118,11 @@ class ProfileCopywritingStage(Stage):
         copywriting: dict[str, Any],
         user_id: str,
         url: str,
+        variant_index: int,
         ctx: Any,
     ) -> None:
+        from api.dao import profile_copywritings as profile_copywritings_dao
+
         copywriting.setdefault("finding_id", f"profile_{user_id or 'unknown'}")
         copywriting.setdefault("url", url)
         copywriting.update(
@@ -126,7 +134,11 @@ class ProfileCopywritingStage(Stage):
         )
         if self.target_id:
             copywriting["target_id"] = self.target_id
-        await self.db[PROFILE_COPYWRITINGS_COLLECTION].insert_one(copywriting)
+        copywriting = await profile_copywritings_dao.upsert_generated(
+            self.db,
+            copywriting,
+            variant_index=variant_index,
+        )
         await self._link_to_finding(copywriting, user_id, ctx)
         ctx.state["profile_copywriting_count"] = int(
             ctx.state.get("profile_copywriting_count") or 0

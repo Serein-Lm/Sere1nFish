@@ -6,11 +6,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from api.db.collections import COMPANY_SCAN_COLLECTION
-from core.logger import get_logger
-from core.observability import obs_log
+from api.services.company_scan.checkpoints import CompanyScanCheckpointRepository
 from api.services.company_scan.contracts import CompanyScanContext
 from api.services.company_scan.policies import incomplete_collection_sources
 from api.services.company_scan.result_projection import completion_observation
+from core.logger import get_logger
+from core.observability import obs_log
 
 
 logger = get_logger("company_scan.terminal")
@@ -19,8 +20,17 @@ logger = get_logger("company_scan.terminal")
 class ProfileCopywritingRuntimeStage:
     name = "profile_copywriting"
 
+    def __init__(self, checkpoints: CompanyScanCheckpointRepository) -> None:
+        self.checkpoints = checkpoints
+
     async def run(self, ctx: CompanyScanContext) -> None:
         if not self._enabled(ctx):
+            return
+        checkpoint = ctx.recovery.checkpoint_results.get(self.name)
+        if isinstance(checkpoint, dict):
+            ctx.result["profile_copywritings"]["count"] += int(
+                checkpoint.get("count") or 0
+            )
             return
         await ctx.owner._update_progress(
             ctx.plan.task_id,
@@ -43,14 +53,24 @@ class ProfileCopywritingRuntimeStage:
                 target_id=ctx.target_id,
             )
             ctx.result["profile_copywritings"]["count"] += count
+            await self.checkpoints.record(
+                ctx,
+                self.name,
+                {
+                    "kind": self.name,
+                    "status": "completed",
+                    "count": count,
+                },
+            )
         finally:
             ctx.core_lease.release()
 
     @staticmethod
     def _enabled(ctx: CompanyScanContext) -> bool:
+        if ProfileCopywritingRuntimeStage.name in ctx.recovery.checkpoint_results:
+            return True
         return bool(
-            not ctx.recovery.restore_core_context
-            and ctx.root_xhs_enabled
+            ctx.root_xhs_enabled
             and ctx.plan.enable_copywriting
             and ctx.xhs_succeeded
         )

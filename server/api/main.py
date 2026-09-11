@@ -174,8 +174,10 @@ async def lifespan(app: FastAPI):
         db = get_db()
         # findings — 核心数据元
         from api.dao import findings as findings_dao
+        from api.dao import profile_copywritings as profile_copywritings_dao
 
         await findings_dao.ensure_indexes(db)
+        await profile_copywritings_dao.ensure_indexes(db)
         finding_identity_backfill = await findings_dao.backfill_finding_group_keys(db)
         if finding_identity_backfill["scanned"]:
             logger.info(

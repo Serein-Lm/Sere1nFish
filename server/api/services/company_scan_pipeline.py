@@ -640,11 +640,16 @@ class CompanyScanPipeline:
         on_completed: Any = None,
     ) -> list[Any]:
         """Run mobile sources and persist their resume boundary independently."""
+        checkpoint_errors: set[str] = set()
         results = await self._gather_named_jobs(
             jobs,
             on_completed=on_completed,
+            on_checkpoint_error=lambda kind, _error: checkpoint_errors.add(kind),
         )
-        if self._jobs_completed_successfully(jobs, results):
+        if not checkpoint_errors and self._jobs_completed_successfully(
+            jobs,
+            results,
+        ):
             from api.services.task_progress import mark_resume_phase
 
             await mark_resume_phase(
@@ -741,6 +746,7 @@ class CompanyScanPipeline:
         jobs: list[tuple[str, Any]],
         *,
         on_completed: Any = None,
+        on_checkpoint_error: Any = None,
     ) -> list[Any]:
         """Run independent source pipelines concurrently with isolated failures."""
         if not jobs:
@@ -757,6 +763,8 @@ class CompanyScanPipeline:
                         kind,
                         checkpoint_error,
                     )
+                    if on_checkpoint_error is not None:
+                        on_checkpoint_error(kind, checkpoint_error)
             return outcome
 
         results = list(

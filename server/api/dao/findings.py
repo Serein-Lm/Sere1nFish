@@ -1261,6 +1261,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         [("project_id", 1), ("target_id", 1), ("group_key", 1)],
         sparse=True,
     )
+    copywritings = db[COPYWRITINGS_COLLECTION]
+    await copywritings.create_index("copywriting_id", unique=True, sparse=True)
+    await copywritings.create_index([("project_id", 1), ("finding_id", 1)])
 
 
 async def backfill_finding_group_keys(
@@ -1503,8 +1506,23 @@ async def delete_findings_by_tasks(db: AsyncIOMotorDatabase, task_ids: list[str]
 # ── Copywriting ──
 
 async def insert_copywriting(db: AsyncIOMotorDatabase, doc: dict[str, Any]) -> None:
-    doc.setdefault("created_at", _now())
-    await db[COPYWRITINGS_COLLECTION].insert_one(doc)
+    copywriting_id = str(doc.get("copywriting_id") or "").strip()
+    if not copywriting_id:
+        doc.setdefault("created_at", _now())
+        await db[COPYWRITINGS_COLLECTION].insert_one(doc)
+        return
+    payload = dict(doc)
+    created_at = payload.pop("created_at", _now())
+    payload["copywriting_id"] = copywriting_id
+    payload["updated_at"] = _now()
+    await db[COPYWRITINGS_COLLECTION].update_one(
+        {"copywriting_id": copywriting_id},
+        {
+            "$set": payload,
+            "$setOnInsert": {"created_at": created_at},
+        },
+        upsert=True,
+    )
 
 
 async def get_copywriting(db: AsyncIOMotorDatabase, finding_id: str) -> dict[str, Any] | None:

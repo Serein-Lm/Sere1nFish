@@ -52,7 +52,6 @@ class RelatedEntityPlanningStage:
             skipped_count=int(scope.get("skipped_count") or 0),
             requested_channels=list(scope.get("requested_channels") or []),
         )
-        await self._select_child_xhs(ctx)
 
     @staticmethod
     def _merge_entities(
@@ -95,10 +94,35 @@ class RelatedEntityPlanningStage:
             *(["scholar"] if plan.enable_scholar else []),
         ]
 
-    async def _select_child_xhs(self, ctx: CompanyScanContext) -> None:
+
+class RelatedXhsSelectionStage:
+    """Select child XHS targets inside the core-resource boundary."""
+
+    name = "related_xhs_selection"
+
+    def enabled(self, ctx: CompanyScanContext) -> bool:
+        checkpoints = ctx.recovery.checkpoint_results
+        if "wholly_owned_entities" in checkpoints:
+            return False
+        if self._checkpoint_or_none(ctx) is not None:
+            return True
         entities = list(ctx.subsidiary_scope.get("selected") or [])
-        if not entities or not ctx.plan.subsidiary_xhs_enabled or ctx.xhs_selector is None:
-            return
+        return bool(
+            entities
+            and ctx.plan.subsidiary_xhs_enabled
+            and ctx.xhs_selector is not None
+        )
+
+    def requires_core_lease(self, ctx: CompanyScanContext) -> bool:
+        return self._checkpoint_or_none(ctx) is None
+
+    async def run(self, ctx: CompanyScanContext) -> dict[str, Any]:
+        checkpoint = self._checkpoint_or_none(ctx)
+        if checkpoint is not None:
+            self.apply(ctx, checkpoint)
+            return dict(checkpoint)
+
+        entities = list(ctx.subsidiary_scope.get("selected") or [])
         from api.services.xhs_target_selection import (
             XhsTargetCandidate,
             merge_xhs_target_selection_results,
@@ -146,6 +170,48 @@ class RelatedEntityPlanningStage:
             item.target_id: item.model_dump(mode="json")
             for item in selection.decisions
         }
+        return {
+            "kind": self.name,
+            "status": "completed",
+            "scope_target_ids": self._scope_target_ids(ctx),
+            "selection": dict(ctx.result["xhs"]["selection"]),
+            "decisions": dict(ctx.child_xhs_decisions),
+        }
+
+    def _checkpoint_or_none(
+        self,
+        ctx: CompanyScanContext,
+    ) -> dict[str, Any] | None:
+        checkpoint = ctx.recovery.checkpoint_results.get(self.name)
+        if not isinstance(checkpoint, dict):
+            return None
+        checkpoint_targets = list(checkpoint.get("scope_target_ids") or [])
+        if checkpoint_targets != self._scope_target_ids(ctx):
+            return None
+        return dict(checkpoint)
+
+    @staticmethod
+    def _scope_target_ids(ctx: CompanyScanContext) -> list[str]:
+        return sorted(
+            {
+                str(entity.get("target_id") or "")
+                for entity in ctx.subsidiary_scope.get("selected") or []
+                if str(entity.get("target_id") or "")
+            }
+        )
+
+    @staticmethod
+    def apply(ctx: CompanyScanContext, outcome: dict[str, Any]) -> None:
+        selection = outcome.get("selection")
+        if isinstance(selection, dict):
+            ctx.result["xhs"]["selection"] = dict(selection)
+        decisions = outcome.get("decisions")
+        if isinstance(decisions, dict):
+            ctx.child_xhs_decisions = {
+                str(target_id): dict(decision)
+                for target_id, decision in decisions.items()
+                if isinstance(decision, dict)
+            }
 
 
 class RelatedSourceStage(ABC):
@@ -158,6 +224,9 @@ class RelatedSourceStage(ABC):
     @abstractmethod
     async def run(self, ctx: CompanyScanContext) -> dict[str, Any]:
         ...
+
+    def requires_core_lease(self, ctx: CompanyScanContext) -> bool:
+        return self.name not in ctx.recovery.checkpoint_results
 
 
 class WhollyOwnedCollectionStage(RelatedSourceStage):
@@ -279,21 +348,34 @@ class RelatedSourceRuntimeStage:
         self,
         registry: RelatedSourceRegistry,
         checkpoints: CompanyScanCheckpointRepository,
+        selection_stage: RelatedXhsSelectionStage | None = None,
     ) -> None:
         self.registry = registry
         self.checkpoints = checkpoints
+        self.selection_stage = selection_stage or RelatedXhsSelectionStage()
 
     async def run(self, ctx: CompanyScanContext) -> None:
-        stages = self.registry.active(ctx)
-        if not stages:
-            return
-        await ctx.owner._update_progress(
-            ctx.plan.task_id,
-            "waiting_core",
-            "等待资源采集全资关联单位...",
+        selection_enabled = self.selection_stage.enabled(ctx)
+        lease_required = bool(
+            selection_enabled
+            and self.selection_stage.requires_core_lease(ctx)
         )
-        await ctx.core_lease.acquire()
+        lease_acquired = False
         try:
+            if lease_required:
+                await self._acquire_core_lease(ctx)
+                lease_acquired = True
+            if selection_enabled:
+                selection = await self.selection_stage.run(ctx)
+                await self.checkpoints.record(ctx, self.selection_stage.name, selection)
+
+            stages = self.registry.active(ctx)
+            if not stages:
+                return
+            if any(stage.requires_core_lease(ctx) for stage in stages):
+                if not lease_acquired:
+                    await self._acquire_core_lease(ctx)
+                    lease_acquired = True
             await ctx.owner._update_progress(
                 ctx.plan.task_id,
                 "followup_collection",
@@ -312,7 +394,18 @@ class RelatedSourceRuntimeStage:
                     raise outcome
                 self._apply(ctx, kind, outcome)
         finally:
-            ctx.core_lease.release()
+            if lease_acquired and ctx.core_lease is not None:
+                ctx.core_lease.release()
+
+    @staticmethod
+    async def _acquire_core_lease(ctx: CompanyScanContext) -> None:
+        await ctx.owner._update_progress(
+            ctx.plan.task_id,
+            "waiting_core",
+            "等待资源采集全资关联单位...",
+        )
+        if ctx.core_lease is not None:
+            await ctx.core_lease.acquire()
 
     @staticmethod
     def _apply(ctx: CompanyScanContext, kind: str, outcome: dict[str, Any]) -> None:

@@ -12,6 +12,8 @@
 
 本轮同时完成公司综合扫描和手机采集的编排 stage 化。公司扫描现在由版本化 `CompanyScanPlan`、`CompanyScanRuntime`、有序 workflow registry、来源/关联单位 registry、checkpoint repository 和 finalizer 组成；手机采集由版本化 `MobileCollectPlan`、planning、`MobileCollectRuntime`、声明式流式 DAG 以及导航、关键词、详情、持久化 stage 组成。原 public API、任务参数、结果投影和检查点身份保持兼容，旧千行编排体已从默认执行路径删除。
 
+2026-09-11 的恢复语义复审进一步修复了边界故障：来源协程只在取得所需资源后创建，纯检查点恢复不再占用核心并发；关联单位 XHS 选择纳入核心租约并持久化作用域检查点；根 Target 画像话术使用独立检查点和稳定 ID 幂等 upsert。上述阶段发生重载后可按各自检查点恢复，不会因全局阶段标记先写入而跳过话术，也不会因检查点存在但阶段标记缺失而重复选择或重复落库。
+
 没有发现需要暂停当前扫描任务的 P0 数据损坏问题。后续拆分应保持小步迁移，不能为了目录整洁重写正在工作的采集 pipeline。
 
 ## 当前基线
@@ -140,6 +142,7 @@ command/service
 4. 渠道检查点、覆盖状态、恢复兼容判断已收敛到 checkpoint repository。
 5. 汇总、通知、错误语义、移动任务 join 和资源清理已移到 terminal/runtime 层。
 6. 已用既有恢复/编排回归与 registry/runtime 契约测试覆盖顺序、失败、恢复和重复注册。
+7. Stage 通过统一资源声明区分外部工作与持久化恢复；画像话术和关联单位选择拥有独立检查点，检查点依赖失效时只重跑受影响阶段。
 
 以后新增来源只实现 Stage 协议并注册；不得在 `run_pipeline` 或 runtime 中增加渠道名称分支。
 
@@ -172,6 +175,8 @@ command/service
 阶段 B/C 的本机 contract 已稳定。后续按 stage 输入输出逐项增加 `resource_parse`、`website_page`、`ocr` 等无状态 capability；仍不能把 company facade、手机主循环或 finalizer 整体复制到节点。
 
 ## 本轮验证
+
+- 2026-09-11 恢复语义加固回归：公司编排、检查点、流式 runtime、手机 runtime 和任务控制共 `236 passed`；真实 Mongo 已建立画像话术与统一话术 `copywriting_id` 唯一稀疏索引，HTTPS 健康检查返回 200。
 
 - 公司/手机/公众号/任务服务主回归 `259 passed`；资产、官网文档、招投标、学者、XHS 与流式框架回归 `145 passed`。
 - `test_pipeline_e2e.py` 是依赖运行环境 `app_config/db` fixture 的手工在线脚本，当前仓库未提供这两个 fixture，因此不计入自动化通过数。

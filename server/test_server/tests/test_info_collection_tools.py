@@ -2118,6 +2118,42 @@ def test_profile_copywriting_stage_uses_copywriting_tool_contract():
     asyncio.run(_run())
 
 
+def test_profile_copywriting_persistence_is_idempotent_for_recovery():
+    async def _run():
+        from api.dao import findings as findings_dao
+        from api.dao import profile_copywritings as profile_copywritings_dao
+
+        db = _FakeDB()
+        document = {
+            "project_id": "project-1",
+            "task_id": "task-1",
+            "target_id": "target-1",
+            "user_id": "user-1",
+            "finding_id": "profile-user-1",
+            "source": "xhs_profile",
+            "status": "completed",
+        }
+
+        first = await profile_copywritings_dao.upsert_generated(
+            db,
+            document,
+            variant_index=0,
+        )
+        second = await profile_copywritings_dao.upsert_generated(
+            db,
+            document,
+            variant_index=0,
+        )
+        await findings_dao.insert_copywriting(db, first)
+        await findings_dao.insert_copywriting(db, second)
+
+        assert first["copywriting_id"] == second["copywriting_id"]
+        assert len(db[PROFILE_COPYWRITINGS_COLLECTION].docs) == 1
+        assert len(db[COPYWRITINGS_COLLECTION].docs) == 1
+
+    asyncio.run(_run())
+
+
 def test_url_copywriting_stage_uses_copywriting_tool_contract():
     async def _run():
         db = _FakeDB()

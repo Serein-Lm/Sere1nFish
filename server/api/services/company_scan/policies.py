@@ -11,13 +11,22 @@ def requires_initial_core_lease(
     refresh_target_identity: bool,
     enable_wechat: bool,
     wechat_target_selection_mode: str,
+    checkpoint_modules: set[str] | None = None,
+    restore_core_context: bool = False,
 ) -> bool:
-    if any(enabled_core_modules.values()):
+    checkpoints = checkpoint_modules or set()
+    if any(
+        enabled and module not in checkpoints
+        for module, enabled in enabled_core_modules.items()
+    ):
         return True
-    if not str(target_id or "").strip() or refresh_target_identity:
+    if not restore_core_context and (
+        not str(target_id or "").strip() or refresh_target_identity
+    ):
         return True
     return bool(
-        enable_wechat
+        not restore_core_context
+        and enable_wechat
         and str(wechat_target_selection_mode or "auto").strip().casefold() != "all"
     )
 

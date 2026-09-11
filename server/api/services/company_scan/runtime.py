@@ -81,7 +81,7 @@ class CompanyStageRegistry:
                     checkpoints,
                 )
             )
-            .register(ProfileCopywritingRuntimeStage())
+            .register(ProfileCopywritingRuntimeStage(checkpoints))
             .register(MobileJoinStage())
             .register(CompanyScanFinalizerStage())
         )
@@ -223,6 +223,8 @@ class CompanyScanRuntime:
             refresh_target_identity=self.plan.refresh_target_identity,
             enable_wechat=self.plan.enable_wechat,
             wechat_target_selection_mode=self.plan.wechat_target_selection_mode,
+            checkpoint_modules=set(recovery.checkpoint_results),
+            restore_core_context=recovery.restore_core_context,
         ):
             return
         await self.owner._update_progress(

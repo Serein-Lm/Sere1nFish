@@ -104,6 +104,7 @@
 - LLM token 归因必须通过 `core.observability.observation_context` 包裹 AI 调用(浏览器 agent、结构化解析、修复重试),携带 `project_id/task_id/phase/agent/task_type`;不要直接操作 `TokenTracker`。凡是新接入的 AI 链路(人设采集、公司规范化、采集分析、手机规划等)都要确认 token 与日志观测已连通,可在 Observability/Dashboard 看到归因。
 - 已知缺口:`AutoGLM-GUI-main` 手机执行器使用原生 OpenAI 客户端,绕过 LangChain 回调,其 token 暂未纳入统一 tracker;修改该 vendored 代码风险高,接入前先评估影响并在交接说明。
 - 后台 fire-and-forget 任务统一用 `core.background.spawn_background` 启动,避免任务被 GC 回收并统一记录异常;不要在业务代码里散落裸 `asyncio.create_task` 且不持引用。
+- Runtime 只负责生命周期、阶段顺序、资源租约、恢复、取消和统一观测，渠道业务留在 Stage/adapter。Stage 必须显式声明本轮是外部工作还是持久化恢复：外部工作取得对应租约后才能创建协程，纯检查点/DAO 恢复不得占用核心并发。阶段完成标记只能在必需检查点成功写入后保存；后处理阶段必须拥有独立检查点和稳定幂等写入身份。
 - 采集/分析等长流程应提供「试跑预览(dry_run)」能力:仍执行导航、截屏、结构化,但不入库、不发通知,而是把结构化结果收集到返回值的 `preview` 列表,供前端评估效果。dry_run 分支收敛在 runtime/stage 内(如 `run_collect_task(dry_run=True)`),调用侧只切换标志,不复制流程。
 - 新增 API 表面优先使用明确的请求/响应模型。响应结构要稳定，字段命名与既有 API 保持一致。
 - 配置项默认从环境变量、Mongo 托管配置或配置示例进入系统；不要硬编码 secret、登录密钥、API key 或仅本地可用的凭据。

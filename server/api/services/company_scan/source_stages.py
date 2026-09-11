@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from core.logger import get_logger
@@ -15,6 +16,7 @@ logger = get_logger("company_scan.sources")
 class CompanySourceStage(ABC):
     name: str = ""
     resource_group: str = "core"
+    restores_from_storage: bool = False
 
     @abstractmethod
     def enabled(self, ctx: CompanyScanContext) -> bool:
@@ -31,9 +33,21 @@ class CompanySourceStage(ABC):
         result = ctx.recovery.checkpoint_results.get(self.name)
         return dict(result) if isinstance(result, dict) else None
 
+    def requires_core_lease(self, ctx: CompanyScanContext) -> bool:
+        """Return whether this run performs external work instead of restoration."""
+        return bool(
+            self.resource_group != "mobile"
+            and self.name not in ctx.recovery.checkpoint_results
+            and not (
+                self.restores_from_storage
+                and ctx.recovery.resume_core_completed
+            )
+        )
+
 
 class ControlStructureStage(CompanySourceStage):
     name = "control_structure"
+    restores_from_storage = True
 
     def enabled(self, ctx: CompanyScanContext) -> bool:
         return ctx.plan.enable_control_structure
@@ -66,6 +80,7 @@ class ControlStructureStage(CompanySourceStage):
 
 class AssetUrlStage(CompanySourceStage):
     name = "asset_url"
+    restores_from_storage = True
 
     def enabled(self, ctx: CompanyScanContext) -> bool:
         return ctx.plan.enable_asset_discovery or ctx.plan.enable_url_scan
@@ -120,7 +135,10 @@ class XhsSourceStage(CompanySourceStage):
     name = "xhs"
 
     def enabled(self, ctx: CompanyScanContext) -> bool:
-        return bool(ctx.root_xhs_enabled)
+        return bool(
+            self.name in ctx.recovery.checkpoint_results
+            or ctx.root_xhs_enabled
+        )
 
     async def run(self, ctx: CompanyScanContext) -> dict[str, Any]:
         checkpoint = await self.checkpoint_or_none(ctx)
@@ -142,6 +160,7 @@ class XhsSourceStage(CompanySourceStage):
 
 class BiddingSourceStage(CompanySourceStage):
     name = "bidding"
+    restores_from_storage = True
 
     def enabled(self, ctx: CompanyScanContext) -> bool:
         return ctx.plan.enable_bidding
@@ -215,6 +234,7 @@ class WechatSourceStage(CompanySourceStage):
 
 class ScholarSourceStage(CompanySourceStage):
     name = "scholar"
+    restores_from_storage = True
 
     def enabled(self, ctx: CompanyScanContext) -> bool:
         return ctx.plan.enable_scholar
@@ -293,7 +313,10 @@ class RootSourceStage:
     async def run(self, ctx: CompanyScanContext) -> None:
         stages = self.registry.active(ctx)
         if not stages:
-            await self._mark_phases(ctx, mobile=True)
+            try:
+                await self._mark_phases(ctx, mobile=True)
+            finally:
+                self._release_core_lease(ctx)
             return
         ctx.primary_job_count = len(stages)
         await ctx.owner._update_progress(
@@ -307,48 +330,95 @@ class RootSourceStage:
         core_stages = [
             stage for stage in stages if stage.resource_group != "mobile"
         ]
-        ctx.mobile_jobs = [
-            (stage.name, stage.run(ctx)) for stage in mobile_stages
-        ]
-        core_jobs = [(stage.name, stage.run(ctx)) for stage in core_stages]
-        if ctx.mobile_jobs:
-            self._start_mobile(ctx)
-        if core_jobs:
-            await self._ensure_core_lease(ctx)
-        outcomes = await ctx.owner._gather_named_jobs(
-            core_jobs,
-            on_completed=lambda kind, outcome: self.checkpoints.record(ctx, kind, outcome),
-        )
-        if ctx.owner._jobs_completed_successfully(core_jobs, outcomes):
-            await self._mark_phases(ctx, mobile=not ctx.mobile_jobs)
-        failures, xhs_succeeded = ctx.owner._merge_primary_job_results(
-            ctx.result,
-            core_jobs,
-            outcomes,
-        )
-        ctx.failed_primary_jobs.update(failures)
-        ctx.xhs_succeeded = ctx.xhs_succeeded or xhs_succeeded
-        if ctx.core_lease is not None:
-            ctx.core_lease.release()
-
-    def _start_mobile(self, ctx: CompanyScanContext) -> None:
-        from core.background import spawn_background
-
-        ctx.mobile_task = spawn_background(
-            ctx.owner._run_mobile_jobs(
-                ctx.mobile_jobs,
-                task_id=ctx.plan.task_id,
+        mobile_jobs = self._job_factories(ctx, mobile_stages)
+        core_jobs = self._job_factories(ctx, core_stages)
+        if mobile_jobs:
+            self._start_mobile(ctx, mobile_jobs)
+        try:
+            if any(stage.requires_core_lease(ctx) for stage in core_stages):
+                await self._ensure_core_lease(ctx)
+            materialized_core_jobs = self._materialize_jobs(core_jobs)
+            checkpoint_errors: set[str] = set()
+            outcomes = await ctx.owner._gather_named_jobs(
+                materialized_core_jobs,
                 on_completed=lambda kind, outcome: self.checkpoints.record(
                     ctx, kind, outcome
                 ),
+                on_checkpoint_error=lambda kind, _error: checkpoint_errors.add(
+                    kind
+                ),
+            )
+            if not checkpoint_errors and ctx.owner._jobs_completed_successfully(
+                materialized_core_jobs,
+                outcomes,
+            ):
+                await self._mark_phases(ctx, mobile=not mobile_jobs)
+            failures, xhs_succeeded = ctx.owner._merge_primary_job_results(
+                ctx.result,
+                materialized_core_jobs,
+                outcomes,
+            )
+            ctx.failed_primary_jobs.update(failures)
+            ctx.xhs_succeeded = ctx.xhs_succeeded or xhs_succeeded
+        finally:
+            self._release_core_lease(ctx)
+
+    def _start_mobile(
+        self,
+        ctx: CompanyScanContext,
+        jobs: list[tuple[str, Callable[[], Awaitable[dict[str, Any]]]]],
+    ) -> None:
+        from core.background import spawn_background
+
+        operation = self._run_mobile_jobs(ctx, jobs)
+        try:
+            ctx.mobile_task = spawn_background(
+                operation,
+                name=f"company-wechat:{ctx.plan.task_id}",
+            )
+        except Exception:
+            operation.close()
+            raise
+
+    async def _run_mobile_jobs(
+        self,
+        ctx: CompanyScanContext,
+        jobs: list[tuple[str, Callable[[], Awaitable[dict[str, Any]]]]],
+    ) -> list[Any]:
+        ctx.mobile_jobs = self._materialize_jobs(jobs)
+        return await ctx.owner._run_mobile_jobs(
+            ctx.mobile_jobs,
+            task_id=ctx.plan.task_id,
+            on_completed=lambda kind, outcome: self.checkpoints.record(
+                ctx, kind, outcome
             ),
-            name=f"company-wechat:{ctx.plan.task_id}",
         )
+
+    @staticmethod
+    def _job_factories(
+        ctx: CompanyScanContext,
+        stages: list[CompanySourceStage],
+    ) -> list[tuple[str, Callable[[], Awaitable[dict[str, Any]]]]]:
+        return [
+            (stage.name, lambda stage=stage: stage.run(ctx))
+            for stage in stages
+        ]
+
+    @staticmethod
+    def _materialize_jobs(
+        jobs: list[tuple[str, Callable[[], Awaitable[dict[str, Any]]]]],
+    ) -> list[tuple[str, Awaitable[dict[str, Any]]]]:
+        return [(name, factory()) for name, factory in jobs]
 
     @staticmethod
     async def _ensure_core_lease(ctx: CompanyScanContext) -> None:
         if ctx.core_lease is not None:
             await ctx.core_lease.acquire()
+
+    @staticmethod
+    def _release_core_lease(ctx: CompanyScanContext) -> None:
+        if ctx.core_lease is not None:
+            ctx.core_lease.release()
 
     @staticmethod
     async def _mark_phases(ctx: CompanyScanContext, *, mobile: bool) -> None:

@@ -33,6 +33,17 @@ def test_pinned_mobile_only_scan_skips_initial_core_lease() -> None:
     ) is False
 
 
+def test_checkpoint_only_scan_skips_initial_core_lease_without_phase_marker() -> None:
+    assert _requires_initial_core_lease(
+        enabled_core_modules={"asset_url": True, "xhs": True},
+        target_id="target-1",
+        refresh_target_identity=False,
+        enable_wechat=False,
+        wechat_target_selection_mode="all",
+        checkpoint_modules={"asset_url", "xhs"},
+    ) is False
+
+
 @pytest.mark.parametrize(
     ("target_id", "refresh", "selection_mode", "core_enabled"),
     [
@@ -637,6 +648,36 @@ def test_named_jobs_write_checkpoint_after_each_success() -> None:
         ("asset_url", {"value": 1}),
         ("scholar", {"value": 2}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_mobile_phase_is_not_marked_when_checkpoint_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import task_progress
+
+    marked: list[str] = []
+
+    async def operation() -> dict[str, Any]:
+        return {"kind": "wechat", "status": "completed"}
+
+    async def checkpoint(_kind: str, _result: dict[str, Any]) -> None:
+        raise RuntimeError("checkpoint unavailable")
+
+    async def mark_phase(*_args: Any, **kwargs: Any) -> None:
+        marked.append(str(kwargs.get("phase") or ""))
+
+    monkeypatch.setattr(task_progress, "mark_resume_phase", mark_phase)
+    pipeline = CompanyScanPipeline(object(), object())
+
+    result = await pipeline._run_mobile_jobs(
+        [("wechat", operation())],
+        task_id="task-checkpoint-failure",
+        on_completed=checkpoint,
+    )
+
+    assert result == [{"kind": "wechat", "status": "completed"}]
+    assert marked == []
 
 
 class _PipelineUpdateResult:
