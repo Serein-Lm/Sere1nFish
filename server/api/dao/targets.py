@@ -1076,6 +1076,56 @@ async def set_target_official_root_domains(
     return target
 
 
+async def clear_target_official_root_domains(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Clear a disproved operational website scope while retaining its history."""
+    current = await get_target(db, target_id)
+    if not current:
+        return None
+    historical = list(
+        dict.fromkeys(
+            str(value or "").strip().casefold()
+            for value in [
+                current.get("root_domain"),
+                *(current.get("root_domains") or []),
+                *(current.get("official_root_domains") or []),
+                *(current.get("asset_root_domains") or []),
+                *(current.get("historical_root_domains") or []),
+            ]
+            if str(value or "").strip()
+        )
+    )[:24]
+    now = _now()
+    fields = {
+        "root_domain": "",
+        "root_domains": [],
+        "official_root_domains": [],
+        "official_root_domains_source": "verified_clear",
+        "official_root_domains_updated_at": now,
+        "asset_root_domains": [],
+        "asset_root_domains_source": "verified_clear",
+        "asset_root_domains_updated_at": now,
+        "historical_root_domains": historical,
+        "website_scope_clear_reason": str(reason or "").strip()[:1000],
+        "updated_at": now,
+    }
+    target = await db[TARGETS_COLLECTION].find_one_and_update(
+        {"target_id": target_id},
+        {"$set": fields},
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    await db[PROJECT_TARGETS_COLLECTION].update_many(
+        {"target_id": target_id},
+        {"$set": fields},
+    )
+    return target
+
+
 async def enrich_target_from_research(
     db: AsyncIOMotorDatabase,
     *,

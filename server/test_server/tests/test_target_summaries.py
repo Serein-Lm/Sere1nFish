@@ -18,6 +18,7 @@ from api.services.targets import (
     _target_summary_sort_key,
     apply_project_target_hierarchy,
     assign_project_target_batches,
+    clear_target_official_website_roots,
     list_project_target_summary_page,
     set_target_official_website_roots,
 )
@@ -70,6 +71,45 @@ async def test_verified_website_roots_are_normalized_before_persistence(
         "asset_root_domains": ["express-sn.com"],
     }
     assert result["official_root_domains"] == ["express-sn.com"]
+
+
+@pytest.mark.asyncio
+async def test_clear_verified_website_scope_reconciles_all_derived_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    async def clear(_db, *, target_id, reason):
+        captured.update(target_id=target_id, reason=reason)
+        return {"target_id": target_id, "root_domains": []}
+
+    async def reconcile(_db, *, target_id, root_domains):
+        captured.update(reconcile_target_id=target_id, root_domains=root_domains)
+        return {
+            "assets_excluded": 3,
+            "website_records_excluded": 2,
+            "findings_removed": 4,
+        }
+
+    monkeypatch.setattr(targets_dao, "clear_target_official_root_domains", clear)
+    monkeypatch.setattr(
+        "api.services.targets.reconcile_target_asset_scope",
+        reconcile,
+    )
+
+    result = await clear_target_official_website_roots(
+        object(),  # type: ignore[arg-type]
+        target_id="target-1",
+        reason="运营主体误归属",
+    )
+
+    assert captured == {
+        "target_id": "target-1",
+        "reason": "运营主体误归属",
+        "reconcile_target_id": "target-1",
+        "root_domains": [],
+    }
+    assert result["scope_reconciliation"]["findings_removed"] == 4
 
 
 def test_finding_group_key_deduplicates_contact_across_websites() -> None:

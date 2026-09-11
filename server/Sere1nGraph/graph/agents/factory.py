@@ -35,7 +35,9 @@ COMPANY_NORMALIZE_MCP_TOOLS = ("navigate_page", "evaluate_script")
 COMPANY_NORMALIZE_MCP_TOOL_LIMIT = 4
 COMPANY_NORMALIZE_MODEL_CALL_LIMIT = 6
 PERSONA_RESEARCH_MCP_TOOLS = ("navigate_page", "evaluate_script")
-TARGET_RESEARCH_MCP_TOOLS = ("navigate_page", "take_snapshot")
+TARGET_RESEARCH_MCP_TOOLS = ("navigate_page", "evaluate_script")
+TARGET_RESEARCH_MCP_TOOL_LIMIT = 16
+TARGET_RESEARCH_MODEL_CALL_LIMIT = 18
 PERSONA_RESEARCH_MCP_TOOL_LIMIT = 24
 PERSONA_RESEARCH_TOOL_OUTPUT_MAX_CHARS = 7000
 RESEARCH_NAVIGATION_TIMEOUT_MS = 12_000
@@ -71,14 +73,15 @@ COMPANY_NORMALIZE_RUNTIME_POLICY = """
 TARGET_RESEARCH_RUNTIME_POLICY = """
 # 只读深研浏览策略
 
-- 运行时只提供 `navigate_page` 与 `take_snapshot`。不得尝试调用脚本、截图、点击、表单或下载工具。
+- 运行时只提供 `navigate_page` 与 `evaluate_script`。不得尝试调用快照、截图、点击、表单或下载工具。
 - 每轮只能调用一个工具，按“导航 -> 读取 -> 判断下一来源”的顺序执行。
-- 先用 3 个有差异的检索词打开搜索结果页；每个结果页只读取一次，并提取候选 URL。
-- 页面读取统一使用 `take_snapshot`；快照保留当前 URL、可访问文本与候选链接，不执行模型提供的页面脚本。
+- 先用 2 个有差异的检索词打开搜索结果页；每个结果页只读取一次，并提取候选 URL。只有候选仍不足时才使用第 3 个检索词。
+- 页面读取统一使用只读 `evaluate_script`；运行时会忽略自定义脚本，并固定返回当前 URL、标题、最多 4500 字符正文和 30 条候选链接。
 - 百科、问答、地图商户、企业目录和内容聚合页不得打开或计入来源；应直接选择官网、主管单位、政府、监管或机构一手页面。
+- 招聘、采购、客服、云服务等共享 SaaS 页面即使由官方链接，也只能作为来源 URL；没有独立运营或备案证据时不得写入机构根域名。
 - 单个页面读取返回 `Tool ... error` 时，记录该 URL 并立即切换到不同域名；不得在同一页面重复读取。
 - 每个 URL 最多导航两次。维护来源证据账本，不要反复读取已经获得的页面内容。
-- 实际读取 8 个跨站点有效正文来源并形成至少 12 条有 URL 关联的具体洞察后，立即输出最终 JSON。
+- 实际读取 2 至 4 个跨站点有效正文来源，其中至少一个是一手来源；身份、业务和域名结论已有充分证据后立即输出最终 JSON，不要为了凑数量耗尽工具预算。
 """
 RESEARCH_PAGE_READ_FUNCTION = r"""() => {
   try { window.stop(); } catch (_) {}
@@ -514,8 +517,12 @@ async def create_target_research_agent(
         builtin_tools=[],
         middleware=[
             RequireEvidenceToolMiddleware(),
+            ToolCallLimitMiddleware(
+                run_limit=TARGET_RESEARCH_MCP_TOOL_LIMIT,
+                exit_behavior="continue",
+            ),
             ModelCallLimitMiddleware(
-                run_limit=24,
+                run_limit=TARGET_RESEARCH_MODEL_CALL_LIMIT,
                 exit_behavior="end",
             ),
             SummarizationMiddleware(
@@ -530,7 +537,7 @@ async def create_target_research_agent(
         mcp_server_profile="readonly_research",
         parallel_tool_calls=False,
         mcp_tool_names=TARGET_RESEARCH_MCP_TOOLS,
-        mcp_tool_limit=20,
+        mcp_tool_limit=TARGET_RESEARCH_MCP_TOOL_LIMIT,
         mcp_tool_timeout=20,
         # MCP 工具超时后底层请求可能继续占用会话，立即交给外层换容器；
         # 页面级错误仍由官方工具转为文本，Agent 可正常切换来源。

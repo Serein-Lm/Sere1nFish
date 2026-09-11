@@ -4,6 +4,10 @@ from Sere1nGraph.graph.agents.factory import (
     COMPANY_NORMALIZE_MODEL_CALL_LIMIT,
     COMPANY_NORMALIZE_RUNTIME_POLICY,
     DEFAULT_WEB_TAGGING_MCP_TOOL_LIMIT,
+    TARGET_RESEARCH_MCP_TOOL_LIMIT,
+    TARGET_RESEARCH_MCP_TOOLS,
+    TARGET_RESEARCH_MODEL_CALL_LIMIT,
+    TARGET_RESEARCH_RUNTIME_POLICY,
     WEB_TAGGING_RUNTIME_POLICY,
 )
 from Sere1nGraph.graph.prompts.loader import load_prompt
@@ -128,6 +132,39 @@ def test_company_normalize_agent_has_bounded_read_only_runtime(monkeypatch) -> N
     assert [
         getattr(item, "run_limit", None) for item in captured["middleware"]
     ] == [COMPANY_NORMALIZE_MCP_TOOL_LIMIT, COMPANY_NORMALIZE_MODEL_CALL_LIMIT]
+
+
+def test_target_research_agent_budget_matches_compact_source_policy(monkeypatch) -> None:
+    import asyncio
+    import Sere1nGraph.graph.agents.factory as factory
+
+    captured = {}
+
+    def fake_create_agent_node(**kwargs):
+        captured.update(kwargs)
+        return "agent"
+
+    class FakeModel:
+        _llm_type = "fake-chat"
+
+        def with_retry(self):
+            return self
+
+    monkeypatch.setattr(factory, "create_agent_node", fake_create_agent_node)
+    monkeypatch.setattr(factory, "create_llm", lambda *_args, **_kwargs: FakeModel())
+    result = asyncio.run(factory.create_target_research_agent(object()))
+
+    assert result == "agent"
+    assert captured["mcp_tool_names"] == TARGET_RESEARCH_MCP_TOOLS
+    assert captured["mcp_tool_limit"] == TARGET_RESEARCH_MCP_TOOL_LIMIT
+    assert captured["parallel_tool_calls"] is False
+    assert TARGET_RESEARCH_RUNTIME_POLICY in captured["system_prompt"]
+    limits = [
+        getattr(item, "run_limit", None)
+        for item in captured["middleware"]
+        if getattr(item, "run_limit", None) is not None
+    ]
+    assert limits == [TARGET_RESEARCH_MCP_TOOL_LIMIT, TARGET_RESEARCH_MODEL_CALL_LIMIT]
 
 
 def test_web_tagging_discards_label_only_contact_entries() -> None:

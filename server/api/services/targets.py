@@ -1013,7 +1013,7 @@ async def reconcile_target_asset_scope(
         for value in root_domains
         if str(value or "").strip()
     }
-    if not selected_target_id or not roots:
+    if not selected_target_id:
         return {
             "assets_excluded": 0,
             "website_records_excluded": 0,
@@ -1193,6 +1193,29 @@ async def set_target_official_website_roots(
         db,
         target_id=str(target_id or "").strip(),
         root_domains=normalized_assets,
+    )
+    return {**target, "scope_reconciliation": reconciliation}
+
+
+async def clear_target_official_website_roots(
+    db: AsyncIOMotorDatabase,
+    *,
+    target_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Persist a verified empty website scope and detach derived Target data."""
+    selected_target_id = str(target_id or "").strip()
+    target = await targets_dao.clear_target_official_root_domains(
+        db,
+        target_id=selected_target_id,
+        reason=reason,
+    )
+    if not target:
+        raise ValueError("Target 不存在")
+    reconciliation = await reconcile_target_asset_scope(
+        db,
+        target_id=selected_target_id,
+        root_domains=[],
     )
     return {**target, "scope_reconciliation": reconciliation}
 

@@ -53,7 +53,7 @@ class TargetResearchRequest(BaseModel):
     project_id: str = Field(min_length=1)
     scan_discovered_targets: bool = True
     rescan_root: bool = True
-    max_related_targets: int = Field(default=8, ge=1, le=12)
+    max_related_targets: int = Field(default=8, ge=0, le=12)
     force_refresh: bool = True
     scan_params: dict = Field(default_factory=dict)
 
@@ -64,7 +64,7 @@ class TargetResearchBatchRequest(BaseModel):
     concurrency: int = Field(default=4, ge=1, le=8)
     scan_discovered_targets: bool = True
     rescan_root: bool = True
-    max_related_targets: int = Field(default=4, ge=1, le=12)
+    max_related_targets: int = Field(default=4, ge=0, le=12)
     force_refresh: bool = True
     scan_params: dict = Field(default_factory=dict)
 

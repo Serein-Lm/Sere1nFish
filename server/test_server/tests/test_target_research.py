@@ -10,11 +10,13 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from api.services.target_research import (
     _build_navigation_evidence_observer,
+    _bounded_related_target_limit,
     _candidate_scan_params,
     _eligible_related_targets,
     _extract_navigated_urls,
     _filter_scan_urls_by_domains,
     _normalize_payload,
+    _preserved_relation,
     _prepare_payload_for_validation,
     _relationship_direction,
     _schedule_company_scans,
@@ -139,6 +141,143 @@ def test_target_research_scan_urls_stay_under_verified_domains() -> None:
         "https://service.example.edu.cn/login",
         "https://example.edu.cn/portal",
     ]
+
+
+def test_target_research_rejects_model_alias_as_new_domain_proof() -> None:
+    payload = _payload(
+        canonical_name="中国卫星网络集团有限公司",
+        aliases=["中星网"],
+        root_domains=["csn-space.cn"],
+        web_scan_urls=["https://csn-space.cn/"],
+        sources=[
+            {
+                "title": "中星网 - 企业官网",
+                "url": "https://csn-space.cn/",
+                "source_type": "official",
+            },
+            {
+                "title": "雄安新区央企动态",
+                "url": "https://www.xiongan.gov.cn/company",
+                "source_type": "government",
+            },
+        ],
+        evidence=[{
+            "dimension": "identity",
+            "finding": "政府页面确认中国卫星网络集团有限公司身份",
+            "confidence": 0.95,
+            "source_urls": ["https://www.xiongan.gov.cn/company"],
+        }],
+        related_targets=[],
+    )
+
+    normalized = _normalize_payload(
+        TargetResearchPayload.model_validate(payload),
+        trusted_canonical_name="中国卫星网络集团有限公司",
+        trusted_aliases=["中国卫星网络集团有限公司"],
+        browser_pages={
+            "https://csn-space.cn/": {
+                "title": "中星网 - 企业官网",
+                "text": "一家提供行业资讯的企业网站",
+            },
+            "https://www.xiongan.gov.cn/company": {
+                "title": "雄安新区央企动态",
+                "text": "中国卫星网络集团有限公司迁驻雄安新区",
+            },
+        },
+    )
+
+    assert normalized["aliases"] == []
+    assert normalized["root_domains"] == []
+    assert normalized["web_scan_urls"] == []
+
+
+def test_target_research_rejects_shared_saas_subdomain_without_operator_proof() -> None:
+    payload = _payload(
+        canonical_name="中国卫星网络集团有限公司",
+        root_domains=["cscnrczp.zhiye.com"],
+        web_scan_urls=["https://cscnrczp.zhiye.com/"],
+        sources=[
+            {
+                "title": "中国卫星网络集团有限公司招聘",
+                "url": "https://cscnrczp.zhiye.com/",
+                "source_type": "official",
+            },
+            {
+                "title": "公开招聘公告",
+                "url": "https://government.example.cn/jobs",
+                "source_type": "government",
+            },
+        ],
+        evidence=[{
+            "dimension": "identity",
+            "finding": "招聘公告确认招聘入口",
+            "confidence": 0.95,
+            "source_urls": ["https://government.example.cn/jobs"],
+        }],
+        related_targets=[],
+    )
+
+    normalized = _normalize_payload(
+        TargetResearchPayload.model_validate(payload),
+        trusted_canonical_name="中国卫星网络集团有限公司",
+        browser_pages={
+            "https://cscnrczp.zhiye.com/": {
+                "title": "中国卫星网络集团有限公司招聘",
+                "text": "招聘职位 技术支持由招聘平台提供",
+            },
+            "https://government.example.cn/jobs": {
+                "title": "公开招聘公告",
+                "text": "中国卫星网络集团有限公司发布招聘公告",
+            },
+        },
+    )
+
+    assert normalized["root_domains"] == []
+
+
+def test_target_research_keeps_previously_verified_domain_scope() -> None:
+    normalized = _normalize_payload(
+        TargetResearchPayload.model_validate(_payload()),
+        trusted_canonical_name="教育机构 A",
+        known_root_domains=["example.edu.cn"],
+        browser_pages={
+            "https://www.example.edu.cn/about": {
+                "title": "公共服务平台",
+                "text": "业务办理入口",
+            },
+            "https://gov.example.cn/unit": {
+                "title": "主管部门",
+                "text": "主管部门确认教育机构 A 身份",
+            },
+        },
+    )
+
+    assert normalized["root_domains"] == ["example.edu.cn"]
+    assert normalized["web_scan_urls"] == ["https://www.example.edu.cn/about"]
+
+
+def test_target_research_zero_related_limit_disables_expansion() -> None:
+    assert _eligible_related_targets(
+        _payload(),
+        current_name="教育机构 A",
+        limit=0,
+    ) == []
+    assert _bounded_related_target_limit(0, default=8) == 0
+    assert _bounded_related_target_limit(None, default=8) == 8
+
+
+def test_target_research_preserves_control_threshold_metadata() -> None:
+    relation = _preserved_relation({
+        "root_target_id": "root",
+        "parent_target_id": "root",
+        "relation_type": "controlled_direct_investment",
+        "relation_depth": 1,
+        "ownership_percent": 59.6611,
+        "minimum_ownership_percent": 50.0,
+    })
+
+    assert relation is not None
+    assert relation["minimum_ownership_percent"] == 50.0
 
 
 def test_shared_government_portal_scan_is_path_scoped() -> None:
@@ -393,6 +532,7 @@ async def test_target_research_hot_swaps_after_browser_transport_failure(
         "canonical_name": "教育机构 A",
         "identity_aliases": ["教育机构 A"],
         "root_domains": ["example.edu.cn"],
+        "official_root_domains": ["example.edu.cn"],
         "aliases": ["教育机构 A"],
     }
 
@@ -722,6 +862,28 @@ def test_navigation_evidence_observer_survives_message_compaction() -> None:
     assert urls == {
         "https://example.edu.cn/about/index.html",
     }
+
+
+def test_navigation_evidence_observer_keeps_browser_derived_page_text() -> None:
+    urls: set[str] = set()
+    pages: dict[str, dict[str, str]] = {}
+    observe = _build_navigation_evidence_observer(urls, [], pages)
+
+    observe(
+        "navigate_page",
+        "Successfully navigated to https://example.edu.cn/about.",
+    )
+    observe(
+        "evaluate_script",
+        'Script ran on page and returned:\n'
+        '{"url":"https://example.edu.cn/about",'
+        '"title":"教育机构 A",'
+        '"text":"版权所有：教育机构 A"}',
+    )
+
+    assert urls == {"https://example.edu.cn/about"}
+    assert pages["https://example.edu.cn/about"]["title"] == "教育机构 A"
+    assert pages["https://example.edu.cn/about"]["text"] == "版权所有：教育机构 A"
 
 
 def test_unverified_navigation_domains_exclude_successfully_read_hosts() -> None:

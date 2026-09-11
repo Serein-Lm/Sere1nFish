@@ -1,6 +1,7 @@
 """Target 机构公开情报深研与扩展扫描编排。"""
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -98,6 +99,34 @@ _OWNED_DOMAIN_SOURCE_TYPES = {
     "official",
     "regulator",
 }
+_DOMAIN_OWNERSHIP_MARKERS = (
+    "ICP备",
+    "版权所有",
+    "主办单位",
+    "主办方",
+    "运营单位",
+    "运营主体",
+    "网站标识码",
+    "copyright",
+)
+_DOMAIN_PROOF_MARKERS = (
+    "官网",
+    "官方网站",
+    "网站",
+    "域名",
+    "ICP备",
+    "备案",
+    "主办",
+    "运营",
+)
+_SECOND_LEVEL_PUBLIC_SUFFIXES = {
+    "ac.cn",
+    "com.cn",
+    "edu.cn",
+    "gov.cn",
+    "net.cn",
+    "org.cn",
+}
 
 
 class TargetResearchTargetNotFoundError(LookupError):
@@ -124,9 +153,38 @@ def _browser_tool_text(value: Any) -> str:
     return str(value or "")
 
 
+def _extract_browser_page_evidence(text: str) -> dict[str, str] | None:
+    """Parse the fixed read-only browser payload without trusting Agent output."""
+    raw = str(text or "")
+    decoder = json.JSONDecoder()
+    for offset, character in enumerate(raw):
+        if character != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(raw[offset:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        url = _canonical_browser_url(value.get("url"))
+        if not url:
+            continue
+        return {
+            "url": url,
+            "title": str(value.get("title") or "")[:500],
+            "text": str(value.get("text") or "")[:5000],
+        }
+    return None
+
+
 def _canonical_browser_url(value: Any) -> str:
     raw = str(value or "").strip().rstrip(".,;，。；")
-    url = canonicalize_source_url(raw)
+    if not raw:
+        return ""
+    try:
+        url = canonicalize_source_url(raw)
+    except (TypeError, ValueError):
+        return ""
     return url if url.startswith(("http://", "https://")) else ""
 
 
@@ -172,6 +230,179 @@ def _source_title_matches_identity(
         if targets_dao.normalize_target_name(str(value or ""))
     }
     return any(label in title or title in label for label in labels)
+
+
+def _page_identity_text(
+    url: str,
+    *,
+    sources_by_url: dict[str, dict[str, Any]],
+    browser_pages: dict[str, dict[str, str]] | None,
+) -> tuple[str, str]:
+    """Return browser-derived title/body; source metadata is a test-only fallback."""
+    if browser_pages is not None:
+        page = browser_pages.get(url) or {}
+        return str(page.get("title") or ""), str(page.get("text") or "")
+    source = sources_by_url.get(url) or {}
+    return str(source.get("title") or ""), str(source.get("summary") or "")
+
+
+def _identity_is_mentioned(
+    text: str,
+    *,
+    canonical_name: str,
+    aliases: list[Any] | None,
+) -> bool:
+    normalized = targets_dao.normalize_target_name(text)
+    if not normalized:
+        return False
+    labels = [canonical_name, *(aliases or [])]
+    return any(
+        len(label_key) >= 4 and label_key in normalized
+        for value in labels
+        if (label_key := targets_dao.normalize_target_name(str(value or "")))
+    )
+
+
+def _domain_is_subdomain(domain: str) -> bool:
+    labels = [part for part in str(domain or "").split(".") if part]
+    if len(labels) <= 2:
+        return False
+    suffix = ".".join(labels[-2:])
+    registrable_labels = 3 if suffix in _SECOND_LEVEL_PUBLIC_SUFFIXES else 2
+    return len(labels) > registrable_labels
+
+
+def _domain_matches_known_scope(domain: str, known_domains: list[Any] | None) -> bool:
+    candidate = normalize_root_domain(domain)
+    return bool(
+        candidate
+        and any(
+            candidate == known
+            or candidate.endswith(f".{known}")
+            for value in known_domains or []
+            if (known := normalize_root_domain(value))
+        )
+    )
+
+
+def _domain_has_browser_ownership_evidence(
+    domain: str,
+    urls: list[str],
+    *,
+    sources_by_url: dict[str, dict[str, Any]],
+    canonical_name: str,
+    aliases: list[Any] | None,
+    browser_pages: dict[str, dict[str, str]] | None,
+) -> bool:
+    """Require operator evidence for a newly claimed domain, not merely a link."""
+    for url in urls:
+        title, body = _page_identity_text(
+            url,
+            sources_by_url=sources_by_url,
+            browser_pages=browser_pages,
+        )
+        combined = f"{title}\n{body}"
+        if not _identity_is_mentioned(
+            combined,
+            canonical_name=canonical_name,
+            aliases=aliases,
+        ):
+            continue
+        lowered = combined.casefold()
+        has_operator_marker = False
+        for marker in _DOMAIN_OWNERSHIP_MARKERS:
+            start = 0
+            marker_key = marker.casefold()
+            while (index := lowered.find(marker_key, start)) >= 0:
+                context = combined[max(0, index - 240) : index + len(marker) + 240]
+                if _identity_is_mentioned(
+                    context,
+                    canonical_name=canonical_name,
+                    aliases=aliases,
+                ):
+                    has_operator_marker = True
+                    break
+                start = index + len(marker_key)
+            if has_operator_marker:
+                break
+        title_matches = _identity_is_mentioned(
+            title,
+            canonical_name=canonical_name,
+            aliases=aliases,
+        )
+        if has_operator_marker or (title_matches and not _domain_is_subdomain(domain)):
+            return True
+    return False
+
+
+def _domain_has_cross_source_proof(
+    domain: str,
+    *,
+    evidence: list[dict[str, Any]] | None,
+    sources_by_url: dict[str, dict[str, Any]],
+    canonical_name: str,
+) -> bool:
+    """Accept a new domain when an independent trusted source proves ownership."""
+    canonical_key = targets_dao.normalize_target_name(canonical_name)
+    for item in evidence or []:
+        finding = str(item.get("finding") or "")
+        finding_key = targets_dao.normalize_target_name(finding)
+        if (
+            not canonical_key
+            or canonical_key not in finding_key
+            or domain.casefold() not in finding.casefold()
+            or not any(marker.casefold() in finding.casefold() for marker in _DOMAIN_PROOF_MARKERS)
+        ):
+            continue
+        urls = list(item.get("source_urls") or [])
+        has_owned_page = bool(_filter_scan_urls_by_domains(urls, [domain]))
+        has_independent_source = any(
+            not _filter_scan_urls_by_domains([url], [domain])
+            and str((sources_by_url.get(url) or {}).get("source_type") or "")
+            .strip()
+            .casefold()
+            in _TRUSTED_SOURCE_TYPES
+            for url in urls
+        )
+        if has_owned_page and has_independent_source:
+            return True
+    return False
+
+
+def _validated_research_aliases(
+    *,
+    canonical_name: str,
+    aliases: list[Any] | None,
+    browser_pages: dict[str, dict[str, str]] | None,
+) -> list[str]:
+    """Keep only structural aliases or aliases co-observed with the stable identity."""
+    result: list[str] = []
+    canonical_key = targets_dao.normalize_target_name(canonical_name)
+    page_texts = [
+        f"{page.get('title') or ''}\n{page.get('text') or ''}"
+        for page in (browser_pages or {}).values()
+    ]
+    for alias in _clean_strings(aliases, limit=30):
+        alias_key = targets_dao.normalize_target_name(alias)
+        if not targets_dao.is_safe_identity_alias(canonical_name, alias):
+            continue
+        structurally_related = bool(
+            alias_key
+            and canonical_key
+            and (alias_key in canonical_key or canonical_key in alias_key)
+        )
+        co_observed = any(
+            _identity_is_mentioned(
+                text,
+                canonical_name=canonical_name,
+                aliases=[],
+            )
+            and alias_key in targets_dao.normalize_target_name(text)
+            for text in page_texts
+        )
+        if browser_pages is None or structurally_related or co_observed:
+            result.append(alias)
+    return result
 
 
 def _identity_key_matches(candidate: str, known: str) -> bool:
@@ -251,6 +482,9 @@ def _validated_scan_scope(
     sources_by_url: dict[str, dict[str, Any]],
     canonical_name: str,
     aliases: list[Any] | None,
+    known_root_domains: list[Any] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+    browser_pages: dict[str, dict[str, str]] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Keep only owned origins or bounded target-specific gov portal paths."""
     candidate_domains = _clean_strings(
@@ -284,16 +518,37 @@ def _validated_scan_scope(
             [normalize_root_domain(url) for url in relevant_urls],
             limit=12,
         )
-    verified_domains = [
-        domain
-        for domain in candidate_domains
-        if _filter_scan_urls_by_domains(relevant_urls, [domain])
-        and (
-            not domain.endswith(".gov.cn")
-            or any(_is_origin_homepage(url) for url in relevant_urls)
-            or _shared_government_path_segments(relevant_urls, [domain])
-        )
-    ]
+    verified_domains: list[str] = []
+    for domain in candidate_domains:
+        domain_urls = _filter_scan_urls_by_domains(relevant_urls, [domain])
+        if not domain_urls:
+            continue
+        if domain.endswith(".gov.cn"):
+            accepted = bool(
+                any(_is_origin_homepage(url) for url in domain_urls)
+                or _shared_government_path_segments(domain_urls, [domain])
+            )
+        else:
+            accepted = bool(
+                browser_pages is None
+                or _domain_matches_known_scope(domain, known_root_domains)
+                or _domain_has_browser_ownership_evidence(
+                    domain,
+                    domain_urls,
+                    sources_by_url=sources_by_url,
+                    canonical_name=canonical_name,
+                    aliases=aliases,
+                    browser_pages=browser_pages,
+                )
+                or _domain_has_cross_source_proof(
+                    domain,
+                    evidence=evidence,
+                    sources_by_url=sources_by_url,
+                    canonical_name=canonical_name,
+                )
+            )
+        if accepted:
+            verified_domains.append(domain)
     return verified_domains, _filter_scan_urls_by_domains(
         relevant_urls,
         verified_domains,
@@ -363,6 +618,7 @@ def _unverified_navigation_domains(
 def _build_navigation_evidence_observer(
     urls: set[str],
     attempted_urls: list[str] | None = None,
+    browser_pages: dict[str, dict[str, str]] | None = None,
 ) -> Callable[[str, Any], None]:
     """Record browser evidence before Agent summarization can discard messages."""
     pending_selected_url = ""
@@ -371,6 +627,11 @@ def _build_navigation_evidence_observer(
         nonlocal pending_selected_url
         text = _browser_tool_text(result)
         if tool_name in {"evaluate_script", "evaluate", "take_snapshot"}:
+            page_evidence = (
+                _extract_browser_page_evidence(text)
+                if tool_name in {"evaluate_script", "evaluate"}
+                else None
+            )
             if tool_name == "take_snapshot":
                 evaluation_succeeded = "## Latest page snapshot" in text
                 evaluated_values = re.findall(
@@ -388,15 +649,19 @@ def _build_navigation_evidence_observer(
                     text,
                 )
             evaluated_url = (
-                _canonical_browser_url(evaluated_values[-1])
+                str((page_evidence or {}).get("url") or "")
+                or _canonical_browser_url(evaluated_values[-1])
                 if evaluated_values
-                else ""
+                else str((page_evidence or {}).get("url") or "")
             )
             if tool_name == "take_snapshot" and _snapshot_is_error_page(text):
                 pending_selected_url = ""
                 return
             if evaluation_succeeded and (evaluated_url or pending_selected_url):
-                urls.add(evaluated_url or pending_selected_url)
+                resolved_url = evaluated_url or pending_selected_url
+                urls.add(resolved_url)
+                if browser_pages is not None and page_evidence:
+                    browser_pages[resolved_url] = page_evidence
                 pending_selected_url = ""
             return
         if tool_name not in {"navigate_page", "navigate"}:
@@ -458,6 +723,10 @@ def _normalize_payload(
     payload: TargetResearchPayload,
     *,
     navigated_urls: set[str] | None = None,
+    trusted_canonical_name: str = "",
+    trusted_aliases: list[Any] | None = None,
+    known_root_domains: list[Any] | None = None,
+    browser_pages: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     data = payload.model_dump()
     sources_by_url: dict[str, dict[str, Any]] = {}
@@ -518,13 +787,18 @@ def _normalize_payload(
     related: list[dict[str, Any]] = []
     for item in normalize_many(list(data.get("related_targets") or [])):
         related_name = str(item.get("name") or "").strip()
-        related_aliases = _clean_strings(item.get("aliases"), limit=20)
+        related_aliases = _validated_research_aliases(
+            canonical_name=related_name,
+            aliases=item.get("aliases"),
+            browser_pages=browser_pages,
+        )
         related_domains, related_urls = _validated_scan_scope(
             urls=normalize_urls(item.get("web_scan_urls") or []),
             root_domains=item.get("root_domains") or [],
             sources_by_url=sources_by_url,
             canonical_name=related_name,
             aliases=related_aliases,
+            browser_pages=browser_pages,
         )
         related.append(
             {
@@ -551,13 +825,25 @@ def _normalize_payload(
         limit=12,
     )
     canonical_name = str(data.get("canonical_name") or "").strip()
-    aliases = _clean_strings(data.get("aliases"), limit=30)
+    stable_name = str(trusted_canonical_name or canonical_name).strip()
+    aliases = _validated_research_aliases(
+        canonical_name=stable_name,
+        aliases=data.get("aliases"),
+        browser_pages=browser_pages,
+    )
+    domain_identity_aliases = _clean_strings(
+        [*(trusted_aliases or []), *aliases],
+        limit=40,
+    )
     root_domains, web_scan_urls = _validated_scan_scope(
         urls=normalize_urls(data.get("web_scan_urls") or []),
         root_domains=candidate_root_domains,
         sources_by_url=sources_by_url,
-        canonical_name=canonical_name,
-        aliases=aliases,
+        canonical_name=stable_name,
+        aliases=domain_identity_aliases,
+        known_root_domains=known_root_domains,
+        evidence=evidence,
+        browser_pages=browser_pages,
     )
     if candidate_root_domains != root_domains:
         logger.warning(
@@ -663,6 +949,10 @@ def _validate_research_payload(
     value: dict[str, Any],
     *,
     navigated_urls: set[str] | None = None,
+    trusted_canonical_name: str = "",
+    trusted_aliases: list[Any] | None = None,
+    known_root_domains: list[Any] | None = None,
+    browser_pages: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     prepared = _prepare_payload_for_validation(
         value,
@@ -671,6 +961,10 @@ def _validate_research_payload(
     return _normalize_payload(
         TargetResearchPayload.model_validate(prepared),
         navigated_urls=navigated_urls,
+        trusted_canonical_name=trusted_canonical_name,
+        trusted_aliases=trusted_aliases,
+        known_root_domains=known_root_domains,
+        browser_pages=browser_pages,
     )
 
 
@@ -680,6 +974,8 @@ def _eligible_related_targets(
     current_name: str,
     limit: int,
 ) -> list[dict[str, Any]]:
+    if int(limit or 0) <= 0:
+        return []
     source_types = {
         str(source.get("url") or ""): str(source.get("source_type") or "").strip().lower()
         for source in data.get("sources") or []
@@ -707,7 +1003,15 @@ def _eligible_related_targets(
             str(item.get("name") or "").casefold(),
         )
     )
-    return eligible[: max(1, min(int(limit or 1), 12))]
+    return eligible[: min(int(limit), 12)]
+
+
+def _bounded_related_target_limit(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0, min(parsed, 12))
 
 
 def _relationship_direction(relation_type: str) -> str:
@@ -744,6 +1048,7 @@ def _preserved_relation(relation: dict[str, Any] | None) -> dict[str, Any] | Non
         "relation_type",
         "relation_depth",
         "ownership_percent",
+        "minimum_ownership_percent",
         "relation_source",
         "lineage_target_ids",
         "lineage_target_names",
@@ -976,7 +1281,10 @@ async def enqueue_target_research(
         "target_id": target_id,
         "scan_discovered_targets": bool(scan_discovered_targets),
         "rescan_root": bool(rescan_root),
-        "max_related_targets": max(1, min(int(max_related_targets or 8), 12)),
+        "max_related_targets": _bounded_related_target_limit(
+            max_related_targets,
+            default=8,
+        ),
         "force_refresh": bool(force_refresh),
         "scan_params": dict(scan_params or {}),
     }
@@ -1106,7 +1414,10 @@ async def enqueue_target_research_batch(
             "target_id": target_id,
             "scan_discovered_targets": bool(scan_discovered_targets),
             "rescan_root": bool(rescan_root),
-            "max_related_targets": max(1, min(int(max_related_targets or 4), 12)),
+            "max_related_targets": _bounded_related_target_limit(
+                max_related_targets,
+                default=4,
+            ),
             "force_refresh": bool(force_refresh),
             "scan_params": shared_scan_params,
         }
@@ -1224,12 +1535,14 @@ async def run_target_research(
     prompt = load_prompt("target_research/target_research")
     parsed: dict[str, Any] | None = None
     navigated_urls: set[str] = set()
+    browser_pages: dict[str, dict[str, str]] = {}
     failed_domains: list[str] = []
     try:
         cdp_url = ""
         for browser_attempt in range(1, TARGET_RESEARCH_BROWSER_ATTEMPTS + 1):
             attempt_urls: set[str] = set()
             attempted_urls: list[str] = []
+            attempt_pages: dict[str, dict[str, str]] = {}
             try:
                 if browser_attempt == 1:
                     cdp_url = await provider.get_cdp_endpoint(
@@ -1267,6 +1580,7 @@ async def run_target_research(
                     mcp_result_observer=_build_navigation_evidence_observer(
                         attempt_urls,
                         attempted_urls,
+                        attempt_pages,
                     ),
                 )
 
@@ -1301,6 +1615,17 @@ async def run_target_research(
                                 ),
                             ),
                             navigated_urls=attempt_urls,
+                            trusted_canonical_name=str(
+                                target.get("canonical_name") or ""
+                            ),
+                            trusted_aliases=list(
+                                target.get("identity_aliases") or []
+                            ),
+                            known_root_domains=[
+                                *(target.get("official_root_domains") or []),
+                                *(target.get("asset_root_domains") or []),
+                            ],
+                            browser_pages=attempt_pages,
                         )
 
                     return await extract_with_retry(
@@ -1355,6 +1680,7 @@ async def run_target_research(
                         phase="target_research_evidence_retry",
                     )
                 navigated_urls = attempt_urls
+                browser_pages = attempt_pages
                 break
             except Exception as exc:
                 for domain in _unverified_navigation_domains(
@@ -1396,6 +1722,13 @@ async def run_target_research(
             canonical_name=str(target.get("canonical_name") or ""),
         ),
         navigated_urls=navigated_urls,
+        trusted_canonical_name=str(target.get("canonical_name") or ""),
+        trusted_aliases=list(target.get("identity_aliases") or []),
+        known_root_domains=[
+            *(target.get("official_root_domains") or []),
+            *(target.get("asset_root_domains") or []),
+        ],
+        browser_pages=browser_pages,
     )
     await update_task_stage(
         db, task_id=task_id, stage="target_expand", message="正在校验证据并扩展 Target 关系..."
@@ -1434,6 +1767,18 @@ async def run_target_research(
             target_id,
             data.get("canonical_name"),
         )
+    research_aliases = [
+        str(data.get("canonical_name") or ""),
+        *(data.get("aliases") or []),
+    ]
+    safe_research_aliases = [
+        alias
+        for alias in research_aliases
+        if targets_dao.is_safe_identity_alias(
+            str(target.get("canonical_name") or ""),
+            alias,
+        )
+    ]
     enriched_target = await targets_dao.merge_target_research_identity(
         db,
         target_id=target_id,
@@ -1442,8 +1787,7 @@ async def run_target_research(
             *(target.get("aliases") or []),
             *(
                 [
-                    str(data.get("canonical_name") or ""),
-                    *(data.get("aliases") or []),
+                    *safe_research_aliases,
                 ]
                 if research_identity_verified
                 else []
@@ -1461,9 +1805,9 @@ async def run_target_research(
         canonical_name=str(enriched_target.get("canonical_name") or ""),
         identity_aliases=list(enriched_target.get("identity_aliases") or []),
         verified_aliases=(
-            list(data.get("aliases") or []) if research_identity_verified else []
+            safe_research_aliases if research_identity_verified else []
         ),
-        ai_aliases=list(data.get("aliases") or []),
+        ai_aliases=safe_research_aliases,
         fallback_aliases=list(enriched_target.get("aliases") or []),
         existing_profile=dict(enriched_target.get("scan_profile") or {}),
         ai_identity_verified=research_identity_verified,
@@ -1590,16 +1934,21 @@ async def run_target_research(
         if not related_target_id or related_target_id in expanded_target_ids:
             continue
         expanded_target_ids.add(related_target_id)
-        if direction in {
+        existing_project_relation = await targets_dao.get_project_target(
+            db,
+            project_id=project_id,
+            target_id=related_target_id,
+        )
+        preserved_project_relation = _preserved_relation(existing_project_relation)
+        if existing_project_relation:
+            project_relation = preserved_project_relation
+            objectives = ["机构深研补充的关联证据"]
+            batch_tags = list(existing_project_relation.get("batch_tags") or [])
+        elif direction in {
             relationships_dao.UPSTREAM_DIRECTION,
             relationships_dao.LATERAL_DIRECTION,
         }:
-            existing_project_relation = await targets_dao.get_project_target(
-                db,
-                project_id=project_id,
-                target_id=related_target_id,
-            )
-            project_relation = _preserved_relation(existing_project_relation)
+            project_relation = None
             if direction == relationships_dao.UPSTREAM_DIRECTION:
                 objectives = ["机构深研发现并核验的直接主管单位"]
                 batch_tags = _expanded_batch_tags(

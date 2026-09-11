@@ -940,7 +940,7 @@ def test_persona_research_browser_context_is_compact_and_read_only() -> None:
     assert positional_args[0]["timeout"] == RESEARCH_NAVIGATION_TIMEOUT_MS
     assert positional_kwargs == {}
 
-    assert TARGET_RESEARCH_MCP_TOOLS == ("navigate_page", "take_snapshot")
+    assert TARGET_RESEARCH_MCP_TOOLS == ("navigate_page", "evaluate_script")
     slim_args, slim_kwargs = _standardize_research_browser_call(
         "evaluate",
         (),
