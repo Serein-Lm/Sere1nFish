@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from urllib.parse import quote_plus, urlsplit
 
 
+class SearchSourceBlocked(RuntimeError):
+    """A search provider requires human verification before it can be used."""
+
+
 @dataclass(frozen=True, slots=True)
 class PersonaSearchSource:
     name: str
@@ -17,6 +21,15 @@ class PersonaSearchSource:
 
     def search_url(self, query: str) -> str:
         return self.url_prefix + quote_plus(query)
+
+    def validate_response(self, payload: dict) -> None:
+        parsed = urlsplit(str(payload.get("url") or ""))
+        location = (str(parsed.hostname or "") + parsed.path).casefold()
+        title = str(payload.get("title") or "").strip().casefold()
+        if re.search(r"(?:^|[./_-])(?:q?captcha|challenge)(?:[./_-]|$)", location) or title.startswith(
+            ("访问异常", "安全验证", "人机验证", "verify you are human")
+        ):
+            raise SearchSourceBlocked(f"{self.name} 要求人工验证，本轮暂停该检索源")
 
     def extraction_script(self) -> str:
         return """() => {

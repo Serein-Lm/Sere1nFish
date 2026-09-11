@@ -19,6 +19,7 @@ from api.services.company_url import normalize_url
 from api.services.info_collection.url_tools import _build_worker_chrome_config
 from api.services.persona_research_search import (
     PersonaSearchSource,
+    SearchSourceBlocked,
     candidate_matches_query,
     is_search_result_url,
     persona_search_sources,
@@ -245,14 +246,24 @@ class ChromeDevtoolsPersonaResearchBrowser:
         task_id: str = "",
     ) -> list[list[ResearchCandidate]]:
         buckets: list[list[ResearchCandidate]] = []
+        blocked_sources: dict[str, str] = {}
         for query in queries:
             candidates: list[ResearchCandidate] = []
             seen: set[str] = set()
             for source in persona_search_sources():
+                if source.name in blocked_sources:
+                    continue
                 try:
                     found = await self._search_candidates(session, source, query)
                 except McpRecoveryExhausted:
                     raise
+                except SearchSourceBlocked as exc:
+                    blocked_sources[source.name] = str(exc)
+                    logger.warning(
+                        "[persona_research_browser] task=%s search=%s blocked: %s",
+                        task_id, source.name, exc,
+                    )
+                    continue
                 except Exception as exc:  # noqa: BLE001
                     logger.info(
                         "[persona_research_browser] task=%s search=%s query=%s failed: %s: %s",
@@ -271,6 +282,10 @@ class ChromeDevtoolsPersonaResearchBrowser:
                 if len(candidates) >= MIN_READABLE_PAGES:
                     break
             buckets.append(candidates[:SEARCH_RESULTS_PER_QUERY])
+        if not any(buckets) and blocked_sources:
+            raise RuntimeError(
+                "未获得相关公开来源；" + "；".join(blocked_sources.values())
+            )
         return buckets
 
     async def _search_candidates(
@@ -283,6 +298,7 @@ class ChromeDevtoolsPersonaResearchBrowser:
         payload = _extract_json_object(await _call_mcp(
             session, "evaluate_script", {"function": source.extraction_script()},
         ))
+        source.validate_response(payload)
         candidates: list[ResearchCandidate] = []
         seen: set[str] = set()
         for item in list(payload.get("items") or [])[:SEARCH_RESULTS_PER_QUERY]:
