@@ -6191,10 +6191,10 @@ export default function ProjectDetail() {
                         </Form.Item>
                         <Form.Item
                           name="control_min_ownership_percent"
-                          label="最低直接持股比例"
+                          label="最低直接持股比例（%）"
                           extra="默认 100%（仅全资）；专项可降至 50%。每一层关系都独立校验并保存真实比例。"
                         >
-                          <InputNumber min={50} max={100} precision={2} addonAfter="%" style={{ width: '100%' }} />
+                          <InputNumber min={50} max={100} precision={2} style={{ width: '100%' }} />
                         </Form.Item>
                         <Form.Item
                           name="control_max_depth"
