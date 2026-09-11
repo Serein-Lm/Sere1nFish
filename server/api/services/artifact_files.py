@@ -77,6 +77,12 @@ def _generate_word(*, title: str, content: str) -> dict[str, Any]:
     return generate_docx(title=title, content=content)
 
 
+def _generate_pdf(*, title: str, content: str) -> dict[str, Any]:
+    from api.services.artifact_pdf import generate_pdf
+
+    return generate_pdf(title=title, content=content)
+
+
 def _generate_registered_text(
     output_format: str,
     *,
@@ -92,6 +98,7 @@ def _generate_registered_text(
 
 ARTIFACT_GENERATORS: dict[str, Callable[..., dict[str, Any]]] = {
     "word": _generate_word,
+    "pdf": _generate_pdf,
     **{
         name: partial(_generate_registered_text, name)
         for name in ARTIFACT_FORMATS

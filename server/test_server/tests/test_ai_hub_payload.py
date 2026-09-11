@@ -2036,7 +2036,7 @@ def test_artifact_list_metadata_omits_large_content() -> None:
 def test_document_artifact_registry_generates_multiple_formats() -> None:
     from api.services.artifact_files import generate_artifact, supported_formats
 
-    assert supported_formats() == ("word", "markdown", "text", "json", "csv")
+    assert supported_formats() == ("word", "pdf", "markdown", "text", "json", "csv")
 
     markdown = generate_artifact(
         title="测试报告",

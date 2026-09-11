@@ -30,7 +30,7 @@
 1. AI Card 展示本次问题，并在可折叠区域更新高层执行阶段。
 2. 正文只流式展示综合回答，不混入 Agent、工具调用和内部分析过程。
 3. 最终回答遵循结论优先、关键依据、可执行建议的层级，并保留结构化 Markdown。
-4. 当前 AI 中枢可生成并保存 `Word`、`Markdown`、`TXT`、`JSON`、`CSV` 产物。
+4. 当前 AI 中枢可生成并保存 `Word`、`PDF`、`Markdown`、`TXT`、`JSON`、`CSV` 产物。Word/PDF 共用 Markdown 表格与正文排版，见 [文档产物说明](DOCUMENT_ARTIFACTS.md)。
 5. 产物文件写入统一 OSS，MongoDB 保存元信息，通过登录鉴权后下载。
 6. 钉钉卡片创建失败时自动回退为普通 Markdown 回复。
 

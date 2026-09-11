@@ -90,6 +90,7 @@ def _artifact_response(doc: dict[str, Any]) -> str:
     kind = str(doc.get("kind") or "file")
     format_label = {
         "word": "Word",
+        "pdf": "PDF",
         "payload_word": "载荷 Word",
         "markdown": "Markdown",
         "text": "TXT",
@@ -167,8 +168,9 @@ def generate_word_document(title: str, content: str = "", sections: str = "") ->
 @tool(
     "generate_document_artifact",
     description=(
-        "把完整正文生成为可下载产物。output_format 支持 word、markdown、text、json、csv；"
+        "把完整正文生成为可下载产物。output_format 支持 word、pdf、markdown、text、json、csv；"
         "用户未指定格式时使用 word。JSON 必须是合法 JSON，CSV 正文应包含表头。"
+        "Word/PDF 共用排版，支持 Markdown 标题、表格、列表、粗体、斜体、引用和代码块。"
         "返回稳定的产物引用和受登录鉴权的下载入口。"
     ),
 )

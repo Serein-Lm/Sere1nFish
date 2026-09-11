@@ -15,7 +15,6 @@ import shutil
 import ssl
 import subprocess
 import tempfile
-import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -75,8 +74,6 @@ _DOCX_OCR_MAX_IMAGES = 80
 _DOCX_OCR_MAX_IMAGE_BYTES = 32 * 1024 * 1024
 _DOCX_OCR_DEADLINE_SECONDS = 900
 _DOCX_RASTER_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
-_OFFICE_CONVERSION_TIMEOUT_SECONDS = 300
-_OFFICE_CONVERSION_SLOTS = threading.BoundedSemaphore(2)
 _OPENSSL_LEGACY_SERVER_CONNECT = int(
     getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00000004)
 )
@@ -670,59 +667,19 @@ def _extract_office_via_pdf(
     limit: int,
 ) -> tuple[str, str]:
     """Render image/vector-only Office files to PDF, then reuse bounded OCR."""
-    converter = shutil.which("soffice") or shutil.which("libreoffice")
-    if not converter:
+    from core.office import (
+        OfficeConversionError,
+        OfficeConverterUnavailable,
+        convert_office_to_pdf,
+    )
+
+    try:
+        pdf_data = convert_office_to_pdf(data, suffix=suffix)
+    except OfficeConverterUnavailable:
         return "", "运行环境缺少 LibreOffice，Office 扫描件已归档但未 OCR"
-    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
-    with _OFFICE_CONVERSION_SLOTS:
-        try:
-            with tempfile.TemporaryDirectory(
-                prefix="sere1nfish-office-"
-            ) as directory:
-                source_path = os.path.join(directory, f"source{safe_suffix}")
-                pdf_path = os.path.join(directory, "source.pdf")
-                profile_path = os.path.join(directory, "profile")
-                with open(source_path, "wb") as handle:
-                    handle.write(data)
-                converted = subprocess.run(
-                    [
-                        converter,
-                        "--headless",
-                        "--nologo",
-                        "--nodefault",
-                        "--nofirststartwizard",
-                        f"-env:UserInstallation=file://{profile_path}",
-                        "--convert-to",
-                        "pdf",
-                        "--outdir",
-                        directory,
-                        source_path,
-                    ],
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=_OFFICE_CONVERSION_TIMEOUT_SECONDS,
-                    env={**os.environ, "HOME": directory},
-                )
-                if converted.returncode or not os.path.exists(pdf_path):
-                    detail = _decode_command_output(
-                        converted.stderr or converted.stdout
-                    ).strip()
-                    return "", (
-                        "Office 转 PDF 失败: "
-                        f"{detail or f'退出码 {converted.returncode}'}"
-                    )[:2_000]
-                with open(pdf_path, "rb") as handle:
-                    pdf_data = handle.read()
-                if len(pdf_data) > 200 * 1024 * 1024:
-                    return "", "Office 转换后的 PDF 超过 200 MiB 安全上限"
-                return _extract_pdf_text(pdf_data, limit)
-        except subprocess.TimeoutExpired:
-            return "", (
-                f"Office 转 PDF 超过 {_OFFICE_CONVERSION_TIMEOUT_SECONDS} 秒上限"
-            )
-        except OSError as exc:
-            return "", f"Office 转 PDF 失败: {exc}"
+    except (OfficeConversionError, ValueError) as exc:
+        return "", str(exc)[:2000]
+    return _extract_pdf_text(pdf_data, limit)
 
 
 def _with_office_render_fallback(
