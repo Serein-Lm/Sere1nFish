@@ -18,7 +18,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
 
 from Sere1nGraph.graph.agents.runtime import create_llm
 from api.services.runtime_config import get_runtime_app_config
@@ -38,6 +37,7 @@ from core.mobile.executor import (
     unregister_agent,
 )
 from core.mobile.manager import MobileDeviceManager
+from core.mobile.planner_contract import TaskPlan
 from core.mobile.prompt_runtime import load_mobile_prompt
 from core.mobile.screen_capture import capture_ready_screen, wake_device
 from core.mobile.vision_payload import prepare_vision_data_url
@@ -53,10 +53,6 @@ def _should_describe_screen_before_plan(goal: str) -> bool:
     """Screen context is useful for continuing current UI, not for fresh starts."""
     normalized = goal.strip()
     return bool(normalized) and not _FRESH_START_RE.search(normalized)
-
-
-class TaskPlan(BaseModel):
-    subtasks: list[str] = Field(description="有序的子任务列表")
 
 
 async def plan_task(goal: str, *, screen_analysis: str | None = None) -> list[str]:
