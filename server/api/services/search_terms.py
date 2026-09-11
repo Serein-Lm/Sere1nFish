@@ -317,7 +317,7 @@ async def resolve_project_target_terms(
     skip_completed_descendants: bool = True,
     max_keywords: int = 60,
 ) -> ResolvedSearchTerms:
-    """解析根 Target 及其全资关联单位渠道词，供手机/浏览器任务复用。"""
+    """解析根 Target 及其控股关联单位渠道词，供手机/浏览器任务复用。"""
     from api.dao import targets as targets_dao
     from api.services.target_scan_profile import is_scan_coverage_current
 

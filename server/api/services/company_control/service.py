@@ -1,4 +1,4 @@
-"""公司全资关联单位分层发现、ICP 补全和项目 Target 持久化。"""
+"""公司控股关联单位分层发现、ICP 补全和项目 Target 持久化。"""
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +16,11 @@ from crawler_tools.tianyancha_tools import (
 )
 from core.logger import get_logger
 
-from .contracts import ControlledEntity
+from .contracts import (
+    ControlledEntity,
+    investment_relation_type,
+    normalize_control_ownership_threshold,
+)
 from .factory import CompanyControlProviderFactory
 
 logger = get_logger("company_control")
@@ -41,6 +45,7 @@ class CompanyControlService:
         task_id: str,
         parent_target: dict[str, Any],
         company_name: str,
+        min_ownership_percent: float = 100.0,
         max_depth: int = 1,
         max_entities: int = 100,
         page_concurrency: int = 4,
@@ -51,14 +56,19 @@ class CompanyControlService:
         safe_max_depth = max(1, min(int(max_depth or 1), 2))
         safe_max_entities = max(1, int(max_entities or 100))
         safe_lookup_concurrency = max(1, int(page_concurrency or 4))
+        safe_min_ownership_percent = normalize_control_ownership_threshold(
+            min_ownership_percent
+        )
+        result_relation_type = investment_relation_type(safe_min_ownership_percent)
         base_result: dict[str, Any] = {
             "enabled": True,
             "status": "running",
             "provider": "tianyancha_outbound_investment",
-            "relation_type": "wholly_owned_direct_investment",
+            "relation_type": result_relation_type,
             "max_depth": safe_max_depth,
             "relation_depth": 0,
-            "ownership_percent": 100.0,
+            "ownership_percent": safe_min_ownership_percent,
+            "minimum_ownership_percent": safe_min_ownership_percent,
             "total_reported": 0,
             "matched": 0,
             "persisted": 0,
@@ -107,11 +117,11 @@ class CompanyControlService:
                 }
             )
             log = logger.info if provider_disabled else logger.warning
-            log("全资关联单位发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
+            log("控股关联单位发现不可用 company=%s code=%s reason=%s", company_name, exc.code, exc.reason)
             return base_result
         except Exception as exc:  # noqa: BLE001
             base_result.update({"status": "error", "errors": [str(exc)]})
-            logger.exception("全资关联单位发现异常 company=%s", company_name)
+            logger.exception("控股关联单位发现异常 company=%s", company_name)
             return base_result
         provider_name = str(
             getattr(provider, "name", "") or "tianyancha_outbound_investment"
@@ -133,13 +143,13 @@ class CompanyControlService:
                     return parent, await provider.lookup_icp(entity), ""
                 except TianyanchaApiError as exc:
                     logger.warning(
-                        "全资关联单位 ICP 查询失败 company=%s code=%s",
+                        "控股关联单位 ICP 查询失败 company=%s code=%s",
                         entity.name,
                         exc.code,
                     )
                     return parent, entity, f"{entity.name}: ICP 查询失败({exc.code}) {exc.reason}"
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("全资关联单位 ICP 查询异常 company=%s: %s", entity.name, exc)
+                    logger.warning("控股关联单位 ICP 查询异常 company=%s: %s", entity.name, exc)
                     return parent, entity, f"{entity.name}: ICP 查询异常 {exc}"
 
         async def _persist(
@@ -157,7 +167,7 @@ class CompanyControlService:
             }
             if entity_name_key and entity_name_key in lineage_name_keys:
                 logger.warning(
-                    "跳过全资关系名称循环 root=%s parent=%s entity=%s",
+                    "跳过控股关系名称循环 root=%s parent=%s entity=%s",
                     parent_target_id,
                     parent.target_id,
                     entity.name,
@@ -176,7 +186,7 @@ class CompanyControlService:
             target_id = str(target.get("target_id") or "")
             if not target_id or target_id in parent.lineage_target_ids:
                 logger.warning(
-                    "跳过全资关系循环 root=%s parent=%s entity=%s target=%s",
+                    "跳过控股关系循环 root=%s parent=%s entity=%s target=%s",
                     parent_target_id,
                     parent.target_id,
                     entity.name,
@@ -199,14 +209,17 @@ class CompanyControlService:
             aliases = list(scan_profile.get("search_aliases") or [entity.name])
             lineage_target_ids = [*parent.lineage_target_ids, target_id]
             lineage_target_names = [*parent.lineage_target_names, entity.name]
+            ownership_percent = float(entity.ownership_percent)
+            relation_type = investment_relation_type(ownership_percent)
             relation = {
                 "root_target_id": parent_target_id,
                 "root_target_name": parent_target_name,
                 "parent_target_id": parent.target_id,
                 "parent_target_name": parent.name,
-                "relation_type": "wholly_owned_direct_investment",
+                "relation_type": relation_type,
                 "relation_depth": depth,
-                "ownership_percent": 100.0,
+                "ownership_percent": ownership_percent,
+                "minimum_ownership_percent": safe_min_ownership_percent,
                 "relation_source": provider_name,
                 "provider_company_id": entity.provider_id,
                 "registration_status": entity.registration_status,
@@ -265,7 +278,8 @@ class CompanyControlService:
                 "root_domain": entity.root_domain,
                 "icp_domains": entity.icp_domains,
                 "icp_records": entity.icp_records,
-                "ownership_percent": 100.0,
+                "ownership_percent": ownership_percent,
+                "relation_type": relation_type,
                 "root_target_id": parent_target_id,
                 "root_target_name": parent_target_name,
                 "parent_target_id": parent.target_id,
@@ -314,6 +328,7 @@ class CompanyControlService:
                     try:
                         found = await provider.discover(
                             parent.name,
+                            min_ownership_percent=safe_min_ownership_percent,
                             max_entities=remaining,
                             page_concurrency=nested_page_concurrency,
                         )
@@ -370,6 +385,12 @@ class CompanyControlService:
                     base_result["truncated"] or discovery.truncated
                 )
                 for entity in discovery.entities:
+                    try:
+                        ownership_percent = float(entity.ownership_percent)
+                    except (TypeError, ValueError):
+                        continue
+                    if not safe_min_ownership_percent <= ownership_percent <= 100.0:
+                        continue
                     entity_key = (
                         f"id:{entity.provider_id}"
                         if entity.provider_id

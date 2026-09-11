@@ -138,6 +138,7 @@ const TASK_FORM_INITIAL_VALUES = {
   enable_copywriting: true,
   profile_copywriting_threshold: 60,
   enable_control_structure: false,
+  control_min_ownership_percent: 100,
   control_max_depth: 1,
   subsidiary_scan_limit: 12,
   skip_completed_subsidiaries: true,
@@ -215,7 +216,8 @@ function targetHierarchyParentName(target: ProjectTargetSummary | ProjectTargetO
 
 function targetHierarchyRole(target: ProjectTargetSummary | ProjectTargetOption): string {
   const depth = targetHierarchyDepth(target)
-  if (target.hierarchy_relation_type === 'controlled_subsidiary') {
+  if (target.hierarchy_relation_type === 'controlled_subsidiary'
+    || target.hierarchy_relation_type?.includes('controlled')) {
     return depth >= 2 ? '二级控股单位' : '控股子公司'
   }
   if (target.hierarchy_relation_type?.includes('wholly_owned')) {
@@ -5951,6 +5953,7 @@ export default function ProjectDetail() {
                       params.profile_copywriting_threshold = values.profile_copywriting_threshold
                     }
                     params.enable_control_structure = values.enable_control_structure ?? false
+                    params.control_min_ownership_percent = values.control_min_ownership_percent ?? 100
                     params.control_max_depth = values.control_max_depth ?? 1
                     params.subsidiary_scan_limit = values.subsidiary_scan_limit ?? 12
                     params.skip_completed_subsidiaries = values.skip_completed_subsidiaries ?? true
@@ -6141,7 +6144,7 @@ export default function ProjectDetail() {
                               <Checkbox>公司标准化 + FOFA/Hunter 资产发现与存活去重</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_control_structure" valuePropName="checked" noStyle>
-                              <Checkbox title="使用天眼查对外投资 ID 823，仅保留每一层直接持股比例恰好为 100% 的经营中企业；当前余额不足时请保持关闭">天眼查对外投资：全资关联单位 + ICP 域名（默认关闭）</Checkbox>
+                              <Checkbox title="使用天眼查对外投资 ID 823，按持股阈值保留每一层直接投资且仍在经营的企业；当前余额不足时请保持关闭">天眼查对外投资：控股关联单位 + ICP 域名（默认关闭）</Checkbox>
                             </Form.Item>
                             <Form.Item name="enable_url_scan" valuePropName="checked" noStyle>
                               <Checkbox>URL 扫描（探活 + 信息提取）</Checkbox>
@@ -6171,7 +6174,7 @@ export default function ProjectDetail() {
                             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.enable_xhs !== cur.enable_xhs}>
                               {({ getFieldValue }) => (
                                 <Form.Item name="enable_subsidiary_xhs" valuePropName="checked" noStyle>
-                                  <Checkbox disabled={!getFieldValue('enable_xhs')}>将已发现的全资关联单位纳入小红书目标选择</Checkbox>
+                                  <Checkbox disabled={!getFieldValue('enable_xhs')}>将已发现的控股关联单位纳入小红书目标选择</Checkbox>
                                 </Form.Item>
                               )}
                             </Form.Item>
@@ -6187,9 +6190,16 @@ export default function ProjectDetail() {
                           </Space>
                         </Form.Item>
                         <Form.Item
+                          name="control_min_ownership_percent"
+                          label="最低直接持股比例"
+                          extra="默认 100%（仅全资）；专项可降至 50%。每一层关系都独立校验并保存真实比例。"
+                        >
+                          <InputNumber min={50} max={100} precision={2} addonAfter="%" style={{ width: '100%' }} />
+                        </Form.Item>
+                        <Form.Item
                           name="control_max_depth"
                           label="关联单位扫描层级"
-                          extra="始终复用项目中已保存的控股关系；开启天眼查时会先补全关系。孙单位必须连续两层均为直接 100% 持股。"
+                          extra="始终复用项目中已保存的控股关系；开启天眼查时会先补全关系。孙单位必须连续两层均达到本次直接持股阈值。"
                         >
                           <Segmented block options={[
                             { label: '仅直属子单位', value: 1 },
@@ -6226,7 +6236,7 @@ export default function ProjectDetail() {
                                   name="xhs_manual_targets"
                                   label="需要采集的公司名单"
                                   rules={[{ required: true, whitespace: true, message: '请输入至少一个公司名称' }]}
-                                  extra="每行一个名称，也支持逗号分隔；按法定名和已有别名匹配根目标及本次发现的全资关联单位。"
+                                  extra="每行一个名称，也支持逗号分隔；按法定名和已有别名匹配根目标及本次发现的控股关联单位。"
                                 >
                                   <Input.TextArea rows={4} placeholder={'如：\n中国平安保险（集团）股份有限公司\n平安科技'} />
                                 </Form.Item>

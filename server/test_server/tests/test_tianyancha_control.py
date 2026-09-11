@@ -15,6 +15,7 @@ from crawler_tools.tianyancha_tools import (
     TianyanchaApiError,
     TianyanchaClient,
     parse_bidding_records,
+    parse_direct_controlled_investments,
     parse_direct_wholly_owned_investments,
     parse_icp_records,
     parse_percent,
@@ -93,6 +94,23 @@ def test_investment_parser_keeps_only_exact_wholly_owned_company() -> None:
         root,
         "100%",
         "直属全资公司",
+    ]
+
+
+def test_investment_parser_keeps_inclusive_control_threshold_and_real_percent() -> None:
+    parsed = parse_direct_controlled_investments(
+        [
+            {"name": "半数持股公司", "id": 1, "percent": "50%", "regStatus": "存续"},
+            {"name": "多数持股公司", "id": 2, "percent": "67.5%", "regStatus": "存续"},
+            {"name": "低比例公司", "id": 3, "percent": "49.99%", "regStatus": "存续"},
+        ],
+        root_name="根公司",
+        min_ownership_percent=50,
+    )
+
+    assert [(item.name, item.ownership_percent) for item in parsed] == [
+        ("半数持股公司", 50.0),
+        ("多数持股公司", 67.5),
     ]
 
 
@@ -523,7 +541,7 @@ async def test_provider_uses_outbound_investment_endpoint() -> None:
     from api.services.company_control.adapters import TianyanchaInvestmentProvider
 
     class _Client:
-        async def list_direct_wholly_owned_investments(
+        async def list_direct_controlled_investments(
             self,
             *_args: Any,
             **_kwargs: Any,
@@ -537,6 +555,7 @@ async def test_provider_uses_outbound_investment_endpoint() -> None:
     with pytest.raises(TianyanchaApiError) as raised:
         await TianyanchaInvestmentProvider(_Client()).discover(
             "根公司",
+            min_ownership_percent=100,
             max_entities=10,
             page_concurrency=2,
         )
@@ -598,9 +617,9 @@ async def test_subsidiary_service_persists_outbound_investment_provenance(
                 provider=self.name,
                 entities=[
                     ControlledEntity(
-                        name="全资子公司",
+                        name="控股子公司",
                         provider_id="company-2",
-                        ownership_percent=100.0,
+                        ownership_percent=60.0,
                     )
                 ],
                 total_reported=2,
@@ -620,7 +639,7 @@ async def test_subsidiary_service_persists_outbound_investment_provenance(
     async def _upsert_target(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {
             "target_id": "child",
-            "canonical_name": "全资子公司",
+            "canonical_name": "控股子公司",
             "root_domain": "child.example.com",
         }
 
@@ -659,11 +678,14 @@ async def test_subsidiary_service_persists_outbound_investment_provenance(
         task_id="task-1",
         parent_target={"target_id": "root", "canonical_name": "根公司"},
         company_name="根公司",
+        min_ownership_percent=50,
     )
 
     assert result["status"] == "completed"
     assert result["persisted"] == 1
-    assert captured["relation"]["relation_type"] == "wholly_owned_direct_investment"
+    assert captured["relation"]["relation_type"] == "controlled_direct_investment"
+    assert captured["relation"]["ownership_percent"] == 60.0
+    assert captured["relation"]["minimum_ownership_percent"] == 50.0
     assert captured["relation"]["relation_source"] == "tianyancha_outbound_investment"
     assert captured["provenance"]["investment_interface_id"] == OUTBOUND_INVESTMENT_INTERFACE_ID
     assert "control_interface_id" not in captured["provenance"]
@@ -689,9 +711,11 @@ async def test_subsidiary_service_persists_child_and_grandchild_lineage(
             self,
             company_name: str,
             *,
+            min_ownership_percent: float,
             max_entities: int,
             page_concurrency: int,
         ) -> ControlDiscovery:
+            assert min_ownership_percent == 100.0
             self.calls.append((company_name, page_concurrency))
             names = {
                 "根公司": [("直属子单位", "provider-child")],

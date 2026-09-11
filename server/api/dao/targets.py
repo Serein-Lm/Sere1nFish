@@ -26,6 +26,7 @@ _PROJECT_TARGET_RELATION_FIELDS = (
     "relation_type",
     "relation_depth",
     "ownership_percent",
+    "minimum_ownership_percent",
     "relation_source",
     "lineage_target_ids",
     "lineage_target_names",
@@ -44,6 +45,7 @@ _PROJECT_TARGET_RELATION_PROJECTION = {
     "relation_type": 1,
     "relation_depth": 1,
     "ownership_percent": 1,
+    "minimum_ownership_percent": 1,
     "relation_source": 1,
     "lineage_target_ids": 1,
     "lineage_target_names": 1,
@@ -1297,6 +1299,7 @@ async def link_project_target(
             "relation_type",
             "relation_depth",
             "ownership_percent",
+            "minimum_ownership_percent",
             "relation_source",
             "lineage_target_ids",
             "lineage_target_names",
@@ -1364,7 +1367,7 @@ async def list_project_target_descendants(
     root_target_id: str,
     max_depth: int = 2,
 ) -> list[dict[str, Any]]:
-    """读取项目中根 Target 下的全资关联单位，兼容旧的第一层记录。"""
+    """读取项目中根 Target 下的控股关联单位，兼容旧的第一层记录。"""
     if not project_id or not root_target_id:
         return []
     safe_depth = max(1, min(int(max_depth or 1), 2))

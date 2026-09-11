@@ -71,7 +71,7 @@
 - `Project` 是一次工作的组织边界，承载任务、搜索目标和项目内展示；它不是公司实体，也不能作为跨项目公司的唯一标识。
 - `Target` 是跨项目复用的全局目标实体，当前主要表示公司或机构，持久化在 `targets`。公司规范化结果通过 `target_id` 归入同一实体，名称别名和根域名只用于解析，调用侧使用稳定 `target_id`。
 - `ProjectTarget` 是项目关注某个 Target 的关系，持久化在 `project_targets`，保存搜索词、目标、采集任务、最近增量采集时间和项目内业务批次标签 `batch_tags`。一个 Project 可关联多个 Target，一个 Target 也可被多个 Project 复用；一个 ProjectTarget 可属于多个业务批次，子、孙单位继承主 Target 的批次标签。业务批次不得复用任务调度 `batch_id`，历史重跑不会自动形成新业务批次。
-- 全资单位关系归属于 ProjectTarget 的项目场景：根单位、直接上级、`relation_depth` 和完整 `lineage_target_ids/lineage_target_names` 必须同时保存。扫描支持直属子单位或继续钻取一层孙单位；每一条边都必须是直接 100% 持股，禁止把根单位到孙单位的间接持股伪装为直接关系。项目详情按这些稳定字段构建层级树，不能依赖名称前缀临时推断。
+- 控股单位关系归属于 ProjectTarget 的项目场景：根单位、直接上级、`relation_depth` 和完整 `lineage_target_ids/lineage_target_names` 必须同时保存。默认阈值为直接持股 100%；专项可在 50%-100% 间配置，每一条边都必须独立达到本次阈值并保存真实 `ownership_percent`。100% 使用 `wholly_owned_direct_investment`，其余使用 `controlled_direct_investment`；禁止把根单位到孙单位的间接持股伪装为直接关系。项目详情按这些稳定字段构建层级树，不能依赖名称前缀临时推断。
 - 主管单位、同级关联单位等非控股方向关系持久化在 `target_relationships`，不得为了复用控股树而把上级或同级单位反向写成当前 Target 的子节点。机构深研应主动尝试核验一层直接主管单位，只接受官网机构设置、直属单位名录或权威政府页面支持的直接关系；行业监管、业务指导和地域归属不能自动当作主管关系。主管单位作为独立 Target 关联项目，默认只继承网站深扫，公众号和招投标等高成本渠道仍需显式开启；普通扫描再次关联 Target 时必须保留已建立的控股层级，只有用户明确把它提升为项目主 Target 时才能清除层级字段。
 - `SourceDocument` 是按规范 URL 全局去重的来源文档，持久化在 `source_documents`；同一文章在不同项目或 Target 中只保存一份来源身份。
 - `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
@@ -160,7 +160,7 @@
 - 官网来源采集通过统一的 `standard/deep` 策略表达归档意图；大型官网达到预算时必须返回 `partial/truncated` 并保留可续跑断点。提高预算续跑时要重新遍历已归档目录页发现此前未入队文档，不得把硬上限误报为采集完成。
 - 新增 MongoDB collection（如 `fofa_assets`、`company_meta`）先在 `api/db/collections.py` 声明常量，再在 `api.main` 生命周期或 DAO `ensure_indexes` 中幂等建索引。
 - 招投标数据通过 `crawler_tools.tianyancha_tools` 查询规范化法定主体，默认固定采集近 30 天的招标预告、招标公告和中标结果；天眼查总开关和时间窗由 MongoDB `collection_runtime` 统一控制，余额不足时自动熔断且不得阻断其他采集通道。由 `api.services.bidding_pipeline` 统一归档供应商原始 JSON、正文、详情页和附件到 OSS，并按稳定 `record_id` 写入 `bidding_records`。精确的 Project、Target、任务和查询窗口关系写入 `bidding_record_links`，记录上的 `target_ids/project_ids` 仅保留向后兼容；同一公告明确出现项目内成员单位的规范名或可信裸别名时可以增加多个 Target 关系，但共享集团域名和多主体汇总不得作为成员单位归属证据。重采集失败不得覆盖此前成功归档的证据引用。后续视觉识别、Finding 和话术生成复用 `UrlScanPipeline`，禁止另建平行分析链路。
-- 控股结构通过 `api.services.company_control` 分层发现并持久化。层级上限、单位总量、投资查询、ICP 查询和后续扫描并发必须分别限幅；默认只查直属子单位，用户显式选择后最多继续一层孙单位。综合扫描启用学者联系时，根 Target 与已选子、孙单位均需按 `target_id` 持久化，关联单位使用独立 `scholar_entities` 检查点，恢复时不得因网站阶段已完成而跳过。恢复任务、渠道词解析和项目 Target 汇总必须复用已保存 lineage，不能重新按名称猜测关系。
+- 控股结构通过 `api.services.company_control` 分层发现并持久化。持股阈值、层级上限、单位总量、投资查询、ICP 查询和后续扫描并发必须分别限幅；默认阈值为 100%，专项最低可配置为 50%。默认只查直属子单位，用户显式选择后最多继续一层孙单位；孙级必须逐边校验阈值。综合扫描启用学者联系时，根 Target 与已选子、孙单位均需按 `target_id` 持久化，关联单位使用独立 `scholar_entities` 检查点，恢复时不得因网站阶段已完成而跳过。恢复任务、渠道词解析和项目 Target 汇总必须复用已保存 lineage，不能重新按名称猜测关系。
 
 ## 前端关键设计规则
 

@@ -87,7 +87,7 @@ class RelatedEntityCollectionAdapter:
 
     async def run(self) -> dict[str, Any]:
         total = len(self.request.entities)
-        await self._update_progress(0, "running", f"开始采集 {total} 家全资关联单位")
+        await self._update_progress(0, "running", f"开始采集 {total} 家控股关联单位")
         outcomes = await asyncio.gather(
             *(self._scan_with_progress(entity) for entity in self.request.entities),
             return_exceptions=True,
@@ -98,7 +98,7 @@ class RelatedEntityCollectionAdapter:
             total,
             status,
             (
-                "全资关联单位采集结束 "
+                "控股关联单位采集结束 "
                 f"完成 {summary['completed']}、部分完成 {summary['partial']}"
                 f"、失败 {summary['failed']}"
             ),
@@ -124,7 +124,7 @@ class RelatedEntityCollectionAdapter:
                 await self._update_progress(
                     self.processed,
                     "completed" if self.processed >= total else "running",
-                    f"全资关联单位已处理 {self.processed}/{total}",
+                    f"控股关联单位已处理 {self.processed}/{total}",
                 )
 
     async def _scan_entity(self, entity: dict[str, Any]) -> dict[str, Any]:

@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from api.services.company_control.contracts import (
+    investment_relation_type,
+    normalize_control_ownership_threshold,
+)
 from api.services.company_scan.contracts import CompanyScanPlan
 
 
@@ -33,13 +37,17 @@ def build_initial_result(
 
 
 def _control_result(plan: CompanyScanPlan) -> dict[str, Any]:
+    minimum_ownership_percent = normalize_control_ownership_threshold(
+        plan.control_min_ownership_percent
+    )
     return {
         "enabled": plan.enable_control_structure,
         "status": "pending" if plan.enable_control_structure else "disabled",
-        "relation_type": "wholly_owned_direct_investment",
+        "relation_type": investment_relation_type(minimum_ownership_percent),
         "max_depth": max(1, min(int(plan.control_max_depth or 1), 2)),
         "relation_depth": 0,
-        "ownership_percent": 100.0,
+        "ownership_percent": minimum_ownership_percent,
+        "minimum_ownership_percent": minimum_ownership_percent,
         "scan_policy": {
             "max_entities": max(1, min(int(plan.subsidiary_scan_limit or 12), 100)),
             "skip_completed": bool(plan.skip_completed_subsidiaries),

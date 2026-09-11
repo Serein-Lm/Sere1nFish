@@ -142,7 +142,11 @@ class RelatedXhsSelectionStage:
                 context={
                     "registration_status": str(entity.get("registration_status") or ""),
                     "icp_domains": list(entity.get("icp_domains") or []),
-                    "relation_type": "wholly_owned_direct_investment",
+                    "relation_type": str(
+                        entity.get("relation_type")
+                        or (entity.get("relation") or {}).get("relation_type")
+                        or "wholly_owned_direct_investment"
+                    ),
                     "relation_depth": int(entity.get("relation_depth") or 1),
                     "parent_target_name": str(
                         entity.get("parent_target_name") or ctx.normalized_name
@@ -379,7 +383,7 @@ class RelatedSourceRuntimeStage:
             await ctx.owner._update_progress(
                 ctx.plan.task_id,
                 "followup_collection",
-                "采集全资关联单位...",
+                "采集控股关联单位...",
             )
             jobs = [(stage.name, stage.run(ctx)) for stage in stages]
             outcomes = await ctx.owner._gather_named_jobs(
@@ -402,7 +406,7 @@ class RelatedSourceRuntimeStage:
         await ctx.owner._update_progress(
             ctx.plan.task_id,
             "waiting_core",
-            "等待资源采集全资关联单位...",
+            "等待资源采集控股关联单位...",
         )
         if ctx.core_lease is not None:
             await ctx.core_lease.acquire()

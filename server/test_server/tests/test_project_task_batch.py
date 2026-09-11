@@ -350,6 +350,25 @@ def test_company_scan_validates_control_relation_depth() -> None:
         )
 
 
+def test_company_scan_validates_control_ownership_threshold() -> None:
+    from api.services.project_tasks.validation import normalize_company_scan_params
+
+    params = {
+        "enable_control_structure": True,
+        "control_min_ownership_percent": "50",
+    }
+    normalize_company_scan_params(params)
+    assert params["control_min_ownership_percent"] == 50.0
+
+    with pytest.raises(ValueError, match="持股比例阈值必须为 50 到 100"):
+        normalize_company_scan_params(
+            {
+                "enable_control_structure": True,
+                "control_min_ownership_percent": 49.99,
+            }
+        )
+
+
 def test_company_scan_validates_website_collection_mode() -> None:
     from api.services.project_tasks.validation import normalize_company_scan_params
 

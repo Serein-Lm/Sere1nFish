@@ -1,8 +1,33 @@
-"""公司全资关联单位领域协议。"""
+"""公司控股关联单位领域协议。"""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+
+MIN_CONTROL_OWNERSHIP_PERCENT = 50.0
+MAX_CONTROL_OWNERSHIP_PERCENT = 100.0
+
+
+def normalize_control_ownership_threshold(value: Any = 100.0) -> float:
+    try:
+        threshold = float(value if value is not None else 100.0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("控股持股比例阈值必须为 50 到 100") from exc
+    if not math.isfinite(threshold) or not (
+        MIN_CONTROL_OWNERSHIP_PERCENT
+        <= threshold
+        <= MAX_CONTROL_OWNERSHIP_PERCENT
+    ):
+        raise ValueError("控股持股比例阈值必须为 50 到 100")
+    return threshold
+
+
+def investment_relation_type(ownership_percent: float) -> str:
+    if math.isclose(float(ownership_percent), 100.0, rel_tol=0, abs_tol=0.0001):
+        return "wholly_owned_direct_investment"
+    return "controlled_direct_investment"
 
 
 @dataclass(slots=True)
@@ -37,6 +62,7 @@ class CompanyControlProvider(Protocol):
         self,
         company_name: str,
         *,
+        min_ownership_percent: float,
         max_entities: int,
         page_concurrency: int,
     ) -> ControlDiscovery: ...

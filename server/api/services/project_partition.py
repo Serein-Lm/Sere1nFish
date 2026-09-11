@@ -23,6 +23,7 @@ _RELATION_FIELDS = (
     "relation_type",
     "relation_depth",
     "ownership_percent",
+    "minimum_ownership_percent",
     "effective_ownership_percent",
     "relation_source",
     "lineage_target_ids",

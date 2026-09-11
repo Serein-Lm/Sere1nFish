@@ -6,6 +6,10 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from api.services.company_control.contracts import (
+    investment_relation_type,
+    normalize_control_ownership_threshold,
+)
 from api.db.collections import (
     BIDDING_RECORDS_COLLECTION,
     COMPANY_SCAN_COLLECTION,
@@ -551,12 +555,22 @@ async def restore_control_structure(
     project_id: str,
     parent_target_id: str,
     max_depth: int = 2,
+    min_ownership_percent: float = 100.0,
 ) -> dict[str, Any]:
     safe_depth = max(1, min(int(max_depth or 1), 2))
+    safe_min_ownership_percent = normalize_control_ownership_threshold(
+        min_ownership_percent
+    )
     entities = await db[COMPANY_META_COLLECTION].find(
         {
             "project_id": project_id,
-            "relation.relation_type": "wholly_owned_direct_investment",
+            "relation.relation_type": {
+                "$in": [
+                    "wholly_owned_direct_investment",
+                    "controlled_direct_investment",
+                ]
+            },
+            "relation.ownership_percent": {"$gte": safe_min_ownership_percent},
             "relation.relation_depth": {"$lte": safe_depth},
             "$or": [
                 {"relation.root_target_id": parent_target_id},
@@ -583,6 +597,10 @@ async def restore_control_structure(
             "parent_target_name": str((item.get("relation") or {}).get("parent_target_name") or ""),
             "relation_depth": int((item.get("relation") or {}).get("relation_depth") or 1),
             "ownership_percent": float((item.get("relation") or {}).get("ownership_percent") or 100),
+            "relation_type": str(
+                (item.get("relation") or {}).get("relation_type")
+                or "wholly_owned_direct_investment"
+            ),
             "lineage_target_ids": list((item.get("relation") or {}).get("lineage_target_ids") or []),
             "lineage_target_names": list((item.get("relation") or {}).get("lineage_target_names") or []),
             "relation": dict(item.get("relation") or {}),
@@ -594,13 +612,14 @@ async def restore_control_structure(
         "result": {
             "enabled": True,
             "status": "completed",
-            "relation_type": "wholly_owned_direct_investment",
+            "relation_type": investment_relation_type(safe_min_ownership_percent),
             "max_depth": safe_depth,
             "relation_depth": max(
                 (int(item.get("relation_depth") or 0) for item in normalized),
                 default=0,
             ),
-            "ownership_percent": 100.0,
+            "ownership_percent": safe_min_ownership_percent,
+            "minimum_ownership_percent": safe_min_ownership_percent,
             "entities": normalized,
             "errors": [],
             "restored": True,

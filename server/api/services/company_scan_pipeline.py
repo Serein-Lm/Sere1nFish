@@ -5,7 +5,7 @@
 1. URL 扫描 → findings → 话术生成
 2. 小红书搜索（多关键词）→ 打标 → 画像
 3. 画像 → 话术生成（每个高分画像生成多套话术）
-4. 全资关联单位分层发现 → ICP 补全 → 资产与社媒采集
+4. 控股关联单位分层发现 → ICP 补全 → 资产与社媒采集
 5. 微信公众号手机发现 → 原文链接 → Chrome 全文与图片归档
 
 前端只需传 company_name + 勾选项，后端自动编排。
@@ -106,6 +106,7 @@ class CompanyScanPipeline:
         copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY,
         xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY,
         enable_control_structure: bool = False,
+        control_min_ownership_percent: float = 100.0,
         control_max_depth: int = 1,
         control_max_entities: int = 100,
         control_lookup_concurrency: int = 4,
@@ -162,6 +163,7 @@ class CompanyScanPipeline:
         project_id: str,
         parent_target: dict[str, Any],
         company_name: str,
+        min_ownership_percent: float,
         max_depth: int,
         max_entities: int,
         page_concurrency: int,
@@ -174,6 +176,7 @@ class CompanyScanPipeline:
             task_id=task_id,
             parent_target=parent_target,
             company_name=company_name,
+            min_ownership_percent=min_ownership_percent,
             max_depth=max_depth,
             max_entities=max_entities,
             page_concurrency=page_concurrency,

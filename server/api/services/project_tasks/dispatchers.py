@@ -167,6 +167,9 @@ async def dispatch_company_scan(
         copywriting_concurrency=tuning.copywriting_concurrency,
         xhs_search_concurrency=tuning.xhs_search_concurrency,
         enable_control_structure=params.get("enable_control_structure", False),
+        control_min_ownership_percent=float(
+            params.get("control_min_ownership_percent") or 100.0
+        ),
         control_max_depth=max(1, min(int(params.get("control_max_depth") or 1), 2)),
         control_max_entities=max(
             1, min(int(params.get("control_max_entities") or 100), 500)

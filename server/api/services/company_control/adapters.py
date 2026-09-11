@@ -1,4 +1,4 @@
-"""公司全资关联单位供应商适配。"""
+"""公司控股关联单位供应商适配。"""
 from __future__ import annotations
 
 from crawler_tools.tianyancha_tools import TianyanchaClient
@@ -20,11 +20,13 @@ class TianyanchaInvestmentProvider:
         self,
         company_name: str,
         *,
+        min_ownership_percent: float,
         max_entities: int,
         page_concurrency: int,
     ) -> ControlDiscovery:
-        result = await self.client.list_direct_wholly_owned_investments(
+        result = await self.client.list_direct_controlled_investments(
             company_name,
+            min_ownership_percent=min_ownership_percent,
             max_entities=max_entities,
             page_concurrency=page_concurrency,
         )

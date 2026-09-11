@@ -159,6 +159,7 @@ def test_tianyancha_collection_is_disabled_by_default() -> None:
 
     assert parameters["enable_bidding"].default is False
     assert parameters["enable_control_structure"].default is False
+    assert parameters["control_min_ownership_percent"].default == 100.0
     assert parameters["bidding_page_size"].default == 20
     assert parameters["bidding_max_records"].default == 20
 

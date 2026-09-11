@@ -37,6 +37,26 @@ def _bounded_integer(
     params[key] = value
 
 
+def _bounded_float(
+    params: dict[str, Any],
+    key: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+    label: str,
+) -> None:
+    if key not in params:
+        return
+    try:
+        value = float(params.get(key) if params.get(key) is not None else default)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}必须为 {minimum:g} 到 {maximum:g}") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{label}必须为 {minimum:g} 到 {maximum:g}")
+    params[key] = value
+
+
 async def normalize_xhs_target_params(
     db: AsyncIOMotorDatabase,
     *,
@@ -115,6 +135,7 @@ def normalize_company_scan_params(params: dict[str, Any]) -> None:
         key in params
         for key in (
             "control_max_depth",
+            "control_min_ownership_percent",
             "subsidiary_scan_limit",
             "skip_completed_subsidiaries",
         )
@@ -126,6 +147,14 @@ def normalize_company_scan_params(params: dict[str, Any]) -> None:
         if control_max_depth not in {1, 2}:
             raise ValueError("全资单位层级必须为 1 或 2")
         params["control_max_depth"] = control_max_depth
+        _bounded_float(
+            params,
+            "control_min_ownership_percent",
+            default=100.0,
+            minimum=50.0,
+            maximum=100.0,
+            label="控股持股比例阈值",
+        )
         _bounded_integer(
             params,
             "subsidiary_scan_limit",

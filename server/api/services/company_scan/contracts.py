@@ -5,6 +5,10 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from api.services.company_control.contracts import (
+    normalize_control_ownership_threshold,
+)
+
 from api.services.info_collection.tuning import (
     DEFAULT_ASSET_PROBE_CONCURRENCY,
     DEFAULT_COMPANY_SCAN_CONCURRENCY,
@@ -62,6 +66,7 @@ class CompanyScanPlan:
     copywriting_concurrency: int = DEFAULT_COPYWRITING_CONCURRENCY
     xhs_search_concurrency: int = DEFAULT_XHS_SEARCH_CONCURRENCY
     enable_control_structure: bool = False
+    control_min_ownership_percent: float = 100.0
     control_max_depth: int = 1
     control_max_entities: int = 100
     control_lookup_concurrency: int = 4
@@ -86,6 +91,7 @@ class CompanyScanPlan:
             raise ValueError("公司扫描缺少 project_id")
         if not self.company_name.strip():
             raise ValueError("公司扫描缺少 company_name")
+        normalize_control_ownership_threshold(self.control_min_ownership_percent)
 
     @property
     def subsidiary_xhs_enabled(self) -> bool:

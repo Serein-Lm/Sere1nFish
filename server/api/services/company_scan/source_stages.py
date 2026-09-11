@@ -65,12 +65,14 @@ class ControlStructureStage(CompanySourceStage):
                 project_id=ctx.plan.project_id,
                 parent_target_id=ctx.target_id,
                 max_depth=ctx.plan.control_max_depth,
+                min_ownership_percent=ctx.plan.control_min_ownership_percent,
             )
         return await ctx.owner._run_wholly_owned_investments(
             task_id=ctx.plan.task_id,
             project_id=ctx.plan.project_id,
             parent_target=ctx.target,
             company_name=ctx.normalized_name,
+            min_ownership_percent=ctx.plan.control_min_ownership_percent,
             max_depth=ctx.plan.control_max_depth,
             max_entities=ctx.plan.control_max_entities,
             page_concurrency=ctx.plan.control_lookup_concurrency,

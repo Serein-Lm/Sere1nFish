@@ -930,6 +930,7 @@ async def load_project_descendant_scan_entities(
                 ),
                 "icp_domains": root_domains,
                 "ownership_percent": relation.get("ownership_percent"),
+                "relation_type": _clean_text(relation.get("relation_type")),
                 "root_target_id": _clean_text(
                     relation.get("root_target_id") or root_target_id
                 ),

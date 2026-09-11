@@ -246,23 +246,30 @@ def is_operating_registration_status(value: Any) -> bool:
     return not any(marker in status for marker in INACTIVE_REGISTRATION_MARKERS)
 
 
-def parse_direct_wholly_owned_investments(
+def parse_direct_controlled_investments(
     items: Any,
     *,
     root_name: str,
+    min_ownership_percent: float = 100.0,
 ) -> list[ControlledCompany]:
-    """保留直接持股恰好 100% 且仍经营的第一层企业。"""
+    """保留直接持股达到阈值且仍经营的第一层企业。"""
     if not isinstance(items, list):
         return []
+    threshold = parse_percent(min_ownership_percent)
+    if threshold is None or threshold <= 0 or threshold > 100:
+        raise ValueError("持股比例阈值必须大于 0 且不超过 100")
     parsed: dict[str, ControlledCompany] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
+        ownership_percent = parse_percent(item.get("percent"))
         if (
             not name
             or name == root_name
-            or parse_percent(item.get("percent")) != Decimal("100")
+            or ownership_percent is None
+            or ownership_percent < threshold
+            or ownership_percent > Decimal("100")
             or not is_operating_registration_status(item.get("regStatus"))
         ):
             continue
@@ -281,7 +288,7 @@ def parse_direct_wholly_owned_investments(
             name=name,
             provider_id=provider_id,
             alias=str(item.get("alias") or "").strip(),
-            ownership_percent=100.0,
+            ownership_percent=float(ownership_percent),
             registration_status=str(item.get("regStatus") or "").strip(),
             legal_person_name=str(item.get("legalPersonName") or "").strip(),
             registered_capital=str(item.get("regCapital") or "").strip(),
@@ -293,6 +300,19 @@ def parse_direct_wholly_owned_investments(
             relation_paths=[relation_path],
         )
     return list(parsed.values())
+
+
+def parse_direct_wholly_owned_investments(
+    items: Any,
+    *,
+    root_name: str,
+) -> list[ControlledCompany]:
+    """兼容入口：仅保留直接持股 100% 的经营中企业。"""
+    return parse_direct_controlled_investments(
+        items,
+        root_name=root_name,
+        min_ownership_percent=100.0,
+    )
 
 
 def parse_icp_records(items: Any) -> list[IcpRecord]:
@@ -554,14 +574,15 @@ class TianyanchaClient:
             if owns_session:
                 await session.close()
 
-    async def list_direct_wholly_owned_investments(
+    async def list_direct_controlled_investments(
         self,
         company_name: str,
         *,
+        min_ownership_percent: float = 100.0,
         max_entities: int = 100,
         page_concurrency: int = 4,
     ) -> OutboundInvestmentResult:
-        """分页读取对外投资，并筛出第一层直接持股 100% 的经营中企业。"""
+        """分页读取对外投资，并筛出第一层达到持股阈值的经营中企业。"""
         page_size = 20
         first = await self._request(
             OUTBOUND_INVESTMENT_PATH,
@@ -574,9 +595,10 @@ class TianyanchaClient:
         companies: dict[str, ControlledCompany] = {}
 
         def _consume(payload: dict[str, Any]) -> None:
-            for company in parse_direct_wholly_owned_investments(
+            for company in parse_direct_controlled_investments(
                 payload.get("items") or [],
                 root_name=company_name,
+                min_ownership_percent=min_ownership_percent,
             ):
                 companies[company.provider_id or company.name] = company
 
@@ -613,6 +635,21 @@ class TianyanchaClient:
             total_reported=total,
             pages_fetched=pages_fetched,
             truncated=next_page <= total_pages or len(companies) > len(values),
+        )
+
+    async def list_direct_wholly_owned_investments(
+        self,
+        company_name: str,
+        *,
+        max_entities: int = 100,
+        page_concurrency: int = 4,
+    ) -> OutboundInvestmentResult:
+        """兼容入口：仅返回第一层直接持股 100% 的经营中企业。"""
+        return await self.list_direct_controlled_investments(
+            company_name,
+            min_ownership_percent=100.0,
+            max_entities=max_entities,
+            page_concurrency=page_concurrency,
         )
 
     async def get_icp_records(self, keyword: str) -> list[IcpRecord]:
