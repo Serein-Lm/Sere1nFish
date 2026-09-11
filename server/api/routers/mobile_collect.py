@@ -28,6 +28,8 @@ from api.services.mobile_collect_tasks import (
     MobileCollectTaskBusyError,
     MobileCollectTaskNotFoundError,
     start_mobile_collect_task,
+    list_mobile_collect_tasks,
+    stop_mobile_collect_task,
 )
 from api.services.mobile_monitoring import (
     MobileMonitorBusyError,
@@ -68,7 +70,7 @@ async def create_task_def(payload: CollectTaskDef):
 @router.get("/tasks")
 async def list_task_defs(project_id: str | None = None):
     db = get_db()
-    items = await collect_dao.list_task_defs(db, project_id=project_id)
+    items = await list_mobile_collect_tasks(db, project_id=project_id)
     return {"items": items, "total": len(items)}
 
 
@@ -139,7 +141,10 @@ async def get_resolved_task_keywords(task_def_id: str):
             target_name=target_name,
             channel=channel,
             explicit_keywords=explicit,
-            include_direct_children=True,
+            include_direct_children=bool(task_def.get("include_direct_children", True)),
+            max_relation_depth=int(task_def.get("max_relation_depth") or 2),
+            max_related_targets=int(task_def.get("max_related_targets") or 8),
+            skip_completed_descendants=bool(task_def.get("skip_completed_related_targets", True)),
             max_keywords=int(task_def.get("max_resolved_keywords") or 60),
         )
     ).as_dict()
@@ -194,14 +199,15 @@ async def run_task(
 async def stop_task(task_def_id: str, payload: StopRequest | None = None):
     """停止运行中的采集任务(协作式取消, 会释放设备)。"""
     db = get_db()
-    task_def = await collect_dao.get_task_def(db, task_def_id)
-    if not task_def:
-        raise HTTPException(404, "采集任务定义不存在")
-    run_task_id = (payload.run_task_id if payload else None) or task_def.get("last_run_task_id")
-    if not run_task_id:
-        raise HTTPException(400, "没有可停止的运行实例")
-    ok = request_stop(run_task_id)
-    return {"ok": ok, "run_task_id": run_task_id}
+    try:
+        return await stop_mobile_collect_task(
+            db, task_def_id=task_def_id,
+            run_task_id=payload.run_task_id if payload else None,
+        )
+    except MobileCollectTaskNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 # ── 试跑预览(dry-run) ──────────────────────────────────

@@ -75,6 +75,16 @@ const FIELD_TYPE_OPTIONS = [
   { value: 'list', label: '列表' },
 ]
 
+const PRIORITY_OPTIONS = [
+  { value: 'high', label: '优先' },
+  { value: 'normal', label: '普通' },
+  { value: 'low', label: '低优先级' },
+]
+
+function hasActiveRun(task: CollectTaskDef) {
+  return task.status === 'running' || ['pending', 'running', 'pausing'].includes(task.latest_run?.status ?? '')
+}
+
 /** 鉴权截图组件：拉取 blob 转 ObjectURL 后展示。 */
 function AuthImage({ url, width = 64 }: { url: string; width?: number }) {
   const [src, setSrc] = useState<string>('')
@@ -100,8 +110,15 @@ function AuthImage({ url, width = 64 }: { url: string; width?: number }) {
   return <Image src={src} width={width} style={{ borderRadius: 4 }} />
 }
 
-function statusTag(status?: string) {
-  if (status === 'running') return <Tag color="processing">运行中</Tag>
+function statusTag(task: CollectTaskDef) {
+  const run = task.latest_run
+  if (run?.status === 'pausing') return <Tag color="orange">正在停止</Tag>
+  if (['pending', 'running'].includes(run?.status ?? '') && (run?.status === 'pending' || run?.progress?.stage === 'waiting_mobile')) {
+    return <Tag color="gold">等待执行</Tag>
+  }
+  if (hasActiveRun(task)) return <Tag color="processing">运行中</Tag>
+  if (run?.status === 'paused') return <Tag>已停止</Tag>
+  if (run?.status === 'error' || run?.status === 'failed') return <Tag color="error">运行失败</Tag>
   return <Tag color="default">空闲</Tag>
 }
 
@@ -109,7 +126,27 @@ export default function MobileCollect() {
   const [activeSection, setActiveSection] = useState<'tasks' | 'monitors'>('tasks')
   const [tasks, setTasks] = useState<CollectTaskDef[]>([])
   const [loading, setLoading] = useState(false)
+  const hasActiveTasks = tasks.some(hasActiveRun)
   const [devices, setDevices] = useState<SimpleDevice[]>([])
+
+  useEffect(() => {
+    if (!hasActiveTasks) return
+    let active = true
+    let pending = false
+    const timer = window.setInterval(async () => {
+      if (pending) return
+      pending = true
+      try {
+        const result = await listTaskDefs()
+        if (active) setTasks(result.items)
+      } catch {
+        // Keep the last known progress; the manual refresh reports request errors.
+      } finally {
+        pending = false
+      }
+    }, 5000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [hasActiveTasks])
   const [presets, setPresets] = useState<CollectPreset[]>([])
   const [sourceLinkStrategies, setSourceLinkStrategies] = useState<SourceLinkStrategyOption[]>([
     { strategy: 'none', label: '不提取', description: '仅使用视觉模型可见的链接' },
@@ -167,6 +204,7 @@ export default function MobileCollect() {
       target_name: '',
       target_type: 'company',
       device_id: '',
+      queue_priority: 'normal',
       app_name: '',
       keywords: [],
       use_target_keyword_library: true,
@@ -199,6 +237,7 @@ export default function MobileCollect() {
       target_name: task.target_name ?? undefined,
       target_type: task.target_type ?? 'company',
       device_id: task.device_id,
+      queue_priority: task.queue_priority ?? 'normal',
       app_name: task.app_name,
       keywords: task.keywords || [],
       use_target_keyword_library: task.use_target_keyword_library ?? true,
@@ -393,14 +432,27 @@ export default function MobileCollect() {
         kws?.length ? kws.map((k) => <Tag key={k}>{k}</Tag>) : <span style={{ color: '#999' }}>无(浏览)</span>,
     },
     { title: '设备', dataIndex: 'device_id', key: 'device_id', width: 150, ellipsis: true },
-    { title: '状态', dataIndex: 'status', key: 'status', width: 90, render: statusTag },
+    {
+      title: '状态 / 进度', key: 'status', width: 260,
+      render: (_, task) => (
+        <div>
+          {statusTag(task)}
+          {task.queue_priority === 'high' && <Tag color="orange">优先</Tag>}
+          <div style={{ fontSize: 12, marginTop: 4 }}>
+            {(task.latest_run?.status === 'running' && task.latest_run.progress?.stage !== 'waiting_mobile'
+              ? task.latest_run.progress?.sources?.mobile_collect?.message
+              : undefined) || task.latest_run?.progress?.message || task.latest_run?.error || ''}
+          </div>
+        </div>
+      ),
+    },
     {
       title: '操作',
       key: 'actions',
       width: 400,
       render: (_, task) => (
         <Space size="small" wrap>
-          {task.status === 'running' ? (
+          {hasActiveRun(task) ? (
             <Button size="small" icon={<PauseCircleOutlined />} onClick={() => doStop(task)}>
               停止
             </Button>
@@ -412,7 +464,7 @@ export default function MobileCollect() {
           <Button
             size="small"
             icon={<ExperimentOutlined />}
-            disabled={task.status === 'running'}
+            disabled={hasActiveRun(task)}
             onClick={() => doDryRun(task)}
           >
             试跑
@@ -563,6 +615,9 @@ export default function MobileCollect() {
           </Form.Item>
           <Form.Item name="app_name" label="目标应用" rules={[{ required: true, message: '请输入应用名' }]}>
             <Input placeholder="如: 微信 / 小红书" />
+          </Form.Item>
+          <Form.Item name="queue_priority" label="排队优先级" initialValue="normal" tooltip="同一手机空闲后优先处理高优先级任务；正在执行的任务会继续完成。">
+            <Select options={PRIORITY_OPTIONS} />
           </Form.Item>
           <Form.Item
             name="target_name"

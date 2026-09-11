@@ -7,81 +7,21 @@
 from __future__ import annotations
 
 import asyncio
-import heapq
-import itertools
-from contextlib import asynccontextmanager
 from collections.abc import Awaitable, Callable
-from typing import AsyncIterator
 
 from api.db.mongodb import get_db
 from api.dao import mobile_collect as collect_dao
 from core.logger import get_logger
 from core.mobile.collect import run_collect_task
+from core.mobile.execution_queue import (
+    PriorityExecutionQueue as _PriorityTaskDefinitionQueue,
+    queue_priority_value as _queue_priority_value,
+)
 
 logger = get_logger("mobile_collect_service")
 
-_QUEUE_PRIORITY_ORDER = {
-    "high": 0,
-    "normal": 10,
-    "low": 20,
-    "skip": 30,
-}
 _DEVICE_READY_TIMEOUT_SECONDS: float | None = None
 _DEVICE_READY_POLL_SECONDS = 2.0
-
-
-class _PriorityTaskDefinitionQueue:
-    """Serialize one task definition while prioritizing queued work."""
-
-    def __init__(self) -> None:
-        self._guard = asyncio.Lock()
-        self._active = False
-        self._sequence = itertools.count()
-        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
-
-    def locked(self) -> bool:
-        return self._active
-
-    async def _acquire(self, priority: int) -> None:
-        loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[None] | None = None
-        async with self._guard:
-            if not self._active:
-                self._active = True
-                return
-            waiter = loop.create_future()
-            heapq.heappush(
-                self._waiters,
-                (priority, next(self._sequence), waiter),
-            )
-
-        try:
-            await waiter
-        except BaseException:
-            granted = waiter.done() and not waiter.cancelled()
-            if not waiter.done():
-                waiter.cancel()
-            if granted:
-                await self._release()
-            raise
-
-    async def _release(self) -> None:
-        async with self._guard:
-            while self._waiters:
-                _priority, _sequence, waiter = heapq.heappop(self._waiters)
-                if waiter.done():
-                    continue
-                waiter.set_result(None)
-                return
-            self._active = False
-
-    @asynccontextmanager
-    async def slot(self, priority: int) -> AsyncIterator[None]:
-        await self._acquire(priority)
-        try:
-            yield
-        finally:
-            await self._release()
 
 
 _TASK_DEFINITION_QUEUE_LOCKS: dict[str, _PriorityTaskDefinitionQueue] = {}
@@ -95,13 +35,6 @@ def _task_definition_queue_lock(
         lock = _PriorityTaskDefinitionQueue()
         _TASK_DEFINITION_QUEUE_LOCKS[task_def_id] = lock
     return lock
-
-
-def _queue_priority_value(priority: str) -> int:
-    return _QUEUE_PRIORITY_ORDER.get(
-        str(priority or "normal").strip().lower(),
-        _QUEUE_PRIORITY_ORDER["normal"],
-    )
 
 
 async def wait_for_mobile_device_ready(
@@ -161,6 +94,7 @@ async def run_mobile_collect_definition(
     requested_by: str = "",
     queue_priority: str = "normal",
     on_started: Callable[[], Awaitable[None]] | None = None,
+    on_waiting: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> dict:
     """原子占用并执行一个数据库任务定义，允许编排层注入本轮目标上下文。"""
     if not task_def_id:
@@ -169,6 +103,8 @@ async def run_mobile_collect_definition(
     queue_lock = _task_definition_queue_lock(task_def_id)
     priority_value = _queue_priority_value(queue_priority)
     if queue_lock.locked():
+        if on_waiting is not None:
+            await on_waiting("waiting_mobile", "等待同一采集定义的上一轮任务结束")
         logger.info(
             "手机采集定义进入等待队列 def=%s run=%s priority=%s",
             task_def_id,
@@ -183,7 +119,9 @@ async def run_mobile_collect_definition(
             task_def_id=task_def_id,
             runtime_overrides=runtime_overrides,
             requested_by=requested_by,
+            queue_priority=queue_priority,
             on_started=on_started,
+            on_waiting=on_waiting,
         )
 
 
@@ -195,7 +133,9 @@ async def _run_mobile_collect_definition_claimed(
     task_def_id: str,
     runtime_overrides: dict | None = None,
     requested_by: str = "",
+    queue_priority: str = "normal",
     on_started: Callable[[], Awaitable[None]] | None = None,
+    on_waiting: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> dict:
     """Claim and run one definition after its in-process queue slot is acquired."""
 
@@ -205,6 +145,8 @@ async def _run_mobile_collect_definition_claimed(
 
     requested_task_def = {**task_def, **(runtime_overrides or {})}
     device_id = str(requested_task_def.get("device_id") or "").strip()
+    if on_waiting is not None:
+        await on_waiting("waiting_mobile", f"等待手机 {device_id} 上线并就绪")
     ready_endpoint = await wait_for_mobile_device_ready(device_id)
     logger.info(
         "手机采集设备已就绪 | def=%s run=%s device=%s adb=%s",
@@ -245,8 +187,8 @@ async def _run_mobile_collect_definition_claimed(
     effective_task_def = {**claimed, **(runtime_overrides or {})}
     effective_task_def["task_def_id"] = task_def_id
     try:
-        if on_started is not None:
-            await on_started()
+        if on_waiting is not None:
+            await on_waiting("waiting_mobile", f"设备已在线，等待手机 {device_id} 的执行租约")
         from api.services.mobile_device_leases import background_device_lease
 
         async with background_device_lease(
@@ -254,7 +196,10 @@ async def _run_mobile_collect_definition_claimed(
             device_id=str(effective_task_def.get("device_id") or ""),
             run_task_id=run_task_id,
             requested_by=requested_by,
+            queue_priority=queue_priority,
         ):
+            if on_started is not None:
+                await on_started()
             result = await run_collect_task(
                 db,
                 run_task_id=run_task_id,
@@ -277,12 +222,36 @@ async def _run_mobile_collect_definition_claimed(
 
 async def _dispatch_mobile_collect(task_id: str, project_id: str, params: dict) -> dict:
     """统一任务分派入口(签名对齐 TASK_DISPATCHERS)。"""
+    from api.services.task_progress import update_source_progress, update_task_stage
+
+    db = get_db()
+
+    async def on_waiting(stage: str, message: str) -> None:
+        await update_task_stage(db, task_id=task_id, stage=stage, message=message)
+        await update_source_progress(
+            db, task_id=task_id, source="mobile_collect", status="waiting", message=message,
+        )
+
+    async def on_started() -> None:
+        await update_task_stage(db, task_id=task_id, stage="mobile_collect", message="手机采集已开始")
+        await update_source_progress(
+            db, task_id=task_id, source="mobile_collect", status="running", message="正在手机中搜索并读取内容",
+        )
+
     return await run_mobile_collect_definition(
-        get_db(),
+        db,
         run_task_id=task_id,
         project_id=project_id,
         task_def_id=params.get("task_def_id", ""),
         requested_by=str(params.get("_requested_by") or ""),
+        queue_priority=str(params.get("queue_priority") or "normal"),
+        runtime_overrides={
+            "parent_task_id": task_id,
+            "progress_source": "mobile_collect",
+            "progress_label": "手机采集",
+        },
+        on_waiting=on_waiting,
+        on_started=on_started,
     )
 
 

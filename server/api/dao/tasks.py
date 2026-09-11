@@ -34,6 +34,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         [("project_id", 1), ("batch_id", 1)],
         sparse=True,
     )
+    await collection.create_index(
+        [("task_type", 1), ("params.task_def_id", 1), ("created_at", -1)],
+    )
 
 
 def _heartbeat_is_stale(item: dict[str, Any], *, before: datetime) -> bool:
@@ -104,6 +107,23 @@ async def find_latest_matching_task(
         projection or {"_id": 0},
         sort=[("created_at", -1)],
     )
+
+
+async def latest_mobile_collect_runs(
+    db: AsyncIOMotorDatabase, task_def_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Project current run state without loading large results or checkpoints."""
+    if not task_def_ids:
+        return {}
+    pipeline = [
+        {"$match": {"task_type": "mobile_collect", "params.task_def_id": {"$in": task_def_ids}}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$params.task_def_id", "run": {"$first": {
+            "task_id": "$task_id", "status": "$status", "progress": "$progress",
+            "error": "$error", "updated_at": "$updated_at",
+        }}}},
+    ]
+    return {str(item["_id"]): item["run"] async for item in db[TASKS_COLLECTION].aggregate(pipeline)}
 
 
 async def list_completed_company_scans_for_coverage(

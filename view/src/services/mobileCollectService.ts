@@ -6,6 +6,7 @@ import { fetchMobileScreenshotBlob } from './mobileService'
 export type FieldType = 'string' | 'number' | 'boolean' | 'list'
 export type NotifyOn = 'new' | 'changed' | 'both' | 'none'
 export type AppInstance = 'primary' | 'clone'
+export type QueuePriority = 'high' | 'normal' | 'low'
 
 export interface ExtractField {
   name: string
@@ -21,6 +22,7 @@ export interface CollectTaskDef {
   target_name?: string | null
   target_type?: string
   device_id: string
+  queue_priority?: QueuePriority
   app_name: string
   app_instance?: AppInstance
   keywords: string[]
@@ -45,6 +47,12 @@ export interface CollectTaskDef {
   prefer_recent_items?: boolean
   max_item_age_days?: number
   status?: string
+  latest_run?: {
+    task_id: string
+    status: string
+    progress?: { stage?: string; message?: string; sources?: Record<string, { message?: string }> }
+    error?: string
+  } | null
   last_run_task_id?: string | null
   last_run_at?: string | null
   created_at?: string
@@ -58,6 +66,7 @@ export interface CollectTaskInput {
   target_name?: string | null
   target_type?: string
   device_id: string
+  queue_priority?: QueuePriority
   app_name: string
   app_instance?: AppInstance
   keywords: string[]

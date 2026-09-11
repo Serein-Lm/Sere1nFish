@@ -787,8 +787,8 @@ async def test_mobile_collect_does_not_claim_or_start_before_device_ready(
         "waiting_device",
         "device_ready",
         "claim",
-        "started",
         "lease",
+        "started",
         "collect",
         "idle",
     ]

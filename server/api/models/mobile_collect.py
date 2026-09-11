@@ -36,6 +36,9 @@ class CollectTaskDef(BaseModel):
     )
     target_type: str = Field(default="company", description="Target 类型")
     device_id: str = Field(description="执行设备 device_id")
+    queue_priority: Literal["high", "normal", "low"] = Field(
+        default="normal", description="设备等待队列优先级，不中断正在执行的任务"
+    )
     app_name: str = Field(description="目标应用名,如 微信 / 小红书")
     app_instance: AppInstance = Field(
         default="primary",
@@ -211,6 +214,7 @@ class CollectTaskUpdate(BaseModel):
     target_name: str | None = None
     target_type: str | None = None
     device_id: str | None = None
+    queue_priority: Literal["high", "normal", "low"] | None = None
     app_name: str | None = None
     app_instance: AppInstance | None = None
     keywords: list[str] | None = None

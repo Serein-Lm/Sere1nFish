@@ -525,6 +525,10 @@ _CHECKPOINT_VOLATILE_FIELDS = {
     "created_at",
     "updated_at",
     "parent_task_id",
+    "queue_priority",
+    "progress_source",
+    "progress_label",
+    "latest_run",
 }
 
 

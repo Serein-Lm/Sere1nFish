@@ -56,6 +56,7 @@ def build_company_wechat_task_profile(
             "use_target_keyword_library": True,
             "deep_collect": True,
             "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
+            "direct_launch_app": True,
             "notify_on": "none",
             "include_direct_children": True,
             "max_relation_depth": 2,
@@ -133,7 +134,7 @@ def _wechat_definition_patch(
     ):
         if is_auto_definition and int(task_def.get(field) or 0) != defaults[field]:
             patch[field] = defaults[field]
-    for field in ("swipe_times", "detail_max_swipes", "max_runtime_seconds"):
+    for field in ("swipe_times", "detail_max_swipes", "max_runtime_seconds", "direct_launch_app"):
         if is_auto_definition and int(task_def.get(field) or 0) != int(defaults[field]):
             patch[field] = defaults[field]
     return patch
