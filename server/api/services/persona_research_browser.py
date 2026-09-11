@@ -11,12 +11,18 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Protocol, Sequence
-from urllib.parse import quote_plus, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from api.services.company_url import normalize_url
 from api.services.info_collection.url_tools import _build_worker_chrome_config
+from api.services.persona_research_search import (
+    PersonaSearchSource,
+    candidate_matches_query,
+    is_search_result_url,
+    persona_search_sources,
+)
 from api.services.url_security import assert_public_http_url
 from browser_manager.provider import get_browser_provider
 from core.logger import get_logger
@@ -58,29 +64,6 @@ _SKIPPED_PATH_SUFFIXES = (
     ".xlsx",
     ".zip",
 )
-
-_SEARCH_RESULT_SCRIPT = """() => {
-  const selectors = [
-    '#b_results li.b_algo h2 a[href]',
-    '#b_results h2 a[href]',
-    'main h2 a[href]',
-    'main h3 a[href]'
-  ];
-  const anchors = Array.from(document.querySelectorAll(selectors.join(',')));
-  const seen = new Set();
-  const items = [];
-  for (const anchor of anchors) {
-    const url = String(anchor.href || '').trim();
-    const title = String(anchor.innerText || anchor.textContent || '').trim();
-    if (!url.startsWith('http') || !title || seen.has(url)) continue;
-    seen.add(url);
-    const container = anchor.closest('li, article, section, div');
-    const snippet = String(container?.innerText || '').replace(/\\s+/g, ' ').trim();
-    items.push({url, title, snippet: snippet.slice(0, 500)});
-    if (items.length >= 24) break;
-  }
-  return {url: location.href, title: document.title, items};
-}"""
 
 _LOCATION_SCRIPT = """() => ({url: location.href})"""
 
@@ -188,7 +171,10 @@ def _candidate_url_allowed(url: str) -> bool:
         return False
     if parsed.username is not None or parsed.password is not None or not parsed.hostname:
         return False
-    return not parsed.path.lower().endswith(_SKIPPED_PATH_SUFFIXES)
+    return (
+        not parsed.path.lower().endswith(_SKIPPED_PATH_SUFFIXES)
+        and not is_search_result_url(normalized)
+    )
 
 
 def _mcp_result_text(result: Any) -> str:
@@ -257,45 +243,63 @@ class ChromeDevtoolsPersonaResearchBrowser:
         self,
         session: Any,
         queries: Sequence[str],
+        *,
+        task_id: str = "",
     ) -> list[list[ResearchCandidate]]:
         buckets: list[list[ResearchCandidate]] = []
         for query in queries:
-            search_url = (
-                "https://cn.bing.com/search?count=20&setlang=zh-hans&q="
-                + quote_plus(query)
-            )
-            await _call_mcp(
-                session,
-                "navigate_page",
-                {"type": "url", "url": search_url, "timeout": NAVIGATION_TIMEOUT_MS},
-            )
-            payload = _extract_json_object(
-                await _call_mcp(
-                    session,
-                    "evaluate_script",
-                    {"function": _SEARCH_RESULT_SCRIPT},
-                )
-            )
             candidates: list[ResearchCandidate] = []
             seen: set[str] = set()
-            for item in list(payload.get("items") or [])[:SEARCH_RESULTS_PER_QUERY]:
-                if not isinstance(item, dict):
-                    continue
-                url = str(item.get("url") or "").strip()
-                identity = research_url_identity(url)
-                if not identity or identity in seen or not _candidate_url_allowed(url):
-                    continue
-                seen.add(identity)
-                candidates.append(
-                    ResearchCandidate(
-                        url=url,
-                        title=str(item.get("title") or "").strip(),
-                        snippet=str(item.get("snippet") or "").strip()[:500],
-                        query=query,
+            for source in persona_search_sources():
+                try:
+                    found = await self._search_candidates(session, source, query)
+                except Exception as exc:  # noqa: BLE001
+                    logger.info(
+                        "[persona_research_browser] task=%s search=%s query=%s failed: %s: %s",
+                        task_id, source.name, query, type(exc).__name__, exc,
                     )
+                    continue
+                logger.info(
+                    "[persona_research_browser] task=%s search=%s query=%s matched=%s",
+                    task_id, source.name, query, len(found),
                 )
-            buckets.append(candidates)
+                for item in found:
+                    identity = research_url_identity(item.url)
+                    if identity and identity not in seen:
+                        seen.add(identity)
+                        candidates.append(item)
+                if len(candidates) >= MIN_READABLE_PAGES:
+                    break
+            buckets.append(candidates[:SEARCH_RESULTS_PER_QUERY])
         return buckets
+
+    async def _search_candidates(
+        self, session: Any, source: PersonaSearchSource, query: str,
+    ) -> list[ResearchCandidate]:
+        await _call_mcp(
+            session, "navigate_page",
+            {"type": "url", "url": source.search_url(query), "timeout": NAVIGATION_TIMEOUT_MS},
+        )
+        payload = _extract_json_object(await _call_mcp(
+            session, "evaluate_script", {"function": source.extraction_script()},
+        ))
+        candidates: list[ResearchCandidate] = []
+        seen: set[str] = set()
+        for item in list(payload.get("items") or [])[:SEARCH_RESULTS_PER_QUERY]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()[:500]
+            identity = research_url_identity(url)
+            if (
+                not identity or identity in seen or not _candidate_url_allowed(url)
+                or not candidate_matches_query(query, title, snippet)
+            ):
+                continue
+            seen.add(identity)
+            candidates.append(ResearchCandidate(url=url, title=title, snippet=snippet, query=query))
+        return candidates
 
     async def _read_page(
         self,
@@ -377,6 +381,7 @@ class ChromeDevtoolsPersonaResearchBrowser:
                     or identity in seen_urls
                     or not host
                     or _host_matches(host, _SEARCH_HOST_SUFFIXES)
+                    or is_search_result_url(page.url)
                     or host_counts.get(host, 0) >= MAX_PAGES_PER_HOST
                 ):
                     continue
@@ -432,7 +437,7 @@ class ChromeDevtoolsPersonaResearchBrowser:
             )
             client = MultiServerMCPClient(connections)
             async with client.session("chrome-devtools") as session:
-                buckets = await self._discover(session, queries)
+                buckets = await self._discover(session, queries, task_id=task_id)
                 candidates = _round_robin_candidates(
                     buckets,
                     offset=candidate_offset,

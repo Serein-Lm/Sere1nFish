@@ -29,7 +29,7 @@ def setup_browser(monkeypatch, candidates, failures=()):
         async def session(self, name):
             yield object()
 
-    async def discover(session, queries):
+    async def discover(session, queries, **kwargs):
         return [candidates]
 
     async def read(session, item):
