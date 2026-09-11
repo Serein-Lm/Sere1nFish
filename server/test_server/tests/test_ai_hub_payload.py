@@ -316,6 +316,7 @@ def _rich_fictional_profile(name: str = "候选姓名"):
 
     return RichFictionalPersonaProfile(
         name=name,
+        aliases=["澄澄"],
         gender="女",
         age=36,
         age_range="30-39",

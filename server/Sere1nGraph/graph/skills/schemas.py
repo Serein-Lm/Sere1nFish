@@ -436,6 +436,7 @@ class RichPersonaEducation(PersonaEducation):
 
 class RichFictionalPersonaProfile(PersonaProfile):
     """Strict schema used only for AI-generated, fully detailed fictional people."""
+    aliases: list[str] = Field(min_length=1, description="至少一个虚构昵称，不能使用真实联系方式或账号")
     gender: str = Field(description="具体性别设定")
     age: int = Field(ge=18, le=75, description="具体虚构年龄")
     age_range: str = Field(description="与年龄一致的年龄段")
