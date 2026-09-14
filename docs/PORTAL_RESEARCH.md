@@ -28,6 +28,7 @@ Agent 从已核验官网出发，可访问官网明确链接的招聘、采购�
 - 检查点：`tasks.checkpoint.portal_research.pages.<URL哈希>` 保存 URL、标题、最多 12000 字正文摘要、最多 100 条链接及 `read_at`；最终已校验结果保存于 `.result`。暂停恢复复用阅读账本和友链边界，时间预算按本次恢复执行重新计算。
 - 来源：两路并发调用 `source_documents.ingest_source_url`，每条至多 180 秒且受剩余研究预算限制；正文原件、附件和视觉资料仍由统一来源服务保存到私有 OSS。报告保存自身 `source_document_id/source_document_version_id`，保留不可变来源版本。
 - 报告：复用 `target_research` 版本与最新投影，新增 `portal_sections/portal_options/portal_page_count/portal_excluded_link_count/portal_archive_pending`；不同研究轮次保留历史。
+- 长报告在浏览完成后从完整阅读账本统一生成，所有已读正文 URL 均进入有界上下文，长页按可用预算保留首尾节选；不使用普通机构研究仅四页的修复摘要，也不依赖浏览聊天压缩后剩余的页面。整理使用同一模型 factory、结构化 Schema、来源校验与独立观测阶段。
 - 后续采集：可选继续门户文档和附件深采，复用公司 pipeline 与 `website_documents` 持久化队列；根单位与关联单位仅开启官网渠道，不自动启动手机、付费招投标或话术生成。
 - 观测：浏览、结构化提取、修复及来源归档携带 Project、Task 和研究阶段的统一观测上下文；阅读进度在任务列表中显示。
 

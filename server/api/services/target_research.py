@@ -1688,6 +1688,9 @@ async def run_target_research(
                             browser_pages=attempt_pages,
                         )
 
+                    if session.options:
+                        return await session.synthesize(worker_config, validate_research_payload)
+
                     with observation_context(
                         project_id=project_id, task_id=task_id, phase=phase + "_extract",
                         agent="target_research", task_type="target_research",

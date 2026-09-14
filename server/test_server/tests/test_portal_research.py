@@ -281,3 +281,43 @@ async def test_archive_keeps_successful_versions_and_records_partial_failures(mo
     assert result['sources'][0]['source_document_version_id'] == 'version-1'
     assert result['sources'][1]['archive_status'] == 'pending'
     assert saved == [result]
+
+
+def test_report_ledger_keeps_all_read_pages_with_bounded_text():
+    from api.services.portal_research import build_reading_ledger
+    pages = {f'https://example.cn/{i}': {'url': f'https://example.cn/{i}', 'title': f'栏目 {i}', 'text': f'页面{i}业务正文 ' * 400} for i in range(50)}
+    pages['https://example.cn/contact'] = {'url': 'https://example.cn/contact', 'title': '联系我们', 'text': '公开联系邮箱：service@example.cn'}
+    rows = build_reading_ledger(pages, max_chars=24000)
+    assert {row['url'] for row in rows} == set(pages)
+    contact = next(row for row in rows if row['url'].endswith('/contact'))
+    assert contact['text'] == pages[contact['url']]['text'] and not contact['truncated']
+    assert any(row['truncated'] for row in rows)
+    assert len(json.dumps(rows, ensure_ascii=False)) <= 24000
+
+
+@pytest.mark.asyncio
+async def test_final_report_uses_durable_pages_not_trimmed_chat_history(monkeypatch):
+    from types import SimpleNamespace
+    from Sere1nGraph.graph.agents import runtime
+
+    captured = {}
+    validated = []
+
+    class Model:
+        def with_structured_output(self, schema):
+            captured['schema'] = schema.__name__
+            return self
+
+        async def ainvoke(self, messages):
+            captured['ledger'] = json.loads(messages[-1].content)['reading_ledger']
+            return SimpleNamespace(model_dump=lambda: {'canonical_name': '示例单位'})
+
+    monkeypatch.setattr(runtime, 'create_llm', lambda *_args, **_kwargs: Model())
+    session = PortalResearchSession(None, 't', 'p', {'canonical_name': '示例单位', 'root_domains': ['example.cn']}, {'dry_run': True})
+    session.pages = {f'https://example.cn/{i}': {'url': f'https://example.cn/{i}', 'title': f'栏目 {i}', 'text': f'已经读取的第{i}页业务事实'} for i in range(23)}
+    result = await session.synthesize(object(), validated.append)
+    assert len(captured['ledger']) == 23
+    assert captured['ledger'][0]['text'] == '已经读取的第0页业务事实'
+    assert captured['ledger'][-1]['text'] == '已经读取的第22页业务事实'
+    assert captured['schema'] == 'TargetResearchPayload'
+    assert validated == [result]

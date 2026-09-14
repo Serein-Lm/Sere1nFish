@@ -20,7 +20,7 @@ PAGE_READ = r"""() => {
   const links = [...document.querySelectorAll('a[href], option[value]')].map(a => ({
     url: a.href || absolute(a.value || ''), title: clean(a.textContent || a.title).slice(0,160), context: context(a)
   })).filter(a => /^https?:\/\//i.test(a.url));
-  const important = /招聘|招标|采购|招商|投资|反馈|留言|联系|业务|服务|产品|关于|简介|下属|直属|上级|主管|子公司|成员|友链|友好|合作伙伴/;
+  const important = /招聘|诚聘|人才|岗位|招标|采购|招商|投资|反馈|留言|联系|业务|服务|产品|关于|简介|下属|直属|上级|主管|子公司|成员|友链|友好|合作伙伴/;
   links.sort((a,b)=>Number(important.test(b.title+' '+b.context))-Number(important.test(a.title+' '+a.context)));
   return {url:location.href,title:clean(document.title).slice(0,300),text:clean(root?.innerText).slice(0,12000),links:links.slice(0,100)};
 }"""

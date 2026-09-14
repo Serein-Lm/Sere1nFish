@@ -19,6 +19,28 @@ from Sere1nGraph.graph.agents.portal_research import PortalBrowserPolicy
 
 CATEGORIES = ("business", "recruitment", "procurement", "investment", "feedback", "organization")
 
+
+def build_reading_ledger(pages, *, max_chars):
+    """Retain every read URL; allocate text fairly instead of keeping four pages."""
+    from api.services.target_research import _is_search_result_url
+    rows = [{"url": page["url"], "title": page.get("title", ""), "text": "", "truncated": False}
+            for page in pages.values() if not _is_search_result_url(page["url"])]
+    remaining = max(0, max_chars - len(json.dumps(rows, ensure_ascii=False)) - 200)
+    ordered = sorted(rows, key=lambda row: len(pages[row["url"]].get("text", "")))
+    for index, row in enumerate(ordered):
+        text = pages[row["url"]].get("text", "")
+        allowance = min(len(text), remaining // (len(ordered) - index))
+        row["truncated"] = allowance < len(text)
+        if row["truncated"] and allowance > 20:
+            head = allowance * 3 // 4
+            text = text[:head] + " … " + text[-(allowance - head - 3):]
+        else:
+            text = text[:allowance]
+        row["text"] = text
+        remaining -= len(text)
+    return rows
+
+
 class PortalResearchSession:
     def __init__(self, db, task_id, project_id, target, options=None):
         self.db, self.task_id, self.project_id, self.target = db, task_id, project_id, target
@@ -51,6 +73,33 @@ class PortalResearchSession:
             return await agent(state)
         async with asyncio.timeout(self.remaining_seconds()):
             return await agent(state)
+
+    async def synthesize(self, app_config, validator):
+        """Build the report from durable evidence, independent of chat trimming."""
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from Sere1nGraph.graph.agents.runtime import create_llm
+        from api.models.target_research import TargetResearchPayload
+        from api.services.task_progress import update_task_stage
+
+        ledger = build_reading_ledger(self.pages, max_chars=self.options.context_tokens * 2)
+        if len(ledger) < 2:
+            raise ValueError("门户研究尚无两条可用于报告的正文证据")
+        if not self.options.dry_run:
+            await update_task_stage(self.db, task_id=self.task_id, stage="portal_synthesis", message=f"正在汇总已读的 {len(ledger)} 页门户证据")
+        payload = {"target_name": self.target.get("canonical_name"), "official_root_domains": self.browser.roots,
+                   "scope": self.options.model_dump(), "reading_ledger": ledger}
+        instructions = self.prompt("") + ("\n现在执行最终报告整理，不再调用浏览器。阅读账本是权威的实际读取记录；"
+            "逐页整合业务、招聘、联系渠道与直属关系，不依赖可能丢失旧页面的聊天摘要。"
+            "账本已有的正文不能标记为未读取；truncated=true 仅表示本次展示了该页节选，"
+            "不能据此判断页面不存在。对没有证据的栏目保留具体缺口。完整保留有实际引用的 URL。")
+        with observation_context(project_id=self.project_id, task_id=self.task_id, phase="portal_synthesis", agent="target_research", task_type="target_research"):
+            model = create_llm(app_config, workload="collection", streaming=False).with_structured_output(TargetResearchPayload)
+            parsed = await asyncio.wait_for(model.ainvoke([
+                SystemMessage(content=instructions), HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+            ]), timeout=min(180, self.remaining_seconds()))
+        result = parsed.model_dump()
+        validator(result)
+        return result
 
     def query(self, original):
         if not self.options: return original
