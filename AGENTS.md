@@ -146,6 +146,7 @@
 - 视频通话中的纯变声统一通过 Deepfake 会话的语音转换接口接入。默认浏览器采集路径通过共享 AudioWorklet 把麦克风重采样为 16kHz PCM，经鉴权 WebSocket、GPU Gateway 和 `meanvc` adapter 转换后写回统一 `media_output`，与换脸画面共同提供给 OBS 浏览器源；OBS WHIP 路径仍可直接解码其麦克风音轨。两条路径都只做原话音色转换，不调用对话模型、不维护对话上下文；参考声音和原始 PCM 只属于短时会话，不落盘。后续替换模型必须扩展 Provider/Factory，不得在媒体 pipeline 或页面增加模型特例。
 - 远端音视频合流统一通过 `api.services.media_output` 的短时会话接入。Deepfake 和全双工语音只按 `output_session_id` 发布领域媒体，不自行实现 OBS、观看端、票据或广播逻辑；观看凭据只允许通过 URL fragment 和 WebSocket subprotocol 传递，服务端仅保存摘要，不持久化原始音视频。
 - 对象存储 Bucket 必须为私有读写，服务端使用内网 Endpoint，浏览器下载使用短时签名 URL，图片通过鉴权 API 读取。AK/SK 只存 MongoDB 加密配置，不写入环境文件、日志、迁移报告或 Git。
+- 看板历史 Token 统计统一使用 `Sere1nGraph.graph.observability.stats_reader` 的有界共享快照，全局与场景共用一次历史聚合，缓存窗口 10 秒；不得重新按场景串行全量聚合，也不得用内存环形缓冲替代完整历史。前端刷新复用按登录隔离的 `dashboardService`，保留已显示内容并独立更新到期的数据源。
 - 观测能力通过 `core/observability`、`Sere1nGraph` token tracker 或统一日志入口接入；新增长流程应记录开始、结束、失败和关键资源标识。
 - LLM token 归因必须通过 `core.observability.observation_context` 包裹 AI 调用(浏览器 agent、结构化解析、修复重试),携带 `project_id/task_id/phase/agent/task_type`;不要直接操作 `TokenTracker`。凡是新接入的 AI 链路(人设采集、公司规范化、采集分析、手机规划等)都要确认 token 与日志观测已连通,可在 Observability/Dashboard 看到归因。
 - 已知缺口:`AutoGLM-GUI-main` 手机执行器使用原生 OpenAI 客户端,绕过 LangChain 回调,其 token 暂未纳入统一 tracker;修改该 vendored 代码风险高,接入前先评估影响并在交接说明。

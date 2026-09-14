@@ -152,21 +152,16 @@ async def scenarios() -> dict:
     """
     db = get_db()
     tracker = _tracker()
-    global_stats, task_counts = await asyncio.gather(
-        tracker.get_stats_async(),
+    token_by_type, task_counts = await asyncio.gather(
+        tracker.get_scenario_stats_async(),
         _task_counts_by_type(db),
     )
-    token_by_type = global_stats.get("by_task_type", {}) or {}
-    scenario_keys = set(task_counts.keys()) | set(token_by_type.keys())
-
-    items = []
-    for ttype in sorted(scenario_keys):
-        token_stats = await tracker.get_stats_async(task_type=ttype)
-        items.append({
-            "task_type": ttype,
-            "token": token_stats,
-            "tasks": task_counts.get(ttype, {"total": 0, "by_status": {}}),
-        })
+    scenario_keys = set(task_counts) | set(token_by_type)
+    items = [{
+        "task_type": ttype,
+        "token": token_by_type.get(ttype) or tracker.get_stats(task_type=ttype),
+        "tasks": task_counts.get(ttype, {"total": 0, "by_status": {}}),
+    } for ttype in sorted(scenario_keys)]
     return {"items": items, "total": len(items)}
 
 

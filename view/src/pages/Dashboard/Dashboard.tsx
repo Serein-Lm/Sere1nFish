@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Row, Col, Card, Statistic, Progress, Tag, Button, Space, Tooltip, message, Table, Skeleton, Empty, Segmented, Typography, Alert } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -28,18 +28,14 @@ import {
   MobileOutlined,
 } from '@ant-design/icons'
 import {
-  getOverview,
-  getScenarios,
-  getTurns,
-  queryLogs,
   taskTypeLabel,
   type LogEntry,
-  type OverviewData,
   type ScenarioStat,
   type TokenTurn,
   type TokenTurnCall,
 } from '../../services/observabilityService'
-import { listProjects, type Project } from '../../services/projectService'
+import { type Project } from '../../services/projectService'
+import { useDashboardData } from '../../hooks/useDashboardData'
 import './Dashboard.css'
 
 const { Text } = Typography
@@ -64,7 +60,6 @@ type StatCardConfig = {
   color: string
 }
 
-type LoadErrors = Partial<Record<'overview' | 'turns' | 'scenarios' | 'logs' | 'projects', string>>
 
 type SummaryMetric = {
   label: string
@@ -141,10 +136,7 @@ function bucketEntries(bucket?: Record<string, BucketStats>, limit = 6): BucketE
     .slice(0, limit)
 }
 
-function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return '请求失败'
-}
+
 
 function SummaryStrip({ items }: { items: SummaryMetric[] }) {
   return (
@@ -242,77 +234,8 @@ function MetricBars({
 
 export default function Dashboard() {
   const navigate = useNavigate()
-  const [overview, setOverview] = useState<OverviewData | null>(null)
-  const [turns, setTurns] = useState<TokenTurn[]>([])
-  const [scenarios, setScenarios] = useState<ScenarioStat[]>([])
-  const [logs, setLogs] = useState<LogEntry[]>([])
-  const [projects, setProjects] = useState<Project[]>([])
-  const [projectTotal, setProjectTotal] = useState(0)
-  const [loading, setLoading] = useState(true)
+  const { overview, turns, scenarios, logs, projects, projectTotal, loading, refreshing, errors: loadErrors, lastUpdatedAt, refresh: fetchDashboard } = useDashboardData()
   const [bucketView, setBucketView] = useState<'model' | 'agent' | 'phase'>('model')
-  const [loadErrors, setLoadErrors] = useState<LoadErrors>({})
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
-
-  const fetchDashboard = useCallback(async (): Promise<boolean> => {
-    setLoading(true)
-    try {
-      const [overviewResult, turnResult, scenarioResult, logResult, projectResult] = await Promise.allSettled([
-        getOverview(),
-        getTurns({ limit: 24 }),
-        getScenarios(),
-        queryLogs({ page: 1, page_size: 8, min_level: 'warning' }),
-        listProjects({ page: 1, page_size: 8 }),
-      ])
-
-      const nextErrors: LoadErrors = {}
-
-      if (overviewResult.status === 'fulfilled') {
-        setOverview(overviewResult.value)
-      } else {
-        nextErrors.overview = errorText(overviewResult.reason)
-      }
-
-      if (turnResult.status === 'fulfilled') {
-        setTurns(turnResult.value.items)
-      } else {
-        nextErrors.turns = errorText(turnResult.reason)
-      }
-
-      if (scenarioResult.status === 'fulfilled') {
-        setScenarios(scenarioResult.value.items)
-      } else {
-        nextErrors.scenarios = errorText(scenarioResult.reason)
-      }
-
-      if (logResult.status === 'fulfilled') {
-        setLogs(logResult.value.items)
-      } else {
-        nextErrors.logs = errorText(logResult.reason)
-      }
-
-      if (projectResult.status === 'fulfilled') {
-        setProjects(projectResult.value.items)
-        setProjectTotal(projectResult.value.total)
-      } else {
-        nextErrors.projects = errorText(projectResult.reason)
-      }
-
-      setLoadErrors(nextErrors)
-      setLastUpdatedAt(Date.now())
-      return Object.keys(nextErrors).length === 0
-    } catch (error) {
-      console.error('加载仪表盘数据失败:', error)
-      message.error('加载仪表盘数据失败')
-      setLoadErrors({ overview: errorText(error) })
-      return false
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void fetchDashboard()
-  }, [fetchDashboard])
 
   const handleRefresh = async () => {
     const ok = await fetchDashboard()
@@ -698,7 +621,7 @@ export default function Dashboard() {
           <Text type="secondary" className="dashboard-refresh-time">
             {lastUpdatedAt ? `更新 ${formatDateTime(lastUpdatedAt / 1000)}` : '等待数据'}
           </Text>
-          <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={loading} type="primary">
+          <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={refreshing} type="primary">
             刷新数据
           </Button>
         </div>

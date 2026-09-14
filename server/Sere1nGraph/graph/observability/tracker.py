@@ -42,6 +42,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from .pricing import calc_cost
+from .stats_reader import TokenStatsReader
 
 _COLLECTION = "token_usage_records"
 
@@ -324,6 +325,7 @@ class TokenTracker:
         self._stats_cache: dict[str, AggregatedStats] = {}
         self._callback = _TokenCallbackHandler(self)
         self._db = db
+        self._stats_reader = TokenStatsReader(db) if db is not None else None
         self._pending: list[UsageRecord] = []
         self._flush_task = None
         self._flush_interval = _float_env("TOKEN_TRACKER_FLUSH_INTERVAL_SECONDS", 1.5, minimum=0.2)
@@ -331,6 +333,8 @@ class TokenTracker:
 
     def set_db(self, db):
         """设置 MongoDB 连接（延迟注入，因为 db 在应用启动后才可用）。"""
+        if db is not self._db:
+            self._stats_reader = TokenStatsReader(db) if db is not None else None
         self._db = db
 
     async def load_history_from_db(self):
@@ -675,6 +679,8 @@ class TokenTracker:
                 or (task_id and r.task_id == task_id)
             )
 
+        if self._stats_reader is not None:
+            self._stats_reader.invalidate()
         with self._lock:
             before = len(self._records)
             self._records = deque((r for r in self._records if _keep(r)), maxlen=self._max_records)
@@ -721,63 +727,32 @@ class TokenTracker:
             return self.get_records(project_id, task_id, limit)
 
     async def get_stats_async(
-        self,
-        project_id: str = "",
-        task_id: str = "",
-        phase: str = "",
-        agent: str = "",
-        task_type: str = "",
+        self, project_id: str = "", task_id: str = "", phase: str = "",
+        agent: str = "", task_type: str = "",
     ) -> dict:
-        """异步获取统计，MongoDB 优先，失败时回退到内存。"""
-        if self._db is None:
-            return self.get_stats(project_id, task_id, phase, agent, task_type)
+        """Historical statistics share one bounded snapshot, refreshed within 10s."""
+        if self._stats_reader is not None:
+            try:
+                await self._flush_once()
+                result = await self._stats_reader.stats(
+                    project_id, task_id, phase=phase, agent=agent, task_type=task_type,
+                )
+                if result["total_calls"]:
+                    return result
+            except Exception:
+                pass
+        return self.get_stats(project_id, task_id, phase, agent, task_type)
 
-        try:
-            await self._flush_once()
-            match: dict[str, Any] = {}
-            if project_id:
-                match["project_id"] = project_id
-            if task_id:
-                match["task_id"] = task_id
-            if phase:
-                match["phase"] = phase
-            if agent:
-                match["agent"] = agent
-            if task_type:
-                match["task_type"] = task_type
-
-            total_pipeline = [
-                {"$match": match} if match else {"$match": {}},
-                {
-                    "$group": {
-                        "_id": None,
-                        "total_calls": {"$sum": 1},
-                        "total_input_tokens": {"$sum": "$input_tokens"},
-                        "total_output_tokens": {"$sum": "$output_tokens"},
-                        "total_cost_yuan": {"$sum": "$cost_yuan"},
-                        "total_duration_ms": {"$sum": "$duration_ms"},
-                    }
-                },
-            ]
-            total = await self._db[_COLLECTION].aggregate(total_pipeline).to_list(1)
-            if not total:
-                return self.get_stats(project_id, task_id, phase, agent, task_type)
-
-            row = total[0]
-            row.pop("_id", None)
-            row["total_input_tokens"] = int(row.get("total_input_tokens") or 0)
-            row["total_output_tokens"] = int(row.get("total_output_tokens") or 0)
-            row["total_calls"] = int(row.get("total_calls") or 0)
-            row["total_tokens"] = row["total_input_tokens"] + row["total_output_tokens"]
-            row["total_cost_yuan"] = round(float(row.get("total_cost_yuan") or 0), 6)
-            row["total_duration_ms"] = round(float(row.get("total_duration_ms") or 0), 1)
-            row["by_model"] = await self._db_group_by(match, "model")
-            row["by_phase"] = await self._db_group_by(match, "phase")
-            row["by_agent"] = await self._db_group_by(match, "agent")
-            row["by_task_type"] = await self._db_group_by(match, "task_type")
-            return row
-        except Exception:
-            return self.get_stats(project_id, task_id, phase, agent, task_type)
+    async def get_scenario_stats_async(self) -> dict[str, dict]:
+        """All scenario dimensions from the same historical snapshot as overview."""
+        if self._stats_reader is not None:
+            try:
+                await self._flush_once()
+                return await self._stats_reader.scenarios()
+            except Exception:
+                pass
+        types = self.get_stats().get("by_task_type", {})
+        return {value: self.get_stats(task_type=value) for value in types}
 
     async def _db_group_by(self, match: dict, field: str) -> dict:
         """MongoDB 按字段分组聚合。"""
