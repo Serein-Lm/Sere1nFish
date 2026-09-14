@@ -40,6 +40,7 @@ from api.routers import (
     scholar_contact,
     dingtalk,
     source_documents,
+    target_library,
     deepfake,
     media_output,
     social_collection,
@@ -312,6 +313,8 @@ async def lifespan(app: FastAPI):
         from api.dao import source_documents as source_documents_dao
         from api.dao import website_crawl as website_crawl_dao
         await targets_dao.ensure_indexes(db)
+        from api.dao import target_library as target_library_dao
+        await target_library_dao.ensure_indexes(db)
         await projects_dao.ensure_indexes(db)
         await project_groups_dao.ensure_indexes(db)
         rebuilt_target_aliases = await targets_dao.rebuild_identity_aliases(db)
@@ -710,6 +713,7 @@ app.include_router(voice.router, prefix="/api/v1/voice", tags=["声音复刻"])
 app.include_router(aigc.router, prefix="/api/v1/aigc", tags=["AIGC"])
 app.include_router(dingtalk.router, prefix="/api/v1/dingtalk", tags=["钉钉机器人"])
 app.include_router(source_documents.router, prefix="/api/v1", tags=["来源文档与目标"])
+app.include_router(target_library.router, prefix="/api/v1/target-library", tags=["目标库"])
 app.include_router(deepfake.router, prefix="/api/v1/deepfake", tags=["Deepfake"])
 app.include_router(media_output.router, prefix="/api/v1/media-output", tags=["远端媒体输出"])
 app.include_router(distributed_scan.router, prefix="/api/v1")

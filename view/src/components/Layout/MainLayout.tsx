@@ -98,7 +98,7 @@ export default function MainLayout() {
       {
         key: '/targets',
         icon: <DatabaseOutlined />,
-        label: 'Target 列表',
+        label: 'Target 目标库',
       },
       {
         key: '/phishing',
