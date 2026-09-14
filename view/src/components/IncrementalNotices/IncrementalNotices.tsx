@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Badge, Button, Drawer, Empty, Space, Tag, notification } from 'antd'
+import { Badge, Button, Drawer, Empty, Space, Tag } from 'antd'
 import { BellOutlined, ArrowRightOutlined, CheckOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { getIncrementalFeed, type IncrementalFeed, type IncrementalNotice } from '../../services/incrementalNoticeService'
@@ -59,13 +59,10 @@ export function IncrementalNoticeProvider({ children, userKey, enabled }: { chil
   const [projectFeed, setProjectFeed] = useState<IncrementalFeed | null>(null)
   const [error, setError] = useState(false)
   const [drawer, setDrawer] = useState<'all' | 'project' | null>(null)
-  const [api, holder] = notification.useNotification()
-  const announced = useRef('')
   const reload = useRef<() => void>(() => {})
 
   useEffect(() => {
     setAfter(safeRead(storageKey))
-    announced.current = ''
   }, [storageKey])
 
   useEffect(() => {
@@ -94,30 +91,17 @@ export function IncrementalNoticeProvider({ children, userKey, enabled }: { chil
     return () => { active = false; window.clearInterval(timer) }
   }, [projectId, after, enabled])
 
-  useEffect(() => {
-    const latest = feed?.items[0]
-    if (drawer || !feed?.unread_count || !latest || announced.current === latest.event_id) return
-    announced.current = latest.event_id
-    api.open({
-      key: 'mobile-incremental', title: `新增量通报 · ${feed.unread_count} 条未读`,
-      description: <><strong>{latest.target_name}</strong><div>{latest.title}</div></>,
-      icon: <BellOutlined style={{ color: '#e97818' }} />, duration: 0,
-      actions: <Button type="primary" size="small" onClick={() => { setDrawer('all'); api.destroy('mobile-incremental') }}>查看增量</Button>,
-    })
-  }, [feed, api, drawer])
-
   const markRead = useCallback(() => {
     if (!feed) return
     try { localStorage.setItem(storageKey, feed.generated_at) } catch { /* current session still acknowledges */ }
     setAfter(feed.generated_at)
     setFeed({ ...feed, unread_count: 0 })
-    api.destroy('mobile-incremental')
-  }, [feed, storageKey, api])
+  }, [feed, storageKey])
 
   const selectedFeed = drawer === 'project' && projectId ? projectFeed : feed
   if (!enabled) return children
-  return <Context.Provider value={{ feed, projectFeed, error, open: (project = false) => { setDrawer(project ? 'project' : 'all'); api.destroy('mobile-incremental') } }}>
-    {children}{holder}
+  return <Context.Provider value={{ feed, projectFeed, error, open: (project = false) => setDrawer(project ? 'project' : 'all') }}>
+    {children}
     <Drawer title={drawer === 'project' ? '本项目增量通报' : '增量通报'} open={drawer !== null} onClose={() => setDrawer(null)} size={660}>
       <div className="incremental-drawer-toolbar">
         <span>最近 7 天 · 时间均为北京时间</span>

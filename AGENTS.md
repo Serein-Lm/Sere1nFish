@@ -87,7 +87,7 @@
 
 ## 分层规范与记录
 
-- 手机增量通报通过 `api.services.mobile_incremental_notifications` 统一发布，`mobile_incremental_events` 按 Project、Target、来源及版本保存不可覆盖的事件，实时采集与浏览器补录共用时间窗口核验和幂等身份。前端统一展示未读角标、持续提示及项目通报卡片；通知渠道仍通过 `notifications.notify_event`，不得把未归档、日期未知或窗口外的记录通报为已确认时间增量。
+- 手机增量通报通过 `api.services.mobile_incremental_notifications` 统一发布，`mobile_incremental_events` 按 Project、Target、来源及版本保存不可覆盖的事件，实时采集与浏览器补录共用时间窗口核验和幂等身份。增量主动通报以钉钉为主，前端只展示未读角标、项目通报卡片和用户主动打开的历史抽屉，禁止自动弹窗；通知渠道仍通过 `notifications.notify_event`，不得把未归档、日期未知或窗口外的记录通报为已确认时间增量。
 
 - 新增能力前先记录归属：它是 API 表面、领域服务、持久化、运行时适配、前端页面、前端 service、部署配置还是测试工具。
 - Router/page 层只做输入输出适配，不承载可复用业务规则。
