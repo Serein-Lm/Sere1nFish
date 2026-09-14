@@ -80,6 +80,9 @@ class MobileCollectRuntime:
         seeds = await resolve_keyword_plan(self.plan, target)
         stop_event = asyncio.Event()
         state = build_stream_state(self.plan, seeds, stop_event=stop_event)
+        from api.services.mobile_incremental import prepare_window
+
+        state["incremental_window"] = await prepare_window(self.plan, seeds)
         return MobileCollectExecution(plan=self.plan, seeds=seeds, state=state)
 
     async def _execute(self, execution: MobileCollectExecution) -> None:
@@ -99,6 +102,9 @@ class MobileCollectRuntime:
             failed_keywords=failure_state["collect_failed"],
         )
         self._raise_terminal_failure(execution, failure_state)
+        from api.services.mobile_incremental import complete_window
+
+        execution.state["incremental_cursor_advanced"] = await complete_window(execution)
 
     async def _run_stream(
         self,
@@ -205,6 +211,7 @@ class MobileCollectRuntime:
                 "resumed_keywords": execution.seeds.completed_count,
                 "dry_run": self.plan.dry_run,
                 "plan_version": self.plan.version,
+                "incremental_window": execution.state.get("incremental_window"),
                 "stages": self.stages.names,
             },
         )

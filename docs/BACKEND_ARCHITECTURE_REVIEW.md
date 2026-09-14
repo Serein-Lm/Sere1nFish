@@ -28,6 +28,10 @@
 
 Target 卡片的公众号数量与手机记录列表统一统计有效项目关联记录，复用已有 `record_count` 聚合；尚未完成全文归档的旧手机证据也可从卡片进入。来源归档状态仍单独保存，不把手机记录数量冒充全文归档数量。
 
+手机增量时间由 `api.services.mobile_incremental` 编排，`api.dao.mobile_incremental` 复用 `mobile_collect_checkpoints` 保存每轮固定时间窗口，复用 `project_targets.mobile_incremental_baseline/mobile_incremental_cursors` 保存历史起点和成功游标；没有新增集合或后台进程。游标按 Target、渠道和关键词范围隔离，跨项目抽取通过原历史合并入口继承，不使用网站采集时间代替手机时间。`MobileCollectPlan` 升至版本 2，结果透传 `incremental_window/incremental_cursor_advanced`，HTTP 字段保持兼容。监控默认按发布时间筛选，上次成功边界向前重叠 24 小时以容纳日期精度和延迟收录，去重为辅助；无历史起点时首次为明确的 45 天窗口。暂停、超时、屏幕错误、持久化失败、未核实日期和详情预算不足均不推进游标，恢复时检查已保存关键词状态。未知日期可进入详情核验，不能作为新增通知；已复制但待浏览器补录的 URL 继续由现有持久化交接队列保存。
+
+独立 `/targets` 页面和侧边栏 Target 列表复用已有项目目标分页、层级分支及手机记录接口，默认展示排序最前的项目组，可筛选项目和搜索单位；不创建第二套 Target 数据。手机时间起点及各采集范围成功游标通过原 Target summary 读模型提供。
+
 招投标项目读模型现由 `api.services.bidding_ownership` 统一核验公告参与方：采购人、代理机构或中标方必须与项目 Target 的稳定名称、身份别名或已保存简称完整匹配。搜索词、旧搜索别名、正文提及与同域名不构成归属；下级范围只读取项目中已保存的层级。候选公告由 bidding DAO 按明确的项目来源关联读取，列表分页、Target 数量和 AI 读取共用过滤后的读模型，原公告、附件与历史关联继续保留。
 
 流水线取消时同时回收入队等待、队列排空等待和致命错误监听的辅助任务，覆盖大量关键词尚在背压入队时暂停的情况，避免出现被垃圾回收的 pending Task 日志。

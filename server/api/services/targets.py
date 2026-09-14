@@ -1702,6 +1702,8 @@ async def list_project_target_summaries(
                 "scan_profile_fingerprint",
                 "scan_profile_updated_at",
                 "scan_coverage",
+                "mobile_incremental_baseline",
+                "mobile_incremental_cursors",
             )
             if key in relation
         }

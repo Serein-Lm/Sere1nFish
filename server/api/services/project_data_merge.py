@@ -713,6 +713,10 @@ async def _merge_project_target_metadata(
             if min_fields:
                 update["$min"] = min_fields
             result = await db[PROJECT_TARGETS_COLLECTION].update_one(query, update)
+            if source.get("mobile_incremental_baseline") or source.get("mobile_incremental_cursors"):
+                from api.dao.mobile_incremental import inherit_target_state
+
+                await inherit_target_state(db, source, query["project_id"])
             stats.updated += int(result.modified_count or 0)
             if not result.modified_count:
                 stats.unchanged += 1

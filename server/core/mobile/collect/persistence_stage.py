@@ -12,6 +12,7 @@ from core.mobile.collect.contacts import (
     record_text_blob,
 )
 from core.mobile.collect.score_policy import ScorePolicyRegistry
+from core.mobile.collect.candidate_time import candidate_window_status
 from core.observability import obs_log
 from core.stream import Item, Stage
 
@@ -44,9 +45,23 @@ class PersistStage(Stage):
 
     async def handle(self, item: Item, ctx: Any) -> None:
         state = ctx.state
+        time_status = candidate_window_status(
+            item.payload, state.get("incremental_window"),
+            str(item.payload.get("target_id") or ""),
+        )
+        if time_status in {"outside", "unknown"}:
+            counter = "time_skipped" if time_status == "outside" else "time_unverified"
+            counters = state.setdefault("counters", {})
+            counters[counter] = int(counters.get(counter) or 0) + 1
+            # A copied URL awaiting Chrome must remain durable for the existing
+            # handoff worker; it is not a verified time increment yet.
+            if item.payload.get("source_archive_status") != "pending":
+                return
         prepared = self._prepare(item.payload, state)
         if prepared is None:
             return
+        if time_status in {"outside", "unknown"}:
+            prepared.is_high_score = False
         if state.get("dry_run"):
             self._append_preview(state, prepared)
             return

@@ -26,6 +26,10 @@ def build_counters() -> dict[str, int]:
         "max_score": 0,
         "duplicates_skipped": 0,
         "stale_skipped": 0,
+        "time_skipped": 0,
+        "time_unverified": 0,
+        "time_coverage_incomplete": 0,
+        "screen_errors": 0,
     }
 
 
@@ -193,5 +197,7 @@ def project_terminal_result(execution: MobileCollectExecution) -> dict[str, Any]
         "keywords_completed": int(state.get("keywords_completed") or 0),
         "keyword_total": int(state.get("keyword_total") or 0),
         "keyword_resolution": execution.seeds.keyword_resolution,
+        "incremental_window": state.get("incremental_window"),
+        "incremental_cursor_advanced": bool(state.get("incremental_cursor_advanced")),
         **dict(state.get("counters") or {}),
     }

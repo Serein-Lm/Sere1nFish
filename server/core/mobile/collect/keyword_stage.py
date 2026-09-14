@@ -14,6 +14,7 @@ from core.mobile.collect.candidate_policy import (
 from core.mobile.collect.candidate_time import (
     candidate_age_rejection,
     candidate_publish_time,
+    candidate_window_status,
 )
 
 
@@ -127,6 +128,8 @@ class MobileKeywordStageRunner:
                 await self._publish_screen_progress(run, index)
             except Exception as exc:  # noqa: BLE001
                 run.screen_errors += 1
+                counters = shared.setdefault("counters", {})
+                counters["screen_errors"] = int(counters.get("screen_errors") or 0) + 1
                 run.ctx.logger.warning(
                     "[collect] 处理失败 kw=%r idx=%s: %s",
                     run.keyword,
@@ -182,8 +185,14 @@ class MobileKeywordStageRunner:
                 record,
                 max_age_days=int(shared.get("max_item_age_days") or 0),
             )
+            time_status = candidate_window_status(
+                record, shared.get("incremental_window"),
+                str((run.target or {}).get("target_id") or ""),
+            )
             rejection = (
-                ("history", history_reason)
+                ("time", "发布时间不在本轮增量窗口内")
+                if time_status == "outside"
+                else ("history", history_reason)
                 if history_reason
                 else ("stale", age_reason)
                 if age_reason
@@ -203,7 +212,7 @@ class MobileKeywordStageRunner:
         if key in skipped:
             return
         skipped.add(key)
-        counter = "duplicates_skipped" if kind == "history" else "stale_skipped"
+        counter = {"history": "duplicates_skipped", "time": "time_skipped"}.get(kind, "stale_skipped")
         counters = state.setdefault("counters", {})
         counters[counter] = int(counters.get(counter) or 0) + 1
 
@@ -216,7 +225,10 @@ class MobileKeywordStageRunner:
     ) -> int:
         if not run.candidate_policy.persist_list_candidates:
             return 0
+        emitted = 0
         for record in records:
+            if self._candidate_key(run, record) in run.candidate_rejections:
+                continue
             await run.ctx.emit(
                 "persist",
                 {
@@ -235,7 +247,8 @@ class MobileKeywordStageRunner:
                     "detail": False,
                 },
             )
-        return len(records)
+            emitted += 1
+        return emitted
 
     def _should_review_details(self, run: KeywordStageState) -> bool:
         return bool(
@@ -260,8 +273,10 @@ class MobileKeywordStageRunner:
             if candidate_key in detailed:
                 continue
             if run.candidate_policy.max_details_per_screen > 0 and per_screen >= run.candidate_policy.max_details_per_screen:
+                self._mark_time_coverage_gap(run)
                 break
             if details_left <= 0 or reviews_left <= 0 or run.stopped:
+                self._mark_time_coverage_gap(run)
                 break
             detailed.add(candidate_key)
             run.details_attempted += 1
@@ -282,6 +297,12 @@ class MobileKeywordStageRunner:
                 run.details_accepted += 1
                 run.shared["details_accepted"] = int(run.shared.get("details_accepted") or 0) + 1
                 details_left -= 1
+
+    @staticmethod
+    def _mark_time_coverage_gap(run: KeywordStageState) -> None:
+        if run.shared.get("incremental_window"):
+            counters = run.shared.setdefault("counters", {})
+            counters["time_coverage_incomplete"] = int(counters.get("time_coverage_incomplete") or 0) + 1
 
     def _review_candidates(
         self,
@@ -437,7 +458,7 @@ class MobileKeywordStageRunner:
         if run.checkpoint_key and not run.shared.get("dry_run"):
             metrics = await run.ctx.drain("persist")
             if int(metrics.get("failed") or 0) == run.persist_failures_before:
-                await self._mark_checkpoint(run, "completed", stats=stats)
+                await self._mark_checkpoint(run, "completed", stats=self._checkpoint_stats(run))
                 run.shared["keywords_completed"] = int(run.shared.get("keywords_completed") or 0) + 1
         run.shared["keywords_processed"] = int(run.shared.get("keywords_processed") or 0) + 1
         await self._publish_keyword_progress(run)
@@ -597,4 +618,6 @@ class MobileKeywordStageRunner:
             "emitted": run.emitted,
             "duplicates_skipped": int(counters.get("duplicates_skipped") or 0),
             "stale_skipped": int(counters.get("stale_skipped") or 0),
+            "time_unverified": int(counters.get("time_unverified") or 0),
+            "time_coverage_incomplete": int(counters.get("time_coverage_incomplete") or 0),
         }

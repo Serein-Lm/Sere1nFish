@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from typing import Literal
+from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -191,6 +192,9 @@ class CollectTaskDef(BaseModel):
         default=False,
         description="候选通过审核后优先点击发布时间较新的条目",
     )
+    incremental_by_time: bool = Field(default=False, description="按上次成功窗口和本轮开始时间筛选发布时间")
+    incremental_since: datetime | None = Field(default=None, description="没有项目历史时间基线时使用的首次增量起点")
+    incremental_overlap_hours: int = Field(default=24, ge=0, le=168, description="为日期精度和延迟收录保留的重叠小时数")
     max_item_age_days: int = Field(
         default=0,
         ge=0,
@@ -283,6 +287,9 @@ class CollectTaskUpdate(BaseModel):
     min_score_to_persist: int | None = Field(default=None, ge=0, le=100)
     skip_previously_collected: bool | None = None
     prefer_recent_items: bool | None = None
+    incremental_by_time: bool | None = None
+    incremental_since: datetime | None = None
+    incremental_overlap_hours: int | None = Field(default=None, ge=0, le=168)
     max_item_age_days: int | None = Field(default=None, ge=0, le=3650)
     max_runtime_seconds: int | None = Field(default=None, ge=0, le=14400)
 

@@ -282,6 +282,9 @@ export default function MobileMonitorPanel({ devices }: { devices: SimpleDevice[
       render: (_, monitor) => (
         <Space direction="vertical" size={2}>
           <span>{triggerLabel(monitor)}</span>
+          {monitor.incremental_by_time ? (
+            <span className="mobile-monitor-secondary">按发布时间增量 · 重叠 {monitor.incremental_overlap_hours ?? 24} 小时</span>
+          ) : null}
           <span className="mobile-monitor-secondary">下次 {formatTime(monitor.next_run)}</span>
         </Space>
       ),

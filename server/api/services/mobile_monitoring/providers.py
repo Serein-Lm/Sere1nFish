@@ -68,7 +68,7 @@ class WeChatOfficialMonitorProvider:
                 "include_direct_children": False,
                 "max_relation_depth": 1,
                 "max_related_targets": 1,
-                "skip_completed_related_targets": True,
+                "skip_completed_related_targets": False,
                 "max_resolved_keywords": max(1, len(accounts)) if account_scope else 24,
                 "notify_on": "both",
                 "direct_launch_app": True,
@@ -81,7 +81,9 @@ class WeChatOfficialMonitorProvider:
                 "detail_max_swipes": 6,
                 "skip_previously_collected": True,
                 "prefer_recent_items": True,
-                "max_item_age_days": 45,
+                "incremental_by_time": True,
+                "incremental_overlap_hours": 24,
+                "max_item_age_days": 0,
                 "max_runtime_seconds": 3600,
                 "search_hint": (
                     "逐个搜索指定公众号，优先检查最近发布且与关联 Target 有关的文章"

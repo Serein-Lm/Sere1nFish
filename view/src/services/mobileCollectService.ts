@@ -45,6 +45,9 @@ export interface CollectTaskDef {
   min_score_to_persist?: number
   skip_previously_collected?: boolean
   prefer_recent_items?: boolean
+  incremental_by_time?: boolean
+  incremental_since?: string | null
+  incremental_overlap_hours?: number
   max_item_age_days?: number
   status?: string
   latest_run?: {
@@ -89,6 +92,9 @@ export interface CollectTaskInput {
   min_score_to_persist?: number
   skip_previously_collected?: boolean
   prefer_recent_items?: boolean
+  incremental_by_time?: boolean
+  incremental_since?: string | null
+  incremental_overlap_hours?: number
   max_item_age_days?: number
 }
 
@@ -201,6 +207,9 @@ export interface MobileMonitor {
   trigger: TriggerDef
   enabled: boolean
   task_status: string
+  incremental_by_time?: boolean
+  incremental_since?: string | null
+  incremental_overlap_hours?: number
   last_run_task_id?: string | null
   last_run_at?: string | null
   last_status?: string | null

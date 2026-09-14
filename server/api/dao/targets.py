@@ -1473,6 +1473,8 @@ async def list_project_targets(
                 "run_task_ids": 1,
                 "task_def_ids": 1,
                 "last_collected_at": 1,
+                "mobile_incremental_baseline": 1,
+                "mobile_incremental_cursors": 1,
                 "display_name": 1,
                 "short_names": 1,
                 "scan_aliases": 1,

@@ -117,6 +117,8 @@ export interface TargetRelationshipUnit {
 }
 
 export interface ProjectTargetSummary {
+  mobile_incremental_baseline?: { since: string; source_project_id?: string; source_task_id?: string; reason?: string }
+  mobile_incremental_cursors?: Record<string, { through_at: string; run_task_id: string }>
   project_target_id: string
   project_id: string
   target_id: string

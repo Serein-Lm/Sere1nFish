@@ -16,7 +16,7 @@ _PUBLISH_TIME_FIELDS = (
 )
 
 
-def candidate_publish_time(candidate: dict[str, Any]) -> datetime | None:
+def candidate_publish_time(candidate: dict[str, Any], *, reference: datetime | None = None) -> datetime | None:
     fields = dict(candidate.get("fields") or {})
     value = next(
         (
@@ -26,7 +26,27 @@ def candidate_publish_time(candidate: dict[str, Any]) -> datetime | None:
         ),
         None,
     )
-    return collect_dao.parse_record_publish_time(value)
+    try:
+        return collect_dao.parse_record_publish_time(value, reference=reference)
+    except (ValueError, OverflowError, TypeError):
+        return None
+
+
+def candidate_window_status(candidate: dict[str, Any], window: dict | None, target_id: str) -> str:
+    """Unknown dates may be resolved in detail, but never qualify for notification."""
+    if not window:
+        return "disabled"
+    from api.services.mobile_incremental import utc_time
+
+    target = (window.get("targets") or {}).get(target_id)
+    if not target:
+        return "unknown"
+    published_at = candidate_publish_time(candidate)
+    if published_at is None:
+        return "unknown"
+    since = utc_time(target["since"]) - timedelta(hours=int(window.get("overlap_hours", 24)))
+    until = utc_time(window["until"])
+    return "inside" if since <= published_at <= until else "outside"
 
 
 def candidate_age_rejection(
@@ -37,7 +57,7 @@ def candidate_age_rejection(
 ) -> str | None:
     if max_age_days <= 0:
         return None
-    published_at = candidate_publish_time(candidate)
+    published_at = candidate_publish_time(candidate, reference=reference)
     if published_at is None:
         return None
     now = reference or datetime.now(timezone.utc)

@@ -7,7 +7,7 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 
-MOBILE_COLLECT_PLAN_VERSION = 1
+MOBILE_COLLECT_PLAN_VERSION = 2
 
 
 @dataclass(slots=True)
