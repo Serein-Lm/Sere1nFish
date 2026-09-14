@@ -335,7 +335,30 @@ export interface TargetResearchBatchResponse {
   status: 'pending' | 'deduplicated'
 }
 
+export interface PortalResearchOptions {
+  include_subordinates: boolean
+  include_parent: boolean
+  max_runtime_seconds: number
+  max_tool_calls: number
+  context_tokens: number
+  max_pages: number
+  dry_run?: boolean
+}
+export interface PortalSection {
+  category: 'business' | 'recruitment' | 'procurement' | 'investment' | 'feedback' | 'organization'
+  summary: string
+  source_urls: string[]
+  status: 'covered' | 'partial' | 'not_found' | 'blocked'
+  gaps: string[]
+}
+
 export interface TargetResearchResult {
+  portal_sections?: PortalSection[]
+  portal_page_count?: number
+  portal_archive_pending?: number
+  portal_excluded_link_count?: number
+  portal_options?: PortalResearchOptions
+  sources?: Array<{ title: string; url: string; source_document_id?: string; source_document_version_id?: string; archive_status?: string }>
   research_id: string
   target_id: string
   project_id: string
@@ -438,6 +461,7 @@ export function createTargetResearch(
     rescan_root?: boolean
     max_related_targets?: number
     force_refresh?: boolean
+    portal_options?: PortalResearchOptions
   },
 ) {
   return apiFetch<TargetResearchTaskResponse>(
@@ -446,6 +470,7 @@ export function createTargetResearch(
       method: 'POST',
       body: JSON.stringify({
         project_id: projectId,
+        portal_options: options?.portal_options,
         scan_discovered_targets: options?.scan_discovered_targets ?? true,
         rescan_root: options?.rescan_root ?? true,
         max_related_targets: options?.max_related_targets ?? 8,

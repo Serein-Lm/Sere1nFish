@@ -11,6 +11,7 @@ from api.dao import target_research as target_research_dao
 from api.dao import source_documents as source_dao
 from api.dao import targets as targets_dao
 from api.db.mongodb import get_db
+from api.models.portal_research import PortalResearchOptions
 from api.services.source_documents import get_source_document_detail
 from api.services.targets import (
     assign_project_target_batches,
@@ -50,6 +51,7 @@ class TargetOfficialWebsiteRootsRequest(BaseModel):
 
 
 class TargetResearchRequest(BaseModel):
+    portal_options: PortalResearchOptions | None = None
     project_id: str = Field(min_length=1)
     scan_discovered_targets: bool = True
     rescan_root: bool = True
@@ -59,6 +61,7 @@ class TargetResearchRequest(BaseModel):
 
 
 class TargetResearchBatchRequest(BaseModel):
+    portal_options: PortalResearchOptions | None = None
     project_id: str = Field(min_length=1)
     target_names: list[str] = Field(min_length=1, max_length=100)
     concurrency: int = Field(default=4, ge=1, le=8)
@@ -192,6 +195,7 @@ async def create_target_research_batch(
             max_related_targets=payload.max_related_targets,
             force_refresh=payload.force_refresh,
             scan_params=payload.scan_params,
+            portal_options=payload.portal_options.model_dump() if payload.portal_options else None,
         )
     except TargetResearchTargetNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -272,6 +276,7 @@ async def create_target_research(
             max_related_targets=payload.max_related_targets,
             force_refresh=payload.force_refresh,
             scan_params=payload.scan_params,
+            portal_options=payload.portal_options.model_dump() if payload.portal_options else None,
         )
     except TargetResearchTargetNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc

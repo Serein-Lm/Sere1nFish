@@ -594,6 +594,10 @@ async def capture_cdp_rendered_links(
         or is_browser_error_page_url(final_url)
     ):
         raise RuntimeError(f"浏览器落入错误页: {final_url[:200]}")
+    links = list(page.get("links") or [])
+    if page.get("html"):
+        from api.services.source_documents.resources import html_text_and_links
+        _text, links = html_text_and_links(str(page["html"]), final_url)
     return {
         "url": preferred_url,
         "final_url": final_url,
@@ -601,7 +605,7 @@ async def capture_cdp_rendered_links(
         "content_length": max(0, int(page.get("contentLength") or 0)),
         "visible_text": str(page.get("visibleText") or ""),
         "html": str(page.get("html") or ""),
-        "links": list(page.get("links") or []),
+        "links": links,
         "controls": list(page.get("controls") or []),
         "service_resources": list(page.get("serviceResources") or []),
     }

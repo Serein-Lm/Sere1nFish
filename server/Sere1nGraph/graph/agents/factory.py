@@ -504,9 +504,13 @@ async def create_target_research_agent(
     app_config: AppConfig,
     server_name: str = "chrome-devtools",
     output_mode: OutputMode = "silent",
-    mcp_result_observer: Callable[[str, Any], None] | None = None,
+    mcp_result_observer: Callable[[str, Any], Any] | None = None,
+    research_session: Any = None,
 ) -> Callable:
     """创建机构 Target 深研 Agent；仅使用项目 Chrome，不另起浏览器。"""
+    if research_session is not None and research_session.options is not None:
+        from .portal_research import create_portal_research_agent
+        return await create_portal_research_agent(app_config, session=research_session, observer=mcp_result_observer)
     return create_agent_node(
         app_config=app_config,
         model_workload="collection",

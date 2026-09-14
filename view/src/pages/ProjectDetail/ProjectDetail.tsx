@@ -69,7 +69,6 @@ import CopyLinkButton, { CopyableLink, CopyableText } from '../../components/Cop
 import SkillSelector from '../../components/SkillSelector'
 import TargetRelationLabel from '../../components/TargetRelationLabel'
 import {
-  createTargetResearch,
   getProjectTargetDashboard,
   getProjectTargetSummary,
   listProjectTargetBranch,
@@ -91,6 +90,7 @@ import {
   type BiddingRecord,
 } from '../../services/biddingService'
 import './ProjectDetail.css'
+import { PortalResearchDialog, PortalResearchPanel } from '../../components/PortalResearch/PortalResearch'
 
 const { Title, Paragraph, Text } = Typography
 
@@ -860,7 +860,7 @@ export default function ProjectDetail() {
   const targetSummaryRequestRef = useRef<Record<string, number>>({})
   const targetSummaryPendingRef = useRef<Set<string>>(new Set())
   const [targetSummaryLoading, setTargetSummaryLoading] = useState(false)
-  const [targetResearchActionId, setTargetResearchActionId] = useState('')
+  const [researchTarget, setResearchTarget] = useState<ProjectTargetSummary | null>(null)
   const [selectedTargetId, setSelectedTargetId] = useState('')
   const [selectedTargetDashboard, setSelectedTargetDashboard] = useState<ProjectTargetDashboard | null>(null)
   const [selectedTargetDashboardLoading, setSelectedTargetDashboardLoading] = useState(false)
@@ -4361,24 +4361,7 @@ export default function ProjectDetail() {
     openTargetOverview(target.target_id)
   }
 
-  const runTargetResearch = async (target: ProjectTargetSummary) => {
-    if (!projectId || targetResearchActionId) return
-    setTargetResearchActionId(target.target_id)
-    try {
-      const result = await createTargetResearch(projectId, target.target_id, {
-        scan_discovered_targets: true,
-        rescan_root: true,
-        max_related_targets: 8,
-        force_refresh: true,
-      })
-      message.success(result.deduplicated ? '该机构已在深研队列中' : '机构深研已启动，可信关联 Target 将自动进入扫描')
-      void fetchTasks(projectId)
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '机构深研启动失败')
-    } finally {
-      setTargetResearchActionId('')
-    }
-  }
+  const runTargetResearch = (target: ProjectTargetSummary) => setResearchTarget(target)
 
   const runCoverageBatch = async () => {
     if (!projectId || coverageSubmitting) return
@@ -4694,6 +4677,8 @@ export default function ProjectDetail() {
           <Statistic title="采集覆盖" value={summary.coverage_completed_count || 0} suffix={`/ ${summary.coverage_required_count || 4}`} />
         </div>
 
+        <PortalResearchPanel projectId={projectId || ''} targetId={summary.target_id} onResearch={() => runTargetResearch(summary)} />
+
         <div className="target-overview-jumpbar">
           <Text strong>快速进入</Text>
           <Space size={[6, 6]} wrap>
@@ -4995,13 +4980,12 @@ export default function ProjectDetail() {
         width: 72,
         align: 'center',
         render: (_, target) => target.isLoadingPlaceholder ? null : (
-          <Tooltip title="联网核验机构资料，扩展可信 Target 后自动扫描">
+          <Tooltip title="配置官网门户深研，选择直属下级和直接上级">
             <Button
               type="text"
               size="small"
               icon={<SearchOutlined />}
-              aria-label="机构深研"
-              loading={targetResearchActionId === target.target_id}
+              aria-label="官网门户深研"
               onClick={(event) => {
                 event.stopPropagation()
                 void runTargetResearch(target)
@@ -5722,6 +5706,7 @@ export default function ProjectDetail() {
               />
             </div>
 
+            <PortalResearchDialog projectId={projectId || ''} target={researchTarget} onClose={() => setResearchTarget(null)} onStarted={() => { if (projectId) void fetchTasks(projectId) }} />
             <Modal
               title={mobilePreview ? `手机截图 ${mobilePreview.screenshot_id}` : '手机截图'}
               open={Boolean(mobilePreview)}

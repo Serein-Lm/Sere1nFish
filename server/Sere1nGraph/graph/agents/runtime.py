@@ -12,6 +12,7 @@ Agent 运行时核心模块。
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 from typing import Any, Callable, AsyncGenerator, Literal, Sequence
@@ -41,7 +42,7 @@ logger = get_logger("agent_runtime")
 OutputMode = Literal["silent", "console", "sse"]
 ModelWorkload = Literal["interactive", "collection"]
 ToolResultTransform = Callable[[str, Any], Any]
-ToolResultObserver = Callable[[str, Any], None]
+ToolResultObserver = Callable[[str, Any], Any]
 ToolCallTransform = Callable[
     [str, tuple[Any, ...], dict[str, Any]],
     tuple[tuple[Any, ...], dict[str, Any]],
@@ -221,6 +222,11 @@ def _wrap_tools_with_error_handling(
         original_func = getattr(tool, 'func', None)
         declared_argument_names = _declared_argument_names(tool)
 
+        if not original_coroutine and original_func and inspect.iscoroutinefunction(result_observer):
+            async def observe_sync_tool(*args, _func=original_func, **kwargs):
+                return await asyncio.to_thread(_func, *args, **kwargs)
+            original_coroutine = observe_sync_tool
+
         if original_coroutine:
             @functools.wraps(original_coroutine)
             async def safe_coroutine(*args, _orig=original_coroutine, _name=tool.name, _art=is_artifact, _es=error_state, _allowed=declared_argument_names, **kwargs):
@@ -254,7 +260,9 @@ def _wrap_tools_with_error_handling(
                     _es["container_error_consecutive"] = 0
                     if result_observer is not None:
                         try:
-                            result_observer(_name, result)
+                            observed = result_observer(_name, result)
+                            if inspect.isawaitable(observed):
+                                await observed
                         except Exception:
                             logger.warning(
                                 "MCP 工具结果观察器执行失败 | tool=%s",

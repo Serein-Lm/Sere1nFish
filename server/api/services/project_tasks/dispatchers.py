@@ -280,6 +280,7 @@ async def dispatch_target_research(
         rescan_root=bool(params.get("rescan_root", False)),
         force_refresh=bool(params.get("force_refresh", True)),
         scan_params=dict(params.get("scan_params") or {}),
+        portal_options=params.get("portal_options"),
         requested_by=str(params.get("_requested_by") or ""),
     )
 

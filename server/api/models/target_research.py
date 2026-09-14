@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, Field
+from api.models.portal_research import PortalSection
 
 
 class TargetResearchSource(BaseModel):
@@ -60,6 +61,7 @@ class RelatedTargetCandidate(BaseModel):
 
 
 class TargetResearchPayload(BaseModel):
+    portal_sections: list[PortalSection] = Field(default_factory=list, max_length=6)
     canonical_name: str = Field(min_length=1, max_length=300)
     summary: str = Field(min_length=1, max_length=12000)
     industry: str = Field(default="", max_length=300)

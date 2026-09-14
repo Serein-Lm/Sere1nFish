@@ -22,7 +22,7 @@ def test_page_target_prefers_exact_url_over_other_tabs() -> None:
     assert selected["targetId"] == "wanted"
 
 
-def test_page_target_accepts_redirect_on_same_host() -> None:
+def test_page_target_rejects_different_path_on_same_host() -> None:
     selected = _select_page_target(
         [
             {"targetId": "other", "type": "page", "url": "https://other.example/page"},
@@ -31,6 +31,15 @@ def test_page_target_accepts_redirect_on_same_host() -> None:
         "https://example.com/bids/1",
     )
 
+    # A pre-existing login tab cannot be treated as evidence for the bid URL.
+    assert selected is None
+
+
+def test_page_target_accepts_protocol_redirect_for_same_path() -> None:
+    selected = _select_page_target(
+        [{"targetId": "redirect", "type": "page", "url": "https://example.com/bids/1"}],
+        "http://example.com/bids/1",
+    )
     assert selected is not None
     assert selected["targetId"] == "redirect"
 

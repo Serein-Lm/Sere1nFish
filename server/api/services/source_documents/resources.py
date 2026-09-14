@@ -159,6 +159,8 @@ def _decode_html_content(content: str | bytes, content_type: str = "") -> str:
 
 def extract_html_links(root, base_url: str) -> list[dict[str, str]]:
     """Extract navigable and embedded resources through one shared policy."""
+    from api.services.portal_link_policy import html_link_context, relation_hint
+
     links: list[dict[str, str]] = []
     seen: set[str] = set()
     nodes = root.xpath(
@@ -196,6 +198,8 @@ def extract_html_links(root, base_url: str) -> list[dict[str, str]]:
                 or node.get("download")
                 or ""
             ).strip()
+        if relation_hint(label, html_link_context(node)) == "friend":
+            continue
         for candidate in candidates:
             if not candidate or candidate.lower().startswith(
                 ("javascript:", "data:", "mailto:", "tel:", "#")

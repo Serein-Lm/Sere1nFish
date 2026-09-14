@@ -17,6 +17,7 @@ from api.dao import target_relationships as relationships_dao
 from api.dao import targets as targets_dao
 from api.dao import tasks as tasks_dao
 from api.models.target_research import TargetResearchPayload
+from api.models.portal_research import PortalResearchOptions
 from api.services.company_normalize import NORMALIZATION_VERSION, normalize_root_domain
 from api.services.source_documents.urls import canonicalize_source_url
 from api.services.target_scan_profile import (
@@ -1301,8 +1302,10 @@ async def enqueue_target_research(
     max_related_targets: int = 8,
     force_refresh: bool = True,
     scan_params: dict[str, Any] | None = None,
+    portal_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """校验并下发一项持久化机构深研任务。"""
+    portal_options = PortalResearchOptions.model_validate(portal_options).model_dump() if portal_options is not None else None
     target = await targets_dao.get_target(db, target_id)
     relation = await targets_dao.get_project_target(
         db, project_id=project_id, target_id=target_id
@@ -1333,6 +1336,7 @@ async def enqueue_target_research(
         ),
         "force_refresh": bool(force_refresh),
         "scan_params": dict(scan_params or {}),
+        "portal_options": portal_options,
     }
     now = datetime.now(timezone.utc)
     await tasks_dao.insert_tasks(
@@ -1379,8 +1383,10 @@ async def enqueue_target_research_batch(
     max_related_targets: int = 4,
     force_refresh: bool = True,
     scan_params: dict[str, Any] | None = None,
+    portal_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve a Target list and enqueue bounded, recoverable deep research."""
+    portal_options = PortalResearchOptions.model_validate(portal_options).model_dump() if portal_options is not None else None
     from api.services.project_task_batch import (
         ProjectTaskJob,
         parse_company_names,
@@ -1466,6 +1472,7 @@ async def enqueue_target_research_batch(
             ),
             "force_refresh": bool(force_refresh),
             "scan_params": shared_scan_params,
+            "portal_options": portal_options,
         }
         documents.append({
             "task_id": task_id,
@@ -1530,6 +1537,7 @@ async def run_target_research(
     rescan_root: bool = False,
     force_refresh: bool = True,
     scan_params: dict[str, Any] | None = None,
+    portal_options: dict[str, Any] | None = None,
     requested_by: str = "",
 ) -> dict[str, Any]:
     target = await targets_dao.get_target(db, target_id)
@@ -1539,7 +1547,7 @@ async def run_target_research(
     if not target or not relation:
         raise ValueError("Target 不存在或不属于当前项目")
 
-    if not force_refresh:
+    if not force_refresh and portal_options is None:
         cached = await research_dao.get_latest_research(
             db, target_id=target_id, project_id=project_id
         )
@@ -1561,6 +1569,10 @@ async def run_target_research(
     from Sere1nGraph.graph.agents.runtime import extract_with_retry
     from Sere1nGraph.graph.prompts.loader import load_prompt
 
+    from api.services.portal_research import PortalResearchSession
+    session = PortalResearchSession(db, task_id, project_id, target, portal_options)
+    await session.prepare()
+    scan_params = session.scan_params(scan_params)
     provider = get_browser_provider()
     browser_task_id = f"target_research_{task_id}"
     query = (
@@ -1578,7 +1590,8 @@ async def run_target_research(
         "合作方、供应商、媒体转载主体和同名第三方不得标记为自动扫描。"
         f"\n{REQUIRE_EVIDENCE_TOOL_MARKER}"
     )
-    prompt = load_prompt("target_research/target_research")
+    query = session.query(query)
+    prompt = session.prompt(load_prompt("target_research/target_research"))
     parsed: dict[str, Any] | None = None
     navigated_urls: set[str] = set()
     browser_pages: dict[str, dict[str, str]] = {}
@@ -1586,9 +1599,9 @@ async def run_target_research(
     try:
         cdp_url = ""
         for browser_attempt in range(1, TARGET_RESEARCH_BROWSER_ATTEMPTS + 1):
-            attempt_urls: set[str] = set()
+            attempt_urls: set[str] = set(session.pages)
             attempted_urls: list[str] = []
-            attempt_pages: dict[str, dict[str, str]] = {}
+            attempt_pages: dict[str, dict[str, str]] = dict(session.pages)
             try:
                 if browser_attempt == 1:
                     cdp_url = await provider.get_cdp_endpoint(
@@ -1623,11 +1636,12 @@ async def run_target_research(
                 worker_config = _build_worker_chrome_config(app_config, cdp_url)
                 agent = await create_target_research_agent(
                     worker_config,
-                    mcp_result_observer=_build_navigation_evidence_observer(
+                    research_session=session,
+                    mcp_result_observer=session.observer(_build_navigation_evidence_observer(
                         attempt_urls,
                         attempted_urls,
                         attempt_pages,
-                    ),
+                    )),
                 )
 
                 async def run_research_pass(
@@ -1642,7 +1656,7 @@ async def run_target_research(
                         agent="target_research",
                         task_type="target_research",
                     ):
-                        raw = await agent(
+                        raw = await session.run_agent(agent,
                             {"messages": [HumanMessage(content=pass_query)]}
                         )
                     attempt_urls.update(_extract_navigated_urls(raw))
@@ -1674,18 +1688,22 @@ async def run_target_research(
                             browser_pages=attempt_pages,
                         )
 
-                    return await extract_with_retry(
-                        raw,
-                        worker_config,
-                        max_retries=2,
-                        system_prompt=prompt,
-                        validator=validate_research_payload,
-                        repair_context=_build_research_repair_context(
-                            content_urls,
-                            attempt_pages,
-                        ),
-                        model_workload="collection",
-                    )
+                    with observation_context(
+                        project_id=project_id, task_id=task_id, phase=phase + "_extract",
+                        agent="target_research", task_type="target_research",
+                    ):
+                        return await extract_with_retry(
+                            raw,
+                            worker_config,
+                            max_retries=2,
+                            system_prompt=prompt,
+                            validator=validate_research_payload,
+                            repair_context=_build_research_repair_context(
+                                content_urls,
+                                attempt_pages,
+                            ),
+                            model_workload="collection",
+                        )
 
                 attempt_query = query
                 if failed_domains:
@@ -1756,7 +1774,10 @@ async def run_target_research(
                     ),
                 )
     finally:
-        await provider.release_cdp_endpoint(browser_task_id)
+        try:
+            await session.flush()
+        finally:
+            await provider.release_cdp_endpoint(browser_task_id)
     if not parsed:
         raise ValueError("机构深研 Agent 未返回可解析的结构化结果")
 
@@ -1774,6 +1795,10 @@ async def run_target_research(
         ],
         browser_pages=browser_pages,
     )
+    data = session.restrict(data)
+    if session.options and session.options.dry_run:
+        return {"dry_run": True, "preview": [data], "source_count": len(data.get("sources") or []), "scan_task_ids": []}
+    data = await session.archive(data)
     await update_task_stage(
         db, task_id=task_id, stage="target_expand", message="正在校验证据并扩展 Target 关系..."
     )
@@ -2142,6 +2167,10 @@ async def run_target_research(
             root_seed_urls=root_scan_urls,
         )
     result = {
+        "portal_sections": data.get("portal_sections", []),
+        "portal_page_count": data.get("portal_page_count", 0),
+        "portal_archive_pending": data.get("portal_archive_pending", 0),
+        "status": "partial" if data.get("portal_archive_pending") else "completed",
         "research_id": research.get("research_id"),
         "target_id": target_id,
         "target_name": enriched_target.get("canonical_name"),

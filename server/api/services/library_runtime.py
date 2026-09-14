@@ -55,6 +55,7 @@ CORE_PROMPT_SLUGS = {
     "copywriting/copywriting",
     "company_normalize/company_normalize",
     "target_research/target_research",
+    "target_research/portal_research",
     "company_router/company_router",
     "douyin_profile/douyin_profile",
     "douyin_profile/douyin_tagging",
