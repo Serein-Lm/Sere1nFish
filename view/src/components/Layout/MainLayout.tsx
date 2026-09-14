@@ -29,6 +29,7 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useTheme } from '../../contexts/ThemeContext'
 import { logout, getCurrentUser, type CurrentUser } from '../../services/authService'
 import './MainLayout.css'
+import { IncrementalNoticeProvider, IncrementalNoticeBell, IncrementalProjectNotice } from '../IncrementalNotices/IncrementalNotices'
 
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
@@ -259,6 +260,7 @@ export default function MainLayout() {
   ]
 
   return (
+    <IncrementalNoticeProvider userKey={currentUser?.username || 'session'} enabled={!!currentUser && (currentUser.is_admin || !!currentUser.permission_codes?.some(code => ['*', 'system.admin', 'projects.*', 'projects.read'].includes(code)))}>
     <Layout className="main-layout">
       <Sider
         trigger={null}
@@ -315,6 +317,7 @@ export default function MainLayout() {
             </div>
           </div>
           <div className="header-right">
+            <IncrementalNoticeBell />
             <Tooltip title={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}>
               <div className="theme-switch">
                 <Switch
@@ -340,9 +343,11 @@ export default function MainLayout() {
           </div>
         </Header>
         <Content className="layout-content">
+          <IncrementalProjectNotice />
           <Outlet />
         </Content>
       </Layout>
     </Layout>
+    </IncrementalNoticeProvider>
   )
 }

@@ -368,16 +368,15 @@ class PersistStage(Stage):
         )
         if not should_notify or not prepared.is_high_score:
             return
-        await ctx.emit(
-            "notify",
-            {
-                "record_id": result["record_id"],
-                "fields": prepared.payload["fields"],
-                "score": prepared.notification_score,
-                "keyword": prepared.payload["keyword"],
-                "kind": "new" if result["is_new"] else "changed",
-            },
-        )
+        from api.services.mobile_incremental_notifications import record_increment
+
+        payload = {
+            **prepared.payload, "record_id": result["record_id"],
+            "score": prepared.notification_score,
+            "kind": "new" if result["is_new"] else "changed",
+        }
+        if await record_increment(state["db"], payload=payload, state=state):
+            await ctx.emit("notify", payload)
 
 
 class NotifyStage(Stage):
@@ -385,26 +384,6 @@ class NotifyStage(Stage):
     concurrency = 2
 
     async def handle(self, item: Item, ctx: Any) -> None:
-        from api.services.notifications import notify_event_background
+        from api.services.mobile_incremental_notifications import publish_increment
 
-        state = ctx.state
-        payload = item.payload
-        label = "新增" if payload["kind"] == "new" else "变更"
-        summary = payload["fields"].get("summary") or ", ".join(
-            f"{key}={value}"
-            for key, value in list(payload["fields"].items())[:5]
-        )
-        notify_event_background(
-            event="mobile_collect_incremental",
-            title=f"[采集{label}] {state['task_name']}",
-            content=f"关键词: {payload['keyword'] or '-'}\n{summary}",
-            level="notice",
-            source=_OBS_SOURCE,
-            project_id=state["project_id"],
-            task_id=state["run_task_id"],
-            context={
-                "task_def_id": state["task_def_id"],
-                "record_id": payload["record_id"],
-                "kind": payload["kind"],
-            },
-        )
+        await publish_increment(ctx.state["db"], payload=item.payload, state=ctx.state)

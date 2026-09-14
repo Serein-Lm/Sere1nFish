@@ -203,13 +203,16 @@ def _patch_pipeline(monkeypatch, *, analyze_returns):
     )
 
     notifies: list = []
-    import api.services.notifications as notif
+    import api.services.mobile_incremental_notifications as notif
 
-    def _fake_notify(**kwargs):
-        notifies.append(kwargs)
-        return True
+    async def _fake_notify(_db, *, payload, state):
+        notifies.append({"event": "mobile_collect_incremental", "payload": payload, "state": state})
+        return payload
 
-    monkeypatch.setattr(notif, "notify_event_background", _fake_notify)
+    monkeypatch.setattr(notif, "publish_increment", _fake_notify)
+    async def _fake_record(_db, *, payload, state):
+        return payload
+    monkeypatch.setattr(notif, "record_increment", _fake_record)
     return pl, notifies
 
 

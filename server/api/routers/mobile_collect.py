@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from api.auth import User, get_current_active_user
+from api.auth import User, get_current_active_user, require_permission
+from api.services.authorization import Permissions
 from api.db.mongodb import get_db
 from api.dao import mobile_collect as collect_dao
 from api.dao import schedules as schedules_dao
@@ -24,6 +26,7 @@ from api.models.mobile_collect import (
     ScheduleUpdate,
 )
 from api.services import scheduling
+from api.models.mobile_incremental_events import IncrementalFeed
 from api.services.mobile_collect_tasks import (
     MobileCollectTaskBusyError,
     MobileCollectTaskNotFoundError,
@@ -56,6 +59,17 @@ _TASK_TYPE = "mobile_collect"
 
 class StopRequest(BaseModel):
     run_task_id: str | None = None
+
+
+@router.get("/incremental-events", response_model=IncrementalFeed,
+            dependencies=[Depends(require_permission(Permissions.PROJECTS_READ))])
+async def list_incremental_events(
+    project_id: str = "", after: datetime | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    from api.services.mobile_incremental_notifications import list_incremental_feed
+
+    return await list_incremental_feed(get_db(), project_id=project_id, after=after, limit=limit)
 
 
 # ── 任务定义 CRUD ──────────────────────────────────────

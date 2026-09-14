@@ -79,6 +79,7 @@ PROXY_LEASES_COLLECTION = "proxy_leases"
 # 手机采集任务框架 — 自定义任务定义 / 增量结果 / 定时调度
 MOBILE_COLLECT_TASKS_COLLECTION = "mobile_collect_tasks"
 MOBILE_COLLECT_RECORDS_COLLECTION = "mobile_collect_records"
+MOBILE_INCREMENTAL_EVENTS_COLLECTION = "mobile_incremental_events"
 MOBILE_COLLECT_CHECKPOINTS_COLLECTION = "mobile_collect_checkpoints"
 TASK_SCHEDULES_COLLECTION = "task_schedules"
 

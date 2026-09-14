@@ -396,6 +396,8 @@ async def lifespan(app: FastAPI):
         from api.dao import mobile_collect as mobile_collect_dao
         from api.dao import schedules as schedules_dao
         await mobile_collect_dao.ensure_indexes(db)
+        from api.dao import mobile_incremental_events as mobile_incremental_events_dao
+        await mobile_incremental_events_dao.ensure_indexes(db)
         backfilled_mobile_record_rankings = (
             await mobile_collect_dao.backfill_record_ranking_fields(db)
         )

@@ -22,6 +22,7 @@ export const API_CONFIG = {
  * API 端点
  */
 export const API_ENDPOINTS = {
+  MOBILE_INCREMENTAL_EVENTS: '/v1/mobile-collect/incremental-events',
   // AI 中枢统一 SSE 流式接口
   GRAPH_STREAM: '/v1/agent/stream',
   

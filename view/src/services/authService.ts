@@ -23,6 +23,7 @@ export interface CurrentUser {
   is_admin: boolean
   disabled: boolean
   permissions: UserPermissions
+  permission_codes?: string[]
 }
 
 export interface UserInfo {

@@ -19,6 +19,13 @@ async def get_target_state(db: Any, project_id: str, target_id: str) -> dict:
     ) or {}
 
 
+async def get_run_window(db: Any, run_task_id: str) -> dict | None:
+    return await db[MOBILE_COLLECT_CHECKPOINTS_COLLECTION].find_one(
+        {"run_task_id": run_task_id, "kind": "publication_time_window"},
+        {"_id": 0}, sort=[("until", -1)],
+    )
+
+
 async def get_window(db: Any, run_task_id: str, checkpoint_key: str) -> dict | None:
     return await db[MOBILE_COLLECT_CHECKPOINTS_COLLECTION].find_one(
         {"run_task_id": run_task_id, "checkpoint_key": checkpoint_key}, {"_id": 0},

@@ -252,6 +252,11 @@ async def process_mobile_source_handoff(
 
                 schedule_finding_contexts(db, finding_ids)
 
+        from api.services.mobile_incremental_notifications import publish_recovered_increment
+
+        await publish_recovered_increment(
+            db, previous=record, result=result, stored=stored, task_def=task_def,
+        )
         logger.notice(
             "手机来源补录完成 | project=%s target=%s record=%s document=%s findings=%s",
             project_id,
