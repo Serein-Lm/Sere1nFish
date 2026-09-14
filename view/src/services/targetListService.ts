@@ -1,5 +1,5 @@
 import { listProjects, type Project } from './projectService'
-import { listProjectTargets, type ProjectTargetSummary } from './sourceDocumentService'
+import { listProjectTargetBranch, listProjectTargets, type ProjectTargetSummary } from './sourceDocumentService'
 
 export interface TargetListRow extends ProjectTargetSummary {
   project_name: string
@@ -28,7 +28,16 @@ export async function loadTargetListRows(projects: Project[], query: string) {
         do {
           const result = await listProjectTargets(project.id, { q: query, page, page_size: 100 })
           totalPages = Math.ceil(result.total / 100)
-          projectRows.push(...result.items.map((item) => ({ ...item, project_name: project.name })))
+          let items = result.items
+          if (query.trim()) {
+            const expanded = new Set(result.expanded_project_target_ids)
+            const matched = new Set(result.matched_target_ids)
+            const branches = await Promise.all(items.filter((item) => expanded.has(item.project_target_id))
+              .map((item) => listProjectTargetBranch(project.id, item.target_id)))
+            items = [...new Map([...items, ...branches.flatMap((branch) => branch.items)]
+              .filter((item) => matched.has(item.target_id)).map((item) => [item.target_id, item])).values()]
+          }
+          projectRows.push(...items.map((item) => ({ ...item, project_name: project.name })))
           page += 1
         } while (page <= totalPages)
         rows.push(...projectRows)

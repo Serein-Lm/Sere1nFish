@@ -139,7 +139,7 @@ export default function TargetList() {
       {error && <Alert type="error" showIcon title="部分数据加载失败" description={error} />}
       <Table rowKey="project_target_id" columns={columns} dataSource={rows} loading={loading} scroll={{ x: 1050 }}
         locale={{ emptyText: <Empty description="当前范围没有匹配的 Target" /> }}
-        pagination={{ defaultPageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 个主单位` }}
+        pagination={{ defaultPageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 个${query ? '匹配单位' : '主单位'}` }}
         expandable={{ rowExpandable: (row) => Boolean(row.descendant_count || row.child_count),
           onExpand: (expanded, row) => { if (expanded) void expand(row) },
           expandedRowRender: (row) => <Table rowKey="project_target_id" size="small" columns={columns}
