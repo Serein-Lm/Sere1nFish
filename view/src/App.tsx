@@ -19,6 +19,7 @@ const PersonaLibrary = lazy(() => import('./pages/PersonaLibrary/PersonaLibrary'
 const PersonIntelligence = lazy(() => import('./pages/PersonIntelligence/PersonIntelligence'))
 const MobileCollect = lazy(() => import('./pages/MobileCollect/MobileCollect'))
 const ProjectManagement = lazy(() => import('./pages/ProjectManagement/ProjectManagement'))
+const TargetList = lazy(() => import('./pages/TargetList/TargetList'))
 const ProjectDetail = lazy(() => import('./pages/ProjectDetail/ProjectDetail'))
 const TaskDetail = lazy(() => import('./pages/TaskDetail/TaskDetail'))
 const AITools = lazy(() => import('./pages/AITools/AITools'))
@@ -91,6 +92,7 @@ function AppContent() {
               <Route path="mobile-profiles" element={<Navigate to="/phone-control?tab=profiles" replace />} />
               <Route path="mobile-auto-chat" element={<Navigate to="/phone-control?tab=auto-chat" replace />} />
               <Route path="projects" element={<ProjectManagement />} />
+              <Route path="targets" element={<TargetList />} />
               <Route path="projects/:projectId" element={<ProjectDetail />} />
               <Route path="tasks/:taskId" element={<TaskDetail />} />
               <Route path="projects/:projectId/tasks/:taskId" element={<TaskDetail />} />

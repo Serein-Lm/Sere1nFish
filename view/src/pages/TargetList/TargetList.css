@@ -1,0 +1,11 @@
+.target-list-page { padding: 24px; min-width: 0; }
+.target-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.target-list-heading h3 { margin: 0 0 8px; }
+.target-list-filters { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(210px, 1fr) minmax(200px, 1fr); gap: 12px; margin-bottom: 20px; }
+.target-list-filters > * { width: 100%; min-width: 0; }
+.target-list-page .ant-alert { margin-bottom: 16px; }
+@media (max-width: 700px) {
+  .target-list-page { padding: 12px; }
+  .target-list-heading { align-items: flex-start; }
+  .target-list-filters { grid-template-columns: minmax(0, 1fr); }
+}

@@ -96,6 +96,11 @@ export default function MainLayout() {
         label: '项目管理',
       },
       {
+        key: '/targets',
+        icon: <DatabaseOutlined />,
+        label: 'Target 列表',
+      },
+      {
         key: '/phishing',
         icon: <ThunderboltOutlined />,
         label: '钓鱼中台',
