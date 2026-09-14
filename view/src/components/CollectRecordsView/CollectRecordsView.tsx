@@ -465,9 +465,9 @@ export default function CollectRecordsView({
             <div className="collect-row-title">
               {group.title}
               {group.isNew ? (
-                <Tag color="green" className="collect-row-tag">新</Tag>
+                <Tag color="green" className="collect-row-tag">首次采集</Tag>
               ) : group.isChanged ? (
-                <Tag color="orange" className="collect-row-tag">改</Tag>
+                <Tag color="orange" className="collect-row-tag">内容变更</Tag>
               ) : null}
             </div>
             {meta && <div className="collect-row-meta">{meta}</div>}
@@ -582,7 +582,7 @@ export default function CollectRecordsView({
           <div className="collect-source-summary">
             <div className="collect-source-title-row">
               <span className="collect-source-title">{group.title}</span>
-              {group.isNew ? <Tag color="green">新</Tag> : group.isChanged ? <Tag color="orange">改</Tag> : null}
+              {group.isNew ? <Tag color="green">首次采集</Tag> : group.isChanged ? <Tag color="orange">内容变更</Tag> : null}
             </div>
             {(group.account || group.publishTime) && (
               <div className="collect-source-meta">

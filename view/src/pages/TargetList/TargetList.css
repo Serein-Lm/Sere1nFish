@@ -4,6 +4,7 @@
 .target-list-filters { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(210px, 1fr) minmax(200px, 1fr); gap: 12px; margin-bottom: 20px; }
 .target-list-filters > * { width: 100%; min-width: 0; }
 .target-list-page .ant-alert { margin-bottom: 16px; }
+.target-records-drawer .ant-drawer-content-wrapper { max-width: 96vw; }
 @media (max-width: 700px) {
   .target-list-page { padding: 12px; }
   .target-list-heading { align-items: flex-start; }

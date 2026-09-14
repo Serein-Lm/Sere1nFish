@@ -13,14 +13,17 @@ const CollectRecordsView = lazy(() => import('../../components/CollectRecordsVie
 const { Text, Title } = Typography
 
 function timeLabel(value?: string) {
-  return value ? new Date(value).toLocaleString('zh-CN') : '尚未设置'
+  if (!value) return '尚未设置'
+  // Legacy Mongo responses omit the UTC suffix; never interpret them as local time.
+  const timestamp = /(Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`
+  return new Date(timestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
 }
 
 function IncrementalTime({ row }: { row: TargetListRow }) {
   const cursors = Object.values(row.mobile_incremental_cursors || {})
     .map((item) => item.through_at).sort()
   const through = cursors.at(-1)
-  return <Space direction="vertical" size={0}>
+  return <Space orientation="vertical" size={0}>
     <Text type="secondary">{through ? '最近成功增量' : '增量时间起点'}</Text>
     <span>{timeLabel(through || row.mobile_incremental_baseline?.since)}</span>
   </Space>
@@ -107,8 +110,9 @@ export default function TargetList() {
   }
 
   const columns: ColumnsType<TargetListRow> = [
-    { title: 'Target 单位', key: 'target', width: 290, render: (_, row) => <Space direction="vertical" size={2}>
+    { title: 'Target 单位', key: 'target', width: 290, render: (_, row) => <Space orientation="vertical" size={2}>
       <strong>{row.display_name || row.target_name}</strong>
+      {row.display_name && row.display_name !== row.target_name && <Text type="secondary">{row.target_name}</Text>}
       {(row.hierarchy_parent_target_name || row.parent_target_name) && <Text type="secondary">上级：{row.hierarchy_parent_target_name || row.parent_target_name}</Text>}
       <Space size={4} wrap>{(row.batch_tags || []).map((tag) => <Tag key={tag}>{tag}</Tag>)}</Space>
     </Space> },
@@ -116,7 +120,7 @@ export default function TargetList() {
     { title: '公众号', key: 'wechat', width: 90, render: (_, row) => <Button type="link" onClick={() => void openRecords(row)}>{row.wechat_count || 0}</Button> },
     { title: '网站', dataIndex: 'website_count', width: 80 },
     { title: '招投标', dataIndex: 'bidding_count', width: 85 },
-    { title: '手机增量时间', key: 'incremental', width: 210, render: (_, row) => <IncrementalTime row={row} /> },
+    { title: '手机增量时间（北京时间）', key: 'incremental', width: 210, render: (_, row) => <IncrementalTime row={row} /> },
   ]
 
   return <div className="target-list-page">
@@ -142,7 +146,7 @@ export default function TargetList() {
             dataSource={branches[row.project_target_id] || []} loading={branchLoading[row.project_target_id]} pagination={false} scroll={{ x: 1050 }} />,
         }} />
     </Card>
-    <Drawer open={!!selected} onClose={() => { recordRequest.current += 1; setSelected(null) }} width="min(1120px, 96vw)"
+    <Drawer open={!!selected} onClose={() => { recordRequest.current += 1; setSelected(null) }} size={1120} rootClassName="target-records-drawer"
       title={`${selected?.target_name || ''} · 手机采集记录`}>
       <Text type="secondary">按发布时间展示最近 200 条已有记录，历史记录继续保留。</Text>
       {recordError && <Alert type="error" title={recordError} />}
