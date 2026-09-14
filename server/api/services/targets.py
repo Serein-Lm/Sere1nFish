@@ -1471,24 +1471,6 @@ async def list_project_target_summaries(
             {"$group": {"_id": "$target_id", "record_count": {"$sum": 1}}},
         ]
     ).to_list(len(target_ids))
-    wechat_counts_job = db[MOBILE_COLLECT_RECORDS_COLLECTION].aggregate(
-        [
-            {
-                "$match": project_scope_query(
-                    project_id,
-                    {
-                        "target_id": {"$in": target_ids},
-                        "superseded_by_record_id": {"$exists": False},
-                        "source_document_id": {
-                            "$exists": True,
-                            "$nin": ["", None],
-                        },
-                    },
-                ),
-            },
-            {"$group": {"_id": "$target_id", "wechat_count": {"$sum": 1}}},
-        ]
-    ).to_list(len(target_ids))
     asset_counts_job = db[FOFA_ASSETS_COLLECTION].aggregate(
         [
             {
@@ -1627,7 +1609,6 @@ async def list_project_target_summaries(
         counts,
         project_document_counts,
         record_counts,
-        wechat_counts,
         asset_counts,
         finding_counts,
         website_counts,
@@ -1640,7 +1621,6 @@ async def list_project_target_summaries(
         document_counts_job,
         project_document_counts_job,
         record_counts_job,
-        wechat_counts_job,
         asset_counts_job,
         finding_counts_job,
         website_counts_job,
@@ -1666,10 +1646,9 @@ async def list_project_target_summaries(
         str(item.get("_id") or ""): int(item.get("record_count") or 0)
         for item in record_counts
     }
-    wechat_by_target = {
-        str(item.get("_id") or ""): int(item.get("wechat_count") or 0)
-        for item in wechat_counts
-    }
+    # The module list includes legacy and pending-archive mobile evidence.
+    # Reuse its record count so imported history remains visible on the card.
+    wechat_by_target = records_by_target
     tasks_by_id = {str(item.get("task_id") or ""): item for item in task_docs}
     relations = apply_project_target_hierarchy(relations, target_relationships)
     relationship_views = target_relationships_dao.build_target_relationship_views(
