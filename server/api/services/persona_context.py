@@ -10,6 +10,7 @@ from api.dao import persons as persons_dao
 from api.dao import persona_research_tasks as task_dao
 from api.schemas.persona_context import ContextPlan, ContextReview, ContextSlot, FictionalContextProfile
 from api.services.persona_quality import _profile_quality_issues
+from api.services.persona_timeline import timeline_issues
 
 _model_slots = asyncio.Semaphore(4)
 
@@ -54,17 +55,18 @@ async def _generate_one(db, app_config, *, slot: dict, index: int, request: dict
     payload = {"request": request, "slot": slot, "current_date": datetime.now(timezone.utc).date().isoformat(), "existing_profile": existing, "feedback": []}
     for attempt in range(3):
         generated = await _invoke(app_config, FictionalContextProfile, prompt, payload, task_id=task_id, project_id=project_id, phase="persona_context_generate")
-        review = await _invoke(app_config, ContextReview, prompt, {**payload, "candidate": generated.model_dump(),
-            "action": "独立校对并实际修订上下文。以 current_date 为准，逐项核算毕业年份、入职年份和累计工作年限、子女出生年份与年龄、当前职位与职业路径。稳定身份沿用 existing_profile；用具体修订消除矛盾，返回修订后完整档案。"},
+        candidate = materialize(generated.model_dump(), existing=existing, generation_key=key, background=request["background"], scope=scope)
+        review = await _invoke(app_config, ContextReview, prompt, {**payload, "candidate": candidate, "arithmetic_issues": timeline_issues(candidate),
+            "action": "独立校对并实际修订上下文。以 current_date 为准，逐项核算毕业年份、入职年份和累计工作年限、子女出生年份与年龄、当前职位与职业路径。姓名、年龄、公司、教育保持；已有内容的矛盾必须修正，不能因为沿用旧档案而保留错误年限和家庭年龄。先解决 arithmetic_issues，再返回修订后完整档案。"},
             task_id=task_id, project_id=project_id, phase="persona_context_consistency")
         profile = materialize(review.profile.model_dump(), existing=existing, generation_key=key, background=request["background"], scope=scope)
-        issues = _profile_quality_issues(profile, require_references=False)
+        issues = [*_profile_quality_issues(profile, require_references=False), *timeline_issues(profile)]
         if not review.consistent:
             issues.extend(review.issues_found or ["上下文逻辑仍不一致"])
         if profile["name"] != slot["name"] or profile["industry"] != slot["industry"]:
             issues.append("姓名和 industry 必须与本轮 slot 精确一致")
         if not issues:
-            profile["context_review"] = {"passed": True, "checked_at": datetime.now(timezone.utc).isoformat(), "issues_found": review.issues_found, "corrections_made": review.corrections_made}
+            profile["context_review"] = {"passed": True, "policy_version": 2, "checked_at": datetime.now(timezone.utc).isoformat(), "issues_found": review.issues_found, "corrections_made": review.corrections_made}
             if request.get("dry_run"):
                 return profile
             return await persons_dao.upsert_person(db, profile=profile, project_id=project_id,

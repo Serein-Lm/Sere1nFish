@@ -27,7 +27,7 @@ def test_coverage_defaults_to_complete_context_and_supports_optional_research():
     assert coverage_gaps(4, 0, 0, 4, generation_mode="researched") == ["缺少已核验机构背景", "缺少已核验公开办公电话"]
     assert coverage_gaps(4, 1, 1, 4) == []
     assert not profile_ready({"summary": "完整" * 80, "source_urls": []})
-    assert profile_ready({"summary": "完整" * 80, "company": "虚构公司", "position": "经理", "context_complete": True, "context_review": {"passed": True}})
+    assert profile_ready({"summary": "完整" * 80, "company": "虚构公司", "position": "经理", "context_complete": True, "context_review": {"passed": True, "policy_version": 2}})
 
 
 @pytest.mark.asyncio

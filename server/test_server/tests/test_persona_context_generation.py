@@ -8,6 +8,8 @@ from test_server.tests.test_ai_hub_payload import _rich_fictional_profile
 
 def candidate():
     data = _rich_fictional_profile().model_dump()
+    from datetime import datetime, timezone
+    data["work_years"] = f"{datetime.now(timezone.utc).year - 2012}年"
     data.update(sources=[], evidence=[], research_evidence=[],
         company_business="虚构区域制造企业，负责工业零部件加工，设有生产、采购、质量、财务与信息化部门，各部门按项目协同。",
         company_address="虚构工业园一号楼三层办公室", company_website="https://sample.example",
@@ -60,6 +62,7 @@ async def test_generation_persists_complete_context_or_returns_preview_without_w
     else:
         assert result["items"][0]["industry_code"] == "13"
         assert result["items"][0]["context_review"]["passed"] is True
+        assert result["items"][0]["context_review"]["policy_version"] == 2
         assert write.call_args.kwargs["source"] == "synthetic_context"
 
 
@@ -84,3 +87,21 @@ async def test_coverage_upgrades_existing_unreviewed_identity_before_creating_ne
     assert result["items"][0]["person_id"] == "p-existing"
     assert generate.call_count == 1
     assert generate.call_args.kwargs["existing_profiles"][0]["generation_key"] == "preserve-me"
+
+
+def test_explicit_career_and_child_dates_must_agree_with_current_year():
+    from api.services.persona_timeline import timeline_issues
+    profile = {"career_path": "2013年硕士毕业后进入企业，2019年晋升经理", "work_years": "10年", "background": "2018年结婚，2020年儿子出生。", "life_stage": "已婚，育有一子（8岁）"}
+    assert len(timeline_issues(profile, year=2026)) == 2
+    assert timeline_issues({**profile, "work_years": "13年", "life_stage": "已婚，育有一子（6岁）"}, year=2026) == []
+
+
+@pytest.mark.asyncio
+async def test_context_upsert_initializes_zero_research_rounds(monkeypatch):
+    from api.dao import persons, person_versions
+    monkeypatch.setattr(persons, "get_person", AsyncMock(return_value=None))
+    update = AsyncMock(return_value={"person_id": "saved"})
+    monkeypatch.setattr(person_versions, "update_with_version", update)
+    await persons.upsert_person({}, profile={**candidate(), "generation_key": "stable", "is_fictional": True}, source="synthetic_context")
+    assert update.call_args.args[2]["$setOnInsert"]["research_rounds"] == 0
+    assert "research_rounds" not in update.call_args.args[2]["$inc"]

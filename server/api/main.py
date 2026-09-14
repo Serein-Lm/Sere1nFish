@@ -371,6 +371,7 @@ async def lifespan(app: FastAPI):
         if backfilled_persona_versions:
             logger.info("已初始化人设版本元数据: %s", backfilled_persona_versions)
         await person_versions_dao.recover_and_backfill(db)
+        await persons_dao.repair_context_research_metadata(db)
         await persona_research_tasks_dao.ensure_indexes(db)
         from api.dao import persona_coverage as persona_coverage_dao
         await persona_coverage_dao.ensure_indexes(db)

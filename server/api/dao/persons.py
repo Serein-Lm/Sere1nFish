@@ -133,6 +133,7 @@ async def backfill_profile_versions(db: AsyncIOMotorDatabase) -> int:
         {
             "is_fictional": True,
             "research_rounds": {"$exists": False},
+            "generation_mode": {"$ne": "context"},
         },
         [
             {
@@ -146,6 +147,18 @@ async def backfill_profile_versions(db: AsyncIOMotorDatabase) -> int:
         ],
     )
     return int(max(versioned.modified_count, researched.modified_count))
+
+
+async def repair_context_research_metadata(db: AsyncIOMotorDatabase) -> int:
+    """Correct legacy research defaults only for exclusively generated contexts."""
+    import asyncio
+    from api.dao.person_versions import update_with_version
+    rows = await db[PERSONS_COLLECTION].find({"generation_mode": "context", "research_rounds": {"$gt": 0},
+        "sources.source": "synthetic_context", "sources": {"$not": {"$elemMatch": {"source": {"$ne": "synthetic_context"}}}}},
+        {"_id": 0, "person_id": 1}).to_list(None)
+    await asyncio.gather(*(update_with_version(db, row["person_id"], {"$set": {"research_rounds": 0, "last_researched_at": None,
+        "updated_at": _now()}, "$inc": {"profile_version": 1}}) for row in rows))
+    return len(rows)
 
 
 def _merge_set_fields(
@@ -319,7 +332,7 @@ async def upsert_person(
     now = _now()
     update: dict[str, Any] = {
         "$set": set_fields,
-        "$setOnInsert": {"created_at": now},
+        "$setOnInsert": {"created_at": now, **({"research_rounds": 0} if source == "synthetic_context" else {})},
         "$inc": {"profile_version": 1},
     }
     if source.startswith("synthetic_research"):
