@@ -73,7 +73,7 @@ async def unclassified_people(db) -> list[dict]:
 async def snapshots(db) -> tuple:
     return await asyncio.gather(
         db[JOBS].find({}, {"_id": 0, "lease_owner": 0}).to_list(None),
-        db[PERSONS_COLLECTION].find({"is_fictional": True}, {"_id": 0, "person_id": 1, "industry": 1, "industry_code": 1, "industry_sector_code": 1, "summary": 1, "company": 1, "position": 1, "context_complete": 1, "source_urls": 1, "research_evidence": 1, "last_researched_at": 1}).to_list(None),
+        db[PERSONS_COLLECTION].find({"is_fictional": True}, {"_id": 0, "person_id": 1, "industry": 1, "industry_code": 1, "industry_sector_code": 1, "summary": 1, "company": 1, "position": 1, "context_complete": 1, "context_review": 1, "source_urls": 1, "research_evidence": 1, "last_researched_at": 1}).to_list(None),
         db[FACTS].aggregate([{"$group": {"_id": "$industry_code", "organizations": {"$addToSet": "$target_id"}, "sources": {"$addToSet": "$source_document_id"}, "phone_count": {"$sum": {"$cond": [{"$ne": ["$office_phone", ""]}, 1, 0]}}, "fact_count": {"$sum": 1}}}]).to_list(None),
     )
 
@@ -85,4 +85,4 @@ async def list_facts(db, industry_code: str = "", skip: int = 0, limit: int = 20
 
 
 async def industry_people(db, industry_code: str) -> list[dict]:
-    return await db[PERSONS_COLLECTION].find({"is_fictional": True, "industry_code": industry_code}, {"_id": 0, "person_id": 1, "industry": 1, "summary": 1, "company": 1, "position": 1, "context_complete": 1, "source_urls": 1, "research_evidence": 1}).to_list(None)
+    return await db[PERSONS_COLLECTION].find({"is_fictional": True, "industry_code": industry_code}, {"_id": 0, "person_id": 1, "industry": 1, "summary": 1, "company": 1, "position": 1, "context_complete": 1, "context_review": 1, "source_urls": 1, "research_evidence": 1}).to_list(None)

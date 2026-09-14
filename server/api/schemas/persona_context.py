@@ -32,3 +32,10 @@ class ContextSlot(BaseModel):
 
 class ContextPlan(BaseModel):
     slots: list[ContextSlot] = Field(min_length=1, max_length=60)
+
+
+class ContextReview(BaseModel):
+    consistent: bool = Field(description="修订后的全部字段是否前后一致")
+    issues_found: list[str] = Field(description="审校发现的时间、经历、家庭年龄或职责矛盾")
+    corrections_made: list[str] = Field(description="本次已实际修订的内容")
+    profile: FictionalContextProfile = Field(description="修订后的完整档案")

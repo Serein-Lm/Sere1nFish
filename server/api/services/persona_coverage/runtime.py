@@ -18,8 +18,25 @@ logger = get_logger("persona_coverage")
 _workers: list[asyncio.Task] = []
 
 
-async def _generate(db, app_config, job: dict, owner: str) -> list[str]:
+async def _fill_profiles(db, app_config, job: dict, task_id: str, people: list[dict], missing: int) -> dict:
+    from api.dao.persons import get_person
     from api.services.persona_generation import generate_personas
+    mode = job.get("generation_mode", "context")
+    candidates = [item for item in people if not profile_ready(item)][:missing] if mode == "context" else []
+    existing = await asyncio.gather(*(get_person(db, item["person_id"]) for item in candidates))
+    options = dict(background=default_background([job["industry_name"]]), industries=[job["industry_name"]],
+        extra=f"industry 必须精确为 {job['industry_name']}，补齐完整上下文和自洽时间线。", generation_mode=mode,
+        industry_code=job["industry_code"], industry_sector_code=job["sector_code"], task_id=task_id, source="synthetic_research:industry_coverage")
+    groups = [(missing - len(existing), None), (len(existing), existing)]
+    results = await asyncio.gather(*(generate_personas(db, app_config, count=count, existing_profiles=profiles, **options)
+        for count, profiles in groups if count), return_exceptions=True)
+    items = [item for result in results if isinstance(result, dict) for item in result.get("items", [])]
+    if not items:
+        raise RuntimeError("行业上下文补齐失败：" + "；".join(str(result)[:400] for result in results))
+    return {"items": items}
+
+
+async def _generate(db, app_config, job: dict, owner: str) -> list[str]:
     people = await dao.industry_people(db, job["industry_code"])
     ready = [item["person_id"] for item in people if profile_ready(item)]
     missing = max(0, job["minimum_personas"] - len(ready))
@@ -29,9 +46,7 @@ async def _generate(db, app_config, job: dict, owner: str) -> list[str]:
     await task_dao.create_task(db, task_id=task_id, task_type="generate", requested_count=missing)
     await dao.update_job(db, job["job_id"], owner, research_task_id=task_id)
     try:
-        result = await generate_personas(db, app_config, background=default_background([job["industry_name"]]), count=missing,
-            industries=[job["industry_name"]], extra=f"本轮所有人设的 industry 必须为 {job['industry_name']}，对应行业大类 {job['industry_code']}。已经覆盖 {len(ready)} 条，本轮补齐不同岗位的完整上下文。",
-            generation_mode=job.get("generation_mode", "context"), industry_code=job["industry_code"], industry_sector_code=job["sector_code"], task_id=task_id, source="synthetic_research:industry_coverage")
+        result = await _fill_profiles(db, app_config, job, task_id, people, missing)
         people = [item for item in result.get("items", []) if profile_ready(item) and str(item.get("industry") or "").strip() == job["industry_name"]]
         ids = [item["person_id"] for item in people]
         await dao.classify_persons(db, ids, industry_code=job["industry_code"], sector_code=job["sector_code"], job_id=job["job_id"])

@@ -1,6 +1,6 @@
 from unittest.mock import AsyncMock
 import pytest
-from api.schemas.persona_context import ContextPlan, ContextSlot, FictionalContextProfile
+from api.schemas.persona_context import ContextPlan, ContextReview, ContextSlot, FictionalContextProfile
 from api.services import persona_context as service
 from api.services.persona_quality import _profile_quality_issues
 from test_server.tests.test_ai_hub_payload import _rich_fictional_profile
@@ -43,7 +43,8 @@ def test_materialization_cannot_invent_evidence_or_change_existing_identity():
 async def test_generation_persists_complete_context_or_returns_preview_without_writes(monkeypatch, dry_run):
     raw = candidate()
     plan = ContextPlan(slots=[ContextSlot(name=raw["name"], industry=raw["industry"], position=raw["position"], direction="具体组织职责与生活背景应当保持自洽并提供足够丰富的沟通方式与协作情境。")])
-    invoke = AsyncMock(side_effect=[plan, FictionalContextProfile.model_validate(raw)])
+    profile = FictionalContextProfile.model_validate(raw)
+    invoke = AsyncMock(side_effect=[plan, profile, ContextReview(consistent=True, issues_found=[], corrections_made=[], profile=profile)])
     monkeypatch.setattr(service, "_invoke", invoke)
     monkeypatch.setattr("Sere1nGraph.graph.prompts.loader.load_prompt", lambda _: "context prompt")
     write = AsyncMock(side_effect=lambda db, **kw: {**kw["profile"], "person_id": "stable-person"})
@@ -58,6 +59,7 @@ async def test_generation_persists_complete_context_or_returns_preview_without_w
         assert result["preview"][0]["context_complete"]
     else:
         assert result["items"][0]["industry_code"] == "13"
+        assert result["items"][0]["context_review"]["passed"] is True
         assert write.call_args.kwargs["source"] == "synthetic_context"
 
 
@@ -68,3 +70,17 @@ def test_person_dao_keeps_simulated_contact_separate():
     assert fields["scenario_contact"]["origin"] == "fictional"
     assert fields["contact"]["phone"] == ""
     assert fields["context_complete"] and fields["industry_code"] == "13"
+
+
+@pytest.mark.asyncio
+async def test_coverage_upgrades_existing_unreviewed_identity_before_creating_new_people(monkeypatch):
+    from api.services.persona_coverage.runtime import _fill_profiles
+    existing = {**candidate(), "person_id": "p-existing", "generation_key": "preserve-me"}
+    load = AsyncMock(return_value=existing)
+    generate = AsyncMock(return_value={"items": [{"person_id": "p-existing"}]})
+    monkeypatch.setattr("api.dao.persons.get_person", load)
+    monkeypatch.setattr("api.services.persona_generation.generate_personas", generate)
+    result = await _fill_profiles({}, {}, {"industry_name": "农业", "industry_code": "01", "sector_code": "A"}, "t", [existing], 1)
+    assert result["items"][0]["person_id"] == "p-existing"
+    assert generate.call_count == 1
+    assert generate.call_args.kwargs["existing_profiles"][0]["generation_key"] == "preserve-me"

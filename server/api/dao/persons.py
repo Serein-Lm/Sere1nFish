@@ -66,7 +66,7 @@ _LIST_FIELDS = (
 )
 _OBJECT_LIST_FIELDS = ("research_evidence",)
 # 嵌套对象字段：子字段非空才覆盖
-_NESTED_FIELDS = ("education", "contact", "scenario_contact")
+_NESTED_FIELDS = ("education", "contact", "scenario_contact", "context_review")
 _SUMMARY_PROJECTION = {
     "_id": 0,
     "person_id": 1,

@@ -10,7 +10,7 @@ from .catalog import catalog, ordered_divisions
 
 def profile_ready(profile: dict) -> bool:
     return bool(len(str(profile.get("summary") or "")) >= 80 and profile.get("company") and profile.get("position")
-        and (profile.get("context_complete") or (profile.get("source_urls") and profile.get("research_evidence"))))
+        and ((profile.get("context_complete") and (profile.get("context_review") or {}).get("passed")) or (profile.get("source_urls") and profile.get("research_evidence"))))
 
 
 async def classify_exact_industries(db) -> None:
@@ -43,7 +43,7 @@ async def coverage(db) -> dict:
         minimum = job.get("minimum_personas", 4)
         gaps = coverage_gaps(counts[code], organization_count, phone_count, minimum, generation_mode=job.get("generation_mode", "context"))
         rows.append({**division, "person_count": counts[code], "minimum_personas": minimum, "organization_count": organization_count, "phone_count": phone_count, "source_count": len(fact.get("sources") or []), "gaps": gaps, "complete": not gaps, "job": job or None})
-    return {"standard": catalog()["standard"], "source_url": catalog()["source_url"], "sectors": [{**item, "person_count": sectors[item["code"]]} for item in catalog()["sectors"]], "items": rows,
+    return {"policy_version": 2, "default_generation_mode": "context", "standard": catalog()["standard"], "source_url": catalog()["source_url"], "sectors": [{**item, "person_count": sectors[item["code"]]} for item in catalog()["sectors"]], "items": rows,
             "summary": {"person_count": len(people), "sector_count": sum(sectors[item["code"]] > 0 for item in catalog()["sectors"]), "division_count": sum(row["person_count"] > 0 for row in rows), "complete_count": sum(row["complete"] for row in rows), "unclassified_count": sum(not item.get("industry_code") for item in people), "organization_count": len({target for fact in facts for target in fact.get("organizations", [])}), "phone_count": sum(row["phone_count"] for row in rows), "running": sum(item["status"] == "running" for item in jobs), "queued": sum(item["status"] in {"queued", "retry", "needs_sources"} for item in jobs)}}
 
 
