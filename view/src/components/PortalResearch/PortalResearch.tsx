@@ -15,6 +15,7 @@ export function PortalResearchDialog({ projectId, target, onClose, onStarted }: 
   onStarted?: () => void
 }) {
   const [form] = Form.useForm()
+  const [messageApi, messageContext] = message.useMessage()
   const [busy, setBusy] = useState(false)
   useEffect(() => { if (target) form.setFieldsValue(defaults) }, [target, form])
   const start = async (dryRun = false) => {
@@ -32,15 +33,15 @@ export function PortalResearchDialog({ projectId, target, onClose, onStarted }: 
         portal_options: options, max_related_targets: values.max_related_targets,
         scan_discovered_targets: !dryRun, rescan_root: !dryRun && values.archive_portal, force_refresh: true,
       })
-      message.success(result.deduplicated ? '该单位已有研究任务，可在任务页查看' : dryRun ? '门户试跑已启动，预览结果将在任务详情中显示' : '官网门户深研已启动，可在任务页查看进度')
+      messageApi.success(result.deduplicated ? '该单位已有研究任务，可在任务页查看' : dryRun ? '门户试跑已启动，预览结果将在任务详情中显示' : '官网门户深研已启动，可在任务页查看进度')
       onStarted?.(); onClose()
     } catch (error) {
       if (typeof error === 'object' && error !== null && 'errorFields' in error) return
-      message.error(error instanceof Error ? error.message : '启动失败')
+      messageApi.error(error instanceof Error ? error.message : '启动失败')
     }
     finally { setBusy(false) }
   }
-  return <Modal title={`官网门户深研 · ${target?.target_name || ''}`} open={!!target} onCancel={onClose} width={680} destroyOnHidden footer={[
+  return <>{messageContext}<Modal title={`官网门户深研 · ${target?.target_name || ''}`} open={!!target} onCancel={onClose} width={680} destroyOnHidden footer={[
     <Button key="cancel" onClick={onClose}>取消</Button>,
     <Button key="preview" disabled={busy} onClick={() => void start(true)}>试跑预览</Button>,
     <Button key="start" type="primary" loading={busy} onClick={() => void start()}>开始深研</Button>,
@@ -60,9 +61,9 @@ export function PortalResearchDialog({ projectId, target, onClose, onStarted }: 
         <Form.Item name="max_pages" label="本轮页面上限" rules={[{ required: true }]}><InputNumber min={10} max={100} /></Form.Item>
         <Form.Item name="max_related_targets" label="本轮单位扩展上限" rules={[{ required: true }]}><InputNumber min={0} max={12} /></Form.Item>
       </Space>
-      <Typography.Text type="secondary">阅读记录可从检查点恢复。报告会列出未覆盖的栏目；试跑只生成预览，不写入机构档案、不扩展单位、不发送通知。</Typography.Text>
+      <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>阅读记录可从检查点恢复。报告会列出未覆盖的栏目；试跑只生成预览，不写入机构档案、不扩展单位、不发送通知。</Typography.Text>
     </Form>
-  </Modal>
+  </Modal></>
 }
 
 export function PortalResearchPanel({ projectId, targetId, onResearch }: { projectId: string; targetId: string; onResearch: () => void }) {
