@@ -41,6 +41,7 @@ from api.routers import (
     dingtalk,
     source_documents,
     target_library,
+    persona_coverage,
     deepfake,
     media_output,
     social_collection,
@@ -364,10 +365,15 @@ async def lifespan(app: FastAPI):
         from api.dao import persons as persons_dao
         from api.dao import persona_research_tasks as persona_research_tasks_dao
         await persons_dao.ensure_indexes(db)
+        from api.dao import person_versions as person_versions_dao
+        await person_versions_dao.ensure_indexes(db)
         backfilled_persona_versions = await persons_dao.backfill_profile_versions(db)
         if backfilled_persona_versions:
             logger.info("已初始化人设版本元数据: %s", backfilled_persona_versions)
+        await person_versions_dao.recover_and_backfill(db)
         await persona_research_tasks_dao.ensure_indexes(db)
+        from api.dao import persona_coverage as persona_coverage_dao
+        await persona_coverage_dao.ensure_indexes(db)
         from api.dao import person_intelligence as person_intelligence_dao
         await person_intelligence_dao.ensure_indexes(db)
         interrupted_persona_tasks = await persona_research_tasks_dao.mark_interrupted(db)
@@ -506,7 +512,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"百炼流式 TTS 预热失败(不影响运行): {e}")
 
+    from api.services.persona_coverage.runtime import start_workers, stop_workers
+    start_workers()
+
     yield
+
+    await stop_workers()
 
     try:
         from api.services.distributed_scan import DistributedScanRuntime
@@ -714,6 +725,7 @@ app.include_router(aigc.router, prefix="/api/v1/aigc", tags=["AIGC"])
 app.include_router(dingtalk.router, prefix="/api/v1/dingtalk", tags=["钉钉机器人"])
 app.include_router(source_documents.router, prefix="/api/v1", tags=["来源文档与目标"])
 app.include_router(target_library.router, prefix="/api/v1/target-library", tags=["目标库"])
+app.include_router(persona_coverage.router, prefix="/api/v1/persona-coverage", tags=["人设行业覆盖"])
 app.include_router(deepfake.router, prefix="/api/v1/deepfake", tags=["Deepfake"])
 app.include_router(media_output.router, prefix="/api/v1/media-output", tags=["远端媒体输出"])
 app.include_router(distributed_scan.router, prefix="/api/v1")

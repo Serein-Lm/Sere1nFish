@@ -30,7 +30,7 @@ Target 卡片的公众号数量与手机记录列表统一统计有效项目关�
 
 手机增量时间由 `api.services.mobile_incremental` 编排，`api.dao.mobile_incremental` 复用 `mobile_collect_checkpoints` 保存每轮固定时间窗口，复用 `project_targets.mobile_incremental_baseline/mobile_incremental_cursors` 保存历史起点和成功游标；没有新增集合或后台进程。游标按 Target、渠道和关键词范围隔离，跨项目抽取通过原历史合并入口继承，不使用网站采集时间代替手机时间。`MobileCollectPlan` 升至版本 2，结果透传 `incremental_window/incremental_cursor_advanced`，HTTP 字段保持兼容。监控默认按发布时间筛选，上次成功边界向前重叠 24 小时以容纳日期精度和延迟收录，去重为辅助；无历史起点时首次为明确的 45 天窗口。暂停、超时、屏幕错误、持久化失败、未核实日期和详情预算不足均不推进游标，恢复时检查已保存关键词状态。未知日期可进入详情核验，不能作为新增通知；已复制但待浏览器补录的 URL 继续由现有持久化交接队列保存。
 
-独立 `/targets` 页面和侧边栏 Target 列表复用已有项目目标分页、层级分支及手机记录接口，默认展示排序最前的项目组，可筛选项目和搜索单位；不创建第二套 Target 数据。手机时间起点及各采集范围成功游标通过原 Target summary 读模型提供。
+独立 `/targets` 现通过 `api.services.target_library` / `api.dao.target_library` 提供全库读模型，默认纳入全部历史项目与停用关联。完整名称、身份别名与直接归属核对后生成 `targets.library_identity` 投影，旧身份与解析变更历史保留；既有项目详情接口兼容。来源按 document_id 去重、内容变化只计 ready 版本，任务按稳定身份关联，手机增量仍按项目与关键词范围分别保存。接口提供服务端分页、分支、历史来源、任务、不可变版本和有界正文对比。
 
 招投标项目读模型现由 `api.services.bidding_ownership` 统一核验公告参与方：采购人、代理机构或中标方必须与项目 Target 的稳定名称、身份别名或已保存简称完整匹配。搜索词、旧搜索别名、正文提及与同域名不构成归属；下级范围只读取项目中已保存的层级。候选公告由 bidding DAO 按明确的项目来源关联读取，列表分页、Target 数量和 AI 读取共用过滤后的读模型，原公告、附件与历史关联继续保留。
 
@@ -177,7 +177,9 @@ command/service
 5. 运行实例停止信号、总时限、关键词检查点、父任务进度、失败判断和终态观测由 runtime 持有。
 6. 设备动作仍通过已有 dispatcher/manager 注入；平台搜索差异仍通过 adapter registry 选择。
 
-### 阶段 D：Target 命令与读模型
+### 阶段 D：Target 命令与读模型（全局目标库读模型已分离）
+
+全局目标库已建立独立身份、扫描与历史查询模块；项目专用读写仍在原 service，后续继续迁移。详见 `docs/TARGET_LIBRARY.md`。
 
 1. 将写操作、关系解析、批次继承移入 command service。
 2. 将项目看板、Target 搜索、模块数量移入 read service。
@@ -219,3 +221,9 @@ command/service
 - 日志含 `project_id/task_id/target_id/source/event_type`。
 - 没有新增公网端口或明文 secret。
 - 当前扫描任务无需迁移或重启即可继续；必须重启时先验证恢复检查点。
+
+## 2026-09-14 数据分析与人设覆盖补充
+
+`persona_coverage` 是独立 service/runtime/DAO，不再向大型 `persona_collect` 入口增加行业循环。97 个行业大类采用跨门类广度优先队列、2 个 worker、5 分钟持久化租约、30 秒续期和单行业 30 分钟执行边界，重启保留已完成的人设与机构归档，缺口自动退避重试。复用已有 Chrome registry、模型 adapter、Prompt 库、观测上下文与 SourceDocument 归档。新增 `persona_coverage_jobs`、`industry_organization_facts`，配置 `persona_coverage.enabled` 默认关闭，用户发起后启用。
+
+人设内容历史由 `person_profile_versions` 保存。`persons` 的更新和前后完整快照先在单文档聚合更新中原子提交，快照暂存 `_pending_profile_versions`，再幂等投影到不可变版本集合；重启恢复未投影快照。兼容 standalone MongoDB，不依赖多集合事务。已存在档案只回填当前存活版本，不虚构丢失历史。行业机构事实保留 Target、SourceDocument、version_id 和可核验原文，与虚构人物身份分离。

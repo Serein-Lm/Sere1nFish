@@ -45,6 +45,8 @@ import {
   type Person,
 } from '../../services/personaService'
 import './PersonaLibrary.css'
+import IndustryCoveragePanel from './IndustryCoveragePanel'
+import PersonaVersionHistory from './PersonaVersionHistory'
 
 const { Title, Paragraph, Text } = Typography
 
@@ -373,6 +375,7 @@ export default function PersonaLibrary() {
         </div>
       </div>
 
+      <IndustryCoveragePanel onChanged={() => void refresh()} />
       <div className="persona-toolbar slide-up stagger-1">
         <Input
           id="persona-keyword"
@@ -531,6 +534,7 @@ export default function PersonaLibrary() {
             <Chips icon={<TagsOutlined />} label="标签" items={active.tags} />
             <Chips icon={<WarningOutlined />} label="风险点" items={active.risk_signals} />
 
+            <PersonaVersionHistory personId={active.person_id} />
             <div className="detail-section-title">背景参考来源</div>
             <div className="persona-sources">
               {(active.research_evidence || []).map((item, i) => (
@@ -637,12 +641,11 @@ export default function PersonaLibrary() {
         <Form form={collectForm} layout="vertical">
           <Form.Item
             name="background"
-            label="总体背景设定"
-            rules={[{ required: true, message: '请输入背景设定' }]}
+            label="总体背景设定（可选，留空自动研究）"
           >
             <Input.TextArea
               autoSize={{ minRows: 3, maxRows: 6 }}
-              placeholder="例如：覆盖企业数字化、业务运营和公共服务岗位，用于内容演练；人物必须完全虚构"
+              placeholder="无需填写；系统会自动上网研究行业和岗位背景。也可填写本轮希望优先覆盖的方向。"
             />
           </Form.Item>
           <Form.Item name="count" label="生成数量" initialValue={36}>

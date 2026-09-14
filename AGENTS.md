@@ -214,6 +214,10 @@
 
 ## 热重载与本地运行
 
+- 全局目标库通过 `api.services.target_library` / `api.dao.target_library` 提供身份、归属、扫描与版本分析读模型；`targets.library_identity` 保存可重建的归并键，原 Target ID、项目关联和证据不得删除。默认包含历史项目和停用关联，增量时间仍按 ProjectTarget 和关键词范围隔离。数据粒度与计数口径见 `docs/TARGET_LIBRARY.md`。
+- 人设行业自动补采统一通过 `api.services.persona_coverage`，使用 `persona_coverage_jobs` 租约队列与 `industry_organization_facts` 公开机构事实，复用 Chrome、模型、Prompt、SourceDocument 和观测入口。行业目录来自国家统计局，缺口进入自动重试，不能编造或要求用户必须手填。真实机构事实与虚构人物分离，办公电话必须有归档原文证据。
+- 人设版本由 `api.dao.person_versions` 管理：单文档原子更新将前后快照写入 `persons._pending_profile_versions`，再幂等投影到 `person_profile_versions`；启动恢复 outbox。该内部字段不得通过普通人物 API 返回，旧版本内容不可覆盖，无法恢复的历史不得补造。
+
 - 后端通过 `python run.py` 运行，该命令会以 reload 模式启动 Uvicorn。挂载到后端应用下的源码变更会触发进程重载。
 - 前端通过 Vite dev server 运行，并启用 HMR。`view/src` 下的挂载源码变更会触发 HMR 或页面刷新。
 - nginx 会通过 HTTPS 代理前端 dev server 和后端 API。浏览器验证使用 `https://127.0.0.1/`。

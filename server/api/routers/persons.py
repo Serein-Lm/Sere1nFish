@@ -38,7 +38,7 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 # ── 请求模型 ─────────────────────────────────────────
 
 class PersonaGenerateRequest(BaseModel):
-    background: str = Field(..., min_length=1, description="虚构人物的背景设定（必填）")
+    background: str = Field(default="", description="可选背景，留空自动研究行业与岗位")
     count: int = Field(default=36, ge=1, le=60, description="本轮生成数量")
     industries: list[str] = Field(default_factory=list, description="可选行业提示，留空由 AI 探索")
     age_ranges: list[str] = Field(default_factory=list, description="可选年龄提示，留空由 AI 探索")
@@ -77,7 +77,8 @@ async def generate(req: PersonaGenerateRequest):
     """根据背景设定批量生成不对应真实自然人的虚构人物。"""
     background = (req.background or "").strip()
     if not background:
-        raise HTTPException(status_code=400, detail="背景设定不能为空")
+        from api.services.persona_coverage.catalog import default_background
+        background = default_background(req.industries)
 
     from api.services.persona_collect import generate_personas
     from api.services.runtime_config import get_runtime_app_config
@@ -158,6 +159,12 @@ async def generate(req: PersonaGenerateRequest):
         "count": req.count,
         "is_fictional": True,
     }
+
+
+@router.get("/{person_id}/versions")
+async def profile_versions(person_id: str, skip: int = 0, limit: int = 20):
+    from api.dao import person_versions as versions_dao
+    return await versions_dao.list_versions(get_db(), person_id, max(0, skip), max(1, min(limit, 100)))
 
 
 @router.post("/collect", deprecated=True)

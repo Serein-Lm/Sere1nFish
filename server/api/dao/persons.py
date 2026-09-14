@@ -341,12 +341,12 @@ async def upsert_person(
                 "collected_at": now.isoformat(),
             }
         }
-    await db[PERSONS_COLLECTION].update_one({"person_id": pid}, update, upsert=True)
-    return await get_person(db, pid) or set_fields
+    from api.dao.person_versions import update_with_version
+    return await update_with_version(db, pid, update)
 
 
 async def get_person(db: AsyncIOMotorDatabase, person_id_val: str) -> dict[str, Any] | None:
-    return await db[PERSONS_COLLECTION].find_one({"person_id": person_id_val}, {"_id": 0})
+    return await db[PERSONS_COLLECTION].find_one({"person_id": person_id_val}, {"_id": 0, "_pending_profile_versions": 0})
 
 
 async def search_persons(
@@ -416,7 +416,7 @@ async def search_persons(
     total = await db[PERSONS_COLLECTION].count_documents(query)
     cursor = (
         db[PERSONS_COLLECTION]
-        .find(query, _SUMMARY_PROJECTION if summary_only else {"_id": 0})
+        .find(query, _SUMMARY_PROJECTION if summary_only else {"_id": 0, "_pending_profile_versions": 0})
         .sort(sort_spec)
         .skip(skip)
         .limit(limit)

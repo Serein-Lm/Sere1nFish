@@ -166,8 +166,11 @@ export async function listPersons(params: PersonSearchParams = {}): Promise<Pers
 export const getPerson = (personId: string) =>
   apiFetch<Person>(`${BASE}/${encodeURIComponent(personId)}`)
 
+export interface PersonaVersion { profile_version: number; effective_at?: string; archived_at: string; source: string; profile: Person }
+export const getPersonVersions = (personId: string, page = 1) => apiFetch<{ items: PersonaVersion[]; total: number }>(`${BASE}/${encodeURIComponent(personId)}/versions?skip=${(page - 1) * 20}&limit=20`)
+
 export interface CollectPersonaBody {
-  background: string
+  background?: string
   count?: number
   industries?: string[]
   age_ranges?: string[]

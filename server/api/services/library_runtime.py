@@ -47,6 +47,7 @@ CORE_SKILLS_WITH_REFERENCES = {
 EXTERNAL_DOCUMENT_SKILL_SLUGS = {"docx", "pdf", "pptx", "xlsx"}
 
 CORE_PROMPT_SLUGS = {
+    "industry_organizations/industry_organizations",
     "asset_triage/asset_triage",
     "bid_collect/bid_collect",
     "browser_chat/browser_chat",

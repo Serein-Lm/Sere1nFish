@@ -128,7 +128,11 @@ BIDDING_RECORD_LINKS_COLLECTION = "bidding_record_links"
 
 # 人设库 — 统一人物实体（跨平台/跨项目真源，稳定 person_id）
 PERSONS_COLLECTION = "persons"
+PERSON_PROFILE_VERSIONS_COLLECTION = "person_profile_versions"
 PERSONA_RESEARCH_TASKS_COLLECTION = "persona_research_tasks"
+# 行业覆盖队列和公开机构事实。人物身份仍是虚构，机构联系方式独立溯源。
+PERSONA_COVERAGE_JOBS_COLLECTION = "persona_coverage_jobs"
+INDUSTRY_ORGANIZATION_FACTS_COLLECTION = "industry_organization_facts"
 
 # 人物 OSINT 情报 — 真实自然人的公开资料、证据、画像和沟通方案。
 # 与虚构人设 persons 分离，按姓名+机构稳定归并并跨项目复用。
