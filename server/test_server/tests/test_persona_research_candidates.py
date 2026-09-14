@@ -87,3 +87,29 @@ async def test_source_shortage_still_fails_and_releases_browser(monkeypatch):
     with pytest.raises(RuntimeError, match="少于要求的 8"):
         await browser.collect(object(), search_queries=["行业 岗位"], task_id="research-4", research_key="research-4")
     assert released == ["persona_evidence_research-4"]
+
+
+@pytest.mark.asyncio
+async def test_organization_budget_keeps_verified_pages_without_weakening_persona_default(monkeypatch):
+    rows = [candidate(f"https://source{i}.example/contact") for i in range(6)]
+    browser, _, _ = setup_browser(monkeypatch, rows)
+    pages = await browser.collect(object(), search_queries=["行业 联系电话"], task_id="org", research_key="org", minimum_pages=2, target_pages=6)
+    assert len(pages) == 6
+    with pytest.raises(RuntimeError, match="少于要求的 8"):
+        await browser.collect(object(), search_queries=["行业 岗位"], task_id="persona", research_key="persona")
+
+
+@pytest.mark.asyncio
+async def test_readability_shortage_uses_fallback_without_revisiting_failures(monkeypatch):
+    primary = [ResearchCandidate(f"https://primary{i}.example/article", "行业岗位", "", "行业", "bing") for i in range(8)]
+    fallback = [ResearchCandidate(f"https://secondary{i}.example/article", "行业岗位", "", "行业", "so360") for i in range(8)]
+    browser, visited, _ = setup_browser(monkeypatch, primary, failures={item.url for item in primary[:4]})
+    calls = []
+    async def discover(session, queries, **kwargs):
+        calls.append(kwargs.get("exclude_sources", []))
+        return [fallback if kwargs.get("exclude_sources") else primary]
+    monkeypatch.setattr(browser, "_discover", discover)
+    pages = await browser.collect(object(), search_queries=["行业"], task_id="fallback", research_key="fallback")
+    assert len(pages) == 12
+    assert calls == [[], ["bing"]]
+    assert len(visited) == len(set(visited))

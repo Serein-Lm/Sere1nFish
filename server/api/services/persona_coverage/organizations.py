@@ -43,7 +43,7 @@ async def research_organizations(db, app_config, job: dict) -> list[str]:
 
     code, name, job_id = job["industry_code"], job["industry_name"], job["job_id"]
     browser = create_persona_research_browser()
-    pages = await browser.collect(app_config, search_queries=[f"{name} 企业 官网 联系我们 电话", f"{name} 机构 名录 官方", f"{name} 行业协会 企业 联系电话"], task_id=job_id, research_key=job_id + "_organizations", candidate_offset=(max(1, job.get("attempts", 1)) - 1) * 4)
+    pages = await browser.collect(app_config, search_queries=[f"{name} 企业 官网 联系我们 电话", f"{name} 机构 名录 官方", f"{name} 行业协会 企业 联系电话"], task_id=job_id, research_key=job_id + "_organizations", candidate_offset=(max(1, job.get("attempts", 1)) - 1) * 4, minimum_pages=2, target_pages=6)
     with observation_context(task_id=job_id, phase="industry_organization_research", agent="industry_organizations", task_type="persona_coverage"):
         model = create_llm(app_config, workload="collection", streaming=False).with_structured_output(OrganizationResearchResult)
         result = await asyncio.wait_for(model.ainvoke([

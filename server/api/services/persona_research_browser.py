@@ -104,6 +104,7 @@ class ResearchCandidate:
     title: str
     snippet: str
     query: str
+    search_source: str = ""
 
 
 @dataclass(slots=True)
@@ -129,6 +130,8 @@ class PersonaResearchBrowser(Protocol):
         research_key: str,
         excluded_urls: Sequence[str] | None = None,
         candidate_offset: int = 0,
+        minimum_pages: int = MIN_READABLE_PAGES,
+        target_pages: int = TARGET_READABLE_PAGES,
     ) -> list[ResearchPage]: ...
 
 
@@ -244,6 +247,7 @@ class ChromeDevtoolsPersonaResearchBrowser:
         queries: Sequence[str],
         *,
         task_id: str = "",
+        exclude_sources: Sequence[str] = (),
     ) -> list[list[ResearchCandidate]]:
         buckets: list[list[ResearchCandidate]] = []
         blocked_sources: dict[str, str] = {}
@@ -251,7 +255,7 @@ class ChromeDevtoolsPersonaResearchBrowser:
             candidates: list[ResearchCandidate] = []
             seen: set[str] = set()
             for source in persona_search_sources():
-                if source.name in blocked_sources:
+                if source.name in blocked_sources or source.name in exclude_sources:
                     continue
                 try:
                     found = await self._search_candidates(session, source, query)
@@ -314,7 +318,7 @@ class ChromeDevtoolsPersonaResearchBrowser:
             ):
                 continue
             seen.add(identity)
-            candidates.append(ResearchCandidate(url=url, title=title, snippet=snippet, query=query))
+            candidates.append(ResearchCandidate(url=url, title=title, snippet=snippet, query=query, search_source=source.name))
         return candidates
 
     async def _read_page(
@@ -370,13 +374,17 @@ class ChromeDevtoolsPersonaResearchBrowser:
         *,
         excluded: set[str],
         task_id: str,
+        target_pages: int = TARGET_READABLE_PAGES,
+        attempted_urls: set[str] | None = None,
+        host_counts: dict[str, int] | None = None,
+        max_attempts: int = MAX_CANDIDATE_ATTEMPTS,
     ) -> list[ResearchPage]:
         pages: list[ResearchPage] = []
         seen_urls = set(excluded)
-        attempted_urls: set[str] = set()
-        host_counts: dict[str, int] = {}
+        attempted_urls = attempted_urls if attempted_urls is not None else set()
+        host_counts = host_counts if host_counts is not None else {}
         for candidate in candidates:
-            if len(attempted_urls) >= MAX_CANDIDATE_ATTEMPTS:
+            if len(attempted_urls) >= max_attempts:
                 break
             identity = research_url_identity(candidate.url)
             host = (urlsplit(candidate.url).hostname or "").lower().rstrip(".")
@@ -404,7 +412,7 @@ class ChromeDevtoolsPersonaResearchBrowser:
                 seen_urls.add(identity)
                 host_counts[host] = host_counts.get(host, 0) + 1
                 pages.append(page)
-                if len(pages) >= TARGET_READABLE_PAGES:
+                if len(pages) >= target_pages:
                     break
             except McpRecoveryExhausted:
                 raise
@@ -424,7 +432,11 @@ class ChromeDevtoolsPersonaResearchBrowser:
         research_key: str,
         excluded_urls: Sequence[str] | None = None,
         candidate_offset: int = 0,
+        minimum_pages: int = MIN_READABLE_PAGES,
+        target_pages: int = TARGET_READABLE_PAGES,
     ) -> list[ResearchPage]:
+        if not 1 <= minimum_pages <= target_pages <= TARGET_READABLE_PAGES:
+            raise ValueError("研究来源预算必须满足 1 <= minimum_pages <= target_pages <= 12")
         queries = list(
             dict.fromkeys(
                 str(query).strip() for query in search_queries if str(query).strip()
@@ -464,9 +476,19 @@ class ChromeDevtoolsPersonaResearchBrowser:
                     buckets,
                     offset=candidate_offset,
                 )
-                pages = await self._read_candidates(
-                    session, candidates, excluded=excluded, task_id=task_id,
-                )
+                attempts: set[str] = set()
+                host_counts: dict[str, int] = {}
+                has_source = any(item.search_source for item in candidates)
+                pages = await self._read_candidates(session, candidates, excluded=excluded, task_id=task_id,
+                    target_pages=target_pages, attempted_urls=attempts, host_counts=host_counts,
+                    max_attempts=32 if has_source else MAX_CANDIDATE_ATTEMPTS)
+                if len(pages) < minimum_pages and has_source:
+                    excluded.update(research_url_identity(page.url) for page in pages)
+                    fallback = await self._discover(session, queries, task_id=task_id,
+                        exclude_sources=[persona_search_sources()[0].name])
+                    pages.extend(await self._read_candidates(session, _round_robin_candidates(fallback, offset=candidate_offset),
+                        excluded=excluded, task_id=task_id, target_pages=target_pages - len(pages),
+                        attempted_urls=attempts, host_counts=host_counts))
         finally:
             try:
                 await provider.release_cdp_endpoint(lease_id)
@@ -476,10 +498,10 @@ class ChromeDevtoolsPersonaResearchBrowser:
                     task_id,
                 )
 
-        if len(pages) < MIN_READABLE_PAGES:
+        if len(pages) < minimum_pages:
             raise RuntimeError(
                 f"Chrome 只读取到 {len(pages)} 个有效公网来源，"
-                f"少于要求的 {MIN_READABLE_PAGES} 个"
+                f"少于要求的 {minimum_pages} 个"
             )
         return pages
 
