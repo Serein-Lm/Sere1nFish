@@ -46,3 +46,13 @@ def test_multi_target_mobile_window_is_scoped_and_waiting_is_not_a_completed_sca
     assert summary["scan_count"] == 1
     assert summary["first_scan_at"] is None
     assert summary["last_success_at"] is None
+
+
+def test_resumed_run_orders_by_execution_time_and_legacy_names_join_without_guessing():
+    index = build_index([target("a", "机构甲")], [], [], [])
+    runs = scan_index(index, [
+        {"task_id": "old-failure", "params": {"company_name": "机构甲"}, "created_at": "2026-09-12", "started_at": "2026-09-12"},
+        {"task_id": "resumed", "params": {"target_id": "a"}, "created_at": "2026-09-10", "started_at": "2026-09-14"},
+    ], [], [])
+    assert runs["a"][0]["task_id"] == "resumed"
+    assert runs["a"][1]["target_resolution_basis"] == "unambiguous_complete_name"

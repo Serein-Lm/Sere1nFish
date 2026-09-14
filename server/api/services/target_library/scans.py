@@ -50,7 +50,7 @@ def scan_index(index: dict, tasks: list[dict], definitions: list[dict], windows:
                 "cursor_advanced": (task.get("result") or {}).get("incremental_cursor_advanced") is True,
             })
     for runs in result.values():
-        runs.sort(key=lambda item: (time_key(item.get("created_at")), item["task_id"]), reverse=True)
+        runs.sort(key=lambda item: (time_key(item.get("started_at") or item.get("created_at")), item["task_id"]), reverse=True)
     return result
 
 

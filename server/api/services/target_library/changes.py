@@ -6,6 +6,7 @@ from . import get_target
 
 
 def text_diff(before: str, after: str) -> dict:
+    before, after = str(before or ""), str(after or "")
     limit = 100_000
     lines = list(difflib.unified_diff(before[:limit].splitlines(), after[:limit].splitlines(), fromfile="previous", tofile="selected", lineterm="", n=3))
     return {"lines": lines[:600], "truncated": len(lines) > 600 or len(before) > limit or len(after) > limit,

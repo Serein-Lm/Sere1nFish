@@ -48,7 +48,10 @@ async def list_library(db, *, page: int = 1, page_size: int = 25, q: str = "", p
         rows = [row for row in rows if row["parent_target_id"] == parent]
     else:
         rows = [row for row in rows if row["parent_target_id"] not in scoped_ids]
-    rows.sort(key=lambda row: (time_key((index["scans"].get(row["target_id"]) or [{}])[0].get("created_at")), row["target_name"]), reverse=True)
+    def activity_key(row):
+        run = (index["scans"].get(row["target_id"]) or [{}])[0]
+        return time_key(run.get("started_at") or run.get("created_at")), row["target_name"]
+    rows.sort(key=activity_key, reverse=True)
     total = len(rows)
     selected = rows[(page - 1) * page_size:page * page_size]
     return {"items": await _enrich(db, index, selected), "total": total, "page": page, "page_size": page_size,
