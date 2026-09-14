@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_atomic_profile_outbox_recovers_crash_and_concurrent_writes(monkeypatch):
     name = os.environ.get("SF_TEST_MONGO_DATABASE", "")
     if not name.startswith("sf_test_"):
@@ -40,7 +40,7 @@ async def test_atomic_profile_outbox_recovers_crash_and_concurrent_writes(monkey
         await client.drop_database(name)
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_context_metadata_repair_is_versioned_idempotent_and_preserves_real_research():
     name = os.environ.get("SF_TEST_MONGO_DATABASE", "")
     if not name.startswith("sf_test_"):
