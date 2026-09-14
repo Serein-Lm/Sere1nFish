@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Key } from 'react'
+import { useCallback, useEffect, useRef, useState, type Key } from 'react'
 import { Alert, Button, Card, Input, Select, Space, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
@@ -10,7 +10,7 @@ import TargetLibraryDetail from './TargetLibraryDetail'
 import './TargetList.css'
 
 const { Text, Title } = Typography
-interface TreeRow extends LibraryTarget { children?: TreeRow[]; placeholder?: boolean }
+interface TreeRow extends LibraryTarget { children?: TreeRow[]; placeholder?: boolean; more?: { parentId: string; page: number; remaining: number } }
 const treeNode = (row: LibraryTarget): TreeRow => ({ ...row, children: row.child_count ? [{ ...row, target_id: `${row.target_id}:loading`, target_name: '正在加载下级单位…', children: undefined, placeholder: true }] : undefined })
 
 export default function TargetList() {
@@ -20,7 +20,6 @@ export default function TargetList() {
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
-  const [revision, setRevision] = useState(0)
   const [data, setData] = useState<LibraryPage | null>(null)
   const [rows, setRows] = useState<TreeRow[]>([])
   const [expanded, setExpanded] = useState<Key[]>([])
@@ -30,32 +29,45 @@ export default function TargetList() {
   const [detailTab, setDetailTab] = useState('overview')
   const generation = useRef(0)
   useEffect(() => { void loadTargetListProjects().then(setProjects).catch((err) => setError(String(err))) }, [])
-  useEffect(() => {
+  const branchRequests = useRef(new Set<string>())
+  const load = useCallback(async (refresh = false) => {
     const request = ++generation.current
-    setLoading(true); setError(''); setRows([]); setExpanded([])
-    listTargetLibrary({ project_id: projectId, q: query, page, page_size: pageSize, refresh: revision > 0 }).then((result) => {
-      if (request === generation.current) { setData(result); setRows(query ? result.items : result.items.map(treeNode)) }
-    }).catch((err) => { if (request === generation.current) setError(String(err)) }).finally(() => { if (request === generation.current) setLoading(false) })
+    setLoading(true); setError('')
+    try {
+      const result = await listTargetLibrary({ project_id: projectId, q: query, page, page_size: pageSize, refresh })
+      if (request === generation.current) {
+        setData(result); setRows(query ? result.items : result.items.map(treeNode)); setExpanded([])
+      }
+    } catch (err) { if (request === generation.current) setError(String(err)) }
+    finally { if (request === generation.current) setLoading(false) }
+  }, [projectId, query, page, pageSize])
+  useEffect(() => {
+    void load()
     return () => { generation.current += 1 }
-  }, [projectId, query, page, pageSize, revision])
+  }, [load])
   const open = (row: LibraryTarget, tab = 'overview') => { setSelected(row); setDetailTab(tab) }
   const expand = async (row: TreeRow) => {
-    if (!row.children?.some((item) => item.placeholder)) return
+    if (!row.more && !row.children?.some(item => item.placeholder)) return
+    const parentId = row.more?.parentId || row.target_id
+    const nextPage = row.more?.page || 1
     const request = generation.current
+    const key = `${request}:${parentId}:${nextPage}`
+    if (branchRequests.current.has(key)) return
+    branchRequests.current.add(key)
     try {
-      let result = await listTargetLibrary({ parent_id: row.target_id, project_id: projectId, page_size: 100 })
-      const children = [...result.items]
-      for (let next = 2; children.length < result.total; next += 1) {
-        result = await listTargetLibrary({ parent_id: row.target_id, project_id: projectId, page_size: 100, page: next })
-        children.push(...result.items)
-        if (!result.items.length || request !== generation.current) return
-      }
-      const replace = (nodes: TreeRow[]): TreeRow[] => nodes.map((node) => node.target_id === row.target_id ? { ...node, children: children.map(treeNode) } : node.children ? { ...node, children: replace(node.children) } : node)
+      const result = await listTargetLibrary({ parent_id: parentId, project_id: projectId, page_size: 25, page: nextPage })
+      const children: TreeRow[] = result.items.map(treeNode)
+      const remaining = result.total - nextPage * result.page_size
+      if (remaining > 0 && children.length) children.push({ ...row, target_id: `${parentId}:more`, target_name: `加载更多下级（剩余 ${remaining} 个）`, children: undefined, placeholder: true, more: { parentId, page: nextPage + 1, remaining } })
+      const replace = (nodes: TreeRow[]): TreeRow[] => nodes.map(node => node.target_id === parentId
+        ? { ...node, children: [...(nextPage > 1 ? (node.children || []).filter(item => !item.placeholder) : []), ...children] }
+        : node.children ? { ...node, children: replace(node.children) } : node)
       if (request === generation.current) setRows(replace)
     } catch (err) { if (request === generation.current) setError(String(err)) }
+    finally { branchRequests.current.delete(key) }
   }
   const columns: ColumnsType<TreeRow> = [
-    { title: '单位与归属', key: 'target', width: 340, render: (_, row) => row.placeholder ? <Text type="secondary">{row.target_name}</Text> : <div className="target-list-unit">
+    { title: '单位与归属', key: 'target', width: 340, render: (_, row) => row.placeholder ? row.more ? <Button type="link" onClick={() => void expand(row)}>{row.target_name}</Button> : <Text type="secondary">{row.target_name}</Text> : <div className="target-list-unit">
       <Button type="link" className="target-name-button" onClick={() => open(row)}>{row.target_name}</Button>
       {row.parent_target_name && <Text type="secondary">上级：{row.parent_target_name}</Text>}
       <Space wrap size={4}>{row.merged_count > 1 && <Tag>已归并 {row.merged_count} 个身份</Tag>}{row.relation_conflict && <Tag color="gold">多条归属记录</Tag>}</Space>
@@ -72,7 +84,7 @@ export default function TargetList() {
     { title: '内容变化', key: 'changes', width: 130, render: (_, row) => !row.placeholder && <Space orientation="vertical" size={0}><Button type="link" onClick={() => open(row, 'versions')}>{row.change_count} 次变化</Button><Text type="secondary">{row.version_count} 个版本</Text></Space> },
   ]
   return <div className="target-list-page">
-    <div className="target-list-heading"><div><Title level={3}>Target 目标库</Title><Text type="secondary">汇总全部历史单位，按名称和直接归属合并；跨项目保留扫描、来源与版本历史。</Text></div><Button icon={<ReloadOutlined />} loading={loading} onClick={() => setRevision((value) => value + 1)}>刷新</Button></div>
+    <div className="target-list-heading"><div><Title level={3}>Target 目标库</Title><Text type="secondary">汇总全部历史单位，按名称和直接归属合并；跨项目保留扫描、来源与版本历史。</Text></div><Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load(true)}>刷新</Button></div>
     <Card><div className="target-list-filters target-library-filters">
       <Select aria-label="历史项目" value={projectId} showSearch optionFilterProp="label" onChange={(value) => { setPage(1); setParams(value ? { project_id: value } : {}, { replace: true }) }} options={[{ value: '', label: '全部历史项目' }, ...projects.map((p) => ({ value: p.id, label: p.name }))]} />
       <Input.Search allowClear placeholder="搜索全库单位或已确认别名" aria-label="搜索目标库" onSearch={(value) => { setPage(1); setQuery(value) }} />

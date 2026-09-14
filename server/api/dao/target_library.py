@@ -55,30 +55,60 @@ def _scope(rows: list[dict]) -> tuple[list[str], dict]:
     return ids, expression
 
 
+async def _document_metrics(db, ids: list[str], identity: dict) -> dict:
+    # Avoid one nested lookup per document (and loading entire archived payloads).
+    links = await db[SOURCE_DOCUMENT_LINKS_COLLECTION].aggregate([
+        {"$match": {"target_id": {"$in": ids}}},
+        {"$group": {"_id": {"target_id": identity, "document_id": "$document_id"}}},
+    ]).to_list(None)
+    document_ids = list({row["_id"]["document_id"] for row in links})
+    if not document_ids:
+        return {}
+    documents, versions = await asyncio.gather(
+        db[SOURCE_DOCUMENTS_COLLECTION].find(
+            {"document_id": {"$in": document_ids}},
+            {"_id": 0, "document_id": 1, "first_seen_at": 1, "last_seen_at": 1},
+        ).to_list(None),
+        db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].aggregate([
+            {"$match": {"document_id": {"$in": document_ids}, "status": "ready"}},
+            {"$group": {"_id": "$document_id", "count": {"$sum": 1}}},
+        ]).to_list(None),
+    )
+    by_id = {item["document_id"]: item for item in documents}
+    version_counts = {item["_id"]: item["count"] for item in versions}
+    result = {}
+    for link in links:
+        key = link["_id"]
+        document = by_id.get(key["document_id"])
+        if not document:
+            continue
+        item = result.setdefault(key["target_id"], {"document_count": 0, "version_count": 0, "change_count": 0, "first_archived_at": None, "last_archived_at": None})
+        count = version_counts.get(key["document_id"], 0)
+        item["document_count"] += 1
+        item["version_count"] += count
+        item["change_count"] += max(0, count - 1)
+        for output, source, choose in (("first_archived_at", "first_seen_at", min), ("last_archived_at", "last_seen_at", max)):
+            value = document.get(source)
+            if value is not None:
+                item[output] = choose(item[output], value) if item[output] is not None else value
+    return result
+
+
 async def archive_metrics(db, rows: list[dict]) -> dict:
+    """Current-page summaries from four bulk reads, without raw source bodies."""
     if not rows:
         return {}
     ids, identity = _scope(rows)
-    pipeline = [
-        {"$match": {"target_id": {"$in": ids}}},
-        {"$group": {"_id": {"target_id": identity, "document_id": "$document_id"}}},
-        {"$lookup": {"from": SOURCE_DOCUMENTS_COLLECTION, "localField": "_id.document_id", "foreignField": "document_id", "as": "doc"}},
-        {"$unwind": "$doc"},
-        {"$lookup": {"from": SOURCE_DOCUMENT_VERSIONS_COLLECTION, "localField": "_id.document_id", "foreignField": "document_id", "pipeline": [{"$match": {"status": "ready"}}, {"$count": "count"}], "as": "versions"}},
-        {"$set": {"version_count": {"$ifNull": [{"$first": "$versions.count"}, 0]}}},
-        {"$group": {"_id": "$_id.target_id", "document_count": {"$sum": 1}, "version_count": {"$sum": "$version_count"}, "change_count": {"$sum": {"$max": [0, {"$subtract": ["$version_count", 1]}]}}, "first_archived_at": {"$min": "$doc.first_seen_at"}, "last_archived_at": {"$max": "$doc.last_seen_at"}}},
-    ]
     archives, mobiles = await asyncio.gather(
-        db[SOURCE_DOCUMENT_LINKS_COLLECTION].aggregate(pipeline).to_list(None),
+        _document_metrics(db, ids, identity),
         db[MOBILE_COLLECT_RECORDS_COLLECTION].aggregate([
             {"$match": {"target_id": {"$in": ids}, "superseded_by_record_id": {"$in": [None, ""]}}},
             {"$group": {"_id": identity, "mobile_count": {"$sum": 1}, "first_collected_at": {"$min": "$first_seen_at"}, "last_collected_at": {"$max": "$last_seen_at"}}},
         ]).to_list(None),
     )
-    result: dict[str, dict] = {}
-    for item in [*archives, *mobiles]:
-        result.setdefault(item.pop("_id"), {}).update(item)
-    return result
+    for item in mobiles:
+        archives.setdefault(item.pop("_id"), {}).update(item)
+    return archives
 
 
 async def task_inventory(db) -> tuple:
