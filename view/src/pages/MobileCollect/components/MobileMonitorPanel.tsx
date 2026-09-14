@@ -39,6 +39,7 @@ import {
   type ProjectTargetOption,
 } from '../../../services/sourceDocumentService'
 import type { SimpleDevice } from '../../../services/mobileService'
+import { formatBeijingTimestamp } from '../../../utils/dateTime'
 
 interface MonitorFormValues {
   name?: string
@@ -55,9 +56,7 @@ interface MonitorFormValues {
 }
 
 function formatTime(value?: string | null) {
-  if (!value) return '-'
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+  return formatBeijingTimestamp(value)
 }
 
 function triggerLabel(monitor: MobileMonitor) {
@@ -247,7 +246,7 @@ export default function MobileMonitorPanel({ devices }: { devices: SimpleDevice[
       key: 'scope',
       width: 260,
       render: (_, monitor) => (
-        <Space direction="vertical" size={2}>
+        <Space orientation="vertical" size={2}>
           <Space size={6} wrap>
             <strong>{monitor.target_name}</strong>
             <Tag color={monitor.scope === 'official_account' ? 'green' : 'blue'}>
@@ -267,7 +266,7 @@ export default function MobileMonitorPanel({ devices }: { devices: SimpleDevice[
       key: 'device',
       width: 190,
       render: (_, monitor) => (
-        <Space direction="vertical" size={2}>
+        <Space orientation="vertical" size={2}>
           <span>{monitor.device_id}</span>
           <span className="mobile-monitor-secondary">
             {monitor.app_instance === 'clone' ? '微信分身' : '主微信'}
@@ -280,12 +279,12 @@ export default function MobileMonitorPanel({ devices }: { devices: SimpleDevice[
       key: 'trigger',
       width: 170,
       render: (_, monitor) => (
-        <Space direction="vertical" size={2}>
+        <Space orientation="vertical" size={2}>
           <span>{triggerLabel(monitor)}</span>
           {monitor.incremental_by_time ? (
             <span className="mobile-monitor-secondary">按发布时间增量 · 重叠 {monitor.incremental_overlap_hours ?? 24} 小时</span>
           ) : null}
-          <span className="mobile-monitor-secondary">下次 {formatTime(monitor.next_run)}</span>
+          <span className="mobile-monitor-secondary">下次（北京时间）{formatTime(monitor.next_run)}</span>
         </Space>
       ),
     },
@@ -294,7 +293,7 @@ export default function MobileMonitorPanel({ devices }: { devices: SimpleDevice[
       key: 'last_run',
       width: 180,
       render: (_, monitor) => (
-        <Space direction="vertical" size={2}>
+        <Space orientation="vertical" size={2}>
           <span>{formatTime(monitor.last_run_at)}</span>
           {monitor.last_status ? <Tag>{monitor.last_status}</Tag> : null}
           {monitor.last_error ? <span className="mobile-monitor-error">{monitor.last_error}</span> : null}

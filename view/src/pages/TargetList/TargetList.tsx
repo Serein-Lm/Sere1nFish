@@ -7,16 +7,14 @@ import { listProjectGroups, type Project, type ProjectGroup } from '../../servic
 import { listProjectTargetBranch } from '../../services/sourceDocumentService'
 import { loadTargetListProjects, loadTargetListRows, type TargetListRow } from '../../services/targetListService'
 import { listRecords, type CollectRecord } from '../../services/mobileCollectService'
+import { formatBeijingTimestamp } from '../../utils/dateTime'
 import './TargetList.css'
 
 const CollectRecordsView = lazy(() => import('../../components/CollectRecordsView/CollectRecordsView'))
 const { Text, Title } = Typography
 
 function timeLabel(value?: string) {
-  if (!value) return '尚未设置'
-  // Legacy Mongo responses omit the UTC suffix; never interpret them as local time.
-  const timestamp = /(Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`
-  return new Date(timestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+  return formatBeijingTimestamp(value, '尚未设置')
 }
 
 function IncrementalTime({ row }: { row: TargetListRow }) {
