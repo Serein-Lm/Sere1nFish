@@ -1,4 +1,5 @@
 import type { CollectRecord } from '../../services/mobileCollectService'
+import { collectRecordTimes } from './collectRecordTime'
 
 const MOBILE_RE = /(?<![A-Za-z0-9._%+-])(1[3-9]\d{9})(?![\d@])/g
 const TEL_KW_RE = /(?:联系电话|电话|联系方式|座机|Tel|TEL|tel)\s*[:：]?\s*(1[3-9]\d{9}|(?:0\d{2,3}[-\s]|\(0\d{2,3}\)[-\s]?)\d{7,8})(?!\d)/g
@@ -39,6 +40,9 @@ export interface CollectRecordGroup {
   title: string
   account: string
   publishTime: string
+  publishTimeSource: string
+  firstSeenTime: string
+  lastSeenTime: string
   score: number | null
   subjectMatch: number | null
   isNew: boolean
@@ -128,9 +132,6 @@ function buildRecordGroup(groupKey: string, records: CollectRecord[]): CollectRe
     || primary.keyword
     || '无标题'
   const account = firstRecordValue(records, ['account', '公众号', '公众号名称', 'author', '来源'])
-  const publishTime = firstRecordValue(records, ['publish_time', '发布时间', 'published_at', 'date'])
-    || records.map((record) => record.published_at || '').find(Boolean)
-    || ''
 
   return {
     groupKey,
@@ -149,7 +150,7 @@ function buildRecordGroup(groupKey: string, records: CollectRecord[]): CollectRe
     keywords: uniqueStrings(records.map((record) => record.keyword)),
     title,
     account,
-    publishTime,
+    ...collectRecordTimes(records, primary),
     score: maxNullable(records.map((record) => record.score)),
     subjectMatch: maxNullable(records.map((record) => record.subject_match)),
     isNew: records.some((record) => record.is_new),

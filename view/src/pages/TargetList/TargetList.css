@@ -5,6 +5,9 @@
 .target-list-filters > * { width: 100%; min-width: 0; }
 .target-list-page .ant-alert { margin-bottom: 16px; }
 .target-records-drawer .ant-drawer-content-wrapper { max-width: 96vw; }
+.target-list-unit { display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.target-list-table .ant-table-cell { vertical-align: top; }
+.target-list-table .ant-table-cell a { overflow-wrap: anywhere; }
 @media (max-width: 700px) {
   .target-list-page { padding: 12px; }
   .target-list-heading { align-items: flex-start; }

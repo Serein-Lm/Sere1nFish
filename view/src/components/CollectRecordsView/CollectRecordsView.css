@@ -77,6 +77,16 @@
   overflow-wrap: anywhere;
 }
 
+.collect-record-times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  color: var(--text-secondary, rgba(0, 0, 0, 0.45));
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .collect-source-facts {
   display: flex;
   flex-wrap: wrap;

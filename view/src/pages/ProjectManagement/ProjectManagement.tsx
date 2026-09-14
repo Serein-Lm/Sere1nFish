@@ -42,6 +42,7 @@ import {
   type ProjectGroup,
 } from '../../services/projectService'
 import './ProjectManagement.css'
+import { formatBeijingTimestamp } from '../../utils/dateTime'
 
 const { Title, Paragraph, Text } = Typography
 const UNGROUPED_KEY = '__ungrouped__'
@@ -286,7 +287,7 @@ export default function ProjectManagement() {
       <div className="project-card-footer">
         <Space size={6} className="project-card-time">
           <ClockCircleOutlined />
-          <Text type="secondary">{new Date(project.updated_at).toLocaleDateString()}</Text>
+          <Text type="secondary" title="项目更新时间（北京时间）">更新 {formatBeijingTimestamp(project.updated_at)}</Text>
         </Space>
         <Button type="link" size="small" icon={<RightOutlined />} className="view-link">
           查看

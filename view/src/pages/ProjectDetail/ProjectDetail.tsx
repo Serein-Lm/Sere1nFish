@@ -35,6 +35,8 @@ import {
   type DouyinProfile,
 } from '../../services/douyinService'
 import { stringToColor } from '../../utils/colorUtils'
+import { formatBeijingTimestamp as formatDate } from '../../utils/dateTime'
+import { buildTargetHierarchy } from '../../utils/targetHierarchy'
 import { mapWebTaggingEnum } from '../../utils/webTaggingMap'
 import { renderFindingValue } from '../../utils/findingValueRenderer'
 import ProfileDrawer from '../../components/ProfileDrawer'
@@ -357,13 +359,6 @@ function parseHashtags(content: string): React.ReactNode[] {
   }
   
   return parts.length > 0 ? parts : [content]
-}
-
-function formatDate(value: string | undefined): string {
-  if (!value) return '-'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return value
-  return d.toLocaleString()
 }
 
 function blurFocusedTabPaneElement() {
@@ -4200,28 +4195,15 @@ export default function ProjectDetail() {
           ...projectTargets,
           ...projectTargets.flatMap((root) => targetBranches[root.target_id] || []),
         ]
-    const uniqueTargets = Array.from(
-      new Map(visibleTargets.map((target) => [target.target_id, target])).values(),
-    )
-    const rows = uniqueTargets.map<TargetDashboardRow>((target) => ({
-      ...target,
-      children: [],
-    }))
-    const byTargetId = new Map(rows.map((target) => [target.target_id, target]))
-    const roots: TargetDashboardRow[] = []
-    rows.forEach((target) => {
-      const depth = targetHierarchyDepth(target)
-      const parentTargetId = targetHierarchyParentId(target)
-      const parent = parentTargetId
-        ? byTargetId.get(parentTargetId)
-        : undefined
-      const parentDepth = parent ? targetHierarchyDepth(parent) : 0
-      if (parent && parent.target_id !== target.target_id && parentDepth < depth) {
-        parent.children?.push(target)
-      } else {
-        roots.push(target)
+    const roots = buildTargetHierarchy<TargetDashboardRow>(visibleTargets)
+    const rows: TargetDashboardRow[] = []
+    const collectRows = (items: TargetDashboardRow[]) => {
+      for (const item of items) {
+        rows.push(item)
+        if (item.children?.length) collectRows(item.children)
       }
-    })
+    }
+    collectRows(roots)
     rows.forEach((target) => {
       if (!target.children?.length) delete target.children
       const isRoot = targetHierarchyDepth(target) === 0
@@ -5010,7 +4992,7 @@ export default function ProjectDetail() {
       {
         title: '操作',
         key: 'actions',
-        width: 56,
+        width: 72,
         align: 'center',
         render: (_, target) => target.isLoadingPlaceholder ? null : (
           <Tooltip title="联网核验机构资料，扩展可信 Target 后自动扫描">
@@ -5102,6 +5084,7 @@ export default function ProjectDetail() {
         <Table<TargetDashboardRow>
           className="target-dashboard-table"
           rowKey="project_target_id"
+          tableLayout="fixed"
           size="small"
           columns={columns}
           dataSource={targetDashboardRows}
@@ -5146,7 +5129,7 @@ export default function ProjectDetail() {
               }
             },
           }}
-          scroll={{ x: screens.lg ? 1006 : screens.md ? 746 : 420 }}
+          scroll={{ x: screens.lg ? 1022 : screens.md ? 762 : 420 }}
           onRow={(target) => ({
             onClick: () => {
               if (!target.isLoadingPlaceholder) openTargetDetails(target)

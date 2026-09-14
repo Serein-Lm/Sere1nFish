@@ -33,6 +33,8 @@ import {
   type CollectRecordGroup,
 } from './collectRecordUtils'
 import './CollectRecordsView.css'
+import CollectRecordTimes from './CollectRecordTimes'
+import { PUBLICATION_TIME_KEYS } from './collectRecordTime'
 
 const { Text } = Typography
 
@@ -304,8 +306,11 @@ function CollectRecordDetail({ group }: { group: CollectRecordGroup }) {
           className="collect-detail-descriptions"
         >
           {group.targetNames.length > 0 && <Descriptions.Item label="目标实体">{group.targetNames.join('、')}</Descriptions.Item>}
+          <Descriptions.Item label="发布时间（北京时间）"><span title={group.publishTimeSource}>{group.publishTime || '时间待核实'}</span></Descriptions.Item>
+          {group.firstSeenTime && <Descriptions.Item label="首次采集（北京时间）">{group.firstSeenTime}</Descriptions.Item>}
+          {group.lastSeenTime && <Descriptions.Item label="最近采集（北京时间）">{group.lastSeenTime}</Descriptions.Item>}
           {basicEntries.map(([key, value]) => (
-            <Descriptions.Item key={key} label={key}>{renderDetailValue(value)}</Descriptions.Item>
+            <Descriptions.Item key={key} label={PUBLICATION_TIME_KEYS.includes(key) ? '原文发布时间' : key}>{renderDetailValue(value)}</Descriptions.Item>
           ))}
           {group.sourceUrl && (
             <Descriptions.Item label="原文链接" span="filled">
@@ -459,7 +464,6 @@ export default function CollectRecordsView({
       title: '内容',
       key: 'content',
       render: (_, group) => {
-        const meta = [group.account, group.publishTime].filter(Boolean).join(' · ')
         return (
           <div className="collect-row-cell">
             <div className="collect-row-title">
@@ -470,7 +474,8 @@ export default function CollectRecordsView({
                 <Tag color="orange" className="collect-row-tag">内容变更</Tag>
               ) : null}
             </div>
-            {meta && <div className="collect-row-meta">{meta}</div>}
+            {group.account && <div className="collect-row-meta">{group.account}</div>}
+            <CollectRecordTimes group={group} />
           </div>
         )
       },
@@ -584,11 +589,8 @@ export default function CollectRecordsView({
               <span className="collect-source-title">{group.title}</span>
               {group.isNew ? <Tag color="green">首次采集</Tag> : group.isChanged ? <Tag color="orange">内容变更</Tag> : null}
             </div>
-            {(group.account || group.publishTime) && (
-              <div className="collect-source-meta">
-                {[group.account, group.publishTime].filter(Boolean).join(' · ')}
-              </div>
-            )}
+            {group.account && <div className="collect-source-meta">{group.account}</div>}
+            <CollectRecordTimes group={group} />
             <div className="collect-source-facts">
               {group.score != null && <Tag color={scoreColor(group.score)}>相关性 {group.score}</Tag>}
               {showSubjectMatch && group.subjectMatch != null && (
