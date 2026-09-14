@@ -38,3 +38,29 @@ async def test_atomic_profile_outbox_recovers_crash_and_concurrent_writes(monkey
         assert not (await db.persons.find_one({"person_id": "p"}))[versions.PENDING]
     finally:
         await client.drop_database(name)
+
+
+@pytest.mark.asyncio
+async def test_context_metadata_repair_is_versioned_idempotent_and_preserves_real_research():
+    name = os.environ.get("SF_TEST_MONGO_DATABASE", "")
+    if not name.startswith("sf_test_"):
+        pytest.skip("requires an explicitly named disposable sf_test_ Mongo database")
+    from api.db.mongodb import init_mongo, get_db
+    from api.dao import person_versions as versions, persons
+    init_mongo()
+    client = get_db().client
+    assert name not in await client.list_database_names()
+    db = client[name]
+    try:
+        await versions.ensure_indexes(db)
+        for pid, source in (("context", "synthetic_context"), ("research", "synthetic_research")):
+            await versions.update_with_version(db, pid, {"$set": {"person_id": pid, "generation_mode": "context", "research_rounds": 1,
+                "sources": [{"source": source}]}, "$inc": {"profile_version": 1}})
+        assert await persons.repair_context_research_metadata(db) == 1
+        assert (await persons.get_person(db, "context"))["research_rounds"] == 0
+        assert (await persons.get_person(db, "research"))["research_rounds"] == 1
+        history = await versions.list_versions(db, "context")
+        assert [row["profile"]["research_rounds"] for row in history["items"]] == [0, 1]
+        assert await persons.repair_context_research_metadata(db) == 0
+    finally:
+        await client.drop_database(name)
