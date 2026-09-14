@@ -366,7 +366,13 @@ class PersistStage(Stage):
         ) or (
             result["is_changed"] and notify_on in ("changed", "both")
         )
-        if not should_notify or not prepared.is_high_score:
+        archived_time_increment = bool(
+            state.get("incremental_window")
+            and prepared.payload.get("source_document_id")
+            and prepared.payload.get("source_document_version_id")
+            and prepared.payload.get("source_archive_status") not in {"pending", "rejected"}
+        )
+        if not should_notify or not (prepared.is_high_score or archived_time_increment):
             return
         from api.services.mobile_incremental_notifications import record_increment
 

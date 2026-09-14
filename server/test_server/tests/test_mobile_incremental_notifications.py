@@ -104,3 +104,17 @@ async def test_handoff_uses_original_window_and_announces_first_archive_as_new(m
         task_def={"task_def_id": "def1", "project_id": "p1", "notify_on": "new", "incremental_by_time": True})
     assert publish.call_args.kwargs["payload"]["kind"] == "new"
     assert publish.call_args.kwargs["state"]["incremental_window"] == state["incremental_window"]
+
+
+@pytest.mark.asyncio
+async def test_archived_time_increment_is_reported_even_without_high_contact_score(monkeypatch):
+    from core.mobile.collect.persistence_stage import PersistStage
+    payload, state = example()
+    state.update(db=None, notify_on="new")
+    prepared = SimpleNamespace(payload=payload, is_high_score=False, notification_score=39)
+    record = AsyncMock(return_value={"event_id": "e1"})
+    monkeypatch.setattr(service, "record_increment", record)
+    ctx = SimpleNamespace(emit=AsyncMock())
+    await PersistStage._emit_notification(ctx, state, prepared, {"record_id": "r1", "is_new": True, "is_changed": False})
+    record.assert_awaited_once()
+    ctx.emit.assert_awaited_once()

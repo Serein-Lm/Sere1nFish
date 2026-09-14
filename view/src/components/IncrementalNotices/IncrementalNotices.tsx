@@ -96,15 +96,15 @@ export function IncrementalNoticeProvider({ children, userKey, enabled }: { chil
 
   useEffect(() => {
     const latest = feed?.items[0]
-    if (!feed?.unread_count || !latest || announced.current === latest.event_id) return
+    if (drawer || !feed?.unread_count || !latest || announced.current === latest.event_id) return
     announced.current = latest.event_id
     api.open({
-      key: 'mobile-incremental', message: `新增量通报 · ${feed.unread_count} 条未读`,
+      key: 'mobile-incremental', title: `新增量通报 · ${feed.unread_count} 条未读`,
       description: <><strong>{latest.target_name}</strong><div>{latest.title}</div></>,
       icon: <BellOutlined style={{ color: '#e97818' }} />, duration: 0,
       actions: <Button type="primary" size="small" onClick={() => { setDrawer('all'); api.destroy('mobile-incremental') }}>查看增量</Button>,
     })
-  }, [feed, api])
+  }, [feed, api, drawer])
 
   const markRead = useCallback(() => {
     if (!feed) return
@@ -116,7 +116,7 @@ export function IncrementalNoticeProvider({ children, userKey, enabled }: { chil
 
   const selectedFeed = drawer === 'project' && projectId ? projectFeed : feed
   if (!enabled) return children
-  return <Context.Provider value={{ feed, projectFeed, error, open: (project = false) => setDrawer(project ? 'project' : 'all') }}>
+  return <Context.Provider value={{ feed, projectFeed, error, open: (project = false) => { setDrawer(project ? 'project' : 'all'); api.destroy('mobile-incremental') } }}>
     {children}{holder}
     <Drawer title={drawer === 'project' ? '本项目增量通报' : '增量通报'} open={drawer !== null} onClose={() => setDrawer(null)} size={660}>
       <div className="incremental-drawer-toolbar">
