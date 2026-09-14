@@ -28,12 +28,12 @@ export type HistoryItem = LibraryDocument | LibraryVersion | LibraryRun | Collec
 
 export function listTargetLibrary(params: { page?: number; page_size?: number; q?: string; project_id?: string; parent_id?: string; refresh?: boolean } = {}) {
   const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]))
-  return apiFetch<LibraryPage>(`/target-library?${query}`)
+  return apiFetch<LibraryPage>(`/v1/target-library?${query}`)
 }
-export const getLibraryTarget = (id: string) => apiFetch<LibraryTarget>(`/target-library/${encodeURIComponent(id)}`)
+export const getLibraryTarget = (id: string) => apiFetch<LibraryTarget>(`/v1/target-library/${encodeURIComponent(id)}`)
 export function getLibraryHistory<T = HistoryItem>(id: string, kind: HistoryKind, page = 1, documentId = '') {
   const query = new URLSearchParams({ kind, skip: String((page - 1) * 20), limit: '20', document_id: documentId })
-  return apiFetch<HistoryPage<T>>(`/target-library/${encodeURIComponent(id)}/history?${query}`)
+  return apiFetch<HistoryPage<T>>(`/v1/target-library/${encodeURIComponent(id)}/history?${query}`)
 }
 export function libraryRunLabel(run?: LibraryRun) {
   if (!run) return '尚无执行记录'
@@ -42,4 +42,4 @@ export function libraryRunLabel(run?: LibraryRun) {
 }
 
 export interface VersionComparison { before_version_id?: string; after_version_id: string; lines: string[]; changed: boolean; truncated: boolean; message?: string }
-export const compareLibraryVersion = (id: string, versionId: string) => apiFetch<VersionComparison>(`/target-library/${encodeURIComponent(id)}/compare?version_id=${encodeURIComponent(versionId)}`)
+export const compareLibraryVersion = (id: string, versionId: string) => apiFetch<VersionComparison>(`/v1/target-library/${encodeURIComponent(id)}/compare?version_id=${encodeURIComponent(versionId)}`)
