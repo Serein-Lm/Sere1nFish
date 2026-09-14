@@ -9,7 +9,7 @@
 .target-list-table .ant-table-cell { vertical-align: top; }
 .target-list-table .ant-table-cell a { overflow-wrap: anywhere; }
 .target-library-filters { grid-template-columns: minmax(220px, 1fr) minmax(240px, 2fr); }
-.target-name-button.ant-btn { display: inline; height: auto; padding: 0; white-space: normal; text-align: left; font-weight: 600; overflow-wrap: anywhere; }
+.target-name-button { display: inline; height: auto; padding: 0; white-space: normal; text-align: left; font-weight: 600; overflow-wrap: anywhere; }
 @media (max-width: 700px) {
   .target-list-page { padding: 12px; }
   .target-list-heading { align-items: flex-start; }

@@ -20,6 +20,8 @@ const PersonIntelligence = lazy(() => import('./pages/PersonIntelligence/PersonI
 const MobileCollect = lazy(() => import('./pages/MobileCollect/MobileCollect'))
 const ProjectManagement = lazy(() => import('./pages/ProjectManagement/ProjectManagement'))
 const TargetList = lazy(() => import('./pages/TargetList/TargetList'))
+const TargetLibraryPage = lazy(() => import('./pages/TargetDetail/TargetLibraryPage'))
+const ProjectTargetDetail = lazy(() => import('./pages/TargetDetail/ProjectTargetDetail'))
 const ProjectDetail = lazy(() => import('./pages/ProjectDetail/ProjectDetail'))
 const TaskDetail = lazy(() => import('./pages/TaskDetail/TaskDetail'))
 const AITools = lazy(() => import('./pages/AITools/AITools'))
@@ -93,6 +95,8 @@ function AppContent() {
               <Route path="mobile-auto-chat" element={<Navigate to="/phone-control?tab=auto-chat" replace />} />
               <Route path="projects" element={<ProjectManagement />} />
               <Route path="targets" element={<TargetList />} />
+              <Route path="targets/:targetId" element={<TargetLibraryPage />} />
+              <Route path="projects/:projectId/targets/:targetId" element={<ProjectTargetDetail />} />
               <Route path="projects/:projectId" element={<ProjectDetail />} />
               <Route path="tasks/:taskId" element={<TaskDetail />} />
               <Route path="projects/:projectId/tasks/:taskId" element={<TaskDetail />} />

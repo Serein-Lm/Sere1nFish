@@ -176,6 +176,7 @@
 - 大页面、设备工具、可观测性、编辑器、视频流、图表和 AI 对话类功能应通过动态导入排除在初始 bundle 之外。
 - 页面层负责状态组合、交互流程和展示；复杂数据转换、轮询、流式连接、下载、上传等逻辑应收敛到 service、hook 或专门工具。
 - 项目维度的数据面(网站/小红书/抖音/公众号/手机操作)统一作为 `ProjectDetail` 的 tab 接入,复用带类型的 service 按 `project_id` 过滤,不新开独立路由页;新增数据源优先加 tab 并复用既有采集/记录 service。
+- Target 详情按用户要求提供独立前端入口：`/projects/:projectId/targets/:targetId` 复用 `ProjectDetail` 的目标范围和渠道 tab，`/targets/:targetId` 展示全库历史及所属项目入口。前者只加载选定 Target，不能为定位子单位先拉整个项目树；合并身份通过 `targetDetailService` 按稳定 ID 解析到项目内身份，链接和 tab 必须支持直接打开、刷新及浏览器前进后退。
 - 长耗时预览(如采集「试跑」/dry-run)使用抽屉承载,明确加载态与「不入库、不发送通知」提示,预览结果只读展示;截图等鉴权资源统一走 service 的鉴权 blob 取图,不在页面内联拼 URL。
 - 添加新抽象前，优先复用现有 layout、theme token、Ant Design 组件模式和 `src/components/*` 中的通用组件。
 - UI 文案默认中文；保留项目既有英文术语，如 API、Agent、Prompt、Skill、Dashboard、Token。避免同一位置中英重复解释。

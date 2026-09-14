@@ -284,7 +284,7 @@ export default function MainLayout() {
         </div>
         <Menu
           mode="inline"
-          selectedKeys={[location.pathname]}
+          selectedKeys={[location.pathname.startsWith('/targets') ? '/targets' : /^\/projects\/[^/]+\/targets\//.test(location.pathname) ? '/targets' : location.pathname]}
           items={menuItems}
           onClick={handleMenuClick}
           className="main-menu"

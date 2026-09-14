@@ -1,0 +1,19 @@
+.target-detail-page { padding: 24px; min-width: 0; }
+.target-detail-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin: 20px 0; }
+.target-detail-heading > div { min-width: 0; }
+.target-detail-heading h2 { margin: 0 0 8px; overflow-wrap: anywhere; }
+.target-detail-projects { margin-bottom: 20px; }
+.target-detail-projects .ant-btn { height: auto; min-height: 32px; white-space: normal; text-align: left; }
+.target-detail-project-picker { display: flex; margin-bottom: 16px; }
+.target-detail-project-picker .ant-select { width: min(480px, 100%); min-width: 200px; }
+.target-detail-page .project-detail.page-container { padding: 0; }
+.target-detail-page .ant-card, .target-library-history { min-width: 0; }
+.target-library-history .ant-descriptions-item-content { overflow-wrap: anywhere; }
+.target-detail-page .ant-alert { margin-bottom: 16px; }
+@media (max-width: 700px) {
+  .target-detail-page { padding: 12px; }
+  .target-detail-heading { flex-direction: column; gap: 12px; }
+  .target-detail-heading h2 { font-size: 23px; }
+  .target-detail-page > .ant-card > .ant-card-body { padding: 12px; }
+  .target-detail-project-picker .ant-select { min-width: 0; width: min(300px, calc(100vw - 48px)); }
+}
