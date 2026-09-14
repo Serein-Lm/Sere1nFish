@@ -381,8 +381,10 @@ def notify_target_collection_completed(
     summary: dict[str, Any] | None = None,
     status: str = "completed",
 ) -> bool:
-    """Notify only actionable target results or failures."""
+    """Notify collected results; empty completion/failure stays in task history."""
     summary = dict(summary or {})
+    if not _has_high_value_summary(summary):
+        return False
     normalized_status = str(status or "completed")
     status_text = {
         "completed": "完成",
@@ -390,9 +392,7 @@ def notify_target_collection_completed(
         "failed": "失败",
     }.get(normalized_status, normalized_status)
     target_label = target_name or target_id or "Target"
-    if normalized_status in {"completed", "partial"}:
-        if not _has_high_value_summary(summary):
-            return False
+    if normalized_status in {"completed", "partial", "failed"}:
         lines = ["**结论**", f"- 扫描{status_text}，发现高价值结果"]
         modules = [str(item) for item in summary.get("enabled_modules") or [] if item]
         if modules:
@@ -666,7 +666,7 @@ async def notify_company_scan_batch_completed(
     tasks: list[dict[str, Any]],
 ) -> NotificationDispatchResult:
     title, content, context = build_company_scan_batch_notification(tasks)
-    if not context["high_value_companies"] and not context["failed"]:
+    if not context["high_value_companies"]:
         return NotificationDispatchResult(
             event="company_scan.batch.completed",
             ok=True,

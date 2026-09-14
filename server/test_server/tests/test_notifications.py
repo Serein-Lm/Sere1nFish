@@ -252,6 +252,27 @@ def test_target_completion_without_high_value_does_not_notify(
     ) is False
 
 
+def test_target_failure_without_collected_information_stays_silent(monkeypatch):
+    from api.services import notifications
+    monkeypatch.setattr(notifications, "notify_event_background", lambda **_kwargs: pytest.fail("无结果不通报"))
+    assert notifications.notify_target_collection_completed(
+        project_id="p", task_id="t", target_id="a", target_name="示例单位",
+        source="company_scan_pipeline", status="failed", summary={"error": "no usable source"},
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_without_collected_information_stays_silent(monkeypatch):
+    from api.services import notifications
+    async def send(**_kwargs):
+        pytest.fail("无结果不通报")
+    monkeypatch.setattr(notifications, "notify_event", send)
+    result = await notifications.notify_company_scan_batch_completed(
+        project_id="p", batch_id="b", tasks=[{"status": "error", "params": {"company_name": "示例单位"}, "error": "empty result"}],
+    )
+    assert result.skipped is True
+
+
 def test_human_notification_markdown_hides_internal_context() -> None:
     from api.services.notifications import format_notification_markdown
 

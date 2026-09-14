@@ -58,6 +58,41 @@ def test_notification_highlights_counts_identity_dates_and_source():
     assert "[打开新增资料](https://example.org/article)" in message["content"]
 
 
+@pytest.mark.parametrize("fields", [{}, {"title": "公开公告", "publish_time": "2026-09-14"}, {"title": "采集完成", "summary": "暂无信息。"}, {"summary": "--", "contact": "无"}, {"summary": "  ", "read_count": "1000"}, {"content": None, "summary": []}])
+def test_empty_content_never_creates_increment_event(fields):
+    payload, state = example()
+    payload["fields"] = fields
+    assert service.build_event(payload=payload, state=state, now=NOW) is None
+
+
+@pytest.mark.parametrize("key", ["source_document_id", "source_document_version_id", "source_archive_status"])
+def test_time_increment_requires_completed_source_identity(key):
+    payload, state = example()
+    payload.pop(key)
+    assert service.build_event(payload=payload, state=state, now=NOW) is None
+
+
+def test_contact_content_can_supply_summary_without_an_article_abstract():
+    payload, state = example()
+    payload["fields"].update(summary="暂无", contact="公开咨询邮箱：service@example.org")
+    event = service.build_event(payload=payload, state=state, now=NOW)
+    assert event["summary"] == "公开咨询邮箱：service@example.org"
+    message = service.notification_content(event, {"new": 1, "changed": 0})
+    assert "变化 **0**" not in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_empty_result_neither_persists_bulletin_nor_sends_notification(monkeypatch):
+    payload, state = example()
+    payload["fields"] = {"title": "暂无内容"}
+    insert = AsyncMock(); notify = AsyncMock()
+    monkeypatch.setattr(service.dao, "insert_event", insert)
+    monkeypatch.setattr(service, "notify_event", notify)
+    assert await service.publish_increment(None, payload=payload, state=state) is None
+    insert.assert_not_awaited()
+    notify.assert_not_awaited()
+
+
 def test_legacy_non_project_event_still_has_a_valid_public_contract():
     from api.models.mobile_incremental_events import IncrementalEvent
     payload, state = example()

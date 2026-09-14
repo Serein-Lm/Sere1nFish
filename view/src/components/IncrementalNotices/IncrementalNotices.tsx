@@ -24,8 +24,8 @@ function safeRead(key: string) {
 
 function Counts({ feed }: { feed: IncrementalFeed }) {
   return <div className="incremental-counts">
-    <span className="incremental-count-new">新增 <strong>{feed.new_count}</strong> 条</span>
-    <span className="incremental-count-changed">变化 <strong>{feed.changed_count}</strong> 条</span>
+    {feed.new_count > 0 && <span className="incremental-count-new">新增 <strong>{feed.new_count}</strong> 条</span>}
+    {feed.changed_count > 0 && <span className="incremental-count-changed">变化 <strong>{feed.changed_count}</strong> 条</span>}
   </div>
 }
 
@@ -136,13 +136,14 @@ export function IncrementalProjectNotice() {
   if (!notices || !/^\/(projects|targets)(\/|$)/.test(pathname)) return null
   const isProject = /^\/projects\/[^/]+/.test(pathname)
   const feed = isProject ? notices.projectFeed : notices.feed
-  return <aside className={`incremental-project-notice${feed?.new_count || feed?.changed_count ? ' has-increments' : ''}`} aria-label="最近增量通报">
+  if (!feed || feed.new_count + feed.changed_count <= 0 || !feed.items.length) return null
+  return <aside className="incremental-project-notice has-increments" aria-label="最近增量通报">
     <BellOutlined className="incremental-project-icon" />
     <div className="incremental-project-body">
       <strong>{isProject ? '本项目增量通报' : '增量通报'} <span>最近 7 天 · 手机采集</span></strong>
-      {notices.error ? <p>通报刷新失败，打开通报可重试</p> : !feed ? <p>正在加载增量通报…</p> : feed.new_count || feed.changed_count ? <Counts feed={feed} /> : <p>暂无已确认增量，采集结果归档后将在这里突出通报</p>}
+      <Counts feed={feed} />
       {feed?.items[0] && <div className="incremental-project-latest">最近：{feed.items[0].target_name} · {formatBeijingTimestamp(feed.items[0].detected_at)}（北京时间）</div>}
     </div>
-    <Button type={feed?.new_count || feed?.changed_count ? 'primary' : 'default'} onClick={() => notices.open(isProject)} icon={<ArrowRightOutlined />}>查看增量</Button>
+    <Button type="primary" onClick={() => notices.open(isProject)} icon={<ArrowRightOutlined />}>查看增量</Button>
   </aside>
 }

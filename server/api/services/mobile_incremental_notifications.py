@@ -22,12 +22,30 @@ def _plain(value, limit: int = 300) -> str:
     return str(value or "").replace("\n", " ").strip()[:limit]
 
 
+def _content_summary(fields: dict) -> str:
+    """A title, date or success flag alone is not collected information."""
+    empty_values = {"", "无", "暂无", "暂无信息", "无信息", "暂无内容", "暂无数据", "无新增", "未发现新增", "未找到", "未知", "未提供", "未获取", "none", "null", "n/a", "na", "-", "--", "采集内容"}
+    for key in ("summary", "摘要", "content", "正文", "background", "项目背景", "contact", "联系方式", "phone", "电话", "联系电话", "email", "邮箱", "wechat", "微信号"):
+        value = fields.get(key)
+        if not isinstance(value, str):
+            continue
+        text = _plain(value, 600)
+        if text.rstrip("。.!！：: ").casefold() not in empty_values:
+            return text
+    return ""
+
+
 def build_event(*, payload: dict, state: dict, now: datetime | None = None) -> dict | None:
     fields = dict(payload.get("fields") or {})
+    summary = _content_summary(fields)
+    if not summary:
+        return None
     target = state.get("target") or {}
     target_id = str(payload.get("target_id") or target.get("target_id") or "")
     window = state.get("incremental_window")
-    if payload.get("source_archive_status") in {"pending", "rejected"}:
+    if payload.get("source_archive_status") in {"pending", "rejected", "failed", "error"}:
+        return None
+    if window and not (payload.get("source_document_id") and payload.get("source_document_version_id") and payload.get("source_archive_status") == "ready"):
         return None
     if window and candidate_window_status(payload, window, target_id) != "inside":
         return None
@@ -51,8 +69,8 @@ def build_event(*, payload: dict, state: dict, now: datetime | None = None) -> d
         "target_name": _plain(payload.get("target_name") or target.get("canonical_name") or state.get("task_name"), 200),
         "task_def_id": state["task_def_id"], "run_task_id": state["run_task_id"],
         "record_id": payload["record_id"], "kind": payload["kind"],
-        "title": _plain(fields.get("title") or fields.get("标题") or fields.get("article_title") or "采集内容"),
-        "summary": _plain(fields.get("summary") or fields.get("摘要") or fields.get("content"), 600),
+        "title": _plain(fields.get("title") or fields.get("标题") or fields.get("article_title") or summary[:60]),
+        "summary": summary,
         "source_url": source_url, "source_document_version_id": str(version),
         "published_at": candidate_publish_time(payload),
         "published_label": _plain(next((fields[key] for key in ("publish_time", "published_at", "publish_date", "published_time", "发布时间") if fields.get(key)), "")),
@@ -64,7 +82,8 @@ def build_event(*, payload: dict, state: dict, now: datetime | None = None) -> d
 
 def notification_content(event: dict, totals: dict) -> dict:
     label = "新增" if event["kind"] == "new" else "内容变化"
-    lines = [f"### 本轮新增 **{totals['new']}** 条 · 变化 **{totals['changed']}** 条", "",
+    counts = " · ".join(f"{name} **{totals[key]}** 条" for key, name in (("new", "新增"), ("changed", "变化")) if totals.get(key, 0) > 0)
+    lines = [f"### 本轮{counts}", "",
              f"**单位：{event['target_name']}**", f"**本条{label}：{event['title']}**", "",
              f"- 文章发布时间：{event['published_label'] or '来源未提供'}",
              f"- 发现时间：{_time(event['detected_at'])}（北京时间）"]
