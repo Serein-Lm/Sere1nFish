@@ -481,6 +481,7 @@ export default function PersonaLibrary() {
             </div>
 
             <Field label="摘要" value={active.summary} />
+            {active.generation_mode === 'context' && <Tag color="blue">完整上下文 · 自动生成</Tag>}
             <Field label="年龄" value={active.age ? `${active.age} 岁` : active.age_range} />
             <Field
               label="资料版本"
@@ -498,6 +499,9 @@ export default function PersonaLibrary() {
             <Field label="所在地" value={active.location} />
             <Field label="地域类型" value={active.region_type} />
             <Field label="组织环境" value={active.organization_context} />
+            <Field label="公司业务" value={active.company_business} />
+            <Field label="办公场景地址" value={active.company_address} />
+            <Field label="公司网站设定" value={active.company_website} />
             <Field label="职业阶段" value={active.career_stage} />
             <Field label="职业路径" value={active.career_path} />
             <Field label="生活阶段" value={active.life_stage} />
@@ -512,6 +516,14 @@ export default function PersonaLibrary() {
                 : undefined}
             />
 
+            {active.scenario_contact && <>
+              <div className="detail-section-title">联络场景（虚构设定）</div>
+              <Field label="办公电话" value={active.scenario_contact.phone} />
+              <Field label="工作邮箱" value={active.scenario_contact.email} />
+              <Field label="工作微信" value={active.scenario_contact.wechat} />
+              <Field label="联系时段" value={active.scenario_contact.availability} />
+              <Field label="联络流程" value={active.scenario_contact.introduction} />
+            </>}
             <div className="detail-section-title">性格与行为逻辑</div>
             <Field label="性格特点" value={active.personality} />
             <Field label="决策方式" value={active.decision_style} />
@@ -570,7 +582,7 @@ export default function PersonaLibrary() {
                 </div>
               ))}
               {!active.source_urls?.length && !active.evidence?.length && (
-                <Text type="secondary">暂无背景参考来源</Text>
+                <Text type="secondary">完整虚构上下文，参考来源为可选信息</Text>
               )}
             </div>
 
@@ -592,7 +604,7 @@ export default function PersonaLibrary() {
               style={{ marginTop: 16 }}
               onClick={handleEnrich}
             >
-              持续研究并升级
+              自动完善并升级
             </Button>
             <Button
               type="primary"
@@ -665,7 +677,7 @@ export default function PersonaLibrary() {
           <Form.Item name="extra" label="其他约束（可选）"><Input.TextArea autoSize={{ minRows: 2, maxRows: 3 }} placeholder="地区、职级比例、生活阶段等约束" /></Form.Item>
         </Form>
         <div className="modal-hint">
-          <ThunderboltOutlined /> AI 自主规划研究分片、真实爬取公网并审校人物逻辑；不会采集真人身份和联系方式。
+          <ThunderboltOutlined /> AI 自动补齐公司、岗位、经历与模拟联系方式，保持上下文完整自洽；背景资料和来源均可留空。
         </div>
       </Modal>
     </div>

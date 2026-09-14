@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 class CoverageStart(BaseModel):
     industry_codes: list[str] = Field(default_factory=list, description="留空补齐全部 97 个行业大类")
     minimum_personas: int = Field(4, ge=1, le=20)
+    generation_mode: Literal["context", "researched"] = "context"
 
 
 class OrganizationSourceFact(BaseModel):

@@ -80,7 +80,7 @@ async def generate(req: PersonaGenerateRequest):
         from api.services.persona_coverage.catalog import default_background
         background = default_background(req.industries)
 
-    from api.services.persona_collect import generate_personas
+    from api.services.persona_generation import generate_personas
     from api.services.runtime_config import get_runtime_app_config
 
     app_config = await get_runtime_app_config()
@@ -208,7 +208,7 @@ async def enrich(person_id: str, req: PersonaEnrichRequest):
             "profile_version": int(existing.get("profile_version") or 1),
         }
 
-    from api.services.persona_collect import enrich_persona
+    from api.services.persona_generation import enrich_persona
     from api.services.runtime_config import get_runtime_app_config
 
     app_config = await get_runtime_app_config()

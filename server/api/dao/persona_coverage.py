@@ -21,14 +21,14 @@ async def ensure_indexes(db) -> None:
     await db[PERSONS_COLLECTION].create_index("industry_code", sparse=True)
 
 
-async def enqueue(db, divisions: list[dict], minimum: int) -> dict:
+async def enqueue(db, divisions: list[dict], minimum: int, *, generation_mode: str = "context") -> dict:
     operations = []
     for priority, division in enumerate(divisions):
-        fields = {"industry_name": division["name"], "sector_code": division["sector_code"], "minimum_personas": minimum, "priority": priority, "updated_at": now()}
+        fields = {"industry_name": division["name"], "sector_code": division["sector_code"], "minimum_personas": minimum, "generation_mode": generation_mode, "priority": priority, "updated_at": now()}
         operations.append(UpdateOne({"industry_code": division["code"]}, {"$set": fields, "$setOnInsert": {"job_id": "industry_" + division["code"], "status": "queued", "attempts": 0, "next_attempt_at": now(), "created_at": now(), "stage": "queued", "gaps": [], "person_ids": [], "fact_ids": []}}, upsert=True))
     if operations:
         await db[JOBS].bulk_write(operations, ordered=False)
-        await db[JOBS].update_many({"industry_code": {"$in": [item["code"] for item in divisions]}, "status": {"$in": ["failed", "needs_sources", "completed"]}}, {"$set": {"status": "queued", "attempts": 0, "next_attempt_at": now(), "updated_at": now()}})
+        await db[JOBS].update_many({"industry_code": {"$in": [item["code"] for item in divisions]}, "status": {"$in": ["failed", "retry", "needs_sources", "completed", "queued"]}}, {"$set": {"status": "queued", "stage": "queued", "attempts": 0, "next_attempt_at": now(), "updated_at": now(), "errors": [], "message": "等待自动补齐完整上下文" if generation_mode == "context" else "等待行业资料研究"}})
     return {"queued_industries": len(divisions), "minimum_personas": minimum}
 
 
@@ -60,16 +60,20 @@ async def save_facts(db, facts: list[dict]) -> list[str]:
     return [fact["fact_id"] for fact in facts]
 
 
-async def classify_persons(db, person_ids: list[str], *, industry_code: str, sector_code: str, job_id: str) -> None:
+async def classify_persons(db, person_ids: list[str], *, industry_code: str, sector_code: str, job_id: str, method: str = "scoped_industry_research") -> None:
     from api.dao.person_versions import update_with_version
     candidates = await db[PERSONS_COLLECTION].find({"person_id": {"$in": person_ids}, "is_fictional": True, "industry_code": {"$ne": industry_code}}, {"person_id": 1}).to_list(None)
-    await asyncio.gather(*(update_with_version(db, item["person_id"], {"$set": {"industry_code": industry_code, "industry_sector_code": sector_code, "updated_at": now(), "industry_classification": {"standard": "GB/T 4754-2017", "method": "scoped_industry_research", "job_id": job_id, "classified_at": now()}}, "$inc": {"profile_version": 1}}) for item in candidates))
+    await asyncio.gather(*(update_with_version(db, item["person_id"], {"$set": {"industry_code": industry_code, "industry_sector_code": sector_code, "updated_at": now(), "industry_classification": {"standard": "GB/T 4754-2017", "method": method, "job_id": job_id, "classified_at": now()}}, "$inc": {"profile_version": 1}}) for item in candidates))
+
+
+async def unclassified_people(db) -> list[dict]:
+    return await db[PERSONS_COLLECTION].find({"is_fictional": True, "industry_code": {"$in": [None, ""]}}, {"_id": 0, "person_id": 1, "industry": 1}).to_list(None)
 
 
 async def snapshots(db) -> tuple:
     return await asyncio.gather(
         db[JOBS].find({}, {"_id": 0, "lease_owner": 0}).to_list(None),
-        db[PERSONS_COLLECTION].find({"is_fictional": True}, {"_id": 0, "person_id": 1, "industry": 1, "industry_code": 1, "industry_sector_code": 1, "summary": 1, "source_urls": 1, "research_evidence": 1, "last_researched_at": 1}).to_list(None),
+        db[PERSONS_COLLECTION].find({"is_fictional": True}, {"_id": 0, "person_id": 1, "industry": 1, "industry_code": 1, "industry_sector_code": 1, "summary": 1, "company": 1, "position": 1, "context_complete": 1, "source_urls": 1, "research_evidence": 1, "last_researched_at": 1}).to_list(None),
         db[FACTS].aggregate([{"$group": {"_id": "$industry_code", "organizations": {"$addToSet": "$target_id"}, "sources": {"$addToSet": "$source_document_id"}, "phone_count": {"$sum": {"$cond": [{"$ne": ["$office_phone", ""]}, 1, 0]}}, "fact_count": {"$sum": 1}}}]).to_list(None),
     )
 
@@ -81,4 +85,4 @@ async def list_facts(db, industry_code: str = "", skip: int = 0, limit: int = 20
 
 
 async def industry_people(db, industry_code: str) -> list[dict]:
-    return await db[PERSONS_COLLECTION].find({"is_fictional": True, "industry_code": industry_code}, {"_id": 0, "person_id": 1, "industry": 1, "summary": 1, "source_urls": 1, "research_evidence": 1}).to_list(None)
+    return await db[PERSONS_COLLECTION].find({"is_fictional": True, "industry_code": industry_code}, {"_id": 0, "person_id": 1, "industry": 1, "summary": 1, "company": 1, "position": 1, "context_complete": 1, "source_urls": 1, "research_evidence": 1}).to_list(None)

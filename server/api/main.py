@@ -374,6 +374,8 @@ async def lifespan(app: FastAPI):
         await persona_research_tasks_dao.ensure_indexes(db)
         from api.dao import persona_coverage as persona_coverage_dao
         await persona_coverage_dao.ensure_indexes(db)
+        from api.services.persona_coverage.service import classify_exact_industries
+        await classify_exact_industries(db)
         from api.dao import person_intelligence as person_intelligence_dao
         await person_intelligence_dao.ensure_indexes(db)
         interrupted_persona_tasks = await persona_research_tasks_dao.mark_interrupted(db)

@@ -19,7 +19,7 @@ _workers: list[asyncio.Task] = []
 
 
 async def _generate(db, app_config, job: dict, owner: str) -> list[str]:
-    from api.services.persona_collect import generate_personas
+    from api.services.persona_generation import generate_personas
     people = await dao.industry_people(db, job["industry_code"])
     ready = [item["person_id"] for item in people if profile_ready(item)]
     missing = max(0, job["minimum_personas"] - len(ready))
@@ -30,7 +30,8 @@ async def _generate(db, app_config, job: dict, owner: str) -> list[str]:
     await dao.update_job(db, job["job_id"], owner, research_task_id=task_id)
     try:
         result = await generate_personas(db, app_config, background=default_background([job["industry_name"]]), count=missing,
-            industries=[job["industry_name"]], extra=f"本轮所有人设的 industry 必须为 {job['industry_name']}，对应行业大类 {job['industry_code']}。已经覆盖 {len(ready)} 条，本轮补齐不同岗位，保留至少 4 个核验来源。", task_id=task_id, source="synthetic_research:industry_coverage")
+            industries=[job["industry_name"]], extra=f"本轮所有人设的 industry 必须为 {job['industry_name']}，对应行业大类 {job['industry_code']}。已经覆盖 {len(ready)} 条，本轮补齐不同岗位的完整上下文。",
+            generation_mode=job.get("generation_mode", "context"), industry_code=job["industry_code"], industry_sector_code=job["sector_code"], task_id=task_id, source="synthetic_research:industry_coverage")
         people = [item for item in result.get("items", []) if profile_ready(item) and str(item.get("industry") or "").strip() == job["industry_name"]]
         ids = [item["person_id"] for item in people]
         await dao.classify_persons(db, ids, industry_code=job["industry_code"], sector_code=job["sector_code"], job_id=job["job_id"])
@@ -43,7 +44,7 @@ async def _generate(db, app_config, job: dict, owner: str) -> list[str]:
 
 
 async def _execute(db, app_config, job: dict, owner: str) -> None:
-    await dao.update_job(db, job["job_id"], owner, stage="researching", message="正在研究行业人设、机构与公开办公联系方式")
+    await dao.update_job(db, job["job_id"], owner, stage="generating", message="正在自动补齐行业人设、公司背景和联络场景")
     async def personas():
         ids = await _generate(db, app_config, job, owner)
         await dao.update_job(db, job["job_id"], owner, person_ids=ids)
@@ -55,7 +56,8 @@ async def _execute(db, app_config, job: dict, owner: str) -> None:
         ids = await research_organizations(db, app_config, job)
         await dao.update_job(db, job["job_id"], owner, fact_ids=ids)
         return ids
-    results = await asyncio.gather(personas(), organizations(), return_exceptions=True)
+    stages = {"context": (personas,), "researched": (personas, organizations)}[job.get("generation_mode", "context")]
+    results = await asyncio.gather(*(stage() for stage in stages), return_exceptions=True)
     errors = [str(item)[:600] for item in results if isinstance(item, Exception)]
     report = await coverage(db)
     row = next(item for item in report["items"] if item["code"] == job["industry_code"])

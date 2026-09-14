@@ -17,7 +17,7 @@ async def get_coverage():
 @router.post("/start")
 async def start(req: CoverageStart):
     try:
-        return await start_coverage(get_db(), industry_codes=req.industry_codes, minimum_personas=req.minimum_personas)
+        return await start_coverage(get_db(), industry_codes=req.industry_codes, minimum_personas=req.minimum_personas, generation_mode=req.generation_mode)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

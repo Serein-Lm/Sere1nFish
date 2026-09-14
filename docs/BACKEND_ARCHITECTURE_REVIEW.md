@@ -227,3 +227,5 @@ command/service
 `persona_coverage` 是独立 service/runtime/DAO，不再向大型 `persona_collect` 入口增加行业循环。97 个行业大类采用跨门类广度优先队列、2 个 worker、5 分钟持久化租约、30 秒续期和单行业 30 分钟执行边界，重启保留已完成的人设与机构归档，缺口自动退避重试。复用已有 Chrome registry、模型 adapter、Prompt 库、观测上下文与 SourceDocument 归档。新增 `persona_coverage_jobs`、`industry_organization_facts`，配置 `persona_coverage.enabled` 默认关闭，用户发起后启用。
 
 人设内容历史由 `person_profile_versions` 保存。`persons` 的更新和前后完整快照先在单文档聚合更新中原子提交，快照暂存 `_pending_profile_versions`，再幂等投影到不可变版本集合；重启恢复未投影快照。兼容 standalone MongoDB，不依赖多集合事务。已存在档案只回填当前存活版本，不虚构丢失历史。行业机构事实保留 Target、SourceDocument、version_id 和可核验原文，与虚构人物身份分离。
+
+2026-09-14 按用户最新口径，人设覆盖默认改为完整虚构上下文模式，由 `persona_generation` registry 分派到独立 `persona_context` 服务，不再以 8 个网页或真实机构电话作为前置门槛；旧研究流程作为可选 adapter 保留。公司背景、模拟联络方式和资料原点独立持久化，历史来源与身份保持。来源浏览器补充按成功页面数量触发次级搜索引擎的有界回退，机构参考采用独立 2–6 页预算。Target 扫描记录按最近实际执行时间排序，恢复任务不会被旧失败任务盖过。

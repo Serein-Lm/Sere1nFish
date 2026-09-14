@@ -4,7 +4,7 @@ import { getIndustryOrganizations, getPersonaCoverage, startPersonaCoverage, typ
 import SourceVersionPreview from '../../components/SourceVersionPreview'
 import { formatBeijingTimestamp as time } from '../../utils/dateTime'
 
-const statusNames: Record<string, string> = { queued: '已排队', running: '联网研究中', retry: '等待自动重试', needs_sources: '等待新来源', completed: '已达标' }
+const statusNames: Record<string, string> = { queued: '已排队', running: '自动补齐中', retry: '等待自动重试', needs_sources: '等待自动补齐', completed: '已达标' }
 
 export default function IndustryCoveragePanel({ onChanged }: { onChanged: () => void }) {
   const { message } = App.useApp()
@@ -42,18 +42,18 @@ export default function IndustryCoveragePanel({ onChanged }: { onChanged: () => 
     setStarting(true)
     try {
       const result = await startPersonaCoverage(codes)
-      message.success(`已安排 ${result.queued_industries} 个行业自动研究，无需填写背景资料`)
+      message.success(`已安排 ${result.queued_industries} 个行业自动补齐，无需填写背景资料`)
       await refresh(); onChanged()
     } catch (err) { message.error(String(err)) }
     finally { setStarting(false) }
   }
   const summary = report?.summary
-  return <Card style={{ marginBottom: 20 }} title="行业覆盖与自动补采" extra={<Button onClick={() => setOpen(true)}>查看全部行业</Button>}>
+  return <Card style={{ marginBottom: 20 }} title="行业覆盖与自动补齐" extra={<Button onClick={() => setOpen(true)}>查看全部行业</Button>}>
     {error && <Alert type="error" title={error} />}
     <Space orientation="vertical" size={14} style={{ width: '100%' }}>
-      <Space wrap><Tag color="blue">人设 {summary?.person_count || 0}</Tag><Tag>门类 {summary?.sector_count || 0} / 20</Tag><Tag>细分行业 {summary?.division_count || 0} / 97</Tag><Tag color="green">资料达标 {summary?.complete_count || 0} / 97</Tag><Tag>公开机构 {summary?.organization_count || 0}</Tag><Tag>办公电话证据 {summary?.phone_count || 0}</Tag></Space>
-      <Typography.Text type="secondary">自动上网研究行业、岗位、机构及公开办公联系方式；人物身份保持虚构，真实机构资料单独保留来源证据。</Typography.Text>
-      <Space wrap><Button type="primary" loading={starting} onClick={() => void start()}>自动补齐全部行业</Button><Button loading={loading} onClick={() => { void refresh(); onChanged() }}>刷新覆盖</Button><Typography.Text>研究中 {summary?.running || 0} · 排队 {summary?.queued || 0}</Typography.Text></Space>
+      <Space wrap><Tag color="blue">人设 {summary?.person_count || 0}</Tag><Tag>门类 {summary?.sector_count || 0} / 20</Tag><Tag>细分行业 {summary?.division_count || 0} / 97</Tag><Tag color="green">资料达标 {summary?.complete_count || 0} / 97</Tag><Tag>参考机构 {summary?.organization_count || 0}</Tag><Tag>参考电话 {summary?.phone_count || 0}</Tag></Space>
+      <Typography.Text type="secondary">自动生成公司、岗位、经历与模拟联系方式，完整上下文无需来源核验；已有网上资料保留作参考。</Typography.Text>
+      <Space wrap><Button type="primary" loading={starting} onClick={() => void start()}>自动补齐全部行业</Button><Button loading={loading} onClick={() => { void refresh(); onChanged() }}>刷新覆盖</Button><Typography.Text>生成中 {summary?.running || 0} · 排队 {summary?.queued || 0}</Typography.Text></Space>
       {!!summary?.unclassified_count && <Typography.Text type="secondary">{summary.unclassified_count} 条历史人设尚未明确归入细分行业，保留原资料，不重复计入大类覆盖。</Typography.Text>}
     </Space>
     <Drawer open={open} onClose={() => setOpen(false)} title="全部行业覆盖" size={1240} rootClassName="target-records-drawer">
@@ -61,10 +61,10 @@ export default function IndustryCoveragePanel({ onChanged }: { onChanged: () => 
       <Table<IndustryCoverage> rowKey="code" dataSource={(report?.items || []).filter((item) => (!sector || item.sector_code === sector) && (!query || item.name.includes(query) || item.code.includes(query)))} loading={loading} tableLayout="fixed" scroll={{ x: 1080 }} pagination={{ pageSize: 20 }} columns={[
         { title: '行业大类', key: 'industry', width: 240, render: (_, row) => <>{row.code} · {row.name}</> },
         { title: '完整人设', key: 'people', width: 90, render: (_, row) => `${row.person_count} / ${row.minimum_personas}` },
-        { title: '机构 / 电话 / 来源', key: 'sources', width: 145, render: (_, row) => <Button type="link" onClick={() => { setSelected(row); setPage(1) }}>{row.organization_count} / {row.phone_count} / {row.source_count}</Button> },
-        { title: '覆盖与缺口', key: 'gaps', width: 240, render: (_, row) => <Space orientation="vertical" size={0}><Tag color={row.complete ? 'green' : 'default'}>{row.complete ? '资料达标' : row.job ? statusNames[row.job.status] || row.job.status : '待补采'}</Tag><Typography.Text type="secondary">{row.gaps.join('；')}</Typography.Text></Space> },
+        { title: '网上参考（可选）', key: 'sources', width: 145, render: (_, row) => <Button type="link" onClick={() => { setSelected(row); setPage(1) }}>{row.organization_count} / {row.phone_count} / {row.source_count}</Button> },
+        { title: '覆盖与缺口', key: 'gaps', width: 240, render: (_, row) => <Space orientation="vertical" size={0}><Tag color={row.complete ? 'green' : 'default'}>{row.complete ? '资料达标' : row.job ? statusNames[row.job.status] || row.job.status : '待补齐'}</Tag><Typography.Text type="secondary">{row.gaps.join('；')}</Typography.Text></Space> },
         { title: '最近进度（北京时间）', key: 'progress', width: 235, render: (_, row) => <Space orientation="vertical" size={0}><Typography.Text>{time(row.job?.updated_at)}</Typography.Text><Typography.Text type="secondary">{row.job?.message}</Typography.Text>{row.job?.errors?.map((item, i) => <Typography.Text type="secondary" key={i}>{item}</Typography.Text>)}</Space> },
-        { title: '操作', key: 'actions', width: 90, render: (_, row) => <Button loading={starting} disabled={row.job?.status === 'running'} onClick={() => void start([row.code])}>补采</Button> },
+        { title: '操作', key: 'actions', width: 90, render: (_, row) => <Button loading={starting} disabled={row.job?.status === 'running'} onClick={() => void start([row.code])}>补齐</Button> },
       ]} />
     </Drawer>
     <Drawer open={!!selected} onClose={() => setSelected(null)} title={`${selected?.name || ''} · 公开机构资料`} size={1060} rootClassName="target-records-drawer">

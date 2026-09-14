@@ -43,6 +43,13 @@ export interface Person {
   is_fictional?: boolean
   generation_brief?: string
   generation_key?: string
+  generation_mode?: 'context' | 'researched'
+  information_origin?: string
+  context_complete?: boolean
+  scenario_contact?: { origin: 'fictional'; phone: string; email: string; wechat: string; availability: string; introduction: string }
+  company_business?: string
+  company_address?: string
+  company_website?: string
   gender?: string
   age?: number
   age_range?: string

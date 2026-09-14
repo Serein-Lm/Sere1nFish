@@ -42,7 +42,9 @@ _SCALAR_FIELDS = (
     "region_type", "organization_context", "career_stage", "career_path", "life_stage",
     "work_context", "work_rhythm", "decision_style", "communication_style",
     "collaboration_style", "technology_attitude", "learning_style", "stress_response",
-    "is_fictional", "generation_brief", "generation_key",
+    "is_fictional", "generation_brief", "generation_key", "generation_mode", "information_origin",
+    "context_complete", "company_business", "company_address", "company_website",
+    "industry_code", "industry_sector_code",
 )
 # 列表字段：取并集
 _LIST_FIELDS = (
@@ -64,7 +66,7 @@ _LIST_FIELDS = (
 )
 _OBJECT_LIST_FIELDS = ("research_evidence",)
 # 嵌套对象字段：子字段非空才覆盖
-_NESTED_FIELDS = ("education", "contact")
+_NESTED_FIELDS = ("education", "contact", "scenario_contact")
 _SUMMARY_PROJECTION = {
     "_id": 0,
     "person_id": 1,
@@ -310,7 +312,7 @@ async def upsert_person(
 
     existing = await get_person(db, pid)
     set_fields, list_add = _merge_set_fields(existing, profile)
-    if source.startswith("synthetic_research"):
+    if source.startswith(("synthetic_research", "synthetic_context")):
         _replace_research_collections(existing, profile, set_fields, list_add)
     set_fields["person_id"] = pid
 

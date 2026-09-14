@@ -80,12 +80,14 @@ def _summary_age_issues(profile: dict[str, Any]) -> list[str]:
     return []
 
 
-def _profile_quality_issues(profile: dict[str, Any]) -> list[str]:
+def _profile_quality_issues(profile: dict[str, Any], *, require_references: bool = True) -> list[str]:
     """Validate richness without constructing or rewriting any persona facts."""
     from Sere1nGraph.graph.skills.schemas import RichFictionalPersonaProfile
 
     issues: list[str] = []
     for key, definition in RichFictionalPersonaProfile.model_fields.items():
+        if not require_references and key in {"sources", "evidence", "research_evidence"}:
+            continue
         if not definition.is_required():
             continue
         value = profile.get(key)
@@ -138,7 +140,7 @@ def _profile_quality_issues(profile: dict[str, Any]) -> list[str]:
             for item in profile.get(field) or []
         ):
             issues.append(f"{field} 包含缺失或占位条目")
-    if any(
+    if require_references and any(
         _research_evidence_has_gap(item)
         for item in profile.get("research_evidence") or []
     ):

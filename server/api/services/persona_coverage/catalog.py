@@ -19,4 +19,4 @@ def ordered_divisions() -> list[dict]:
 
 def default_background(industries: list[str] | None = None) -> str:
     scope = "、".join(industries or [sector["name"] for sector in catalog()["sectors"]])
-    return f"基于公开网络资料研究以下行业及典型岗位，自动生成职业和生活经历完整、身份明确虚构的人设：{scope}。公司行业背景应有可追溯来源，人物不得冒用真实自然人的身份或联系方式。覆盖不同岗位、职级、地区与职业阶段，不需要用户提供资料。"
+    return f"自动生成以下行业及典型岗位的完整虚构人设：{scope}。补齐公司业务、组织关系、模拟联系方式、职业和生活经历，保持上下文自洽。网上行业资料仅作可选参考，不要求来源核验。覆盖不同岗位、职级、地区与职业阶段，不需要用户提供资料。"
