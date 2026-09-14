@@ -181,7 +181,9 @@ class WechatArticleSearchNavigator:
         for attempt in range(max(1, attempts)):
             observed = self._read_search_query(adb_device_id)
             if observed is None:
-                return expected, "adb_keyboard_activity"
+                raise RuntimeError(
+                    "无法读取微信搜索框，不能确认搜索词已生效；需要视觉导航核验"
+                )
             actual = observed
             if self._normalize_query(actual) == expected_normalized:
                 return actual, "uiautomator_exact"

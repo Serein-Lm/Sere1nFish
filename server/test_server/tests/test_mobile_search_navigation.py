@@ -353,7 +353,7 @@ def test_wechat_search_navigator_rejects_stale_query(monkeypatch) -> None:
     assert ("keyboard", "restore", "original/.Ime") in device.events
 
 
-def test_wechat_search_navigator_accepts_opaque_wechat_webview(monkeypatch) -> None:
+def test_wechat_search_navigator_rejects_unverifiable_query(monkeypatch) -> None:
     from core.mobile.collect import search_navigation
 
     device = _FakeDevice()
@@ -382,10 +382,12 @@ def test_wechat_search_navigator_accepts_opaque_wechat_webview(monkeypatch) -> N
         keyword="全国学生资助管理中心 招标",
     )
 
-    assert result.ok is True
-    assert result.metadata["verified_query"] == "全国学生资助管理中心 招标"
-    assert result.metadata["query_verification"] == "adb_keyboard_activity"
-    assert device.events.count(("type", "全国学生资助管理中心 招标")) == 1
+    assert result.ok is False
+    assert "无法读取微信搜索框" in str(result.error)
+    assert "verified_query" not in result.metadata
+    assert not any(event[0] == "press" for event in device.events)
+    assert ("tap", 400, 202) not in device.events
+    assert ("keyboard", "restore", "original/.Ime") in device.events
 
 
 def test_registered_navigation_runs_without_visual_agent(monkeypatch) -> None:
