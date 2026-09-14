@@ -229,7 +229,12 @@ async def test_bidding_read_model_uses_archived_contacts_without_findings(
     async def query_records(*_args: Any, **_kwargs: Any):
         return records, len(records)
 
-    monkeypatch.setattr(bidding_records.bidding_dao, "query_records", query_records)
+    monkeypatch.setattr(bidding_records.bidding_dao, "query_project_records", query_records)
+
+    async def project_targets(*_args: Any, **_kwargs: Any):
+        return [{"target_id": "target-1", "target_name": "示例采购单位"}]
+
+    monkeypatch.setattr(bidding_records.targets_dao, "list_project_targets", project_targets)
 
     items, total = await bidding_records.list_project_bidding_records(
         _BiddingDb([]),

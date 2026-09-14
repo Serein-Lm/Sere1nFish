@@ -3987,7 +3987,7 @@ export default function ProjectDetail() {
     return (
       <div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8, flexWrap: 'wrap' }}>
-          <Text type="secondary">按公司 Target 永久归档，共 {biddingRecordsTotal} 条公告</Text>
+          <Text type="secondary">仅显示可确认归属当前单位及其已关联下级单位的公告，共 {biddingRecordsTotal} 条</Text>
           <Space wrap>
             <Select
               value={biddingTargetId}

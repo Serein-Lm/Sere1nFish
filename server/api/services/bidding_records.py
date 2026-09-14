@@ -9,7 +9,9 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.dao import bidding as bidding_dao
-from api.db.collections import BIDDING_RECORDS_COLLECTION, FINDINGS_COLLECTION
+from api.dao import targets as targets_dao
+from api.db.collections import FINDINGS_COLLECTION
+from api.services.bidding_ownership import BiddingOwnershipScope
 from api.utils.url_identity import endpoint_identity
 
 
@@ -270,6 +272,29 @@ def _public_bidding_record(
     return public
 
 
+async def _owned_project_records(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str = "",
+) -> list[dict[str, Any]]:
+    ownership = BiddingOwnershipScope(await targets_dao.list_project_targets(db, project_id))
+    selected = ownership.target_ids(target_id)
+    if not selected:
+        return []
+    candidates, _ = await bidding_dao.query_project_records(
+        db,
+        project_id=project_id,
+        limit=5_000,
+        skip=0,
+    )
+    return [
+        {**record, "target_ids": owners}
+        for record in candidates
+        if (owners := sorted(set(ownership.owner_ids(record)).intersection(selected)))
+    ]
+
+
 async def list_project_bidding_records(
     db: AsyncIOMotorDatabase,
     *,
@@ -278,14 +303,10 @@ async def list_project_bidding_records(
     limit: int = 20,
     skip: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Return only announcements that have usable participant contacts."""
-    records, _ = await bidding_dao.query_records(
-        db,
-        project_id=project_id,
-        target_id=target_id,
-        limit=5_000,
-        skip=0,
-    )
+    """Return owned announcements with usable contacts, filtering before paging."""
+    records = await _owned_project_records(db, project_id=project_id, target_id=target_id)
+    if not records:
+        return [], 0
     record_ids = [str(record.get("record_id") or "") for record in records]
     finding_query: dict[str, Any] = {
         "project_id": project_id,
@@ -296,8 +317,6 @@ async def list_project_bidding_records(
             {"bidding_record_id": ""},
         ],
     }
-    if target_id:
-        finding_query["target_id"] = target_id
     findings = await db[FINDINGS_COLLECTION].find(
         finding_query,
         {"_id": 0},
@@ -367,77 +386,14 @@ async def count_project_bidding_records_by_target(
     project_id: str,
     target_ids: list[str],
 ) -> dict[str, int]:
-    """Count contact-bearing announcements without rebuilding the full read model."""
-    selected = {str(target_id or "").strip() for target_id in target_ids}
-    selected.discard("")
+    """Use the same ownership and contact gate as the visible project list."""
+    selected = {str(value or "").strip() for value in target_ids} - {""}
     if not selected:
         return {}
-    counts = {target_id: 0 for target_id in selected}
-
-    findings = await db[FINDINGS_COLLECTION].find(
-        {"project_id": project_id, "source": "bidding"},
-        {
-            "_id": 0,
-            "bidding_record_id": 1,
-            "source_url": 1,
-            "url": 1,
-            "channel": 1,
-            "value": 1,
-            "role": 1,
-            "type": 1,
-            "party_role": 1,
-        },
-    ).to_list(None)
-    actionable_record_ids: set[str] = set()
-    legacy_endpoint_keys: set[str] = set()
-    for finding in findings:
-        if not is_actionable_bidding_contact(finding):
-            continue
-        record_id = str(finding.get("bidding_record_id") or "").strip()
-        if record_id:
-            actionable_record_ids.add(record_id)
-            continue
-        endpoint_key = endpoint_identity(
-            str(finding.get("source_url") or finding.get("url") or ""),
-            include_query=True,
-        )
-        if endpoint_key:
-            legacy_endpoint_keys.add(endpoint_key)
-    record_query: dict[str, Any] = {
-        "project_ids": project_id,
-        "target_ids": {"$in": list(selected)},
+    ownership = BiddingOwnershipScope(await targets_dao.list_project_targets(db, project_id))
+    scopes = {target_id: ownership.target_ids(target_id) for target_id in selected}
+    records, _ = await list_project_bidding_records(db, project_id=project_id, limit=5_000)
+    return {
+        target_id: sum(bool(set(record.get("target_ids") or []).intersection(scope)) for record in records)
+        for target_id, scope in scopes.items()
     }
-    records = await db[BIDDING_RECORDS_COLLECTION].find(
-        record_query,
-        {
-            "_id": 0,
-            "record_id": 1,
-            "target_ids": 1,
-            "resolved_detail_url": 1,
-            "detail_url": 1,
-            "provider_url": 1,
-            "contact_candidates": 1,
-            "purchaser": 1,
-            "agency": 1,
-        },
-    ).to_list(None)
-    counted: dict[str, set[str]] = {target_id: set() for target_id in selected}
-    for record in records:
-        record_id = str(record.get("record_id") or "").strip()
-        is_actionable = record_id in actionable_record_ids
-        if not is_actionable and legacy_endpoint_keys:
-            is_actionable = bool(_record_urls(record).intersection(legacy_endpoint_keys))
-        if not is_actionable:
-            is_actionable = bool(archived_bidding_contacts(record))
-        if not is_actionable:
-            continue
-        identity = record_id or next(iter(_record_urls(record)), "")
-        if not identity:
-            continue
-        for target_id in {
-            str(value or "").strip() for value in record.get("target_ids") or []
-        }.intersection(selected):
-            counted[target_id].add(identity)
-    for target_id, identities in counted.items():
-        counts[target_id] = len(identities)
-    return counts

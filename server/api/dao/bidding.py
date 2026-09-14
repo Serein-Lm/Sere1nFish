@@ -559,6 +559,33 @@ async def query_record_links(
     return [doc async for doc in cursor], total
 
 
+async def query_project_records(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    limit: int = 5_000,
+    skip: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Read project evidence through explicit links, never global ID cross-products."""
+    if not project_id:
+        return [], 0
+    record_ids = await db[BIDDING_RECORD_LINKS_COLLECTION].distinct(
+        "record_id", {"project_id": project_id},
+    )
+    if not record_ids:
+        return [], 0
+    query = {"record_id": {"$in": record_ids}}
+    collection = db[BIDDING_RECORDS_COLLECTION]
+    total = await collection.count_documents(query)
+    cursor = (
+        collection.find(query, {"_id": 0})
+        .sort([("published_on", -1), ("updated_at", -1)])
+        .skip(max(0, skip))
+        .limit(max(1, limit))
+    )
+    return [document async for document in cursor], total
+
+
 async def query_records(
     db: AsyncIOMotorDatabase,
     *,
