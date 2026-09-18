@@ -14,6 +14,11 @@ _SUBMISSION_INTENT_RE = re.compile(r"投稿|征稿|约稿")
 _SUBMISSION_SUBJECT_FLOOR = 40
 
 
+def is_submission_intent(keyword: str) -> bool:
+    """投稿/征稿/约稿类搜索词允许合集文章，与其他意图的门控语义不同。"""
+    return bool(_SUBMISSION_INTENT_RE.search(str(keyword or "")))
+
+
 class CandidatePolicy(Protocol):
     name: str
     persist_list_candidates: bool
@@ -174,7 +179,7 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
 
     @property
     def _submission_intent(self) -> bool:
-        return bool(_SUBMISSION_INTENT_RE.search(self.keyword or ""))
+        return is_submission_intent(self.keyword)
 
     def analysis_instructions(self, *, target_name: str, aliases: list[str]) -> str:
         aliases_text = "、".join(value for value in aliases if value) or "无"
