@@ -1,7 +1,6 @@
 """Immutable mobile increments, independent of mutable collection records."""
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 from pymongo import ReturnDocument
@@ -52,20 +51,3 @@ async def counts(db, query: dict) -> dict:
         {"$match": query}, {"$group": {"_id": "$kind", "count": {"$sum": 1}}},
     ]).to_list(None)
     return {kind: next((row["count"] for row in rows if row["_id"] == kind), 0) for kind in ("new", "changed")}
-
-
-async def feed(db, *, project_id: str = "", after: datetime | None = None, limit: int = 50) -> dict:
-    now = datetime.now(timezone.utc)
-    query: dict = {"detected_at": {"$gte": now - timedelta(days=7), "$lte": now}}
-    if project_id:
-        query["project_id"] = project_id
-    unread_query = dict(query)
-    if after:
-        unread_query["detected_at"] = {**query["detected_at"], "$gt": after}
-    collection = db[MOBILE_INCREMENTAL_EVENTS_COLLECTION]
-    items, total, unread = await asyncio.gather(
-        collection.find(query, {"_id": 0, "delivery_lease_until": 0}).sort([("detected_at", -1), ("event_id", -1)]).limit(limit).to_list(None),
-        counts(db, query), counts(db, unread_query),
-    )
-    return {"items": items, "new_count": total["new"], "changed_count": total["changed"],
-            "unread_count": sum(unread.values()), "generated_at": now, "days": 7}

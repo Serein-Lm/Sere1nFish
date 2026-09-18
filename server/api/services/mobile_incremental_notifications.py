@@ -130,10 +130,6 @@ async def publish_increment(db, *, payload: dict, state: dict) -> dict | None:
     return claimed
 
 
-async def list_incremental_feed(db, *, project_id: str = "", after=None, limit: int = 50) -> dict:
-    return await dao.feed(db, project_id=project_id.strip(), after=utc_time(after), limit=limit)
-
-
 async def publish_recovered_increment(db, *, previous: dict, result: dict, stored: dict, task_def: dict) -> None:
     """A recovered pending link becomes a new, verified item after archival."""
     from api.dao.mobile_incremental import get_run_window

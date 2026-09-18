@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class IncrementalEvent(BaseModel):
@@ -24,11 +24,3 @@ class IncrementalEvent(BaseModel):
     window_until: datetime | None = None
     delivery_status: str = "pending"
 
-
-class IncrementalFeed(BaseModel):
-    items: list[IncrementalEvent] = Field(default_factory=list)
-    new_count: int = 0
-    changed_count: int = 0
-    unread_count: int = 0
-    generated_at: datetime
-    days: int = 7
