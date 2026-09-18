@@ -229,6 +229,7 @@ class WechatSourceStage(CompanySourceStage):
             device_id=ctx.plan.wechat_device_id,
             app_instance=str(ctx.result["wechat"].get("app_instance") or "primary"),
             collection_priority=str(ctx.result["wechat"].get("priority") or "normal"),
+            append_keywords=list(ctx.plan.wechat_append_keywords),
             requested_by=ctx.plan.requested_by,
             started_event=ctx.mobile_started,
         )

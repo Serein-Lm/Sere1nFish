@@ -48,6 +48,8 @@ class CompanyScanPlan:
     wechat_device_id: str = ""
     wechat_app_instance: str = "primary"
     wechat_target_selection_mode: str = "auto"
+    wechat_append_keywords: tuple[str, ...] = ()
+    wechat_collection_priority: str = "auto"
     enable_scholar: bool = True
     scholar_direction: str = ""
     scholar_unit_en: str = ""
@@ -120,6 +122,9 @@ class CompanyScanPlan:
     @classmethod
     def from_call(cls, **values: Any) -> "CompanyScanPlan":
         values["urls"] = tuple(values.get("urls") or ())
+        values["wechat_append_keywords"] = tuple(
+            values.get("wechat_append_keywords") or ()
+        )
         values["website_root_domains"] = tuple(
             values.get("website_root_domains") or ()
         )

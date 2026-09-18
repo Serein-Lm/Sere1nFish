@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.dao import mobile_collect as collect_dao
 from api.models.mobile_collect import CollectTaskDef
 from api.services.mobile_collect_pipeline import run_mobile_collect_definition
+from api.services.search_terms import normalize_append_terms
 from core.logger import get_logger
 from core.mobile.collect.presets import get_preset_task
 
@@ -39,7 +40,9 @@ def normalize_wechat_app_instance(value: Any) -> str:
 
 
 def build_company_wechat_task_profile(
-    *, app_instance: str = "primary"
+    *,
+    app_instance: str = "primary",
+    append_keywords: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the complete WeChat article profile used by company scans.
 
@@ -53,6 +56,7 @@ def build_company_wechat_task_profile(
             "name": WECHAT_AUTO_TASK_NAME,
             "app_instance": normalized_instance,
             "keywords": [],
+            "append_keywords": normalize_append_terms(append_keywords),
             "use_target_keyword_library": True,
             "deep_collect": True,
             "source_link_strategy": WECHAT_SOURCE_LINK_STRATEGY,
@@ -347,11 +351,13 @@ async def run_company_wechat_collection(
     device_id: str,
     app_instance: str = "primary",
     collection_priority: str = "normal",
+    append_keywords: list[str] | None = None,
     requested_by: str = "",
     on_started: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """用已配置手机发现文章链接，再复用 Chrome Provider 归档正文与图片。"""
     normalized_instance = normalize_wechat_app_instance(app_instance)
+    normalized_append = normalize_append_terms(append_keywords)
     task_def = await resolve_wechat_task_definition(
         db,
         project_id=project_id,
@@ -369,7 +375,10 @@ async def run_company_wechat_collection(
         project_id=project_id,
         task_def_id=task_def_id,
         runtime_overrides={
-            **build_company_wechat_task_profile(app_instance=normalized_instance),
+            **build_company_wechat_task_profile(
+                app_instance=normalized_instance,
+                append_keywords=normalized_append,
+            ),
             "project_id": project_id,
             "target_id": target_id,
             "target_name": target_name,

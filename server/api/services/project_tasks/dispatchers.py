@@ -146,6 +146,10 @@ async def dispatch_company_scan(
         wechat_target_selection_mode=params.get(
             "wechat_target_selection_mode", "auto"
         ),
+        wechat_append_keywords=params.get("wechat_append_keywords", []),
+        wechat_collection_priority=params.get(
+            "wechat_collection_priority", "auto"
+        ),
         enable_scholar=params.get("enable_scholar", True),
         scholar_direction=params.get("scholar_direction", ""),
         scholar_unit_en=params.get("scholar_unit_en", ""),

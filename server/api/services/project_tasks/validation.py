@@ -1,6 +1,7 @@
 """Task-parameter policies shared by JSON and file submission APIs."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -178,6 +179,7 @@ def normalize_company_scan_params(params: dict[str, Any]) -> None:
         params["enable_subsidiary_bidding"] = False
 
     if params.get("enable_wechat", False):
+        from api.services.search_terms import normalize_append_terms
         from api.services.wechat_collection import normalize_wechat_app_instance
         from api.services.wechat_target_selection import (
             normalize_wechat_selection_mode,
@@ -189,6 +191,19 @@ def normalize_company_scan_params(params: dict[str, Any]) -> None:
         params["wechat_target_selection_mode"] = normalize_wechat_selection_mode(
             params.get("wechat_target_selection_mode", "auto")
         )
+        if "wechat_append_keywords" in params:
+            raw_append = params.get("wechat_append_keywords")
+            if isinstance(raw_append, str):
+                raw_append = re.split(r"[\n\r,，;；]+", raw_append)
+            params["wechat_append_keywords"] = normalize_append_terms(
+                raw_append if isinstance(raw_append, list) else []
+            )
+        collection_priority = str(
+            params.get("wechat_collection_priority") or "auto"
+        ).strip().lower()
+        if collection_priority not in {"auto", "high", "normal", "low"}:
+            raise ValueError("公众号手机优先级必须为 auto、high、normal 或 low")
+        params["wechat_collection_priority"] = collection_priority
 
     if params.get("enable_scholar", True):
         for key in ("scholar_direction", "scholar_unit_en"):

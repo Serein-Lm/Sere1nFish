@@ -88,6 +88,8 @@ class CompanyScanPipeline:
         wechat_device_id: str = "",
         wechat_app_instance: str = "primary",
         wechat_target_selection_mode: str = "auto",
+        wechat_append_keywords: list[str] | None = None,
+        wechat_collection_priority: str = "auto",
         enable_scholar: bool = True,
         scholar_direction: str = "",
         scholar_unit_en: str = "",
@@ -194,6 +196,7 @@ class CompanyScanPipeline:
         device_id: str,
         app_instance: str = "primary",
         collection_priority: str = "normal",
+        append_keywords: list[str] | None = None,
         requested_by: str = "",
         started_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
@@ -221,6 +224,7 @@ class CompanyScanPipeline:
             device_id=device_id,
             app_instance=app_instance,
             collection_priority=collection_priority,
+            append_keywords=append_keywords,
             requested_by=requested_by,
             on_started=_on_started,
         )

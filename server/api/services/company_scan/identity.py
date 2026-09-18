@@ -485,7 +485,10 @@ class CompanyIdentityStage:
             return
         if ctx.recovery.restore_core_context:
             ctx.root_wechat_enabled = not ctx.recovery.resume_mobile_completed
-            ctx.result["wechat"].update(selected=True, priority="normal")
+            ctx.result["wechat"].update(
+                selected=True,
+                priority=self._effective_wechat_priority(ctx, "normal"),
+            )
             ctx.result["wechat"]["selection"].update(
                 status="restored", selected_count=1, skipped_count=0, error=None
             )
@@ -516,10 +519,22 @@ class CompanyIdentityStage:
         ctx.root_wechat_enabled = bool(decision and decision.should_collect_wechat)
         ctx.result["wechat"].update(
             selected=ctx.root_wechat_enabled,
-            priority=decision.collection_priority if decision else "skip",
+            priority=self._effective_wechat_priority(
+                ctx,
+                decision.collection_priority if decision else "skip",
+            ),
         )
         if not ctx.root_wechat_enabled:
             ctx.result["wechat"]["status"] = "skipped"
+
+    @staticmethod
+    def _effective_wechat_priority(
+        ctx: CompanyScanContext, decision_priority: str
+    ) -> str:
+        override = str(ctx.plan.wechat_collection_priority or "auto").strip().lower()
+        if override in {"high", "normal", "low"}:
+            return override
+        return str(decision_priority or "normal")
 
     @staticmethod
     def _xhs_candidate(ctx: CompanyScanContext, candidate_type: Any) -> Any:

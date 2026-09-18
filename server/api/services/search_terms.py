@@ -303,6 +303,14 @@ class ResolvedSearchTerms:
         }
 
 
+def normalize_append_terms(values: list[str] | None) -> list[str]:
+    """清洗附加搜索词：去空白、去重、限幅。"""
+    return _dedupe(
+        [str(value or "").strip() for value in (values or [])],
+        limit=10,
+    )
+
+
 async def resolve_project_target_terms(
     db: AsyncIOMotorDatabase,
     *,
@@ -311,6 +319,7 @@ async def resolve_project_target_terms(
     target_name: str,
     channel: str,
     explicit_keywords: list[str] | None = None,
+    append_terms: list[str] | None = None,
     include_direct_children: bool = True,
     max_relation_depth: int = 2,
     max_related_targets: int = 8,
@@ -376,7 +385,11 @@ async def resolve_project_target_terms(
         "target_name": str((root or {}).get("target_name") or target_name or ""),
     }
     explicit = _dedupe(list(explicit_keywords or []))
-    sources = ["task_explicit"] if explicit else []
+    append = normalize_append_terms(append_terms)
+    sources = [source for source, present in (
+        ("task_explicit", explicit),
+        ("append_terms", append),
+    ) if present]
     target_ids: list[str] = [root_target["target_id"]] if root_target["target_id"] else []
     term_groups: list[tuple[list[str], dict[str, str]]] = []
     for doc in documents:
@@ -436,6 +449,16 @@ async def resolve_project_target_terms(
 
     for term in explicit:
         _append(term, root_target)
+
+    if append:
+        root_names = (
+            _target_search_names(root, root_target["target_name"])
+            if root
+            else _dedupe([target_name])
+        )
+        for term in append:
+            for name in root_names:
+                _append(f"{name} {term}".strip(), root_target)
 
     # 在根公司和所有关联单位之间轮询取词，避免根公司词库先占满上限。
     max_group_size = max((len(group) for group, _target in term_groups), default=0)

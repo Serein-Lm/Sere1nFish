@@ -190,6 +190,11 @@ async def _resolve_keyword_library(
             ),
             channel=channel,
             explicit_keywords=explicit_keywords,
+            append_terms=[
+                str(value)
+                for value in (plan.task_def.get("append_keywords") or [])
+                if str(value or "").strip()
+            ],
             include_direct_children=bool(
                 plan.task_def.get("include_direct_children", True)
             ),

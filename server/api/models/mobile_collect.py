@@ -46,6 +46,11 @@ class CollectTaskDef(BaseModel):
         description="双开应用实例;primary 为主应用,clone 为应用分身",
     )
     keywords: list[str] = Field(default_factory=list, description="搜索关键词列表(逐个执行)")
+    append_keywords: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="附加搜索词，与目标规范名/别名组合为「名称 附加词」优先执行，如 投稿 -> 浙能 投稿",
+    )
     use_target_keyword_library: bool = Field(
         default=True,
         description="合并项目 Target、第一层全资子公司及数据库渠道 Skill 的搜索词",
@@ -222,6 +227,7 @@ class CollectTaskUpdate(BaseModel):
     app_name: str | None = None
     app_instance: AppInstance | None = None
     keywords: list[str] | None = None
+    append_keywords: list[str] | None = Field(default=None, max_length=10)
     use_target_keyword_library: bool | None = None
     include_direct_children: bool | None = None
     max_relation_depth: int | None = Field(default=None, ge=1, le=2)
