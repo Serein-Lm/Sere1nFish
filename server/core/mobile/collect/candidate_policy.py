@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 
 _WECHAT_SAFE_TAP_TOP = 140
 _WECHAT_SAFE_TAP_BOTTOM = 900
+
+_SUBMISSION_INTENT_RE = re.compile(r"投稿|征稿|约稿")
+_SUBMISSION_SUBJECT_FLOOR = 40
 
 
 class CandidatePolicy(Protocol):
@@ -54,6 +57,8 @@ class CandidatePolicy(Protocol):
         aliases: list[str],
         min_subject_match: int,
     ) -> CandidateDecision: ...
+
+    def source_subject_floor(self, base: int) -> int: ...
 
 
 def candidate_tap_bounds(candidate: dict) -> tuple[int, int, int, int] | None:
@@ -153,6 +158,9 @@ class DefaultCandidatePolicy:
     ) -> CandidateDecision:
         return CandidateDecision(True, "当前来源无需详情页二次校验")
 
+    def source_subject_floor(self, base: int) -> int:
+        return int(base)
+
 
 @dataclass(frozen=True, slots=True)
 class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
@@ -162,9 +170,27 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
     max_details_per_screen: int = 1
     requires_detail_verification: bool = True
     retry_detail_verification_at_top: bool = True
+    keyword: str = ""
+
+    @property
+    def _submission_intent(self) -> bool:
+        return bool(_SUBMISSION_INTENT_RE.search(self.keyword or ""))
 
     def analysis_instructions(self, *, target_name: str, aliases: list[str]) -> str:
         aliases_text = "、".join(value for value in aliases if value) or "无"
+        if self._submission_intent:
+            return (
+                "当前只允许选择微信公众号文章结果。必须区分文章、公众号账号、视频、直播、"
+                "小程序、广告和功能入口；后六类一律不得点击。候选必须有可见的文章标题。"
+                f"当前搜索词包含投稿/征稿意图：目标“{target_name}”自身发布的征稿启事"
+                f"（可靠别名：{aliases_text}），以及汇总多家刊物或单位投稿渠道的征稿合集"
+                "文章都是高价值候选。合集即使标题和账号不含目标名称也必须作为候选返回——"
+                "搜索引擎已按目标与投稿词匹配，合集正文深处常包含目标的投稿渠道、内刊和"
+                "联系邮箱。target_evidence 写明依据（如“征稿合集、搜索词命中”或"
+                "“标题/账号含目标名”）。content_kind 必须按画面真实类型填写；只有文章填写"
+                " is_article_result=true。只返回整条卡片完整可见的候选；屏幕顶部或底部被"
+                "裁切的卡片不得作为可点击候选。"
+            )
         return (
             "当前只允许选择微信公众号文章结果。必须区分文章、公众号账号、视频、直播、"
             "小程序、广告和功能入口；后六类一律不得点击。候选必须有可见的文章标题，且"
@@ -183,6 +209,13 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
         )
 
     def detail_verification_instructions(self) -> str:
+        if self._submission_intent:
+            return (
+                "微信公众号文章必须显示图文详情页标题；列表页、视频、公众号主页、搜索页或"
+                "加载空白都不通过。当前标题/账号必须与点击前候选一致。投稿/征稿搜索允许"
+                "征稿合集文章：合集正文很深处才提及目标主体是正常情况，首屏无需出现目标"
+                "名称，只要确认打开的是与候选一致的图文文章即可。"
+            )
         return (
             "微信公众号文章必须显示图文详情页标题；列表页、视频、公众号主页、搜索页或"
             "加载空白都不通过。当前标题/账号必须与点击前候选一致，且文章核心主体必须"
@@ -198,6 +231,11 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
         target_name: str = "",
         aliases: list[str] | None = None,
     ) -> CandidateDecision:
+        if self._submission_intent:
+            return self._review_submission_detail(
+                candidate,
+                min_score=min_score,
+            )
         base = DefaultCandidatePolicy.review_detail(
             self,
             candidate,
@@ -233,6 +271,38 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
             reason="；".join(failures) if failures else "文章类型和主体证据审核通过",
         )
 
+    def _review_submission_detail(
+        self,
+        candidate: dict,
+        *,
+        min_score: int,
+    ) -> CandidateDecision:
+        """投稿/征稿搜索允许合集文章：主体分降门槛，身份改由详情与归档验证。"""
+        failures: list[str] = []
+        if int(candidate.get("subject_match") or 0) < _SUBMISSION_SUBJECT_FLOOR:
+            failures.append("主体对应度不足")
+        if int(candidate.get("score") or 0) < min_score:
+            failures.append("内容价值分不足")
+        if candidate_tap_point(candidate) is None:
+            failures.append("缺少可靠点击坐标")
+        if candidate.get("content_kind") != "article":
+            failures.append("不是图文文章结果")
+        if candidate.get("is_article_result") is not True:
+            failures.append("文章类型未确认")
+        if not str(candidate.get("target_evidence") or "").strip():
+            failures.append("缺少可见主体证据")
+        bounds = candidate_tap_bounds(candidate)
+        if bounds is None:
+            failures.append("缺少完整可点击区域")
+        else:
+            _left, top, _right, bottom = bounds
+            if top < _WECHAT_SAFE_TAP_TOP or bottom > _WECHAT_SAFE_TAP_BOTTOM:
+                failures.append("条目位于屏幕边缘或未完整显示")
+        return CandidateDecision(
+            accepted=not failures,
+            reason="；".join(failures) if failures else "投稿搜索文章候选审核通过",
+        )
+
     def review_opened_detail(
         self,
         verification: dict,
@@ -242,6 +312,11 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
         aliases: list[str],
         min_subject_match: int,
     ) -> CandidateDecision:
+        if self._submission_intent:
+            return self._review_opened_submission_detail(
+                verification,
+                candidate=candidate,
+            )
         failures: list[str] = []
         if verification.get("page_kind") != "article":
             failures.append("点击后不是图文文章详情页")
@@ -268,6 +343,33 @@ class WechatArticleCandidatePolicy(DefaultCandidatePolicy):
             accepted=not failures,
             reason="；".join(failures) if failures else "详情页、候选和目标主体一致",
         )
+
+    def _review_opened_submission_detail(
+        self,
+        verification: dict,
+        *,
+        candidate: dict,
+    ) -> CandidateDecision:
+        failures: list[str] = []
+        if verification.get("page_kind") != "article":
+            failures.append("点击后不是图文文章详情页")
+        if int(verification.get("candidate_match") or 0) < 75:
+            failures.append("详情与点击前候选不一致")
+        if not str(verification.get("visible_title") or "").strip():
+            failures.append("详情页未识别到可见标题")
+        candidate_title = (candidate.get("fields") or {}).get("title")
+        if not _titles_correspond(
+            candidate_title,
+            verification.get("visible_title"),
+        ):
+            failures.append("详情标题与点击前候选标题不一致")
+        return CandidateDecision(
+            accepted=not failures,
+            reason="；".join(failures) if failures else "投稿搜索文章详情与候选一致",
+        )
+
+    def source_subject_floor(self, base: int) -> int:
+        return _SUBMISSION_SUBJECT_FLOOR if self._submission_intent else int(base)
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,5 +587,8 @@ class CandidatePolicyRegistry:
         cls._policies[normalized] = policy
 
     @classmethod
-    def resolve(cls, strategy: str) -> CandidatePolicy:
-        return cls._policies.get(str(strategy or "").strip(), cls._policies["default"])
+    def resolve(cls, strategy: str, *, keyword: str = "") -> CandidatePolicy:
+        policy = cls._policies.get(str(strategy or "").strip(), cls._policies["default"])
+        if keyword and isinstance(policy, WechatArticleCandidatePolicy):
+            return replace(policy, keyword=keyword)
+        return policy

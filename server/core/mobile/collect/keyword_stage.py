@@ -85,7 +85,8 @@ class MobileKeywordStageRunner:
                 shared.get("candidate_policy")
                 or shared.get("source_link_strategy")
                 or "default"
-            )
+            ),
+            keyword=keyword,
         )
         return KeywordStageState(
             ctx=ctx,

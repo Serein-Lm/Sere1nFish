@@ -329,7 +329,8 @@ class _CollectStage(Stage):
                     st.get("candidate_policy")
                     or st.get("source_link_strategy")
                     or "default"
-                )
+                ),
+                keyword=keyword,
             )
             return await triage_screenshot(
                 image_base64,

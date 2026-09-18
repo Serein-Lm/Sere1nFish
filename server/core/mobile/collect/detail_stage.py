@@ -132,7 +132,8 @@ class MobileDetailStageRunner:
         shared = ctx.state
         strategy = str(shared.get("source_link_strategy") or "none")
         policy = CandidatePolicyRegistry.resolve(
-            str(shared.get("candidate_policy") or strategy or "default")
+            str(shared.get("candidate_policy") or strategy or "default"),
+            keyword=keyword,
         )
         return DetailRunState(
             ctx=ctx,
@@ -339,7 +340,9 @@ class MobileDetailStageRunner:
                         "tap": [run.tap_x, run.tap_y],
                     },
                     persist=not bool(run.shared.get("dry_run")),
-                    min_subject_match=int(run.shared.get("min_subject_match", 70)),
+                    min_subject_match=run.policy.source_subject_floor(
+                        int(run.shared.get("min_subject_match", 70))
+                    ),
                 ),
                 timeout=self.ingest_timeout_seconds,
             )
