@@ -136,6 +136,8 @@ const TASK_FORM_INITIAL_VALUES = {
   enable_wechat: false,
   wechat_app_instance: 'primary',
   wechat_target_selection_mode: 'auto',
+  wechat_append_keywords: [],
+  wechat_collection_priority: 'auto',
   enable_scholar: true,
   scholar_limit: 10,
   enable_copywriting: true,
@@ -5661,6 +5663,11 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
                       params.wechat_device_id = values.wechat_device_id
                       params.wechat_app_instance = values.wechat_app_instance ?? 'primary'
                       params.wechat_target_selection_mode = values.wechat_target_selection_mode ?? 'auto'
+                      params.wechat_collection_priority = values.wechat_collection_priority ?? 'auto'
+                      const appendKeywords = (Array.isArray(values.wechat_append_keywords) ? values.wechat_append_keywords : [])
+                        .map((value: unknown) => String(value || '').trim())
+                        .filter(Boolean)
+                      if (appendKeywords.length) params.wechat_append_keywords = appendKeywords
                     }
                     params.enable_scholar = values.enable_scholar ?? true
                     if (values.enable_scholar) {
@@ -5979,6 +5986,30 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
                                   { label: '主微信', value: 'primary' },
                                   { label: '微信分身', value: 'clone' },
                                 ]} />
+                              </Form.Item>
+                              <Form.Item
+                                name="wechat_collection_priority"
+                                label="手机采集优先级"
+                                extra="选择「优先执行」时手机任务在设备队列中插到最前，不中断正在执行的任务。"
+                              >
+                                <Segmented block options={[
+                                  { label: '自动分级', value: 'auto' },
+                                  { label: '优先执行', value: 'high' },
+                                  { label: '普通', value: 'normal' },
+                                  { label: '靠后', value: 'low' },
+                                ]} />
+                              </Form.Item>
+                              <Form.Item
+                                name="wechat_append_keywords"
+                                label="附加搜索词"
+                                extra="与公司规范名/别名组合后置顶搜索，如填「投稿」会搜索「浙能 投稿」。输入后回车添加，最多 10 个。"
+                              >
+                                <Select
+                                  mode="tags"
+                                  tokenSeparators={[',', '，', '\n']}
+                                  placeholder="如：投稿"
+                                  open={false}
+                                />
                               </Form.Item>
                               <Form.Item
                                 name="wechat_device_id"

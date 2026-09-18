@@ -207,6 +207,7 @@ export default function MobileCollect() {
       queue_priority: 'normal',
       app_name: '',
       keywords: [],
+      append_keywords: [],
       use_target_keyword_library: true,
       max_resolved_keywords: 60,
       swipe_times: 3,
@@ -240,6 +241,7 @@ export default function MobileCollect() {
       queue_priority: task.queue_priority ?? 'normal',
       app_name: task.app_name,
       keywords: task.keywords || [],
+      append_keywords: task.append_keywords || [],
       use_target_keyword_library: task.use_target_keyword_library ?? true,
       max_resolved_keywords: task.max_resolved_keywords ?? 60,
       swipe_times: task.swipe_times,
@@ -631,6 +633,13 @@ export default function MobileCollect() {
           </Form.Item>
           <Form.Item name="keywords" label="搜索关键词" tooltip="显式关键词优先；开启目标词库后会合并公司和第一层全资子公司的渠道词">
             <Select mode="tags" placeholder="输入关键词后回车，可多个" tokenSeparators={[',']} />
+          </Form.Item>
+          <Form.Item
+            name="append_keywords"
+            label="附加搜索词"
+            tooltip="与公司规范名/别名组合后置顶搜索，如填「投稿」会搜索「浙能 投稿」；最多 10 个"
+          >
+            <Select mode="tags" placeholder="如：投稿" tokenSeparators={[',', '，']} />
           </Form.Item>
           <Space wrap size="large">
             <Form.Item

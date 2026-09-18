@@ -26,6 +26,7 @@ export interface CollectTaskDef {
   app_name: string
   app_instance?: AppInstance
   keywords: string[]
+  append_keywords?: string[]
   use_target_keyword_library?: boolean
   include_direct_children?: boolean
   max_resolved_keywords?: number
@@ -73,6 +74,7 @@ export interface CollectTaskInput {
   app_name: string
   app_instance?: AppInstance
   keywords: string[]
+  append_keywords?: string[]
   use_target_keyword_library?: boolean
   include_direct_children?: boolean
   max_resolved_keywords?: number
