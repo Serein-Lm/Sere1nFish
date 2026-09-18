@@ -29,6 +29,7 @@ from Sere1nGraph.graph.agents.runtime import create_llm
 from Sere1nGraph.graph.prompts.loader import load_prompt
 from api.models.mobile_collect import ExtractField
 from api.services.runtime_config import get_runtime_app_config
+from core.mobile.collect.candidate_policy import is_submission_intent
 from core.mobile.collect.contacts import extract_contacts
 from core.observability import observation_context
 from .contracts import CapturedDocument, CapturedImage
@@ -61,6 +62,8 @@ _ARTICLE_SCOPE_CAPS = {
     "incidental": 20,
     "uncertain": 69,
 }
+# 投稿/征稿搜索时，合集内目标投稿条目本身就是命中事实，主体分上限放宽到 69。
+_SUBMISSION_ROUNDUP_CAP = 69
 _CONTACT_CHANNEL_LABELS = {
     "phone": "手机号",
     "telephone": "座机",
@@ -351,10 +354,13 @@ def clamp_score(value: Any) -> int:
     return max(0, min(100, round(score)))
 
 
-def apply_article_scope_cap(subject_match: Any, article_scope: Any) -> int:
+def apply_article_scope_cap(subject_match: Any, article_scope: Any, keyword: str = "") -> int:
     """用整篇文章范围分类约束主体分，避免单条命中冒充整篇高相关。"""
     scope = normalize_article_scope(article_scope)
-    return min(clamp_score(subject_match), _ARTICLE_SCOPE_CAPS[scope])
+    cap = _ARTICLE_SCOPE_CAPS[scope]
+    if scope == "multi_entity_roundup" and is_submission_intent(keyword):
+        cap = _SUBMISSION_ROUNDUP_CAP
+    return min(clamp_score(subject_match), cap)
 
 
 def resolve_review_decision(
@@ -363,6 +369,7 @@ def resolve_review_decision(
     decision_supplied: bool,
     draft_analysis: dict[str, Any],
     required_subject_match: int,
+    keyword: str = "",
 ) -> tuple[str, bool]:
     """Resolve an omitted review decision without weakening explicit rejection."""
     decision = str(parsed.get("decision") or "reject")
@@ -376,17 +383,24 @@ def resolve_review_decision(
         parsed.get("subject_match"),
     )
     threshold = max(0, min(100, int(required_subject_match or 0)))
+    submission = is_submission_intent(keyword)
+    accepted_scopes = (
+        {"target_focused", "multi_entity_roundup"} if submission else {"target_focused"}
+    )
     mutually_supported = (
-        normalize_article_scope(parsed.get("article_scope")) == "target_focused"
+        normalize_article_scope(parsed.get("article_scope")) in accepted_scopes
         and normalize_article_scope(draft_analysis.get("article_scope"))
-        == "target_focused"
+        in accepted_scopes
         and apply_article_scope_cap(
-            review_subject_match, parsed.get("article_scope")
+            review_subject_match,
+            parsed.get("article_scope"),
+            keyword=keyword,
         )
         >= threshold
         and apply_article_scope_cap(
             draft_analysis.get("subject_match"),
             draft_analysis.get("article_scope"),
+            keyword=keyword,
         )
         >= threshold
         and review_score >= 50
@@ -594,7 +608,7 @@ async def analyze_article_fields(
             parsed.get("subject_match"),
         )
         article_scope = normalize_article_scope(parsed.get("article_scope"))
-        subject_match = apply_article_scope_cap(subject_match, article_scope)
+        subject_match = apply_article_scope_cap(subject_match, article_scope, keyword=keyword)
         target_contact_values = [
             str(value).strip()
             for value in parsed.get("target_contact_values") or []
@@ -731,6 +745,7 @@ async def review_article_relevance(
             decision_supplied=decision_supplied,
             draft_analysis=draft_analysis,
             required_subject_match=required_subject_match,
+            keyword=keyword,
         )
         score, subject_match = normalize_scores(
             parsed.get("relevance_score"),
@@ -741,7 +756,9 @@ async def review_article_relevance(
             "decision": decision,
             "decision_inferred": decision_inferred,
             "article_scope": article_scope,
-            "subject_match": apply_article_scope_cap(subject_match, article_scope),
+            "subject_match": apply_article_scope_cap(
+                subject_match, article_scope, keyword=keyword
+            ),
             "score": score,
             "summary": str(parsed.get("summary") or ""),
             "target_contact_values": [
