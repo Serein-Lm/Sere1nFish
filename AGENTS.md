@@ -84,7 +84,7 @@
 - 公众号深采采用“手机发现、浏览器读取”的职责划分：手机只负责应用内搜索、命中文章和复制真实链接；链接交给 `api.services.source_documents` 的 Provider registry，由项目 Chrome 池读取全文和媒体。浏览器读取失败时，必须先把 `source_archive_status/error/next_retry_at` 写入手机采集记录，再由 `api.services.mobile_source_handoff` 使用持久化租约独立补录；额度、限流、浏览器故障和进程重启都不得丢失链接或要求手机重复滚动。只有明确允许回退的非公众号策略才能继续手机逐屏深采。公众号候选默认按标题或账号直接身份对应做严格审核，多主体合集降主体分；仅当搜索词本身含投稿/征稿/约稿意图时按 `WechatArticleCandidatePolicy` 的投稿分支放宽：合集文章可入库（主体分门槛 40、点击前后一致即可），目标的投稿渠道常藏在合集正文中，其余意图保持严格门控。来源归档分析与独立复审同样遵循该例外：投稿意图下 `multi_entity_roundup` 的主体分上限放宽到 69（`_SUBMISSION_ROUNDUP_CAP`），目标在合集中拥有具体投稿条目即按 40-69 评分，`source_document` 两份提示词与 `is_submission_intent` 是同一套判定，不得只放宽其中一侧。
 - 社交地点图片采集通过 `api.services.social_collection` 统一编排：`SocialCollectionJob` 保存美团/抖音跨平台任务状态并复用现有设备租约与手机采集 pipeline，平台差异收敛在 adapter registry；AI 中枢和钉钉只能通过统一工具创建、查询 Job，不得直接执行 ADB 或绕过设备队列。
 - 社交图片证据持久化在 `social_media_evidence`，按 Project、平台、地点和图片内容哈希稳定去重，并保留 Job、手机记录、搜索词和完整上下文截图关系。图片通过私有对象存储保存；`screen_render_crop` 仅表示手机屏幕渲染区域的无损裁剪，不得表述为平台原始分辨率文件。
-- 来源版本层只保存文章自身事实和证据；ProjectTarget 关联层保存搜索场景和任务分析；手机采集记录保存本次任务结果；前端按项目过滤记录并可按 Target 聚合。禁止在这些层之间复制原始 HTML 或把搜索关键词自动当作公司名。
+- 来源版本层只保存文章自身事实和证据；ProjectTarget 关联层保存搜索场景和任务分析；手机采集记录保存本次任务结果；前端按项目过滤记录并可按 Target 聚合。按 Target 读取手机记录和 wechat_count 时，范围是「该 Target 及其项目内下属单位」（`project_target_scope_ids` 与 `_rolled_scope_counts` 同一套层级判定），集团视图必须包含下属记录；叶子单位仍只含自身。禁止在这些层之间复制原始 HTML 或把搜索关键词自动当作公司名。
 
 ## 分层规范与记录
 
