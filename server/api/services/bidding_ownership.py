@@ -13,7 +13,7 @@ from api.dao.targets import normalize_target_name
 _PARTY_FIELDS = ("purchaser", "agency", "winner")
 _IDENTITY_FIELDS = ("target_name", "canonical_name", "identity_aliases", "display_name", "short_names")
 _ROLE_PREFIX = re.compile(r"^(?:采购人|招标人|采购单位|招标单位|代理机构|中标人|中标单位|成交供应商)\s*[:：]\s*")
-_PARTY_SEPARATOR = re.compile(r"[、；;\n|]+")
+_PARTY_SEPARATOR = re.compile(r"[、；;，,\n|]+")
 _GENERIC_NAMES = {"公司", "集团", "有限公司", "股份有限公司", "中心", "管理中心", "机场", "集团公司"}
 
 
