@@ -35,6 +35,16 @@ class Cursor:
     async def to_list(self, _length: int | None) -> list:
         return self.rows
 
+    def sort(self, *_args, **_kwargs) -> "Cursor":
+        return self
+
+    def __aiter__(self):
+        async def _iterate():
+            for row in self.rows:
+                yield row
+
+        return _iterate()
+
 
 class Collection:
     def __init__(self, records: list) -> None:

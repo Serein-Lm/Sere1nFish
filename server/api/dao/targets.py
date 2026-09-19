@@ -1491,6 +1491,55 @@ async def list_project_targets(
     return [doc async for doc in cursor]
 
 
+async def project_target_scope_ids(
+    db: AsyncIOMotorDatabase,
+    *,
+    project_id: str,
+    target_id: str,
+) -> list[str]:
+    """Read-model scope: the target plus its in-project descendants.
+
+    Lineage fields take precedence; relations without lineage are resolved by
+    walking ``parent_target_id`` chains. A target outside the project keeps
+    its exact single-target scope.
+    """
+    relations = await list_project_targets(db, project_id, summary_only=True)
+    by_id = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if item.get("target_id") and item.get("active") is not False
+    }
+    normalized = str(target_id or "").strip()
+    if normalized not in by_id:
+        return [normalized] if normalized else []
+    selected = {normalized}
+    for candidate_id, relation in by_id.items():
+        if candidate_id == normalized:
+            continue
+        ancestors = {
+            str(value)
+            for value in relation.get("lineage_target_ids") or []
+            if str(value or "").strip()
+        }
+        root = str(relation.get("root_target_id") or "").strip()
+        if root:
+            ancestors.add(root)
+        if normalized in ancestors:
+            selected.add(candidate_id)
+            continue
+        current_id = str(relation.get("parent_target_id") or "").strip()
+        visited: set[str] = set()
+        while current_id and current_id in by_id and current_id not in visited:
+            if current_id == normalized:
+                selected.add(candidate_id)
+                break
+            visited.add(current_id)
+            current_id = str(
+                by_id[current_id].get("parent_target_id") or ""
+            ).strip()
+    return sorted(selected)
+
+
 async def find_project_target_name_matches(
     db: AsyncIOMotorDatabase,
     search: str,

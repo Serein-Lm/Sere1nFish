@@ -1272,7 +1272,18 @@ async def list_records(
     if task_def_id:
         query["task_def_id"] = task_def_id
     if target_id:
-        query["target_id"] = target_id
+        scope_ids = [target_id]
+        if project_id:
+            from api.dao.targets import project_target_scope_ids
+
+            scope_ids = await project_target_scope_ids(
+                db,
+                project_id=project_id,
+                target_id=target_id,
+            )
+        query["target_id"] = (
+            scope_ids[0] if len(scope_ids) == 1 else {"$in": scope_ids}
+        )
     if only_incremental:
         query["$or"] = [{"is_new": True}, {"is_changed": True}]
     if archived_only:

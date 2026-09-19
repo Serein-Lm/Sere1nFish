@@ -1403,6 +1403,49 @@ async def attach_normalized_company(
     return target
 
 
+def _rolled_scope_counts(
+    counts: dict[str, int],
+    relations: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Roll per-target record counts up to in-project ancestor targets.
+
+    Lineage fields take precedence; relations without lineage fall back to a
+    ``parent_target_id`` chain walk, mirroring ``project_target_scope_ids``.
+    """
+    by_id = {
+        str(item.get("target_id") or ""): item
+        for item in relations
+        if item.get("target_id") and item.get("active") is not False
+    }
+
+    def _ancestors(relation: dict[str, Any]) -> set[str]:
+        ancestors = {
+            str(value)
+            for value in relation.get("lineage_target_ids") or []
+            if str(value or "").strip()
+        }
+        root = str(relation.get("root_target_id") or "").strip()
+        if root:
+            ancestors.add(root)
+        current_id = str(relation.get("parent_target_id") or "").strip()
+        visited: set[str] = set()
+        while current_id and current_id in by_id and current_id not in visited:
+            ancestors.add(current_id)
+            visited.add(current_id)
+            current_id = str(by_id[current_id].get("parent_target_id") or "").strip()
+        return ancestors
+
+    ancestor_sets = {target_id: _ancestors(relation) for target_id, relation in by_id.items()}
+    rolled: dict[str, int] = dict(counts)
+    for target_id in by_id:
+        rolled[target_id] = int(counts.get(target_id) or 0) + sum(
+            int(counts.get(candidate_id) or 0)
+            for candidate_id, ancestors in ancestor_sets.items()
+            if candidate_id != target_id and target_id in ancestors
+        )
+    return rolled
+
+
 async def list_project_target_summaries(
     db: AsyncIOMotorDatabase,
     project_id: str,
@@ -1411,11 +1454,19 @@ async def list_project_target_summaries(
     relations: list[dict[str, Any]] | None = None,
     target_relationships: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    caller_supplied_relations = relations is not None
     if relations is None:
         relations = await targets_dao.list_project_targets(
             db,
             project_id,
             summary_only=compact,
+        )
+    scope_relations = relations
+    if caller_supplied_relations:
+        scope_relations = await targets_dao.list_project_targets(
+            db,
+            project_id,
+            summary_only=True,
         )
     target_ids = [str(item.get("target_id") or "") for item in relations]
     if not target_ids:
@@ -1463,14 +1514,13 @@ async def list_project_target_summaries(
                 "$match": project_scope_query(
                     project_id,
                     {
-                        "target_id": {"$in": target_ids},
                         "superseded_by_record_id": {"$exists": False},
                     },
                 ),
             },
             {"$group": {"_id": "$target_id", "record_count": {"$sum": 1}}},
         ]
-    ).to_list(len(target_ids))
+    ).to_list(None)
     asset_counts_job = db[FOFA_ASSETS_COLLECTION].aggregate(
         [
             {
@@ -1647,8 +1697,9 @@ async def list_project_target_summaries(
         for item in record_counts
     }
     # The module list includes legacy and pending-archive mobile evidence.
-    # Reuse its record count so imported history remains visible on the card.
-    wechat_by_target = records_by_target
+    # Reuse its record count so imported history remains visible on the card,
+    # rolled up so an ancestor Target summarises its in-project descendants.
+    wechat_by_target = _rolled_scope_counts(records_by_target, scope_relations)
     tasks_by_id = {str(item.get("task_id") or ""): item for item in task_docs}
     relations = apply_project_target_hierarchy(relations, target_relationships)
     relationship_views = target_relationships_dao.build_target_relationship_views(
