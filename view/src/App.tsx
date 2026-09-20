@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import ConfigProvider from 'antd/es/config-provider'
 import theme from 'antd/es/theme'
 import zhCN from 'antd/es/locale/zh_CN'
+import { XProvider } from '@ant-design/x'
+import xZhCN from '@ant-design/x/es/locale/zh_CN'
 import ProtectedRoute from './router/ProtectedRoute'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import './styles/theme.css'
@@ -70,6 +72,7 @@ function AppContent() {
         token: currentTheme === 'dark' ? darkTokens : lightTokens,
       }}
     >
+      <XProvider locale={xZhCN}>
       <BrowserRouter>
         <Suspense fallback={<RouteLoading />}>
           <Routes>
@@ -118,6 +121,7 @@ function AppContent() {
           </Routes>
         </Suspense>
       </BrowserRouter>
+      </XProvider>
     </ConfigProvider>
   )
 }

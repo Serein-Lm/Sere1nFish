@@ -1,7 +1,8 @@
-import { useMemo } from 'react'
-import { Button, Empty, Popconfirm, Space, Spin, Tooltip } from 'antd'
+import { useMemo, useState } from 'react'
+import { Button, Empty, Input, Popconfirm, Space, Spin, Tooltip } from 'antd'
 import {
   DeleteOutlined,
+  EditOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   MessageOutlined,
@@ -25,6 +26,7 @@ interface AIHubConversationRailProps {
   onNew: () => void
   onSelect: (conversationId: string) => void
   onDelete: (conversationId: string) => void
+  onRename: (conversationId: string, title: string) => void
 }
 
 const dateValue = (conversation: Conversation) => {
@@ -69,8 +71,24 @@ export default function AIHubConversationRail({
   onNew,
   onSelect,
   onDelete,
+  onRename,
 }: AIHubConversationRailProps) {
   const groups = useMemo(() => groupConversations(conversations), [conversations])
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState('')
+
+  const startRename = (conversation: Conversation) => {
+    setEditingId(conversation.conversation_id)
+    setEditingTitle(conversation.title || '新会话')
+  }
+
+  const commitRename = () => {
+    if (editingId) {
+      onRename(editingId, editingTitle)
+    }
+    setEditingId(null)
+    setEditingTitle('')
+  }
 
   return (
     <>
@@ -154,13 +172,34 @@ export default function AIHubConversationRail({
                       onClick={() => onSelect(conversation.conversation_id)}
                     >
                       <MessageOutlined className="conversation-item-icon" />
-                      <span className="conversation-item-copy">
-                        <span className="conversation-item-title">{conversation.title || '新会话'}</span>
-                        <span className="conversation-item-meta">
-                          {conversation.message_count || 0} 条
-                          {formatConversationTime(conversation) && ` · ${formatConversationTime(conversation)}`}
+                      {editingId === conversation.conversation_id ? (
+                        <Input
+                          className="conversation-item-rename"
+                          size="small"
+                          value={editingTitle}
+                          autoFocus
+                          maxLength={60}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => setEditingTitle(event.target.value)}
+                          onPressEnter={commitRename}
+                          onBlur={commitRename}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') {
+                              event.stopPropagation()
+                              setEditingId(null)
+                              setEditingTitle('')
+                            }
+                          }}
+                        />
+                      ) : (
+                        <span className="conversation-item-copy">
+                          <span className="conversation-item-title">{conversation.title || '新会话'}</span>
+                          <span className="conversation-item-meta">
+                            {conversation.message_count || 0} 条
+                            {formatConversationTime(conversation) && ` · ${formatConversationTime(conversation)}`}
+                          </span>
                         </span>
-                      </span>
+                      )}
                       <Popconfirm
                         title="删除该会话？"
                         okText="删除"
@@ -179,6 +218,19 @@ export default function AIHubConversationRail({
                           onClick={(event) => event.stopPropagation()}
                         />
                       </Popconfirm>
+                      {editingId !== conversation.conversation_id && (
+                        <Button
+                          type="text"
+                          size="small"
+                          className="conversation-item-rename-btn"
+                          icon={<EditOutlined />}
+                          aria-label="重命名会话"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            startRename(conversation)
+                          }}
+                        />
+                      )}
                     </div>
                   ))}
                 </section>

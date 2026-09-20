@@ -295,6 +295,8 @@ export interface StreamCallbacks {
   onStateChange?: (state: ExecutionState) => void
   onComplete?: (state: ExecutionState) => void
   onError?: (error: string, state: ExecutionState) => void
+  /** 用户主动停止生成（AbortSignal abort）时触发，保留已生成的部分内容 */
+  onAbort?: (state: ExecutionState) => void
 }
 
 /**
@@ -309,10 +311,12 @@ export class AgentStreamService {
 
   /**
    * 发送流式请求
+   * @param signal 用于停止生成的 AbortSignal；调用 abort() 会中断 SSE 并触发 onAbort
    */
   async streamQuery(
     request: StreamRequest,
-    callbacks: StreamCallbacks
+    callbacks: StreamCallbacks,
+    signal?: AbortSignal,
   ): Promise<ExecutionState> {
     const state = createExecutionState()
 
@@ -327,6 +331,7 @@ export class AgentStreamService {
         method: 'POST',
         headers,
         body: JSON.stringify(request),
+        signal,
       })
 
       if (response.status === 401) {
@@ -347,6 +352,14 @@ export class AgentStreamService {
       await this.processStream(reader, state, callbacks)
       callbacks.onComplete?.(state)
     } catch (error) {
+      const aborted = signal?.aborted
+        || (error instanceof DOMException && error.name === 'AbortError')
+        || (error instanceof Error && error.name === 'AbortError')
+      if (aborted) {
+        // 用户主动停止：保留部分内容，不当作错误
+        callbacks.onAbort?.(state)
+        return state
+      }
       const errorMessage = error instanceof Error ? error.message : '未知错误'
       callbacks.onError?.(errorMessage, state)
       throw error

@@ -6,9 +6,9 @@ import type { GetRef } from 'antd'
 import XMarkdown from '@ant-design/x-markdown'
 import { Flex, Space, Button, Divider, Dropdown, message, Spin, Empty, Tooltip, Tag, Drawer, Collapse, Alert, Segmented, Input } from 'antd'
 import type { MenuProps } from 'antd'
-import { 
-  RobotOutlined, 
-  UserOutlined, 
+import {
+  RobotOutlined,
+  UserOutlined,
   ThunderboltOutlined,
   PaperClipOutlined,
   SearchOutlined,
@@ -24,6 +24,9 @@ import {
   DatabaseOutlined,
   ProjectOutlined,
   LinkOutlined,
+  CopyOutlined,
+  ReloadOutlined,
+  ArrowDownOutlined,
 } from '@ant-design/icons'
 import { 
   agentService, 
@@ -48,6 +51,7 @@ import {
   listConversations,
   createConversation,
   getConversation,
+  renameConversation,
   deleteConversation,
   type Conversation,
 } from '../../services/agentService'
@@ -318,15 +322,48 @@ export default function PhishingPlatform() {
   const chatListRef = useRef<HTMLDivElement>(null)
   const scrollToTopRef = useRef(false)
   const senderRef = useRef<GetRef<typeof Sender>>(null)
+  // 停止生成：中断进行中的 SSE 请求
+  const abortRef = useRef<AbortController | null>(null)
+  // 智能滚动：仅在用户位于底部附近时自动跟随，避免流式输出时强制拉回
+  const nearBottomRef = useRef(true)
+  const [showScrollBottom, setShowScrollBottom] = useState(false)
+  // 重新生成：保存最近一轮请求参数
+  const lastTurnRef = useRef<{
+    query: string
+    skill?: SenderProps['skill']
+    references: Array<Record<string, unknown>>
+    displayQuery?: string
+    selectedSkills: string[]
+    conversationId: string
+  } | null>(null)
 
-  // 自动滚动：流式对话滚到底部；加载历史会话时置顶，便于看到最初的提问
+  // 自动滚动：流式对话时仅当用户位于底部附近才跟随；加载历史会话时置顶
+  const handleChatScroll = () => {
+    const el = chatListRef.current
+    if (!el) return
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    const near = distance < 120
+    nearBottomRef.current = near
+    setShowScrollBottom(distance > 240)
+  }
+
+  const scrollToBottom = () => {
+    nearBottomRef.current = true
+    setShowScrollBottom(false)
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }
+
   useEffect(() => {
     if (scrollToTopRef.current) {
       scrollToTopRef.current = false
+      nearBottomRef.current = false
+      setShowScrollBottom(false)
       chatListRef.current?.scrollTo({ top: 0, behavior: 'auto' })
       return
     }
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (nearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    }
   }, [messages])
 
   // 从其它页面跳转并预引用（如人设库"带需求跳转中台"）
@@ -655,7 +692,7 @@ export default function PhishingPlatform() {
   }
 
 
-  // SSE 流式响应 - 使用协议 v2
+  // SSE 流式响应 - 使用协议 v2（支持中途停止）
   const streamResponse = async (
     userPrompt: string,
     messageKey: string,
@@ -692,6 +729,22 @@ export default function PhishingPlatform() {
       },
     }
 
+    // 完成或停止后统一刷新会话产物与列表
+    const finalizeTurn = async () => {
+      if (!conversationId) return
+      try {
+        const artifactResult = await listArtifacts({ conversationId, limit: 100 })
+        setArtifacts(artifactResult.items)
+        updateMessage({ artifacts: artifactResult.items })
+        await loadConversations()
+      } catch (error) {
+        console.error('刷新会话产物失败:', error)
+      }
+    }
+
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
       await agentService.streamQuery(request, {
         onStateChange: (state) => {
@@ -703,12 +756,12 @@ export default function PhishingPlatform() {
             finalContent: state.finalContent,
             finalSections: [...state.finalSections],
           }
-          
+
           // 更新状态和实时的最终内容
-          updateMessage({ 
+          updateMessage({
             executionState: clonedState,
             content: state.finalContent || '',
-            status: 'updating' 
+            status: 'updating'
           })
         },
 
@@ -720,28 +773,18 @@ export default function PhishingPlatform() {
             finalContent: state.finalContent,
             finalSections: [...state.finalSections],
           }
-          
+
           updateMessage({
             executionState: clonedState,
             content: state.finalContent || '执行完成',
             status: 'success',
           })
           setIsRequesting(false)
-          if (conversationId) {
-            try {
-              const artifactResult = await listArtifacts({ conversationId, limit: 100 })
-              setArtifacts(artifactResult.items)
-              updateMessage({ artifacts: artifactResult.items })
-              await loadConversations()
-            } catch (error) {
-              console.error('刷新会话产物失败:', error)
-            }
-          }
+          await finalizeTurn()
         },
 
-        onError: (error, state) => {
-          console.error('SSE Error:', error)
-          
+        // 用户点击停止：保留已生成的部分内容
+        onAbort: (state) => {
           const clonedState: ExecutionState = {
             nodes: new Map(state.nodes),
             rootPath: state.rootPath,
@@ -749,7 +792,28 @@ export default function PhishingPlatform() {
             finalContent: state.finalContent,
             finalSections: [...state.finalSections],
           }
-          
+          updateMessage({
+            executionState: clonedState,
+            content: state.finalContent
+              ? `${state.finalContent}\n\n> 已停止生成，以上为部分结果。`
+              : '已停止生成。',
+            status: 'success',
+          })
+          setIsRequesting(false)
+          void finalizeTurn()
+        },
+
+        onError: (error, state) => {
+          console.error('SSE Error:', error)
+
+          const clonedState: ExecutionState = {
+            nodes: new Map(state.nodes),
+            rootPath: state.rootPath,
+            activeNodes: new Set(state.activeNodes),
+            finalContent: state.finalContent,
+            finalSections: [...state.finalSections],
+          }
+
           updateMessage({
             executionState: clonedState,
             content: `❌ 错误: ${error}`,
@@ -757,7 +821,7 @@ export default function PhishingPlatform() {
           })
           setIsRequesting(false)
         },
-      })
+      }, controller.signal)
     } catch (error) {
       console.error('Stream error:', error)
       updateMessage({
@@ -765,6 +829,10 @@ export default function PhishingPlatform() {
         status: 'success',
       })
       setIsRequesting(false)
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null
+      }
     }
   }
 
@@ -803,13 +871,17 @@ export default function PhishingPlatform() {
 
     setMessages(prev => [...prev, userMessage, aiMessage])
     setIsRequesting(true)
-    
+
     // 清空输入
     setInputValue('')
 
     // 发送后清空已引用数据，避免带入下一轮
     setDataRefs([])
     setArtifactRefs([])
+
+    // 发送新消息后始终跟随滚动到底部
+    nearBottomRef.current = true
+    setShowScrollBottom(false)
 
     // 后端流式入口原子留存用户消息、AI 回复和本轮 Artifact 关联
     const conversationId = await ensureConversation()
@@ -821,6 +893,16 @@ export default function PhishingPlatform() {
         label: item.title,
       })),
     ]
+
+    // 保存本轮参数，供「重新生成」使用
+    lastTurnRef.current = {
+      query: value,
+      skill,
+      references: persistedReferences,
+      displayQuery: userMessage.content,
+      selectedSkills: skillIdsSnapshot,
+      conversationId,
+    }
 
     // 调用真实的 SSE 流式 API
     await streamResponse(
@@ -834,9 +916,92 @@ export default function PhishingPlatform() {
     )
   }
 
+  // 停止生成：中断进行中的 SSE 流
   const handleCancel = () => {
+    if (abortRef.current) {
+      abortRef.current.abort()
+      message.info('已停止生成')
+      return
+    }
     setIsRequesting(false)
     message.warning('已取消请求')
+  }
+
+  // 重新生成：替换最后一条 AI 回复，复用本轮请求参数
+  const handleRegenerate = () => {
+    const snapshot = lastTurnRef.current
+    if (!snapshot?.conversationId || isRequesting) return
+    const aiMessageKey = `ai-${Date.now()}`
+    setMessages(prev => {
+      let lastAssistantIdx = -1
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        if (prev[i].role === 'assistant') {
+          lastAssistantIdx = i
+          break
+        }
+      }
+      if (lastAssistantIdx < 0) return prev
+      const next = prev.slice(0, lastAssistantIdx)
+      next.push({
+        key: aiMessageKey,
+        role: 'assistant',
+        content: '',
+        executionState: createExecutionState(),
+        status: 'loading',
+      })
+      return next
+    })
+    setIsRequesting(true)
+    nearBottomRef.current = true
+    void streamResponse(
+      snapshot.query,
+      aiMessageKey,
+      snapshot.skill,
+      snapshot.conversationId,
+      snapshot.references,
+      snapshot.displayQuery,
+      snapshot.selectedSkills,
+    )
+  }
+
+  // 复制 AI 回复（去除引用标记后的纯 Markdown）
+  const handleCopyMessage = async (msg: Message) => {
+    const text = stripArtifactRefs(stripEntityRefs(msg.content || '')).trim()
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      message.success('已复制到剪贴板')
+    } catch {
+      try {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+        message.success('已复制到剪贴板')
+      } catch {
+        message.error('复制失败，请手动选择复制')
+      }
+    }
+  }
+
+  // 重命名会话
+  const handleRenameConversation = async (conversationId: string, title: string) => {
+    const trimmed = title.trim()
+    if (!trimmed) return
+    try {
+      await renameConversation(conversationId, trimmed)
+      setConversations(prev => prev.map(c =>
+        c.conversation_id === conversationId ? { ...c, title: trimmed } : c
+      ))
+      message.success('会话已重命名')
+    } catch (error) {
+      console.error('重命名会话失败:', error)
+      message.error('重命名会话失败')
+    }
   }
 
   const drawerArtifacts = focusedArtifact
@@ -886,6 +1051,33 @@ export default function PhishingPlatform() {
   }
 
   // 渲染消息列表项
+  const lastAssistantKey = useMemo(
+    () => [...messages].reverse().find(item => item.role === 'assistant')?.key,
+    [messages],
+  )
+
+  const renderUserContent = (msg: Message) => {
+    const text = msg.content || ''
+    const refIdx = text.indexOf('\n\n> 已引用：')
+    const main = refIdx >= 0 ? text.slice(0, refIdx) : text
+    const refLabels = refIdx >= 0
+      ? text.slice(refIdx + '\n\n> 已引用：'.length).split('、').filter(Boolean)
+      : []
+    return (
+      <div className="ai-hub-user-content">
+        <div className="ai-hub-user-text">{main}</div>
+        {refLabels.length > 0 && (
+          <div className="ai-hub-user-refs">
+            <span className="ai-hub-user-refs-label">已引用</span>
+            {refLabels.map(label => (
+              <span key={label} className="ai-hub-user-ref-chip">{label}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const renderMessageItems = () => {
     return messages.map(msg => {
       if (msg.role === 'assistant') {
@@ -976,7 +1168,36 @@ export default function PhishingPlatform() {
               ) : msg.content ? (
                 <XMarkdown content={stripArtifactRefs(stripEntityRefs(msg.content))} />
               ) : (
-                <div style={{ color: '#999' }}>等待回复...</div>
+                <div className="ai-hub-typing" aria-label="正在生成回复">
+                  <span className="ai-hub-typing-dot" />
+                  <span className="ai-hub-typing-dot" />
+                  <span className="ai-hub-typing-dot" />
+                </div>
+              )}
+
+              {/* 消息操作：复制 / 重新生成（最后一条 AI 回复） */}
+              {msg.status === 'success' && (msg.content || msg.executionState?.finalSections?.length) && (
+                <Flex gap={4} className="ai-hub-msg-toolbar" align="center">
+                  <Tooltip title="复制全文">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<CopyOutlined />}
+                      onClick={() => void handleCopyMessage(msg)}
+                    />
+                  </Tooltip>
+                  {msg.key === lastAssistantKey && (
+                    <Tooltip title="重新生成">
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<ReloadOutlined />}
+                        disabled={isRequesting}
+                        onClick={handleRegenerate}
+                      />
+                    </Tooltip>
+                  )}
+                </Flex>
               )}
 
               {/* 产物下载入口（Word 等） */}
@@ -1035,7 +1256,7 @@ export default function PhishingPlatform() {
       return {
         key: msg.key,
         role: msg.role,
-        content: msg.content,
+        content: renderUserContent(msg),
       }
     })
   }
@@ -1053,6 +1274,7 @@ export default function PhishingPlatform() {
           onNew={handleNewConversation}
           onSelect={(conversationId) => void selectConversation(conversationId)}
           onDelete={(conversationId) => void handleDeleteConversation(conversationId)}
+          onRename={(conversationId, title) => void handleRenameConversation(conversationId, title)}
         />
         <div className="chat-container">
           <AIHubWorkspaceHeader
@@ -1070,7 +1292,7 @@ export default function PhishingPlatform() {
           />
           <div className={`ai-hub-workspace-grid mode-${layoutMode}`}>
             <section className="ai-hub-conversation-pane">
-        <div className="chat-list" ref={chatListRef}>
+        <div className="chat-list" ref={chatListRef} onScroll={handleChatScroll}>
           {messages.length === 0 ? (
             <AIHubEmptyState
               onPrompt={(prompt) => void handleSend(prompt)}
@@ -1088,6 +1310,16 @@ export default function PhishingPlatform() {
             </>
           )}
         </div>
+        {showScrollBottom && messages.length > 0 && (
+          <Button
+            className="ai-hub-scroll-bottom"
+            size="small"
+            shape="circle"
+            icon={<ArrowDownOutlined />}
+            aria-label="回到底部"
+            onClick={scrollToBottom}
+          />
+        )}
 
         <div className="sender-wrapper">
           {(dataRefs.length > 0 || artifactRefs.length > 0) && (

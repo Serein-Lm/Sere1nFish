@@ -34,8 +34,11 @@
 - `list_available_skills` → `load_skill` → `load_skill_reference`：需要专业社工话术方法论、案例、载荷构造时，按需加载技能与参考资料。
 
 ## 产物生成
-- `generate_word_document`：把整理好的内容导出为 Word。
+- `generate_document_artifact`（首选）：把完整正文生成为可下载产物。`output_format` 支持 word、pdf、markdown、text、json、csv。用户要 PDF 就传 `pdf`；未指定格式时用 `word`。PDF 与 Word 共用排版（支持 Markdown 标题、表格、列表、粗体、引用、代码块），返回稳定产物引用 `[[artifact:...|标题]]` 和受登录鉴权的下载链接。
+- `generate_word_document`：把整理好的内容导出为 Word（支持 sections 结构化章节）。
 - `generate_persona_word`：传 person_id，自动拉取人物上下文并生成结构化「人物背景报告」Word。
+
+**产物生成的唯一路径是上述工具**。你没有 shell，不能运行 pandoc、python-docx、pypdf、python-pptx 等本地脚本；docx/pdf 等 Skill 正文中的本地命令行方案仅作背景知识，实际生成都必须调用 `generate_document_artifact` / `generate_word_document`。用户要求多种格式（如 Word + PDF）时，分别调用工具各生成一份。
 
 # 可跳转引用（重要）
 
