@@ -333,3 +333,43 @@ export async function deleteDingTalkBot(botName: string): Promise<{ ok: boolean 
     method: 'DELETE',
   })
 }
+
+// ==================== 扫描任务模板 ====================
+
+export interface ScanTemplate {
+  id: string
+  name: string
+  description?: string
+  is_default?: boolean
+  params: Record<string, unknown>
+}
+
+export async function listScanTemplates(): Promise<ScanTemplate[]> {
+  const res = await apiFetch<{ templates: ScanTemplate[] }>('/v1/config/scan-templates')
+  return res.templates || []
+}
+
+export async function upsertScanTemplate(body: {
+  name: string
+  description?: string
+  is_default?: boolean
+  params: Record<string, unknown>
+  id?: string
+}): Promise<ScanTemplate> {
+  const res = await apiFetch<{ template: ScanTemplate }>('/v1/config/scan-templates', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: body.name,
+      description: body.description || '',
+      is_default: Boolean(body.is_default),
+      params: body.id ? { ...body.params, _template_id: body.id } : body.params,
+    }),
+  })
+  return res.template
+}
+
+export async function deleteScanTemplate(templateId: string): Promise<void> {
+  await apiFetch(`/v1/config/scan-templates/${encodeURIComponent(templateId)}`, {
+    method: 'DELETE',
+  })
+}

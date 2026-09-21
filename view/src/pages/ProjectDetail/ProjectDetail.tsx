@@ -82,7 +82,7 @@ import {
   type ProjectTargetSummary,
 } from '../../services/sourceDocumentService'
 import { listScholarContacts, type ScholarContact } from '../../services/scholarContactService'
-import { getConfigSection } from '../../services/configService'
+import { getConfigSection, listScanTemplates, type ScanTemplate } from '../../services/configService'
 import {
   listProjectBiddingRecords,
   type BiddingRecord,
@@ -799,6 +799,9 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
   const [coverageSubmitting, setCoverageSubmitting] = useState(false)
   const [taskDefaultsLoading, setTaskDefaultsLoading] = useState(false)
   const [taskTuningValues, setTaskTuningValues] = useState(TASK_TUNING_FORM_DEFAULTS)
+  // 扫描模板：admin 预配置参数，下发时一键套用
+  const [scanTemplates, setScanTemplates] = useState<ScanTemplate[]>([])
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
   const [wechatDeviceOptions, setWechatDeviceOptions] = useState<WechatDeviceOption[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [tasksTotal, setTasksTotal] = useState(0)
@@ -1697,13 +1700,41 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
     setIsTaggingModalOpen(true)
   }
 
+  // 应用扫描模板：把模板 params 写入表单（目标类字段不动）
+  const applyScanTemplate = (template: ScanTemplate | undefined) => {
+    if (!template) return
+    const params = template.params || {}
+    const patch: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(params)) {
+      if (key.startsWith('_')) continue
+      if (key in TASK_FORM_INITIAL_VALUES || key === 'incremental_scan') {
+        patch[key] = value
+      }
+    }
+    if (Object.keys(patch).length) {
+      taskForm.setFieldsValue(patch)
+    }
+    // 模板里可以带上并发调优值
+    const tuningPatch: Record<string, number> = {}
+    for (const key of [
+      'asset_probe_concurrency', 'url_probe_concurrency', 'url_scan_concurrency',
+      'copywriting_concurrency', 'xhs_search_concurrency', 'company_scan_concurrency',
+    ]) {
+      if (typeof params[key] === 'number') tuningPatch[key] = params[key] as number
+    }
+    if (Object.keys(tuningPatch).length) {
+      setTaskTuningValues((prev) => ({ ...prev, ...tuningPatch }))
+    }
+  }
+
   const handleOpenTaskModal = async () => {
     setTaskDefaultsLoading(true)
     try {
-      const [configResult, poolResult] = await Promise.allSettled([
+      const [configResult, poolResult, , templateResult] = await Promise.allSettled([
         getConfigSection('collection_runtime'),
         getPool(),
-        projectId ? fetchProjectTargetOptions(projectId) : Promise.resolve(),
+        projectId ? fetchProjectTargetOptions(projectId) : Promise.resolve(undefined),
+        listScanTemplates(),
       ])
       if (configResult.status === 'fulfilled') {
         const { config } = configResult.value
@@ -1727,6 +1758,18 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
         online: Boolean(device.online),
       }))
       setWechatDeviceOptions(options)
+
+      // 扫描模板：加载后默认套用 admin 标记的默认模板
+      if (templateResult.status === 'fulfilled') {
+        const templates = templateResult.value || []
+        setScanTemplates(templates)
+        const defaultTemplate = templates.find((tpl) => tpl.is_default)
+        setSelectedTemplateId(defaultTemplate?.id || '')
+        if (defaultTemplate) applyScanTemplate(defaultTemplate)
+      } else {
+        setScanTemplates([])
+        setSelectedTemplateId('')
+      }
     } finally {
       setTaskDefaultsLoading(false)
       setIsTaskModalOpen(true)
@@ -5780,6 +5823,9 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
                 if (!open) return
                 taskForm.resetFields()
                 taskForm.setFieldsValue(taskTuningValues)
+                // 表单字段此时才挂载（destroyOnHidden）；套用当前选中的模板
+                const template = scanTemplates.find((tpl) => tpl.id === selectedTemplateId)
+                if (template) applyScanTemplate(template)
               }}
               confirmLoading={taskSubmitting}
               destroyOnHidden
@@ -5787,6 +5833,44 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
               className="project-modal"
             >
               <Form form={taskForm} layout="vertical" initialValues={TASK_FORM_INITIAL_VALUES}>
+                <Form.Item noStyle shouldUpdate={(prev, cur) => prev.task_type !== cur.task_type}>
+                  {({ getFieldValue }) => getFieldValue('task_type') === 'company_scan' ? (
+                    <Form.Item
+                      label="扫描模板"
+                      extra={scanTemplates.length
+                        ? '选择 admin 预配置的模板，一键套用渠道开关和参数；仍可在下方微调。'
+                        : '暂无模板（admin 可在配置管理中创建）；当前使用表单默认值。'}
+                    >
+                      <Select
+                        value={selectedTemplateId || undefined}
+                        placeholder="选择扫描模板"
+                        allowClear
+                        onChange={(value) => {
+                          setSelectedTemplateId(value || '')
+                          const template = scanTemplates.find((tpl) => tpl.id === value)
+                          if (template) {
+                            // 先回到初始值再套模板，避免上一个模板的开关残留
+                            taskForm.setFieldsValue({
+                              ...TASK_FORM_INITIAL_VALUES,
+                              company_names: taskForm.getFieldValue('company_names'),
+                              target_batch_tags: taskForm.getFieldValue('target_batch_tags'),
+                              urls: taskForm.getFieldValue('urls'),
+                            })
+                            applyScanTemplate(template)
+                            message.success(`已套用模板「${template.name}」`)
+                          }
+                        }}
+                        options={scanTemplates.map((tpl) => ({
+                          value: tpl.id,
+                          label: tpl.is_default
+                            ? `${tpl.name}（默认）`
+                            : tpl.name,
+                          title: tpl.description || undefined,
+                        }))}
+                      />
+                    </Form.Item>
+                  ) : null}
+                </Form.Item>
                 <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
                   <Select options={[
                     { label: '综合公司扫描', value: 'company_scan' },
@@ -6401,10 +6485,10 @@ export default function ProjectDetail({ targetView }: { targetView?: ProjectTarg
                     return (
                       <Form.Item
                         name="selected_skill_ids"
-                        label="任务 Skills"
-                        extra="Agent 先读取 Skill 索引，再按需加载正文、参考资料和脚本说明。留空时使用自动路由。"
+                        label="任务 Skills（默认全部可用）"
+                        extra="默认不选择 = Agent 自动按需加载全部 Skills。如需限定范围再手动挑选。"
                       >
-                        <SkillSelector placeholder="选择本次任务可用的 Skills" />
+                        <SkillSelector placeholder="默认全部 Skills（点击可限定范围）" />
                       </Form.Item>
                     )
                   }}

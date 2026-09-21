@@ -813,3 +813,60 @@ async def import_from_config_json(body: ConfigImportRequest, _: User = Depends(_
         status_code=410,
         detail="config.json 导入入口已下线；请在前端配置页写入 MongoDB 加密配置。",
     )
+
+
+# ==================== 扫描任务模板 ====================
+
+class ScanTemplateBody(BaseModel):
+    """扫描模板创建/更新请求体。"""
+
+    name: str
+    description: str = ""
+    is_default: bool = False
+    params: dict[str, Any] = {}
+
+
+@router.get("/scan-templates")
+async def list_scan_templates_route(_: User = Depends(get_current_active_user)):
+    """列出扫描任务模板（默认模板在前）。"""
+    from api.services import scan_templates
+
+    db = get_db()
+    templates = await scan_templates.list_scan_templates(db)
+    return {"templates": templates}
+
+
+@router.post("/scan-templates")
+async def upsert_scan_template_route(
+    body: ScanTemplateBody,
+    admin: User = Depends(_manage_config),
+):
+    """创建或更新扫描任务模板（admin）。"""
+    from api.services import scan_templates
+
+    db = get_db()
+    template_id = str(body.params.get("_template_id") or "").strip()
+    payload = {k: v for k, v in body.model_dump().items() if k != "params"}
+    payload["params"] = {k: v for k, v in body.params.items() if k != "_template_id"}
+    try:
+        template = await scan_templates.upsert_scan_template(
+            db, payload, template_id=template_id
+        )
+    except scan_templates.ScanTemplateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"template": template}
+
+
+@router.delete("/scan-templates/{template_id}")
+async def delete_scan_template_route(
+    template_id: str,
+    admin: User = Depends(_manage_config),
+):
+    """删除扫描任务模板（admin）。"""
+    from api.services import scan_templates
+
+    db = get_db()
+    removed = await scan_templates.delete_scan_template(db, template_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return {"ok": True}
