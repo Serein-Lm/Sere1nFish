@@ -7,7 +7,6 @@ import XMarkdown from '@ant-design/x-markdown'
 import { Flex, Space, Button, Divider, Dropdown, message, Spin, Empty, Tooltip, Tag, Drawer, Collapse, Alert, Segmented, Input } from 'antd'
 import type { MenuProps } from 'antd'
 import {
-  RobotOutlined,
   UserOutlined,
   ThunderboltOutlined,
   PaperClipOutlined,
@@ -1030,23 +1029,13 @@ export default function PhishingPlatform() {
     void loadArtifactList(activeConversationId, nextScope)
   }
 
-  // Bubble.List 角色配置
+  // Bubble.List 角色配置（AI Elements chatbot 模式：无头像，助手纯文本流、用户小胶囊）
   const roles: BubbleListProps['role'] = {
     assistant: {
       placement: 'start',
-      avatar: (
-        <div className="avatar-icon assistant">
-          <RobotOutlined />
-        </div>
-      ),
     },
     user: {
       placement: 'end',
-      avatar: (
-        <div className="avatar-icon user">
-          <UserOutlined />
-        </div>
-      ),
     },
   }
 

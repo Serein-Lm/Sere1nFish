@@ -628,9 +628,9 @@
   align-items: stretch !important; /* 让子元素可以自己控制对齐 */
 }
 
-/* 关键：每个气泡外层容器必须铺满宽度 */
+/* 关键：每个气泡外层容器必须铺满宽度（AI Elements flex flex-col gap-8 ≈ 32px 间距） */
 .chat-list .ant-bubble {
-  margin-bottom: 28px !important;
+  margin-bottom: 32px !important;
   width: 100% !important;
   max-width: 100% !important;
   padding-inline-start: 0 !important; /* 覆盖默认的 15% */
@@ -641,76 +641,52 @@
   margin-bottom: 16px !important;
 }
 
-/* ========== 头像样式 ========== */
-.avatar-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 15px;
-  flex-shrink: 0;
-}
-
-.avatar-icon.assistant {
-  background: var(--primary-color);
-  color: var(--primary-bg);
-}
-
-.avatar-icon.user {
-  background: var(--accent-hover);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-}
-
-/* ========== AI 助手气泡 - 左对齐 ========== */
+/* ========== AI 助手消息 - 左对齐（AI Elements 模式：无气泡纯文本流） ========== */
 .chat-list .ant-bubble.ant-bubble-start {
   align-self: flex-start !important;
 }
 
-/* 外层 bubble-body 占更宽的可读宽度 */
+/* 助手消息占阅读列（AI Elements is-assistant: max-w-[95%] 纯文本流） */
 .chat-list .ant-bubble-start .ant-bubble-body {
-  max-width: 88%;
+  max-width: 96%;
   width: 100%;
 }
 
-/* 助手消息：极淡底纹面板，形成清晰的"一条回复"边界（Claude 风格） */
+/* 助手消息不套气泡：纯 Markdown 文本流，靠排版层次区分（AI Elements 模式） */
 .chat-list .ant-bubble-start .ant-bubble-content,
 .chat-list .ant-bubble-start .ant-bubble-content-filled {
-  background: var(--tertiary-bg) !important;
-  border: 1px solid var(--border-color) !important;
-  border-radius: 14px !important;
-  padding: 14px 18px !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 2px 0 !important;
   box-shadow: none !important;
   width: 100%;
   box-sizing: border-box;
   position: relative;
 }
 
-/* ========== 用户气泡 - 右对齐 ========== */
-/* 使用 align-self 让气泡在 flex column 布局中靠右 */
+/* ========== 用户消息 - 右对齐小胶囊（AI Elements 模式：w-fit ml-auto bg-secondary） ========== */
 .chat-list .ant-bubble.ant-bubble-end {
   align-self: flex-end !important;
 }
 
+/* 宽度随内容收缩，不再固定 60% */
 .chat-list .ant-bubble-end .ant-bubble-body {
-  max-width: 60%;
+  max-width: 78%;
+  width: auto;
 }
 
 .chat-list .ant-bubble-end .ant-bubble-content,
 .chat-list .ant-bubble-end .ant-bubble-content-filled {
-  background: var(--primary-color) !important;
-  border: 1px solid var(--primary-color) !important;
-  color: var(--primary-bg) !important;
-  border-radius: 14px !important;
-  padding: 10px 16px !important;
-  box-shadow: 0 4px 12px var(--primary-glow) !important;
+  background: var(--accent-color) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-primary) !important;
+  border-radius: 12px !important;
+  padding: 9px 14px !important;
+  box-shadow: none !important;
 }
 
-.chat-list .ant-bubble-end .ant-bubble-content * {
-  color: var(--primary-bg) !important;
-}
+/* AI Elements 模式下用户胶囊为浅色底，子元素继承 text-primary 即可 */
 
 .message-artifact-list {
   display: flex;
@@ -1326,16 +1302,11 @@
   }
 
   .chat-list .ant-bubble {
-    margin-bottom: 36px !important;
+    margin-bottom: 28px !important;
   }
 
   .chat-list .ant-bubble-start .ant-bubble-body {
     max-width: 90%;
-  }
-
-  .chat-list .ant-bubble-start .ant-bubble-content,
-  .chat-list .ant-bubble-start .ant-bubble-content-filled {
-    padding: 14px 16px !important;
   }
 
   .chat-list .ant-bubble-end .ant-bubble-body {
@@ -1652,7 +1623,7 @@
   flex-wrap: wrap;
   gap: 6px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.28);
+  border-top: 1px solid var(--border-color);
   font-size: 12px;
 }
 
@@ -1669,7 +1640,8 @@
   white-space: nowrap;
   padding: 1px 8px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--accent-hover);
+  border: 1px solid var(--border-color);
 }
 
 /* 会话条目：重命名按钮与删除同风格，悬浮显示 */
