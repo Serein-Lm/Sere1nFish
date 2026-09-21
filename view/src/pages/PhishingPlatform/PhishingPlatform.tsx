@@ -1371,7 +1371,7 @@ export default function PhishingPlatform() {
             } : undefined}
             slotConfig={slotConfig?.slotConfig}
             placeholder="输入需求，Enter 发送"
-            autoSize={{ minRows: 3, maxRows: 6 }}
+            autoSize={{ minRows: 1, maxRows: 8 }}
             className="chat-sender"
             suffix={false}
             footer={(actionNode) => (

@@ -57,6 +57,21 @@ const darkTokens = {
   colorBgLayout: '#0a0a0a',
 }
 
+// AI 中枢（@ant-design/x 组件）的组件级设计令牌：与上面 antd 令牌同源，
+// Sender 的词槽/边框颜色从主题下发；布局类参数（圆角/内边距）没有组件令牌，
+// 统一放在 PhishingPlatform.css 的设计变量里
+const xLightTokens = {
+  Sender: {
+    colorBorderInput: 'rgba(22, 119, 255, 0.14)',
+  },
+}
+
+const xDarkTokens = {
+  Sender: {
+    colorBorderInput: 'rgba(255, 255, 255, 0.16)',
+  },
+}
+
 function RouteLoading() {
   return <div className="route-loading" aria-label="页面加载中" />
 }
@@ -72,7 +87,12 @@ function AppContent() {
         token: currentTheme === 'dark' ? darkTokens : lightTokens,
       }}
     >
-      <XProvider locale={xZhCN}>
+      <XProvider
+        locale={xZhCN}
+        theme={{
+          components: currentTheme === 'dark' ? xDarkTokens : xLightTokens,
+        }}
+      >
       <BrowserRouter>
         <Suspense fallback={<RouteLoading />}>
           <Routes>

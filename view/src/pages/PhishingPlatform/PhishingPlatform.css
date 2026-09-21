@@ -998,13 +998,13 @@
 }
 
 /* ========== 发送器容器 - 居中 ========== */
-/* 与消息列共用同一套水平尺度：max-width 含两侧 padding（24×2），
-   使 Sender 可视框与 .chat-list 的 820px 阅读列精确对齐 */
+/* 输入框比 820px 阅读列更宽（现代对话 UI 惯例：消息居中阅读、输入框更长），
+   max-width 含两侧 padding（24×2），并压缩垂直空间使输入框更纤细 */
 .sender-wrapper {
   width: 100%;
-  max-width: calc(820px + 48px);
+  max-width: calc(960px + 48px);
   margin: 0 auto;
-  padding: 8px 24px 18px 24px;
+  padding: 6px 24px 12px 24px;
   flex-shrink: 0;
 }
 
@@ -1030,7 +1030,7 @@
   background: transparent !important;
   color: var(--text-primary) !important;
   font-size: 14px;
-  padding: 12px 16px !important;
+  padding: 9px 14px !important;
 }
 
 .chat-sender .ant-sender-input::placeholder {
@@ -1056,9 +1056,9 @@
 
 /* ========== Sender Footer 样式 ========== */
 .sender-footer {
-  padding: 8px 12px;
+  padding: 4px 10px;
   background: transparent;
-  gap: 8px;
+  gap: 6px;
 }
 
 /* 允许底部操作按钮在窄屏换行，避免溢出/截断 */
@@ -1096,10 +1096,10 @@
 .ant-sender-switch {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border-radius: 16px;
-  font-size: 13px;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 14px;
+  font-size: 12px;
   cursor: pointer;
   transition: all 0.2s ease;
   background: transparent !important;
@@ -1361,13 +1361,13 @@
   }
 
   .sender-wrapper {
-    padding: 8px 10px 12px;
+    padding: 6px 10px 10px;
   }
 
   .sender-footer {
     flex-wrap: wrap;
     align-items: flex-start !important;
-    padding: 6px 8px;
+    padding: 4px 8px;
   }
 
   .sender-footer > .ant-flex:first-child {
