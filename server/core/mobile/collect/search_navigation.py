@@ -259,9 +259,17 @@ class WechatArticleSearchNavigator:
             f"实际 {current.rsplit('.', 1)[-1] if current else 'unknown'}"
         )
 
-    def _enter_search_activity(self, device, adb_device_id: str) -> str:
+    def _enter_search_activity(
+        self,
+        device,
+        adb_device_id: str,
+        *,
+        app_name: str = "微信",
+        app_instance: str = "primary",
+    ) -> str:
         """Normalize Launcher/result states to WeChat's focused search editor."""
         activity = ""
+        relaunched = False
         for _attempt in range(8):
             activity = self._current_activity(adb_device_id)
             if activity == self._SEARCH_ACTIVITY:
@@ -277,6 +285,20 @@ class WechatArticleSearchNavigator:
                 device.back(delay=0.1)
                 self._sleep(0.3)
                 continue
+            # 前台不在微信（系统弹窗/桌面/其他应用抢焦点）：拉起微信后重试一次
+            if not relaunched:
+                relaunched = True
+                try:
+                    launch = self._launcher_factory().launch(
+                        adb_device_id,
+                        app_name,
+                        instance="clone" if app_instance == "clone" else "primary",
+                    )
+                    if launch.ok:
+                        self._sleep(0.6)
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
             break
         raise RuntimeError(
             "微信当前页面不支持确定性搜索导航: "
@@ -359,7 +381,12 @@ class WechatArticleSearchNavigator:
 
             device = manager.get_device(device_id)
             self._sleep(0.35)
-            activity = self._enter_search_activity(device, adb_device_id)
+            activity = self._enter_search_activity(
+                device,
+                adb_device_id,
+                app_name=app_name,
+                app_instance=app_instance,
+            )
 
             previous_ime = device.detect_and_set_adb_keyboard()
             restore_error = ""

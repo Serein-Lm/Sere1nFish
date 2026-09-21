@@ -265,6 +265,29 @@ class SettingsSearchClipboardBridge:
             except Exception:
                 break
         try:
+            if self.current_package(adb_device_id) == target_package:
+                return True
+        except Exception:
+            return False
+        # 兜底：盲按返回没能回到目标应用时，直接把目标应用拉回前台，
+        # 避免流程停留在系统桌面/设置里（后续微信内点击全部失效）。
+        try:
+            self._shell(
+                adb_device_id,
+                [
+                    "monkey",
+                    "-p",
+                    target_package,
+                    "-c",
+                    "android.intent.category.LAUNCHER",
+                    "1",
+                ],
+                timeout=12,
+            )
+            self._sleep(0.8)
+        except Exception:
+            pass
+        try:
             return self.current_package(adb_device_id) == target_package
         except Exception:
             return False

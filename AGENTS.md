@@ -130,6 +130,7 @@
 - 共享领域行为放在 `api/services/*` 或 `core/*`。pipeline、auth、device、observability、browser orchestration、runtime config 不要重复实现。
 - 公司综合扫描的稳定执行链是 `CompanyScanPlan -> CompanyScanRuntime -> CompanyStageRegistry -> CompanySourceStageRegistry/RelatedSourceRegistry -> checkpoint/finalizer`。`CompanyScanPipeline.run_pipeline` 只保留兼容入口和渠道 adapter 注入；新增来源必须实现并注册 Stage，不得在入口、runtime 或 finalizer 中增加渠道名 `if/else`。
 - 手机采集的稳定执行链是 `MobileCollectPlan -> planning -> MobileCollectRuntime -> MobileStageRegistry -> keyword/detail/persist/notify`。runtime 只持有运行实例、超时、停止、检查点、父任务进度和终态投影；导航、平台策略、候选审核、详情交接和证据持久化分别由对应 adapter/stage 负责。新增手机渠道或动作通过 registry/dispatcher 扩展，不得把长业务循环写回 `core/mobile/collect/pipeline.py`。
+- 微信采集的页面定位必须走确定性结果页守卫（`core.mobile.collect.wechat_page_guard`）：详情点击前后用前台 activity 校验是否处于搜索结果页，只在文章/菜单等安全中间页有界按返回；搜索输入页（FTSMainUI）、微信主界面（LauncherUI）和微信包外一律不按返回——盲按返回会把流程带出微信搜索甚至退出应用。守卫由 `state.build_stream_state` 仅对微信任务注入共享态 `ensure_results_page`（详情 stage 构造注入优先、共享态兜底、都无则保持旧行为以兼容测试）；结果页确认丢失时设置 `results_page_lost`，关键词阶段立即结束该关键词的屏幕循环，由下一个关键词的确定性导航自愈。剪贴板桥（系统设置）恢复失败时必须用 `monkey -p` 把微信拉回前台兜底。
 - Runtime 只负责生命周期、阶段顺序、资源租约、恢复决策、取消和统一观测，不实现渠道业务；Stage 只消费显式 plan/context 并返回稳定结果，不自行创建第二套任务状态或猜测前序完成状态。跨 Stage 共享字段增加时先更新版本化 contract 和结果 projector，再补 registry/runtime 契约测试。
 - Stage 必须显式声明本轮是外部工作还是持久化恢复：外部工作取得对应租约后才能创建协程，纯检查点/DAO 恢复不得占用核心并发。阶段完成标记只能在该阶段所有必需检查点成功写入后保存；画像话术、目标选择等后处理必须拥有独立检查点和稳定幂等写入身份，不能依赖前序全局完成标记推断自身已完成。
 - 通知类能力必须走统一通知 Hook/Service，例如 `api.services.notifications.notify_event` 或 `notify_event_background`。业务流程只表达事件、级别、标题和上下文，不直接 import 钉钉、邮件、Webhook 等具体通道。

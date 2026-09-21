@@ -66,6 +66,8 @@ class MobileKeywordStageRunner:
         run = await self._build_state(item, ctx)
         if run.stopped:
             return
+        # 结果页守卫标志按关键词复位：上个关键词的页面丢失不影响本轮
+        run.shared["results_page_lost"] = False
         if run.checkpoint_key and not run.shared.get("dry_run"):
             metrics = await run.ctx.drain("persist")
             run.persist_failures_before = int(metrics.get("failed") or 0)
@@ -126,6 +128,12 @@ class MobileKeywordStageRunner:
                 if self._reached_bottom(run, new_visible):
                     self._observe_bottom(run, index)
                     break
+                if bool(shared.get("results_page_lost")):
+                    # 详情采集把结果页弄丢了（守卫确认无法恢复）：
+                    # 继续截图/滑动只会浪费视觉模型调用，立即结束本关键词，
+                    # 由下一个关键词的确定性导航自愈。
+                    self._observe_page_lost(run, index)
+                    break
                 await self._publish_screen_progress(run, index)
             except Exception as exc:  # noqa: BLE001
                 run.screen_errors += 1
@@ -140,6 +148,17 @@ class MobileKeywordStageRunner:
                 self._observe_screen_error(run, index, exc)
             if index < swipe_times and not run.stopped:
                 await self._swipe(run)
+
+    def _observe_page_lost(self, run: KeywordStageState, index: int) -> None:
+        self.observer(
+            f"结果页丢失，提前结束关键词 kw={run.keyword or '-'} idx={index}",
+            project_id=run.shared.get("project_id") or "",
+            task_id=run.shared["run_task_id"],
+            source="mobile_collect",
+            level="warning",
+            event="collect_results_page_lost",
+            data={"keyword": run.keyword, "index": index},
+        )
 
     async def _process_screen(self, run: KeywordStageState, index: int) -> int:
         image, screenshot_id, screenshot_url = await self.collect_stage._capture_save(

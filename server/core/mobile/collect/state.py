@@ -33,6 +33,27 @@ def build_counters() -> dict[str, int]:
     }
 
 
+def _wechat_page_guard_state(task_def: dict[str, Any]) -> dict[str, Any]:
+    """微信采集注入确定性结果页守卫，防止详情采集跳出微信搜索流程。
+
+    仅对微信任务生效（app_name 含「微信」或 source_link_strategy 为微信策略）；
+    其它应用的 activity 模型不同，不注入。
+    """
+    app_name = str(task_def.get("app_name") or "")
+    strategy = str(task_def.get("source_link_strategy") or "")
+    if "微信" not in app_name and "wechat" not in strategy.lower():
+        return {}
+
+    def _ensure_results_page(device_id: str) -> dict[str, Any]:
+        from core.mobile.collect.wechat_page_guard import ensure_wechat_results_page
+        from core.mobile.manager import MobileDeviceManager
+
+        adb_id = MobileDeviceManager().resolve_adb_device_id(device_id)
+        return ensure_wechat_results_page(adb_id).to_dict()
+
+    return {"ensure_results_page": _ensure_results_page}
+
+
 def build_stream_state(
     plan: MobileCollectPlan,
     seeds: MobileSeedPlan,
@@ -60,6 +81,7 @@ def build_stream_state(
         "notify_on": task_def.get("notify_on", "new"),
         **_collection_policy_state(task_def),
         **_detail_policy_state(task_def),
+        **_wechat_page_guard_state(task_def),
         **_runtime_state(plan, seeds, stop_event),
     }
     return state

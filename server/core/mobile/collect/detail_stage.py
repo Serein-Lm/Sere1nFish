@@ -63,6 +63,7 @@ class MobileDetailStageRunner:
         detail_analyzer: Callable[..., Awaitable[dict[str, Any] | None]],
         observer: Callable[..., Any],
         ingest_timeout_seconds: int,
+        ensure_results_page: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self.capture_save = capture_save
         self.capture_verification = capture_verification
@@ -79,6 +80,9 @@ class MobileDetailStageRunner:
         self.observer = observer
         self.events = DetailStageObserver(observer)
         self.ingest_timeout_seconds = ingest_timeout_seconds
+        # 结果页守卫：构造注入优先，否则读共享状态（state.build_stream_state 注入），
+        # 两者都没有时退回旧的盲按返回（测试兼容）
+        self.ensure_results_page = ensure_results_page
 
     async def run(
         self,
@@ -92,6 +96,13 @@ class MobileDetailStageRunner:
             return False
         self.events.enter(run)
         try:
+            # 点击前守卫：当前不在搜索结果页且无法安全恢复时，跳过该候选，
+            # 避免把候选坐标点击到错误页面（视频号/外部浏览器/搜索输入页）。
+            guard = await self._ensure_results_before_tap(run)
+            if guard is not None and not guard.get("restored"):
+                run.shared["results_page_lost"] = True
+                self._observe_page_guard(run, "collect_detail_skip_page_lost", guard, level="warning")
+                return False
             await asyncio.to_thread(
                 self.tap_action,
                 run.shared["device_id"],
@@ -530,8 +541,56 @@ class MobileDetailStageRunner:
         )
         return True
 
+    def _guard_for(self, run: DetailRunState) -> Callable[[str], dict[str, Any]] | None:
+        """守卫解析：构造注入 > 共享状态注入（build_stream_state）> None（旧行为）。"""
+        if self.ensure_results_page is not None:
+            return self.ensure_results_page
+        shared_guard = run.shared.get("ensure_results_page")
+        return shared_guard if callable(shared_guard) else None
+
+    async def _ensure_results_before_tap(self, run: DetailRunState) -> dict[str, Any] | None:
+        """点击候选前校验结果页。返回 None 表示未配置守卫（旧行为）。"""
+        guard = self._guard_for(run)
+        if guard is None:
+            return None
+        try:
+            return await asyncio.to_thread(guard, run.shared["device_id"])
+        except Exception as exc:  # noqa: BLE001
+            return {"restored": False, "action": "guard_error", "error": str(exc)}
+
+    def _observe_page_guard(
+        self,
+        run: DetailRunState,
+        event: str,
+        guard: dict[str, Any],
+        *,
+        level: str = "info",
+    ) -> None:
+        self.observer(
+            f"结果页守卫: {guard.get('action', 'unknown')}",
+            project_id=run.shared.get("project_id") or "",
+            task_id=run.shared["run_task_id"],
+            source="mobile_collect",
+            level=level,
+            event=event,
+            data={
+                "keyword": run.keyword,
+                **{k: guard.get(k) for k in ("restored", "action", "activity", "package", "backs", "error")},
+            },
+        )
+
     async def _restore_results_page(self, run: DetailRunState) -> None:
         if run.restored_to_results:
+            return
+        guard = self._guard_for(run)
+        if guard is not None:
+            try:
+                result = await asyncio.to_thread(guard, run.shared["device_id"])
+            except Exception as exc:  # noqa: BLE001
+                result = {"restored": False, "action": "guard_error", "error": str(exc)}
+            if not result.get("restored"):
+                run.shared["results_page_lost"] = True
+            self._observe_page_guard(run, "collect_detail_restore", result, level="info" if result.get("restored") else "warning")
             return
         try:
             await asyncio.to_thread(self.back_action, run.shared["device_id"])
