@@ -297,7 +297,7 @@
 
 .ai-hub-empty-state {
   width: 100%;
-  max-width: 960px;
+  max-width: 1060px;
   margin: auto;
   padding: 18px 0 34px;
 }
@@ -605,18 +605,18 @@
   min-height: 0; /* 关键：允许 flex 子元素收缩 */
 }
 
-/* AI 中枢统一内容列尺度：消息阅读列与输入框同为 960px，
-   两者共用一套宽度（--ai-hub-col 不够直接时按字面 960px 维护） */
+/* AI 中枢统一内容列尺度：消息阅读列与输入框同为 1060px，
+   两者共用一套宽度（--ai-hub-col 不够直接时按字面 1060px 维护） */
 .chat-list > * {
   width: 100%;
-  max-width: 960px;
+  max-width: 1060px;
 }
 
 /* ========== Bubble.List 核心样式 - 与输入框同尺度 ========== */
-/* 消息列与 Sender 共用 960px 内容宽度，左右边缘与输入框完全一致 */
+/* 消息列与 Sender 共用 1060px 内容宽度，左右边缘与输入框完全一致 */
 .chat-list .ant-bubble-list {
   width: 100% !important;
-  max-width: 960px !important;
+  max-width: 1060px !important;
   padding: 0 !important;
   margin-inline: auto !important;
 }
@@ -998,11 +998,11 @@
 }
 
 /* ========== 发送器容器 - 居中 ========== */
-/* 输入框与消息阅读列共用统一 960px 内容宽度，左右边缘一致；
+/* 输入框与消息阅读列共用统一 1060px 内容宽度，左右边缘一致；
    max-width 含两侧 padding（24×2），并压缩垂直空间使输入框更纤细 */
 .sender-wrapper {
   width: 100%;
-  max-width: calc(960px + 48px);
+  max-width: calc(1060px + 48px);
   margin: 0 auto;
   padding: 6px 24px 12px 24px;
   flex-shrink: 0;
