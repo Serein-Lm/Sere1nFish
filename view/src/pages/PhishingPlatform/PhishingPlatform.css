@@ -593,7 +593,7 @@
   color: #ff4d4f !important;
 }
 
-/* 空态滚动容器（有消息时由 AI Elements Conversation 接管滚动） */
+/* 聊天列表区域 - 居中阅读列 */
 .chat-list {
   flex: 1;
   display: flex;
@@ -605,41 +605,88 @@
   min-height: 0; /* 关键：允许 flex 子元素收缩 */
 }
 
-/* ========== AI Elements Conversation - 消息滚动区（StickToBottom） ========== */
-.chat-conversation {
-  flex: 1;
-  min-height: 0;
-}
-
-/* 阅读列与输入框共用 1060px 内容宽度（AI Elements flex flex-col gap-8 p-4 重排） */
-.chat-conversation-content {
+/* AI 中枢统一内容列尺度：消息阅读列与输入框同为 1060px，
+   两者共用一套宽度（--ai-hub-col 不够直接时按字面 1060px 维护） */
+.chat-list > * {
   width: 100%;
-  max-width: calc(1060px + 48px);
-  margin-inline: auto;
-  padding: 24px 24px 8px 24px;
+  max-width: 1060px;
 }
 
-/* 回到底部按钮与滚动条样式沿用主题 */
-.chat-conversation::-webkit-scrollbar,
-.chat-list::-webkit-scrollbar {
-  width: 6px;
+/* ========== Bubble.List 核心样式 - 与输入框同尺度 ========== */
+/* 消息列与 Sender 共用 1060px 内容宽度，左右边缘与输入框完全一致 */
+.chat-list .ant-bubble-list {
+  width: 100% !important;
+  max-width: 1060px !important;
+  padding: 0 !important;
+  margin-inline: auto !important;
 }
 
-.chat-conversation::-webkit-scrollbar-track,
-.chat-list::-webkit-scrollbar-track {
-  background: transparent;
+/* 关键：scroll-box 铺满阅读列（清除组件库默认 paddingInline） */
+.chat-list .ant-bubble-list-scroll-box {
+  width: 100% !important;
+  padding-inline: 0 !important;
+  align-items: stretch !important; /* 让子元素可以自己控制对齐 */
 }
 
-.chat-conversation::-webkit-scrollbar-thumb,
-.chat-list::-webkit-scrollbar-thumb {
-  background: var(--border-hover);
-  border-radius: 3px;
+/* 关键：每个气泡外层容器必须铺满宽度（AI Elements flex flex-col gap-8 ≈ 32px 间距） */
+.chat-list .ant-bubble {
+  margin-bottom: 32px !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  padding-inline-start: 0 !important; /* 覆盖默认的 15% */
+  padding-inline-end: 0 !important; /* 覆盖默认的 15% */
 }
 
-.chat-conversation::-webkit-scrollbar-thumb:hover,
-.chat-list::-webkit-scrollbar-thumb:hover {
-  background: var(--border-active);
+.chat-list .ant-bubble:last-child {
+  margin-bottom: 16px !important;
 }
+
+/* ========== AI 助手消息 - 左对齐（AI Elements 模式：无气泡纯文本流） ========== */
+.chat-list .ant-bubble.ant-bubble-start {
+  align-self: flex-start !important;
+}
+
+/* 助手消息占阅读列（AI Elements is-assistant: max-w-[95%] 纯文本流） */
+.chat-list .ant-bubble-start .ant-bubble-body {
+  max-width: 96%;
+  width: 100%;
+}
+
+/* 助手消息不套气泡：纯 Markdown 文本流，靠排版层次区分（AI Elements 模式） */
+.chat-list .ant-bubble-start .ant-bubble-content,
+.chat-list .ant-bubble-start .ant-bubble-content-filled {
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 2px 0 !important;
+  box-shadow: none !important;
+  width: 100%;
+  box-sizing: border-box;
+  position: relative;
+}
+
+/* ========== 用户消息 - 右对齐小胶囊（AI Elements 模式：w-fit ml-auto bg-secondary） ========== */
+.chat-list .ant-bubble.ant-bubble-end {
+  align-self: flex-end !important;
+}
+
+/* 宽度随内容收缩，不再固定 60% */
+.chat-list .ant-bubble-end .ant-bubble-body {
+  max-width: 78%;
+  width: auto;
+}
+
+.chat-list .ant-bubble-end .ant-bubble-content,
+.chat-list .ant-bubble-end .ant-bubble-content-filled {
+  background: var(--accent-color) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-primary) !important;
+  border-radius: 12px !important;
+  padding: 9px 14px !important;
+  box-shadow: none !important;
+}
+
+/* AI Elements 模式下用户胶囊为浅色底，子元素继承 text-primary 即可 */
 
 .message-artifact-list {
   display: flex;
@@ -738,7 +785,7 @@
 }
 
 /* ========== XMarkdown 样式 ========== */
-.chat-conversation .x-markdown {
+.chat-list .x-markdown {
   color: var(--text-primary);
   line-height: 1.7;
   font-size: 14px;
@@ -748,12 +795,12 @@
 }
 
 /* 确保 XMarkdown 内部元素不会溢出 */
-.chat-conversation .x-markdown > * {
+.chat-list .x-markdown > * {
   max-width: 100%;
   box-sizing: border-box;
 }
 
-.chat-conversation .x-markdown h1 {
+.chat-list .x-markdown h1 {
   font-size: 19px;
   font-weight: 700;
   color: var(--text-primary);
@@ -762,32 +809,32 @@
   border-bottom: 1px solid var(--border-color);
 }
 
-.chat-conversation .x-markdown h2 {
+.chat-list .x-markdown h2 {
   font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
   margin: 14px 0 8px 0;
 }
 
-.chat-conversation .x-markdown h3 {
+.chat-list .x-markdown h3 {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
   margin: 12px 0 6px 0;
 }
 
-.chat-conversation .x-markdown p {
+.chat-list .x-markdown p {
   margin: 8px 0;
   line-height: 1.7;
 }
 
-.chat-conversation .x-markdown strong {
+.chat-list .x-markdown strong {
   font-weight: 600;
   color: var(--text-primary);
 }
 
 /* 行内代码 */
-.chat-conversation .x-markdown code {
+.chat-list .x-markdown code {
   background: var(--accent-color);
   padding: 2px 6px;
   border-radius: 4px;
@@ -797,7 +844,7 @@
 }
 
 /* 代码块 */
-.chat-conversation .x-markdown pre {
+.chat-list .x-markdown pre {
   background: var(--secondary-bg) !important;
   padding: 14px 16px !important;
   border-radius: 10px !important;
@@ -806,7 +853,7 @@
   border: 1px solid var(--border-color) !important;
 }
 
-.chat-conversation .x-markdown pre code {
+.chat-list .x-markdown pre code {
   background: transparent !important;
   padding: 0 !important;
   color: var(--text-primary) !important;
@@ -818,19 +865,19 @@
 }
 
 /* 列表 */
-.chat-conversation .x-markdown ul,
-.chat-conversation .x-markdown ol {
+.chat-list .x-markdown ul,
+.chat-list .x-markdown ol {
   margin: 10px 0;
   padding-left: 24px;
 }
 
-.chat-conversation .x-markdown li {
+.chat-list .x-markdown li {
   margin: 6px 0;
   line-height: 1.8;
 }
 
 /* 引用块 */
-.chat-conversation .x-markdown blockquote {
+.chat-list .x-markdown blockquote {
   border-left: 3px solid var(--primary-color);
   padding-left: 14px;
   margin: 14px 0;
@@ -838,14 +885,14 @@
 }
 
 /* 分割线 */
-.chat-conversation .x-markdown hr {
+.chat-list .x-markdown hr {
   border: none;
   border-top: 1px solid var(--border-color);
   margin: 20px 0;
 }
 
 /* 表格 - 企业级排版 */
-.chat-conversation .x-markdown table {
+.chat-list .x-markdown table {
   display: table !important;
   width: 100% !important;
   min-width: 100% !important;
@@ -859,7 +906,7 @@
   overflow: hidden;
 }
 
-.chat-conversation .x-markdown thead th {
+.chat-list .x-markdown thead th {
   background: var(--tertiary-bg);
   color: var(--text-primary);
   font-weight: 600;
@@ -869,22 +916,22 @@
   white-space: nowrap;
 }
 
-.chat-conversation .x-markdown tbody td {
+.chat-list .x-markdown tbody td {
   padding: 9px 14px;
   border-bottom: 1px solid var(--border-color);
   color: var(--text-secondary);
 }
 
-.chat-conversation .x-markdown tbody tr:last-child td {
+.chat-list .x-markdown tbody tr:last-child td {
   border-bottom: none;
 }
 
-.chat-conversation .x-markdown tbody tr:nth-child(even) {
+.chat-list .x-markdown tbody tr:nth-child(even) {
   background: var(--accent-color);
 }
 
 /* ========== Think 组件样式 - 缩小图标 ========== */
-.chat-conversation .ant-think {
+.chat-list .ant-think {
   background: var(--secondary-bg) !important;
   border: 1px solid var(--border-color) !important;
   border-radius: 10px !important;
@@ -893,33 +940,33 @@
 }
 
 /* Think 图标和文字缩小 */
-.chat-conversation .ant-think .ant-think-status-wrapper {
+.chat-list .ant-think .ant-think-status-wrapper {
   font-size: 13px;
 }
 
-.chat-conversation .ant-think .ant-think-status-icon {
+.chat-list .ant-think .ant-think-status-icon {
   font-size: 14px !important;
 }
 
-.chat-conversation .ant-think .ant-think-status-icon .anticon {
+.chat-list .ant-think .ant-think-status-icon .anticon {
   font-size: 14px !important;
 }
 
-.chat-conversation .ant-think .ant-think-status-icon svg {
+.chat-list .ant-think .ant-think-status-icon svg {
   width: 14px !important;
   height: 14px !important;
 }
 
-.chat-conversation .ant-think .ant-think-status-text {
+.chat-list .ant-think .ant-think-status-text {
   font-size: 13px;
   color: var(--text-secondary);
 }
 
-.chat-conversation .ant-think .ant-think-status-down-icon {
+.chat-list .ant-think .ant-think-status-down-icon {
   font-size: 12px !important;
 }
 
-.chat-conversation .ant-think-content {
+.chat-list .ant-think-content {
   color: var(--text-secondary) !important;
   margin-top: 10px;
   line-height: 1.6;
@@ -937,50 +984,65 @@
   flex-shrink: 0;
 }
 
-/* ========== AI Elements PromptInput（Composer）适配 ========== */
-/* form 容器，内部 InputGroup 提供圆角边框面板 */
-.chat-prompt-input [data-slot='input-group'] {
-  background: var(--secondary-bg);
-  border-color: var(--border-color);
-  border-radius: 14px;
-  box-shadow: var(--shadow-md);
-  transition: border-color var(--transition-base) ease, box-shadow var(--transition-base) ease;
+/* Sender 样式 */
+.chat-sender {
+  background: var(--secondary-bg) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 14px !important;
+  box-shadow: var(--shadow-md) !important;
+  transition: all var(--transition-base) ease;
 }
 
-.chat-prompt-input [data-slot='input-group']:hover {
-  border-color: var(--border-hover);
+.chat-sender:hover {
+  border-color: var(--primary-color) !important;
+  box-shadow: var(--shadow-lg) !important;
 }
 
-.chat-prompt-input [data-slot='input-group']:has(textarea:focus-visible) {
-  border-color: var(--primary-color);
-  box-shadow: 0 2px 16px var(--primary-glow);
+.chat-sender:focus-within {
+  box-shadow: 0 2px 16px var(--primary-glow) !important;
 }
 
-/* 输入区：纤细单行起步，内容增长自动撑高（field-sizing-content） */
-.chat-prompt-input textarea {
-  min-height: 44px;
-  padding: 10px 14px;
+.chat-sender .ant-sender-input {
+  background: transparent !important;
+  color: var(--text-primary) !important;
   font-size: 14px;
-  color: var(--text-primary);
+  padding: 9px 14px !important;
 }
 
-.chat-prompt-input textarea::placeholder {
-  color: var(--text-tertiary);
+.chat-sender .ant-sender-input::placeholder {
+  color: var(--text-tertiary) !important;
 }
 
-/* 引用区（PromptInputHeader）：贴住输入区上沿 */
-.chat-prompt-header {
-  padding-top: 10px;
-  padding-inline: 10px;
+/* ========== 去掉 ant-sender-content 的灰色边框 ========== */
+.chat-sender .ant-sender-content,
+.ant-sender .ant-sender-content,
+.ant-sender-content {
+  border: none !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
 }
 
-/* 工具行（PromptInputTools）：窄屏自动换行 */
-.chat-prompt-tools {
+.chat-sender .ant-sender-content textarea,
+.ant-sender-content textarea {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+/* ========== Sender Footer 样式 ========== */
+.sender-footer {
+  padding: 4px 10px;
+  background: transparent;
+  gap: 6px;
+}
+
+/* 允许底部操作按钮在窄屏换行，避免溢出/截断 */
+.sender-footer > .ant-flex:first-child {
   flex-wrap: wrap;
   row-gap: 6px;
-  padding: 4px 8px;
+  min-width: 0;
 }
-
 
 .ai-hub-skill-picker {
   width: clamp(132px, 18vw, 240px);
@@ -991,6 +1053,110 @@
   min-height: 30px !important;
 }
 
+.sender-footer .ant-btn-text {
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
+}
+
+.sender-footer .ant-btn-text:hover {
+  color: var(--primary-color);
+  background: var(--accent-hover);
+}
+
+.chat-sender .ant-sender-footer {
+  border-top: none !important;
+}
+
+/* ========== Sender.Switch 样式 ========== */
+.chat-sender .ant-sender-switch,
+.ant-sender-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  color: var(--text-secondary);
+}
+
+.chat-sender .ant-sender-switch:hover,
+.ant-sender-switch:hover {
+  color: var(--primary-color);
+  background: var(--accent-color) !important;
+}
+
+.chat-sender .ant-sender-switch-checked,
+.ant-sender-switch-checked {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--primary-color) !important;
+  border-radius: 16px;
+}
+
+/* 去掉 Switch 内部按钮的边框和背景 */
+.ant-sender-switch .ant-btn,
+.ant-sender-switch button,
+.ant-sender-switch .ant-sender-switch-content,
+.ant-sender-switch .ant-btn-outlined,
+.ant-sender-switch .ant-btn-variant-outlined,
+.chat-sender .ant-sender-switch .ant-btn,
+.chat-sender .ant-sender-switch button {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  color: inherit !important;
+  padding: 4px 8px !important;
+}
+
+.ant-sender-switch .ant-btn:hover,
+.ant-sender-switch button:hover,
+.chat-sender .ant-sender-switch .ant-btn:hover {
+  background: transparent !important;
+  border: none !important;
+  color: var(--primary-color) !important;
+}
+
+/* 选中状态的按钮 */
+.ant-sender-switch-checked .ant-btn,
+.ant-sender-switch-checked button,
+.ant-sender-switch-checked .ant-sender-switch-content {
+  background: transparent !important;
+  border: none !important;
+  color: var(--primary-color) !important;
+}
+
+/* ========== 发送按钮样式 ========== */
+.chat-sender .ant-sender-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-sender .ant-sender-submit,
+.chat-sender .ant-btn-primary {
+  background: var(--primary-color) !important;
+  border: none !important;
+  color: var(--primary-bg) !important;
+  border-radius: 10px !important;
+  padding: 6px 16px !important;
+  font-weight: 600;
+  transition: all var(--transition-base) ease;
+  height: 32px;
+}
+
+.chat-sender .ant-sender-submit:hover:not(:disabled),
+.chat-sender .ant-btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px var(--primary-glow) !important;
+}
 
 /* ========== Dropdown 菜单样式 ========== */
 .ant-dropdown-menu {
@@ -1050,8 +1216,16 @@
     grid-template-columns: minmax(440px, 1fr) 300px;
   }
 
-  .chat-conversation-content {
+  .chat-list {
     padding: 32px 24px 50px 24px;
+  }
+
+  .chat-list .ant-bubble-start .ant-bubble-body {
+    max-width: 80%;
+  }
+
+  .chat-list .ant-bubble-end .ant-bubble-body {
+    max-width: 70%;
   }
 }
 
@@ -1127,8 +1301,16 @@
     padding: 16px 10px 24px;
   }
 
-  .chat-conversation-content {
-    padding: 16px 10px 24px;
+  .chat-list .ant-bubble {
+    margin-bottom: 28px !important;
+  }
+
+  .chat-list .ant-bubble-start .ant-bubble-body {
+    max-width: 90%;
+  }
+
+  .chat-list .ant-bubble-end .ant-bubble-body {
+    max-width: 85%;
   }
 
   .ai-hub-empty-state {
@@ -1153,12 +1335,25 @@
     padding: 6px 10px 10px;
   }
 
-  .chat-prompt-tools {
-    padding: 4px 6px;
+  .sender-footer {
+    flex-wrap: wrap;
+    align-items: flex-start !important;
+    padding: 4px 8px;
+  }
+
+  .sender-footer > .ant-flex:first-child {
+    width: 100%;
+    column-gap: 4px !important;
   }
 
   .ai-hub-skill-picker {
     width: min(100%, 220px);
+  }
+
+  .chat-sender .ant-sender-switch,
+  .ant-sender-switch {
+    padding: 3px 6px;
+    font-size: 12px;
   }
 
   .ai-hub-drawer .ant-drawer-content-wrapper {
@@ -1192,7 +1387,7 @@
 }
 
 /* ========== ThoughtChain 优化样式 ========== */
-.chat-conversation .ant-thought-chain {
+.chat-list .ant-thought-chain {
   background: var(--secondary-bg);
   border: 1px solid var(--border-color);
   border-radius: 12px;
@@ -1202,7 +1397,7 @@
 }
 
 /* 嵌套的 ThoughtChain（子节点）样式 */
-.chat-conversation .ant-thought-chain .ant-thought-chain {
+.chat-list .ant-thought-chain .ant-thought-chain {
   background: transparent;
   border: none;
   padding: 0;
@@ -1210,44 +1405,44 @@
   width: 100%;
 }
 
-.chat-conversation .ant-thought-chain-node {
+.chat-list .ant-thought-chain-node {
   width: 100%;
 }
 
-.chat-conversation .ant-thought-chain-node-box {
+.chat-list .ant-thought-chain-node-box {
   width: 100%;
   flex: 1;
 }
 
-.chat-conversation .ant-thought-chain-node-content {
+.chat-list .ant-thought-chain-node-content {
   width: 100%;
 }
 
-.chat-conversation .ant-thought-chain-node-content-box {
+.chat-list .ant-thought-chain-node-content-box {
   width: 100%;
 }
 
-.chat-conversation .ant-thought-chain-item {
+.chat-list .ant-thought-chain-item {
   margin-bottom: 12px !important;
 }
 
-.chat-conversation .ant-thought-chain-item:last-child {
+.chat-list .ant-thought-chain-item:last-child {
   margin-bottom: 0 !important;
 }
 
-.chat-conversation .ant-thought-chain-item-header {
+.chat-list .ant-thought-chain-item-header {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.chat-conversation .ant-thought-chain-item-title {
+.chat-list .ant-thought-chain-item-title {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
 }
 
-.chat-conversation .ant-thought-chain-item-description {
+.chat-list .ant-thought-chain-item-description {
   font-size: 12px;
   color: var(--primary-color);
   margin-top: 4px;
@@ -1255,7 +1450,7 @@
 }
 
 /* Agent 内容区域 - 完整显示 */
-.chat-conversation .ant-thought-chain-item-content {
+.chat-list .ant-thought-chain-item-content {
   margin-top: 8px;
   padding: 12px;
   background: var(--tertiary-bg);
@@ -1271,23 +1466,23 @@
 }
 
 /* ThoughtChain 内部的 XMarkdown 样式 */
-.chat-conversation .ant-thought-chain-node-content .x-markdown,
-.chat-conversation .ant-thought-chain-item-content .x-markdown {
+.chat-list .ant-thought-chain-node-content .x-markdown,
+.chat-list .ant-thought-chain-item-content .x-markdown {
   width: 100%;
   max-width: 100%;
 }
 
-.chat-conversation .ant-thought-chain-item-content::-webkit-scrollbar {
+.chat-list .ant-thought-chain-item-content::-webkit-scrollbar {
   width: 4px;
 }
 
-.chat-conversation .ant-thought-chain-item-content::-webkit-scrollbar-thumb {
+.chat-list .ant-thought-chain-item-content::-webkit-scrollbar-thumb {
   background: var(--border-color);
   border-radius: 2px;
 }
 
 /* 状态图标 */
-.chat-conversation .ant-thought-chain-item-icon {
+.chat-list .ant-thought-chain-item-icon {
   font-size: 16px;
 }
 
@@ -1372,12 +1567,12 @@
   transition: opacity 0.15s ease;
 }
 
-.chat-conversation .is-assistant:hover .ai-hub-msg-toolbar,
+.chat-list .ant-bubble:hover .ai-hub-msg-toolbar,
 .ai-hub-msg-toolbar:has(.ant-btn:not([disabled]):hover) {
   opacity: 1;
 }
 
-.chat-conversation .is-assistant:last-child .ai-hub-msg-toolbar {
+.chat-list .ant-bubble:last-child .ai-hub-msg-toolbar {
   opacity: 1;
 }
 
@@ -1390,19 +1585,21 @@
   background: var(--accent-color);
 }
 
-/* 回到底部按钮（ConversationScrollButton：组件自带居中悬浮定位） */
-.chat-scroll-button {
+/* 回到底部悬浮按钮：流式输出时用户上滑阅读不强制跟随 */
+.ai-hub-scroll-bottom {
+  position: absolute;
+  right: 28px;
+  bottom: 148px;
   z-index: 30;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--border-color);
   color: var(--text-secondary);
   background: var(--secondary-bg);
-  border-color: var(--border-color);
 }
 
-.chat-scroll-button:hover {
+.ai-hub-scroll-bottom:hover {
   color: var(--primary-color);
   border-color: var(--primary-color);
-  background: var(--secondary-bg);
 }
 
 /* 用户消息：正文 + 引用清单分行展示 */

@@ -1,23 +1,15 @@
 import { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ThoughtChain } from '@ant-design/x'
-import { Conversation as AIConversation, ConversationContent, ConversationScrollButton } from '@/components/ai-elements/conversation'
-import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message'
-import {
-  PromptInput,
-  PromptInputBody,
-  PromptInputButton,
-  PromptInputFooter,
-  PromptInputHeader,
-  PromptInputSubmit,
-  PromptInputTextarea,
-  PromptInputTools,
-} from '@/components/ai-elements/prompt-input'
-import type { StickToBottomContext } from 'use-stick-to-bottom'
-import { Flex, Space, Button, Dropdown, message, Spin, Empty, Tooltip, Tag, Drawer, Collapse, Alert, Segmented, Switch } from 'antd'
+import { Bubble, Sender, ThoughtChain } from '@ant-design/x'
+import type { BubbleListProps, SenderProps } from '@ant-design/x'
+import type { GetRef } from 'antd'
+import XMarkdown from '@ant-design/x-markdown'
+import { Flex, Space, Button, Divider, Dropdown, message, Spin, Empty, Tooltip, Tag, Drawer, Collapse, Alert, Segmented, Input } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   UserOutlined,
+  ThunderboltOutlined,
+  PaperClipOutlined,
   SearchOutlined,
   CodeOutlined,
   MailOutlined,
@@ -33,6 +25,7 @@ import {
   LinkOutlined,
   CopyOutlined,
   ReloadOutlined,
+  ArrowDownOutlined,
 } from '@ant-design/icons'
 import { 
   agentService, 
@@ -74,13 +67,15 @@ import AIHubWorkspaceHeader, {
 import AIHubWorkspaceInspector from './components/AIHubWorkspaceInspector'
 import './PhishingPlatform.css'
 
+const Switch = Sender.Switch
+type SenderSlotConfig = NonNullable<
+  Parameters<NonNullable<SenderProps['onSubmit']>>[1]
+>
 const isNarrowViewport = () => typeof window !== 'undefined'
   && window.matchMedia('(max-width: 768px)').matches
-
-interface AgentSkill {
-  value: string
-  title: string
-}
+const AIHubInput = (props: React.ComponentProps<typeof Input.TextArea>) => (
+  <Input.TextArea {...props} id="ai-hub-query" name="ai_hub_query" aria-label="AI 中枢问题" />
+)
 
 interface Message {
   key: string
@@ -92,13 +87,13 @@ interface Message {
   artifacts?: Artifact[]
 }
 
-// Agent 配置信息（AI Elements Composer 模式：选中后以模板文案填入输入框）
+// Agent 配置信息
 const AgentInfo: {
   [key: string]: {
     icon: React.ReactNode
     label: string
-    skill: AgentSkill
-    template: string
+    skill: SenderProps['skill']
+    slotConfig: SenderProps['slotConfig']
   }
 } = {
   phishing_email: {
@@ -107,8 +102,29 @@ const AgentInfo: {
     skill: {
       value: 'phishingEmail',
       title: '钓鱼邮件生成',
+      closable: true,
     },
-    template: '请帮我生成一封针对「目标人群」的钓鱼邮件，主题是「邮件主题」。',
+    slotConfig: [
+      { type: 'text', value: '请帮我生成一封针对' },
+      {
+        type: 'select',
+        key: 'target_type',
+        props: {
+          options: ['技术人员', '财务人员', '管理层', 'HR部门'],
+          placeholder: '请选择目标人群',
+        },
+      },
+      { type: 'text', value: '的钓鱼邮件，主题是' },
+      {
+        type: 'input',
+        key: 'email_topic',
+        props: {
+          placeholder: '请输入邮件主题',
+          defaultValue: '系统升级通知',
+        },
+      },
+      { type: 'text', value: '。' },
+    ],
   },
   website_clone: {
     icon: <GlobalOutlined />,
@@ -116,8 +132,29 @@ const AgentInfo: {
     skill: {
       value: 'websiteClone',
       title: '网站克隆助手',
+      closable: true,
     },
-    template: '请帮我克隆「网站类型」，目标域名是「目标域名」。',
+    slotConfig: [
+      { type: 'text', value: '请帮我克隆' },
+      {
+        type: 'select',
+        key: 'site_type',
+        props: {
+          options: ['企业登录页', '邮箱登录页', 'VPN登录页', '云服务登录页'],
+          placeholder: '请选择网站类型',
+        },
+      },
+      { type: 'text', value: '，目标域名是' },
+      {
+        type: 'input',
+        key: 'target_domain',
+        props: {
+          placeholder: '请输入目标域名',
+          defaultValue: 'example.com',
+        },
+      },
+      { type: 'text', value: '。' },
+    ],
   },
   social_engineering: {
     icon: <PhoneOutlined />,
@@ -125,8 +162,29 @@ const AgentInfo: {
     skill: {
       value: 'socialEngineering',
       title: '社工话术助手',
+      closable: true,
     },
-    template: '请帮我设计一套针对「场景」的社工话术，目标是获取「目标信息」。',
+    slotConfig: [
+      { type: 'text', value: '请帮我设计一套针对' },
+      {
+        type: 'select',
+        key: 'scenario',
+        props: {
+          options: ['电话钓鱼', '短信钓鱼', '即时通讯', '面对面社工'],
+          placeholder: '请选择场景',
+        },
+      },
+      { type: 'text', value: '的社工话术，目标是获取' },
+      {
+        type: 'select',
+        key: 'target_info',
+        props: {
+          options: ['账号密码', '验证码', '内部信息', '物理访问权限'],
+          placeholder: '请选择目标信息',
+        },
+      },
+      { type: 'text', value: '。' },
+    ],
   },
   deep_search: {
     icon: <SearchOutlined />,
@@ -134,8 +192,28 @@ const AgentInfo: {
     skill: {
       value: 'deepSearch',
       title: '深度搜索',
+      closable: true,
     },
-    template: '请帮我搜索关于「关键词」的「搜索类型」。',
+    slotConfig: [
+      { type: 'text', value: '请帮我搜索关于' },
+      {
+        type: 'input',
+        key: 'search_keyword',
+        props: {
+          placeholder: '请输入搜索关键词',
+        },
+      },
+      { type: 'text', value: '的' },
+      {
+        type: 'select',
+        key: 'search_type',
+        props: {
+          options: ['漏洞信息', '泄露数据', '社交账号', '企业信息'],
+          placeholder: '请选择搜索类型',
+        },
+      },
+      { type: 'text', value: '。' },
+    ],
   },
   ai_code: {
     icon: <CodeOutlined />,
@@ -143,8 +221,29 @@ const AgentInfo: {
     skill: {
       value: 'aiCode',
       title: '代码助手',
+      closable: true,
     },
-    template: '请使用「编程语言」编写一个「功能描述」。',
+    slotConfig: [
+      { type: 'text', value: '请使用' },
+      {
+        type: 'select',
+        key: 'code_lang',
+        props: {
+          options: ['Python', 'JavaScript', 'PowerShell', 'Bash'],
+          placeholder: '请选择编程语言',
+        },
+      },
+      { type: 'text', value: '编写一个' },
+      {
+        type: 'input',
+        key: 'code_desc',
+        props: {
+          placeholder: '请描述功能',
+          defaultValue: '信息收集脚本',
+        },
+      },
+      { type: 'text', value: '。' },
+    ],
   },
 }
 
@@ -165,6 +264,8 @@ const FileInfo: {
   },
 }
 
+const IconStyle = { fontSize: 16 }
+
 // 从消息文本中提取产物（Word 等）下载链接
 const ARTIFACT_LINK_RE = /\/api\/v1\/artifacts\/(art_[A-Za-z0-9]+)\/download/g
 function extractArtifactLinks(text: string): Array<{ id: string; url: string }> {
@@ -181,6 +282,13 @@ function extractArtifactLinks(text: string): Array<{ id: string; url: string }> 
     }
   }
   return links
+}
+
+const SwitchTextStyle = {
+  display: 'inline-flex',
+  width: 28,
+  justifyContent: 'center',
+  alignItems: 'center',
 }
 
 export default function PhishingPlatform() {
@@ -209,32 +317,52 @@ export default function PhishingPlatform() {
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isNarrowViewport())
   const [layoutMode, setLayoutMode] = useState<AIHubLayoutMode>('chat')
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const chatListRef = useRef<HTMLDivElement>(null)
+  const scrollToTopRef = useRef(false)
+  const senderRef = useRef<GetRef<typeof Sender>>(null)
   // 停止生成：中断进行中的 SSE 请求
   const abortRef = useRef<AbortController | null>(null)
-  // StickToBottom 上下文：发送后贴底、加载历史置顶
-  const stickCtxRef = useRef<StickToBottomContext | null>(null)
-  // 加载历史会话后需要置顶展示最旧消息
-  const scrollToTopRef = useRef(false)
+  // 智能滚动：仅在用户位于底部附近时自动跟随，避免流式输出时强制拉回
+  const nearBottomRef = useRef(true)
+  const [showScrollBottom, setShowScrollBottom] = useState(false)
   // 重新生成：保存最近一轮请求参数
   const lastTurnRef = useRef<{
     query: string
-    skill?: AgentSkill
+    skill?: SenderProps['skill']
     references: Array<Record<string, unknown>>
     displayQuery?: string
     selectedSkills: string[]
     conversationId: string
   } | null>(null)
 
-  // 加载历史会话后从顶部开始阅读（StickToBottom 默认贴底，这里手动回滚）
+  // 自动滚动：流式对话时仅当用户位于底部附近才跟随；加载历史会话时置顶
+  const handleChatScroll = () => {
+    const el = chatListRef.current
+    if (!el) return
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    const near = distance < 120
+    nearBottomRef.current = near
+    setShowScrollBottom(distance > 240)
+  }
+
+  const scrollToBottom = () => {
+    nearBottomRef.current = true
+    setShowScrollBottom(false)
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }
+
   useEffect(() => {
-    if (!scrollToTopRef.current) return
-    scrollToTopRef.current = false
-    const frame = requestAnimationFrame(() => {
-      const el = stickCtxRef.current?.scrollRef.current
-      el?.scrollTo({ top: 0, behavior: 'auto' })
-    })
-    return () => cancelAnimationFrame(frame)
+    if (scrollToTopRef.current) {
+      scrollToTopRef.current = false
+      nearBottomRef.current = false
+      setShowScrollBottom(false)
+      chatListRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+      return
+    }
+    if (nearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    }
   }, [messages])
 
   // 从其它页面跳转并预引用（如人设库"带需求跳转中台"）
@@ -265,7 +393,7 @@ export default function PhishingPlatform() {
         prev.trim() ? prev : `请基于已引用的「${ref.label}」，`,
       )
       // 聚焦输入框，提示用户直接说出诉求
-      setTimeout(() => textareaRef.current?.focus(), 0)
+      setTimeout(() => senderRef.current?.focus?.(), 0)
     }
     // 清理 URL 参数，避免刷新重复引用
     const next = new URLSearchParams(searchParams)
@@ -472,7 +600,7 @@ export default function PhishingPlatform() {
     setArtifactsOpen(false)
     setFocusedArtifact(null)
     message.success(`已引用产物：${artifact.title}`)
-    setTimeout(() => textareaRef.current?.focus(), 0)
+    setTimeout(() => senderRef.current?.focus?.(), 0)
   }
 
   // 可跳转引用点击：跳到对应实体的读取页，供中台快速读取信息
@@ -531,20 +659,35 @@ export default function PhishingPlatform() {
     const config = AgentInfo[agentKey]
     if (!config) return
     setActiveAgentKey(agentKey)
-    setSlotConfig(config)
-    // Composer 模式：把模板文案直接填入输入框，用户替换「占位」后发送
-    setInputValue(config.template)
-    setTimeout(() => textareaRef.current?.focus(), 0)
+    try {
+      setSlotConfig(JSON.parse(JSON.stringify(config)))
+    } catch (error) {
+      console.error(error)
+    }
   }
 
   // Agent 选择点击
   const agentItemClick: MenuProps['onClick'] = (item) => selectAgent(item.key)
 
-  // 文件引用点击：以标记文案追加进输入框（随提问一起发送）
+  // 文件引用点击
   const fileItemClick: MenuProps['onClick'] = (item) => {
-    const { label } = FileInfo[item.key]
-    setInputValue(prev => (prev.trim() ? `${prev.trim()} ` : '') + `[${label}]`)
-    setTimeout(() => textareaRef.current?.focus(), 0)
+    const { icon, label } = FileInfo[item.key]
+    const slots: SenderSlotConfig = [
+      {
+        type: 'tag',
+        key: `${item.key}_${Date.now()}`,
+        props: {
+          label: (
+            <Flex gap="small">
+              {icon}
+              {label}
+            </Flex>
+          ),
+          value: item.key,
+        },
+      },
+    ]
+    senderRef.current?.insert?.(slots)
   }
 
 
@@ -552,7 +695,7 @@ export default function PhishingPlatform() {
   const streamResponse = async (
     userPrompt: string,
     messageKey: string,
-    skill?: AgentSkill,
+    skill?: SenderProps['skill'],
     conversationId?: string,
     references: Array<Record<string, unknown>> = [],
     displayQuery?: string,
@@ -692,7 +835,11 @@ export default function PhishingPlatform() {
     }
   }
 
-  const handleSend = async (value: string, skill?: AgentSkill) => {
+  const handleSend = async (
+    value: string,
+    _slots?: SenderSlotConfig,
+    skill?: SenderProps['skill'],
+  ) => {
     if (!value.trim() || isRequesting) return
 
     const refsSnapshot = dataRefs
@@ -731,10 +878,9 @@ export default function PhishingPlatform() {
     setDataRefs([])
     setArtifactRefs([])
 
-    // 发送新消息后贴底跟随新回复
-    requestAnimationFrame(() => {
-      void stickCtxRef.current?.scrollToBottom()
-    })
+    // 发送新消息后始终跟随滚动到底部
+    nearBottomRef.current = true
+    setShowScrollBottom(false)
 
     // 后端流式入口原子留存用户消息、AI 回复和本轮 Artifact 关联
     const conversationId = await ensureConversation()
@@ -805,9 +951,7 @@ export default function PhishingPlatform() {
       return next
     })
     setIsRequesting(true)
-    requestAnimationFrame(() => {
-      void stickCtxRef.current?.scrollToBottom()
-    })
+    nearBottomRef.current = true
     void streamResponse(
       snapshot.query,
       aiMessageKey,
@@ -885,7 +1029,16 @@ export default function PhishingPlatform() {
     void loadArtifactList(activeConversationId, nextScope)
   }
 
-  // AI Elements chatbot 模式：助手无头像纯文本流、用户右对齐小胶囊
+  // Bubble.List 角色配置（AI Elements chatbot 模式：无头像，助手纯文本流、用户小胶囊）
+  const roles: BubbleListProps['role'] = {
+    assistant: {
+      placement: 'start',
+    },
+    user: {
+      placement: 'end',
+    },
+  }
+
   // 渲染消息列表项
   const lastAssistantKey = useMemo(
     () => [...messages].reverse().find(item => item.role === 'assistant')?.key,
@@ -914,11 +1067,11 @@ export default function PhishingPlatform() {
     )
   }
 
-  const renderMessages = () => {
+  const renderMessageItems = () => {
     return messages.map(msg => {
       if (msg.role === 'assistant') {
         const items = msg.executionState ? buildThoughtChainItems(msg.executionState) : []
-
+        
         // 获取所有可折叠项的 key
         const allKeys = items.map(item => item.key as string)
 
@@ -959,20 +1112,22 @@ export default function PhishingPlatform() {
 
         // 提取可跳转引用（person/finding/company），供中台快速跳转
         const entityRefs = parseEntityRefs(artifactText)
-
+        
         // 当前消息的展开状态，默认全部展开（执行中）或全部折叠（完成后）
         const currentExpandedKeys = msg.expandedKeys
           ?? (autoExpandExecution && msg.status !== 'success' ? allKeys : [])
-
+        
         // 更新展开状态的处理函数
         const handleExpand = (keys: string[]) => {
-          setMessages(prev => prev.map(m =>
+          setMessages(prev => prev.map(m => 
             m.key === msg.key ? { ...m, expandedKeys: keys } : m
           ))
         }
-
-        return (
-          <Message key={msg.key} from="assistant">
+        
+        return {
+          key: msg.key,
+          role: msg.role,
+          content: (
             <div className="assistant-message-wrapper">
               {/* ThoughtChain 思维链展示 */}
               {items.length > 0 && (
@@ -984,32 +1139,30 @@ export default function PhishingPlatform() {
                   style={{ marginBottom: 16 }}
                 />
               )}
-
-              {/* 最终回复内容 - 支持分段显示（MessageResponse：Streamdown 流式 Markdown） */}
-              <MessageContent>
-                {msg.executionState?.finalSections && msg.executionState.finalSections.length > 0 ? (
-                  <Flex vertical gap={16}>
-                    {msg.executionState.finalSections.map((section) => (
-                      <div key={section.section} className="final-section-card">
-                        {section.title && (
-                          <div className="final-section-title">
-                            {section.title}
-                          </div>
-                        )}
-                        <MessageResponse>{stripArtifactRefs(stripEntityRefs(section.content))}</MessageResponse>
-                      </div>
-                    ))}
-                  </Flex>
-                ) : msg.content ? (
-                  <MessageResponse>{stripArtifactRefs(stripEntityRefs(msg.content))}</MessageResponse>
-                ) : (
-                  <div className="ai-hub-typing" aria-label="正在生成回复">
-                    <span className="ai-hub-typing-dot" />
-                    <span className="ai-hub-typing-dot" />
-                    <span className="ai-hub-typing-dot" />
-                  </div>
-                )}
-              </MessageContent>
+              
+              {/* 最终回复内容 - 支持分段显示 */}
+              {msg.executionState?.finalSections && msg.executionState.finalSections.length > 0 ? (
+                <Flex vertical gap={16}>
+                  {msg.executionState.finalSections.map((section) => (
+                    <div key={section.section} className="final-section-card">
+                      {section.title && (
+                        <div className="final-section-title">
+                          {section.title}
+                        </div>
+                      )}
+                      <XMarkdown content={stripArtifactRefs(stripEntityRefs(section.content))} />
+                    </div>
+                  ))}
+                </Flex>
+              ) : msg.content ? (
+                <XMarkdown content={stripArtifactRefs(stripEntityRefs(msg.content))} />
+              ) : (
+                <div className="ai-hub-typing" aria-label="正在生成回复">
+                  <span className="ai-hub-typing-dot" />
+                  <span className="ai-hub-typing-dot" />
+                  <span className="ai-hub-typing-dot" />
+                </div>
+              )}
 
               {/* 消息操作：复制 / 重新生成（最后一条 AI 回复） */}
               {msg.status === 'success' && (msg.content || msg.executionState?.finalSections?.length) && (
@@ -1085,14 +1238,15 @@ export default function PhishingPlatform() {
                 </Flex>
               )}
             </div>
-          </Message>
-        )
+          ),
+          loading: msg.status === 'loading',
+        }
       }
-      return (
-        <Message key={msg.key} from="user">
-          <MessageContent>{renderUserContent(msg)}</MessageContent>
-        </Message>
-      )
+      return {
+        key: msg.key,
+        role: msg.role,
+        content: renderUserContent(msg),
+      }
     })
   }
 
@@ -1127,136 +1281,152 @@ export default function PhishingPlatform() {
           />
           <div className={`ai-hub-workspace-grid mode-${layoutMode}`}>
             <section className="ai-hub-conversation-pane">
-        {messages.length === 0 ? (
-          <div className="chat-list">
+        <div className="chat-list" ref={chatListRef} onScroll={handleChatScroll}>
+          {messages.length === 0 ? (
             <AIHubEmptyState
               onPrompt={(prompt) => void handleSend(prompt)}
               onAgent={selectAgent}
             />
-          </div>
-        ) : (
-          <AIConversation contextRef={stickCtxRef} className="chat-conversation">
-            <ConversationContent className="chat-conversation-content">
-              {renderMessages()}
-            </ConversationContent>
-            <ConversationScrollButton className="chat-scroll-button" />
-          </AIConversation>
+          ) : (
+            <>
+              <Bubble.List
+                items={renderMessageItems()}
+                role={roles}
+                autoScroll={false}
+                style={{ flex: 1 }}
+              />
+              <div ref={messagesEndRef} />
+            </>
+          )}
+        </div>
+        {showScrollBottom && messages.length > 0 && (
+          <Button
+            className="ai-hub-scroll-bottom"
+            size="small"
+            shape="circle"
+            icon={<ArrowDownOutlined />}
+            aria-label="回到底部"
+            onClick={scrollToBottom}
+          />
         )}
 
         <div className="sender-wrapper">
-          <PromptInput
-            className="chat-prompt-input"
-            onSubmit={({ text }) => {
-              void handleSend(text, slotConfig?.skill)
-            }}
-          >
-            {(dataRefs.length > 0 || artifactRefs.length > 0 || slotConfig?.skill) && (
-              <PromptInputHeader className="chat-prompt-header">
-                {slotConfig?.skill && (
-                  <Tag
-                    color="blue"
-                    closable
-                    onClose={() => {
-                      setSlotConfig(null)
-                      setActiveAgentKey(null)
+          {(dataRefs.length > 0 || artifactRefs.length > 0) && (
+            <Flex gap={8} wrap="wrap" align="center" style={{ marginBottom: 8 }}>
+              <span style={{ color: '#999', fontSize: 12 }}>已引用：</span>
+              {dataRefs.map(ref => (
+                <Tag
+                  key={`${ref.type}:${ref.id}`}
+                  color={ref.type === 'person' ? 'blue' : ref.type === 'person_intel' ? 'cyan' : ref.type === 'finding' ? 'gold' : 'purple'}
+                  icon={ref.type === 'person' ? <UserOutlined /> : ref.type === 'person_intel' ? <GlobalOutlined /> : <ProfileOutlined />}
+                  closable
+                  onClose={() => handleRemoveReference(ref.type, ref.id)}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  {ref.label}
+                </Tag>
+              ))}
+              {artifactRefs.map(artifact => (
+                <Tag
+                  key={`artifact:${artifact.artifact_id}`}
+                  color="cyan"
+                  icon={<AIHubArtifactIcon artifact={artifact} />}
+                  closable
+                  onClose={() => setArtifactRefs(prev => prev.filter(
+                    item => item.artifact_id !== artifact.artifact_id,
+                  ))}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  {artifact.title}
+                </Tag>
+              ))}
+            </Flex>
+          )}
+          <Sender
+            ref={senderRef}
+            components={{ input: AIHubInput }}
+            value={inputValue}
+            onChange={setInputValue}
+            loading={isRequesting}
+            skill={slotConfig?.skill ? {
+              ...slotConfig.skill,
+              closable: {
+                onClose: () => {
+                  setSlotConfig(null)
+                  setActiveAgentKey(null)
+                  setInputValue('')
+                }
+              }
+            } : undefined}
+            slotConfig={slotConfig?.slotConfig}
+            placeholder="输入需求，Enter 发送"
+            autoSize={{ minRows: 1, maxRows: 8 }}
+            className="chat-sender"
+            suffix={false}
+            footer={(actionNode) => (
+              <Flex justify="space-between" align="center" className="sender-footer">
+                <Flex gap="small" align="center">
+                  <Button style={IconStyle} type="text" icon={<PaperClipOutlined />} />
+                  <Switch
+                    value={autoExpandExecution}
+                    checkedChildren={
+                      <>
+                        展开过程：<span style={SwitchTextStyle}>开启</span>
+                      </>
+                    }
+                    unCheckedChildren={
+                      <>
+                        展开过程：<span style={SwitchTextStyle}>关闭</span>
+                      </>
+                    }
+                    onChange={(checked: boolean) => setAutoExpandExecution(checked)}
+                    icon={<ThunderboltOutlined />}
+                  />
+                  <Dropdown
+                    menu={{
+                      selectedKeys: activeAgentKey ? [activeAgentKey] : [],
+                      onClick: agentItemClick,
+                      items: agentItems,
                     }}
                   >
-                    {slotConfig.skill.title}
-                  </Tag>
-                )}
-                {dataRefs.map(ref => (
-                  <Tag
-                    key={`${ref.type}:${ref.id}`}
-                    color={ref.type === 'person' ? 'blue' : ref.type === 'person_intel' ? 'cyan' : ref.type === 'finding' ? 'gold' : 'purple'}
-                    icon={ref.type === 'person' ? <UserOutlined /> : ref.type === 'person_intel' ? <GlobalOutlined /> : <ProfileOutlined />}
-                    closable
-                    onClose={() => handleRemoveReference(ref.type, ref.id)}
-                    style={{ marginInlineEnd: 0 }}
-                  >
-                    {ref.label}
-                  </Tag>
-                ))}
-                {artifactRefs.map(artifact => (
-                  <Tag
-                    key={`artifact:${artifact.artifact_id}`}
-                    color="cyan"
-                    icon={<AIHubArtifactIcon artifact={artifact} />}
-                    closable
-                    onClose={() => setArtifactRefs(prev => prev.filter(
-                      item => item.artifact_id !== artifact.artifact_id,
-                    ))}
-                    style={{ marginInlineEnd: 0 }}
-                  >
-                    {artifact.title}
-                  </Tag>
-                ))}
-              </PromptInputHeader>
-            )}
-            <PromptInputBody>
-              <PromptInputTextarea
-                ref={textareaRef}
-                value={inputValue}
-                onChange={e => setInputValue(e.target.value)}
-                placeholder="输入需求，Enter 发送"
-              />
-            </PromptInputBody>
-            <PromptInputFooter>
-              <PromptInputTools className="chat-prompt-tools">
-                <Switch
-                  size="small"
-                  value={autoExpandExecution}
-                  checkedChildren="展开过程：开"
-                  unCheckedChildren="展开过程：关"
-                  onChange={(checked: boolean) => setAutoExpandExecution(checked)}
-                />
-                <Dropdown
-                  menu={{
-                    selectedKeys: activeAgentKey ? [activeAgentKey] : [],
-                    onClick: agentItemClick,
-                    items: agentItems,
-                  }}
-                >
-                  <PromptInputButton size="sm">
-                    <AntDesignOutlined />
-                    <span>功能应用</span>
-                  </PromptInputButton>
-                </Dropdown>
-                {fileItems?.length ? (
-                  <Dropdown menu={{ onClick: fileItemClick, items: fileItems }}>
-                    <PromptInputButton size="sm">
-                      <ProfileOutlined />
-                      <span>文件引用</span>
-                    </PromptInputButton>
+                    <Switch value={false} icon={<AntDesignOutlined />}>
+                      功能应用
+                    </Switch>
                   </Dropdown>
-                ) : null}
-                <PromptInputButton size="sm" onClick={() => setPickerOpen(true)}>
-                  <DatabaseOutlined />
-                  <span>{dataRefs.length > 0 ? `引用数据(${dataRefs.length})` : '引用数据'}</span>
-                </PromptInputButton>
-                <SkillSelector
-                  value={selectedSkillIds}
-                  onChange={setSelectedSkillIds}
-                  disabled={isRequesting}
-                  className="ai-hub-skill-picker"
-                  placeholder="Skills"
-                />
-              </PromptInputTools>
-              <Flex align="center" gap={4}>
-                <PromptInputButton
-                  size="icon-sm"
-                  tooltip="能力目录"
-                  onClick={openCapabilities}
-                >
-                  <ApiOutlined />
-                </PromptInputButton>
-                <PromptInputSubmit
-                  status={isRequesting ? 'streaming' : 'ready'}
-                  onStop={handleCancel}
-                  disabled={!inputValue.trim() && !isRequesting}
-                />
+                  {fileItems?.length ? (
+                    <Dropdown menu={{ onClick: fileItemClick, items: fileItems }}>
+                      <Switch value={false} icon={<ProfileOutlined />}>
+                        文件引用
+                      </Switch>
+                    </Dropdown>
+                  ) : null}
+                  <Switch
+                    value={dataRefs.length > 0}
+                    icon={<DatabaseOutlined />}
+                    onChange={() => setPickerOpen(true)}
+                  >
+                    {dataRefs.length > 0 ? `引用数据(${dataRefs.length})` : '引用数据'}
+                  </Switch>
+                  <SkillSelector
+                    value={selectedSkillIds}
+                    onChange={setSelectedSkillIds}
+                    disabled={isRequesting}
+                    className="ai-hub-skill-picker"
+                    placeholder="Skills"
+                  />
+                </Flex>
+                <Flex align="center">
+                  <Tooltip title="能力目录">
+                    <Button type="text" style={IconStyle} icon={<ApiOutlined />} onClick={openCapabilities} />
+                  </Tooltip>
+                  <Divider orientation="vertical" />
+                  {actionNode}
+                </Flex>
               </Flex>
-            </PromptInputFooter>
-          </PromptInput>
+            )}
+            onSubmit={handleSend}
+            onCancel={handleCancel}
+          />
         </div>
             </section>
             {layoutMode === 'split' && (
