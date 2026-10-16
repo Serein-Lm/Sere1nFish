@@ -3,6 +3,8 @@ version: "2.4"
 x-backend-env: &backend-env
   HOST: 0.0.0.0
   PORT: 8000
+  SERVER_RELOAD: ${SERVER_RELOAD:-false}
+  SEREINFISH_RUN_KIND: service
   MONGODB_URI: mongodb://mongo:27017
   MONGODB_DATABASE: Sere1nG0Fish
   MONGODB_DIRECT: "true"

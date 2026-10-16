@@ -42,7 +42,7 @@
 
 ## 代码架构速览
 
-- 后端入口：`server/run.py` 启动 `api.main:socket_app`，通过 Uvicorn reload 模式运行。
+- 后端入口：`server/run.py` 启动 `api.main:socket_app`，生产默认关闭 Uvicorn reload；仅开发环境显式设置 `SERVER_RELOAD=true`。
 - FastAPI 应用：`server/api/main.py`，集中注册 `/api/v1/*` 路由、生命周期初始化、统一异常处理、`/health` 健康检查和 Socket.IO 挂载。
 - 后端 API 分层：
   - `server/api/routers/*`：HTTP 形态、鉴权依赖、请求校验和响应组装。
@@ -227,14 +227,14 @@
 - 人设行业自动补采统一通过 `api.services.persona_coverage`，使用 `persona_coverage_jobs` 租约队列与 `industry_organization_facts` 公开机构事实，复用 Chrome、模型、Prompt、SourceDocument 和观测入口。行业目录来自国家统计局。默认经 `api.services.persona_generation` registry 自动生成完整虚构上下文，不要求来源核验或用户手填；虚构公司与模拟联系方式保存于 `persons` 并明确标注，不能伪装为 Target 真实事实。可选 `researched` 模式继续核验公开机构事实与办公电话。缺口进入自动重试，旧来源与人物版本必须保留。
 - 人设版本由 `api.dao.person_versions` 管理：单文档原子更新将前后快照写入 `persons._pending_profile_versions`，再幂等投影到 `person_profile_versions`；启动恢复 outbox。该内部字段不得通过普通人物 API 返回，旧版本内容不可覆盖，无法恢复的历史不得补造。
 
-- 后端通过 `python run.py` 运行，该命令会以 reload 模式启动 Uvicorn。挂载到后端应用下的源码变更会触发进程重载。
+- 后端通过 `python run.py` 运行，默认 `SERVER_RELOAD=false`，源码修改在受控重启后生效。开发环境可显式开启热重载，`scripts` 和测试目录不参与监听；运维和验证脚本通过独立容器运行。
 - 前端通过 Vite dev server 运行，并启用 HMR。`view/src` 下的挂载源码变更会触发 HMR 或页面刷新。
 - nginx 会通过 HTTPS 代理前端 dev server 和后端 API。浏览器验证使用 `https://127.0.0.1/`。
 
 ## 部署与安全边界
 
 - 当前服务器的运行时部署文件位于 `/root/Sere1nFish` 根目录：`docker-compose.yml`、`compose.yaml`、`.env`、`nginx/`、`downloads/`。
-- 后端 Git 仓库内的部署模板仍位于 `Sere1nFishServer/deploy`；修改运行时部署后，应按需同步模板或文档。
+- 当前根目录两份 Compose 文件共同维护运行时部署；本仓库没有 `server/deploy` 目录，GPU 与扫描节点另有各自部署模板。
 - HTTPS 证书位于 `/root/Sere1nFish/nginx/certs/`，不要提交证书文件。
 - 数据库备份属于运维产物。将它们保留在 Git 之外，并通过 Compose `db-import` 服务或迁移脚本导入。
 - 现有业务文件迁移使用 `python -m scripts.migrate_object_storage` 先盘点，再用 `--apply --concurrency 16` 幂等上传。迁移会校验远端大小和下载 SHA-256，成功前保留本地源文件；不得手工批量移动或提前删除源文件。

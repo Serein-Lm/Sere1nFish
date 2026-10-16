@@ -1,8 +1,9 @@
 """
-启动脚本（热更新 + 仅本地访问）
+启动脚本（生产受控重启；开发环境可显式开启热更新）
 """
 
 from pathlib import Path
+import os
 
 import resource
 import uvicorn
@@ -11,6 +12,7 @@ from api.config import get_settings
 from core.logger import get_logger
 from core.process_watchdog import ProcessWatchdogConfig, start_process_health_watchdog
 
+os.environ.setdefault("SEREINFISH_RUN_KIND", "service")
 logger = get_logger("startup")
 
 # 提高文件描述符限制（并发浏览器、ADB 和长连接场景需要更多 fd）
@@ -43,6 +45,7 @@ if __name__ == "__main__":
         ".git",
         "*.log",
         str(project_root / "test_server"),
+        str(project_root / "scripts"),
         str(project_root / ".pytest_cache"),
         str(project_root / "AutoGLM-GUI-main" / "tests"),
     ]
@@ -62,9 +65,9 @@ if __name__ == "__main__":
         "api.main:socket_app",
         host=settings.HOST,  # 127.0.0.1 只允许本地访问
         port=settings.PORT,
-        reload=True,  # 热更新
-        reload_dirs=[str(project_root)],  # 运行时源码保持热更新
-        reload_excludes=reload_excludes,
+        reload=settings.SERVER_RELOAD,
+        **({"reload_dirs": [str(project_root)], "reload_excludes": reload_excludes}
+           if settings.SERVER_RELOAD else {}),
         # 优雅关闭超时上限：WS/SSE 长连接不会自然断开，超时后强制断开旧进程，
         # 避免 reload 卡在 "Waiting for connections to close"，同时兜住容器停机/重启。
         timeout_graceful_shutdown=settings.GRACEFUL_SHUTDOWN_TIMEOUT,

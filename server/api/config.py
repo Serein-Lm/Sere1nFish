@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # 服务配置
     HOST: str = "127.0.0.1"  # 只允许本地访问
     PORT: int = 8000
+    SERVER_RELOAD: bool = False  # Development opt-in; production uses controlled restarts.
     # 优雅关闭超时（秒）：WS/SSE 长连接不会自然断开，超时后强制断开，
     # 避免 reload/停机卡在 "Waiting for connections to close"。
     GRACEFUL_SHUTDOWN_TIMEOUT: int = 5
