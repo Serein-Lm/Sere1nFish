@@ -5,9 +5,14 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
+
+from api.dao.website_crawl_runs import (
+    WebsiteCrawlOwnershipLost, assert_run_owner, claim_run, finish_run, renew_run,
+)
 
 from api.db.collections import (
     WEBSITE_CRAWL_PAGES_COLLECTION,
@@ -79,6 +84,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await tasks.create_index("crawl_task_id", unique=True)
     await tasks.create_index([("project_id", 1), ("target_id", 1), ("updated_at", -1)])
     await tasks.create_index([("status", 1), ("updated_at", -1)])
+    await tasks.create_index([("status", 1), ("lease_expires_at", 1)])
 
     pages = db[WEBSITE_CRAWL_PAGES_COLLECTION]
     await pages.create_index("page_id", unique=True)
@@ -100,37 +106,22 @@ async def begin_task(
     seeds: list[str],
     root_domains: list[str],
     config: dict[str, Any],
+    runtime_id: str = "",
 ) -> dict[str, Any]:
     now = _now()
-    previous = await get_task(db, crawl_task_id)
-    await db[WEBSITE_CRAWL_TASKS_COLLECTION].update_one(
-        {"crawl_task_id": crawl_task_id},
-        {
-            "$set": {
-                "parent_task_id": parent_task_id,
-                "project_id": project_id,
-                "target_id": target_id,
-                "target_name": target_name,
-                "seeds": seeds,
-                "root_domains": root_domains,
-                "config": config,
-                "status": "running",
-                "error": "",
-                "updated_at": now,
-                "heartbeat_at": now,
-                "started_at": now,
-            },
-            "$unset": {"completed_at": ""},
-            "$setOnInsert": {
-                "crawl_task_id": crawl_task_id,
-                "created_at": now,
-            },
-        },
-        upsert=True,
+    runtime_id = runtime_id or uuid4().hex
+    previous = await claim_run(
+        db, crawl_task_id=crawl_task_id, runtime_id=runtime_id,
+        fields=dict(parent_task_id=parent_task_id, project_id=project_id,
+                    target_id=target_id, target_name=target_name, seeds=seeds,
+                    root_domains=root_domains, config=config),
     )
     await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
-        {"crawl_task_id": crawl_task_id},
-        {"$set": {"attempts_in_run": 0}},
+        {"crawl_task_id": crawl_task_id, "$or": [
+            {"runtime_id": (previous or {}).get("runtime_id")},
+            {"runtime_id": {"$exists": False}}, {"runtime_id": runtime_id},
+        ]},
+        {"$set": {"attempts_in_run": 0, "runtime_id": runtime_id}},
     )
     # A capped run persisted its directory pages but could not enqueue every
     # document. Revisit those indexes so a larger retry budget can continue
@@ -139,6 +130,7 @@ async def begin_task(
     await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
         {
             "crawl_task_id": crawl_task_id,
+            "runtime_id": runtime_id,
             "status": {"$in": statuses},
         },
         {
@@ -152,6 +144,7 @@ async def begin_task(
     await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
         {
             "crawl_task_id": crawl_task_id,
+            "runtime_id": runtime_id,
             "depth": 0,
             "parent_url": "",
             "canonical_url": {"$nin": seeds},
@@ -168,6 +161,7 @@ async def begin_task(
     await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
         {
             "crawl_task_id": crawl_task_id,
+            "runtime_id": runtime_id,
             "canonical_url": {"$in": seeds},
             "status": {"$ne": "archived"},
         },
@@ -177,6 +171,7 @@ async def begin_task(
         db,
         crawl_task_id=crawl_task_id,
         root_domains=root_domains,
+        runtime_id=runtime_id,
     )
     return await get_task(db, crawl_task_id) or {}
 
@@ -186,6 +181,7 @@ async def supersede_pages_outside_roots(
     *,
     crawl_task_id: str,
     root_domains: list[str],
+    runtime_id: str = "",
 ) -> int:
     """Stop unfinished pages that no longer belong to the official-site scope."""
     roots = {
@@ -230,6 +226,7 @@ async def supersede_pages_outside_roots(
     result = await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
         {
             "page_id": {"$in": outside_ids},
+            **({"runtime_id": runtime_id} if runtime_id else {}),
             "status": {"$in": resumable_statuses},
         },
         {
@@ -261,10 +258,12 @@ async def enqueue_pages(
     project_id: str,
     target_id: str,
     pages: list[dict[str, Any]],
+    runtime_id: str = "",
 ) -> list[str]:
     """Insert unseen URLs and return the page IDs created by this call."""
     if not pages:
         return []
+    await assert_run_owner(db, crawl_task_id=crawl_task_id, runtime_id=runtime_id)
     now = _now()
     operations: list[UpdateOne] = []
     page_ids: list[str] = []
@@ -281,6 +280,7 @@ async def enqueue_pages(
                     "$setOnInsert": {
                         "page_id": page_id,
                         "crawl_task_id": crawl_task_id,
+                        "runtime_id": runtime_id,
                         "project_id": project_id,
                         "target_id": target_id,
                         "canonical_url": canonical_url,
@@ -332,15 +332,18 @@ async def mark_page_started(
     *,
     page_id: str,
     status: str,
+    runtime_id: str = "",
 ) -> None:
     now = _now()
-    await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_one(
-        {"page_id": page_id},
+    result = await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_one(
+        {"page_id": page_id, **({"runtime_id": runtime_id} if runtime_id else {})},
         {
             "$set": {"status": status, "updated_at": now},
             "$inc": {"attempts": 1, "attempts_in_run": 1},
         },
     )
+    if runtime_id and not result.matched_count:
+        raise WebsiteCrawlOwnershipLost(f"官网页面执行拥有者已失效: {page_id}")
 
 
 async def mark_page_retry(
@@ -348,10 +351,11 @@ async def mark_page_retry(
     *,
     page_id: str,
     error: str,
+    runtime_id: str = "",
 ) -> None:
     now = _now()
-    await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_one(
-        {"page_id": page_id},
+    result = await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_one(
+        {"page_id": page_id, **({"runtime_id": runtime_id} if runtime_id else {})},
         {
             "$set": {
                 "status": "pending",
@@ -362,6 +366,8 @@ async def mark_page_retry(
             "$unset": {"completed_at": "", "error": ""},
         },
     )
+    if runtime_id and not result.matched_count:
+        raise WebsiteCrawlOwnershipLost(f"官网页面执行拥有者已失效: {page_id}")
 
 
 async def mark_page_terminal(
@@ -370,10 +376,11 @@ async def mark_page_terminal(
     page_id: str,
     status: str,
     fields: dict[str, Any] | None = None,
+    runtime_id: str = "",
 ) -> None:
     now = _now()
-    await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_one(
-        {"page_id": page_id},
+    result = await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_one(
+        {"page_id": page_id, **({"runtime_id": runtime_id} if runtime_id else {})},
         {
             "$set": {
                 "status": status,
@@ -383,49 +390,23 @@ async def mark_page_terminal(
             }
         },
     )
+    if runtime_id and not result.matched_count:
+        raise WebsiteCrawlOwnershipLost(f"官网页面执行拥有者已失效: {page_id}")
 
 
 async def heartbeat_task(
-    db: AsyncIOMotorDatabase,
-    *,
-    crawl_task_id: str,
-    counters: dict[str, Any],
-) -> None:
-    now = _now()
-    await db[WEBSITE_CRAWL_TASKS_COLLECTION].update_one(
-        {"crawl_task_id": crawl_task_id},
-        {
-            "$set": {
-                "counters": counters,
-                "heartbeat_at": now,
-                "updated_at": now,
-            }
-        },
-    )
+    db: AsyncIOMotorDatabase, *, crawl_task_id: str,
+    counters: dict[str, Any] | None = None, runtime_id: str = "",
+) -> bool:
+    return await renew_run(db, crawl_task_id=crawl_task_id, counters=counters, runtime_id=runtime_id)
 
 
 async def finish_task(
-    db: AsyncIOMotorDatabase,
-    *,
-    crawl_task_id: str,
-    status: str,
-    summary: dict[str, Any],
-    error: str = "",
+    db: AsyncIOMotorDatabase, *, crawl_task_id: str, status: str,
+    summary: dict[str, Any], error: str = "", runtime_id: str = "",
 ) -> dict[str, Any]:
-    now = _now()
-    await db[WEBSITE_CRAWL_TASKS_COLLECTION].update_one(
-        {"crawl_task_id": crawl_task_id},
-        {
-            "$set": {
-                "status": status,
-                "summary": summary,
-                "counters": counters_from_summary(summary),
-                "error": str(error or "")[:4_000],
-                "updated_at": now,
-                "completed_at": now,
-            }
-        },
-    )
+    await finish_run(db, crawl_task_id=crawl_task_id, status=status, summary=summary,
+                     counters=counters_from_summary(summary), error=error, runtime_id=runtime_id)
     return await get_task(db, crawl_task_id) or {"summary": summary, "status": status}
 
 

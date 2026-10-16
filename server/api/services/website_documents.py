@@ -15,6 +15,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from api.dao import findings as findings_dao
 from api.dao import website_crawl as crawl_dao
 from api.services.company_url import normalize_url
+from api.services.website_crawl_runtime import WebsiteCrawlExecution
+from api.dao.website_crawl_runs import WebsiteCrawlOwnershipLost
 from api.services.site_relevance import classify_candidate_surface
 from api.services.source_documents.resources import (
     create_public_fetch_ssl_context,
@@ -534,6 +536,27 @@ class WebsiteDocumentCollectionService:
         required_path_segments: list[str] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
+        async with WebsiteCrawlExecution(
+            self.db, crawl_task_id=f"{parent_task_id}_webdocs", dry_run=dry_run,
+        ) as execution:
+            return await self._collect(
+                execution=execution, parent_task_id=parent_task_id, project_id=project_id,
+                target=target, seed_urls=seed_urls, known_alive_urls=known_alive_urls,
+                required_path_segments=required_path_segments, dry_run=dry_run,
+            )
+
+    async def _collect(
+        self,
+        *,
+        execution: WebsiteCrawlExecution,
+        parent_task_id: str,
+        project_id: str,
+        target: dict[str, Any],
+        seed_urls: list[str],
+        known_alive_urls: list[str] | None = None,
+        required_path_segments: list[str] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
         target_id = str(target.get("target_id") or "").strip()
         target_name = str(target.get("canonical_name") or "").strip()
         root_domains = list(
@@ -577,9 +600,7 @@ class WebsiteDocumentCollectionService:
             "required_path_segments": required_segments,
         }
         if not dry_run:
-            await crawl_dao.begin_task(
-                self.db,
-                crawl_task_id=crawl_task_id,
+            await execution.start(
                 parent_task_id=parent_task_id,
                 project_id=project_id,
                 target_id=target_id,
@@ -661,6 +682,7 @@ class WebsiteDocumentCollectionService:
                     inserted_ids = set(
                         await crawl_dao.enqueue_pages(
                             self.db,
+                            runtime_id=execution.runtime_id,
                             crawl_task_id=crawl_task_id,
                             project_id=project_id,
                             target_id=target_id,
@@ -773,6 +795,7 @@ class WebsiteDocumentCollectionService:
                     counters["processed_pages"] += 1
                     await crawl_dao.mark_page_terminal(
                         self.db,
+                        runtime_id=execution.runtime_id,
                         page_id=str(item.get("page_id") or ""),
                         status="superseded",
                         fields={"scope_change_reason": surface},
@@ -814,11 +837,15 @@ class WebsiteDocumentCollectionService:
         async def _record_progress() -> None:
             if dry_run:
                 return
-            await crawl_dao.heartbeat_task(
+            owned = await crawl_dao.heartbeat_task(
                 self.db,
+                runtime_id=execution.runtime_id,
                 crawl_task_id=crawl_task_id,
                 counters=dict(counters),
             )
+            if owned is False:
+                execution.cancel()
+                raise WebsiteCrawlOwnershipLost(crawl_task_id)
             await update_source_progress(
                 self.db,
                 task_id=parent_task_id,
@@ -840,6 +867,7 @@ class WebsiteDocumentCollectionService:
             if not dry_run:
                 await crawl_dao.mark_page_started(
                     self.db,
+                    runtime_id=execution.runtime_id,
                     page_id=page_id,
                     status="archiving",
                 )
@@ -912,6 +940,7 @@ class WebsiteDocumentCollectionService:
             counters["findings_upserted"] += len(findings)
             await crawl_dao.mark_page_terminal(
                 self.db,
+                runtime_id=execution.runtime_id,
                 page_id=page_id,
                 status=status,
                 fields={
@@ -934,6 +963,7 @@ class WebsiteDocumentCollectionService:
             if not dry_run:
                 await crawl_dao.mark_page_started(
                     self.db,
+                    runtime_id=execution.runtime_id,
                     page_id=page_id,
                     status="fetching",
                 )
@@ -1080,6 +1110,7 @@ class WebsiteDocumentCollectionService:
             if not dry_run:
                 await crawl_dao.mark_page_terminal(
                     self.db,
+                    runtime_id=execution.runtime_id,
                     page_id=page_id,
                     status="discovered",
                     fields={
@@ -1123,6 +1154,9 @@ class WebsiteDocumentCollectionService:
                             await _archive(item)
                         else:
                             await _discover(session, item)
+                    except WebsiteCrawlOwnershipLost:
+                        execution.cancel()
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         if is_storage_configuration_error(exc):
                             details = storage_error_details(exc)
@@ -1140,6 +1174,7 @@ class WebsiteDocumentCollectionService:
                             if not dry_run:
                                 await crawl_dao.mark_page_retry(
                                     self.db,
+                                    runtime_id=execution.runtime_id,
                                     page_id=str(item["page_id"]),
                                     error=archive_blocked_reason,
                                 )
@@ -1160,6 +1195,7 @@ class WebsiteDocumentCollectionService:
                             if not dry_run:
                                 await crawl_dao.mark_page_retry(
                                     self.db,
+                                    runtime_id=execution.runtime_id,
                                     page_id=str(item["page_id"]),
                                     error=str(exc),
                                 )
@@ -1176,6 +1212,7 @@ class WebsiteDocumentCollectionService:
                             if not dry_run:
                                 await crawl_dao.mark_page_terminal(
                                     self.db,
+                                    runtime_id=execution.runtime_id,
                                     page_id=str(item["page_id"]),
                                     status="error",
                                     fields={"error": str(exc)[:2_000]},
@@ -1202,12 +1239,7 @@ class WebsiteDocumentCollectionService:
                 asyncio.create_task(_worker(index))
                 for index in range(self.policy.discovery_concurrency)
             ]
-            try:
-                await queue.join()
-            finally:
-                for worker in workers:
-                    worker.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
+            await execution.drain(queue, workers)
 
         durable = (
             await crawl_dao.summarize_task(
@@ -1277,9 +1309,7 @@ class WebsiteDocumentCollectionService:
         if dry_run:
             summary["preview"] = preview
             return summary
-        await crawl_dao.finish_task(
-            self.db,
-            crawl_task_id=crawl_task_id,
+        await execution.finish(
             status=status,
             summary=summary,
             error=(
