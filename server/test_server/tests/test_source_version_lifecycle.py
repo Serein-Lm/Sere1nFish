@@ -9,6 +9,27 @@ from api.dao import source_documents as dao
 
 
 @pytest.mark.asyncio
+async def test_cached_projection_cannot_replace_newer_or_inflight_evidence(isolated_mongo_db):
+    from api.dao.source_document_versions import SourceVersionOwnershipLost
+
+    db = isolated_mongo_db
+    await dao.ensure_indexes(db)
+    snapshot = await dao.mark_version_ready(db, version_id="version", payload={"content": {"text": "original"}})
+    await dao.begin_version(db, version_id="version", document_id="doc", content_hash="hash",
+                            source_type="official_website_document", attempt_id="upgrade")
+    with pytest.raises(SourceVersionOwnershipLost):
+        await dao.mark_version_ready(db, version_id="version", payload={"contacts": ["stale"]},
+                                     expected_snapshot=snapshot)
+    current = await dao.mark_version_ready(db, version_id="version", attempt_id="upgrade", payload={"contacts": ["new"]})
+    with pytest.raises(SourceVersionOwnershipLost):
+        await dao.mark_version_ready(db, version_id="version", payload={"contacts": ["stale"]},
+                                     expected_snapshot=snapshot)
+    await dao.mark_version_ready(db, version_id="version", payload={"contacts": ["current projection"]},
+                                 expected_snapshot=current)
+    assert (await dao.get_version(db, "version"))["content"]["text"] == "original"
+
+
+@pytest.mark.asyncio
 async def test_ready_version_stays_readable_during_cancelled_upgrade(isolated_mongo_db):
     db = isolated_mongo_db
     await dao.ensure_indexes(db)

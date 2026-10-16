@@ -74,6 +74,7 @@ async def renew_version_attempt(db: AsyncIOMotorDatabase, *, version_id: str, at
 
 async def mark_version_ready(
     db: AsyncIOMotorDatabase, *, version_id: str, payload: dict[str, Any], attempt_id: str = "",
+    expected_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     fields = {key: value for key, value in payload.items() if key not in {"_id", "archive_attempt"}}
@@ -81,10 +82,15 @@ async def mark_version_ready(
     if attempt_id:
         fields.update({"archive_attempt.status": "completed", "archive_attempt.finished_at": now,
                        "archive_attempt.lease_expires_at": now})
+    query = _owned(version_id, attempt_id)
+    if expected_snapshot is not None:
+        query.update({"status": "ready", "updated_at": expected_snapshot.get("updated_at"),
+                      "archive_attempt.status": {"$ne": "processing"}})
+    checked = bool(attempt_id) or expected_snapshot is not None
     result = await db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].update_one(
-        _owned(version_id, attempt_id), {"$set": fields}, upsert=not bool(attempt_id),
+        query, {"$set": fields}, upsert=not checked,
     )
-    if attempt_id and not result.matched_count:
+    if checked and not result.matched_count:
         raise SourceVersionOwnershipLost(f"来源归档拥有者已失效: {version_id}")
     return await db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].find_one({"version_id": version_id}, {"_id": 0}) or payload
 

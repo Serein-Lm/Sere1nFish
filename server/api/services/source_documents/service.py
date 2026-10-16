@@ -27,7 +27,6 @@ from .analysis import (
     analyze_article_images,
     article_analysis_prompt_fingerprint,
     attribute_target_contacts,
-    filter_target_contacts,
     stable_content_hash,
 )
 from .contracts import (
@@ -41,6 +40,7 @@ from .contracts import (
 from .factory import get_source_document_provider
 from .urls import canonicalize_source_url
 from .version_lifecycle import SourceVersionAttempt
+from .contextual_analysis import complete_contextual_analysis
 
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -95,6 +95,7 @@ def _analysis_fingerprint(
     keyword: str,
     fields: list[ExtractField],
     analysis_mode: str = "full",
+    target_aliases: list[str] | None = None,
 ) -> str:
     payload = {
         "schema_version": _CONTEXT_ANALYSIS_SCHEMA_VERSION,
@@ -107,6 +108,8 @@ def _analysis_fingerprint(
         "fields": [field.model_dump(mode="json") for field in fields],
         "analysis_mode": str(analysis_mode or "full"),
     }
+    if target_aliases:
+        payload["target_aliases"] = sorted(set(target_aliases))
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -133,83 +136,18 @@ def _compact_contextual_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _complete_contextual_analysis(
-    analysis: dict[str, Any],
-    *,
-    capture: CapturedDocument,
-    contacts: list[dict[str, Any]],
-    image_analysis: list[dict[str, Any]],
-    target_name: str,
-    target_aliases: list[str],
-    project_id: str,
-    task_id: str,
+    analysis: dict[str, Any], *, capture: CapturedDocument,
+    contacts: list[dict[str, Any]], image_analysis: list[dict[str, Any]],
+    target_name: str, target_aliases: list[str], project_id: str, task_id: str,
+    version_id: str = "", target_id: str = "", keyword: str = "",
 ) -> dict[str, Any]:
-    validated_contacts: list[dict[str, Any]] = []
-    for contact in contacts:
-        if str(contact.get("source") or "text") != "image":
-            validated_contacts.append(contact)
-            continue
-        normalized = normalize_contact_candidate(contact, source="image")
-        if normalized:
-            validated_contacts.append(
-                {
-                    **contact,
-                    **normalized,
-                    "contexts": list(
-                        contact.get("contexts") or normalized["contexts"]
-                    ),
-                }
-            )
-    contacts = validated_contacts
-    fields = dict(analysis.get("fields") or {})
-    review_values = list(
-        (analysis.get("relevance_review") or {}).get("target_contact_values") or []
+    return await complete_contextual_analysis(
+        analysis, capture=capture, contacts=contacts, image_analysis=image_analysis,
+        target_name=target_name, target_aliases=target_aliases, project_id=project_id,
+        task_id=task_id, version_id=version_id, target_id=target_id, keyword=keyword,
+        policy_version=_CONTACT_POLICY_VERSION, prompt_hash=article_analysis_prompt_fingerprint(),
+        attribute_contacts=attribute_target_contacts,
     )
-    declared_values = review_values or list(analysis.get("target_contact_values") or [])
-    reviewed_contacts = filter_target_contacts(
-        contacts,
-        declared_values,
-        text=capture.text,
-    )
-    attribution_error = ""
-    target_contacts = reviewed_contacts
-    if contacts:
-        attributed, attribution_error = await attribute_target_contacts(
-            target_name=target_name,
-            target_aliases=target_aliases,
-            title=capture.title,
-            account=capture.account,
-            summary=str(fields.get("summary") or ""),
-            contacts=contacts,
-            image_analysis=image_analysis,
-            project_id=project_id,
-            task_id=task_id,
-            source_type=capture.source_type,
-        )
-        if attributed or not attribution_error:
-            target_contacts = attributed
-    fields.update(
-        {
-            "title": capture.title,
-            "account": capture.account,
-            "publish_time": capture.publish_time,
-            "content": capture.text,
-            "contact": "、".join(
-                str(item.get("label") or "") for item in target_contacts
-            ),
-            "image_context": [
-                item.get("description")
-                for item in image_analysis
-                if item.get("description")
-            ],
-        }
-    )
-    return {
-        **analysis,
-        "fields": fields,
-        "target_contacts": target_contacts,
-        "contact_attribution_error": attribution_error,
-    }
-
 
 def _version_image_analysis(version: dict[str, Any]) -> list[dict[str, Any]]:
     if version.get("image_analysis"):
@@ -1090,6 +1028,7 @@ async def _refresh_cached_source_contacts(
     return await source_dao.mark_version_ready(
         db,
         version_id=version_id,
+        expected_snapshot={"updated_at": version.get("updated_at")},
         payload={
             "contacts": contacts,
             "analysis": source_analysis,
@@ -1117,6 +1056,7 @@ def _result_from_version(
     return {
         "ok": version.get("status") == "ready",
         "cached": cached,
+        "contact_attribution_cached": bool(analysis.get("contact_attribution_cached")),
         "source_type": document.get("source_type") or version.get("source_type"),
         "source_url": document.get("canonical_url") or version.get("canonical_url"),
         "document_id": document.get("document_id") or version.get("document_id"),
@@ -1207,6 +1147,7 @@ async def ingest_source_url(
             keyword=keyword,
             fields=task_fields,
             analysis_mode=normalized_analysis_mode,
+            target_aliases=target_aliases,
         )
         if persist:
             existing = await source_dao.get_version(db, version_id)
@@ -1306,6 +1247,7 @@ async def ingest_source_url(
                     )
                 contextual_analysis = await _complete_contextual_analysis(
                     contextual_analysis,
+                    version_id=version_id, target_id=target_id, keyword=keyword,
                     capture=capture,
                     contacts=source_contacts,
                     image_analysis=version_image_analysis,
@@ -1511,6 +1453,7 @@ async def ingest_source_url(
             )
             analysis = await _complete_contextual_analysis(
                 analysis,
+                version_id=version_id, target_id=target_id, keyword=keyword,
                 capture=capture,
                 contacts=contacts,
                 image_analysis=image_analysis,

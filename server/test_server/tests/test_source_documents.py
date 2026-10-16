@@ -2538,7 +2538,8 @@ def test_cached_contact_refresh_rewrites_only_structured_artifact(monkeypatch):
             "structured_url": "/objects/object-structured-new",
         }
 
-    async def mark_ready(_db, *, version_id, payload):
+    async def mark_ready(_db, *, version_id, payload, expected_snapshot):
+        assert expected_snapshot == {"updated_at": None}
         version_payloads.append(payload)
         return {"version_id": version_id, **payload}
 
