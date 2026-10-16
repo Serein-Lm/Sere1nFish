@@ -26,6 +26,8 @@ Chrome 预热策略：`browser_manager.warm_policy` 在 `chrome_docker.adaptive_
 
 日志生命周期：普通日志改为 `application.log`，同时按 UTC 日期与大小轮转，历史日期命名文件不自动删除；PIL/websockets/watchdog/httpcore2 仅抑制低级噪音，告警与错误继续保存。普通和结构化日志补 run_kind/process_id/runtime_id，并在日志出口脱敏凭据。观测启动按最近记录与 16 MiB 上限倒序读取；可配置保留天数，Compose 为 90 天，部署前归档旧文件。容器 json-file 限 20 MiB × 5，新增 Chrome 为 10 MiB × 3；已有容器需要受控重建才能采用 Docker 日志选项。35 项日志、配置与池回归通过，两份 Compose 校验通过。
 
+隔离验证入口为根目录 `scripts/run_backend_tests.py`：复制 Git 可见的后端源码（含未提交改动，排除实际 .env），使用只读快照与临时日志，不挂 Docker socket 或业务卷。默认无网络，可选临时内部网络/MongoDB；按运行身份清理自身资源并输出独立日志/manifest，支持超时和中断。已实际完成 18 项持久化/手机契约测试和一次强制超时，均确认没有遗留容器或网络。运维脚本不再直接加入后端常驻进程；旧验证进程单独记录现场，由受控容器重启清理。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。
