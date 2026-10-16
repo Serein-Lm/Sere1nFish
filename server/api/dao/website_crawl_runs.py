@@ -36,7 +36,7 @@ async def claim_run(db: Any, *, crawl_task_id: str, runtime_id: str, fields: dic
             query, {"$set": {**fields, "runtime_id": runtime_id, "status": "running", "error": "",
                              "updated_at": now, "heartbeat_at": now, "started_at": now,
                              "lease_expires_at": now + timedelta(seconds=CRAWL_LEASE_SECONDS)},
-                    "$unset": {"completed_at": ""},
+                    "$unset": {"completed_at": "", "recovery_pending": ""},
                     "$setOnInsert": {"crawl_task_id": crawl_task_id, "created_at": now}},
             upsert=True, return_document=ReturnDocument.BEFORE,
         )
@@ -93,3 +93,32 @@ async def interrupt_run(db: Any, *, crawl_task_id: str, runtime_id: str, error: 
             "updated_at": now, "completed_at": now, "lease_expires_at": now,
         }},
     )
+
+
+async def expire_abandoned_runs(db: Any) -> int:
+    now = datetime.now(timezone.utc)
+    tasks = db[WEBSITE_CRAWL_TASKS_COLLECTION]
+    expired = await tasks.find({"runtime_id": {"$nin": [None, ""]}, "lease_expires_at": {"$lte": now},
+                                "$or": [{"status": "running"}, {"status": "interrupted", "recovery_pending": True}]},
+                               {"crawl_task_id": 1, "runtime_id": 1, "lease_expires_at": 1, "status": 1}).limit(100).to_list(100)
+    changed = 0
+    for run in expired:
+        query = {"crawl_task_id": run["crawl_task_id"], "runtime_id": run["runtime_id"], "status": run["status"],
+                 "lease_expires_at": run["lease_expires_at"]}
+        result = await tasks.update_one(query, {"$set": {
+            "status": "interrupted", "error": "官网采集执行租约已过期，保留队列等待按需恢复",
+            "updated_at": now, "completed_at": now, "recovery_pending": True,
+        }})
+        if not result.modified_count:
+            continue  # A heartbeat or takeover won; leave all its pages alone.
+        changed += 1
+        await db[WEBSITE_CRAWL_PAGES_COLLECTION].update_many(
+            {"crawl_task_id": run["crawl_task_id"], "runtime_id": run["runtime_id"],
+             "status": {"$in": ["fetching", "archiving"]}},
+            {"$set": {"status": "pending", "interrupted_at": now, "updated_at": now}},
+        )
+        await tasks.update_one(
+            {"crawl_task_id": run["crawl_task_id"], "runtime_id": run["runtime_id"], "status": "interrupted"},
+            {"$unset": {"recovery_pending": ""}},
+        )
+    return changed

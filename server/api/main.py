@@ -74,6 +74,8 @@ async def lifespan(app: FastAPI):
         pass
 
     from api.services.source_documents.http_runtime import start_source_http_runtime, shutdown_source_http_runtime
+    from api.services.collection_lease_recovery import CollectionLeaseRecovery
+    collection_recovery = CollectionLeaseRecovery()
 
     start_source_http_runtime()
 
@@ -354,6 +356,7 @@ async def lifespan(app: FastAPI):
         await target_relationships_dao.ensure_indexes(db)
         await source_documents_dao.ensure_indexes(db)
         await website_crawl_dao.ensure_indexes(db)
+        collection_recovery.start(db)
         # 学者学术联系发现索引
         from api.dao import scholar_contact as scholar_contact_dao
         await scholar_contact_dao.ensure_indexes(db)
@@ -615,6 +618,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"业务后台任务停止失败: {e}")
 
+    await collection_recovery.stop()
     await shutdown_source_http_runtime()
 
     # 关闭时：先 drain 观测组件，把内存待写记录全部落库（须先于 close_mongo）

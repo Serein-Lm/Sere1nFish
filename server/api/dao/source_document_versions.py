@@ -111,3 +111,19 @@ async def mark_version_error(
                        "archive_attempt.error": {"$literal": message},
                        "archive_attempt.finished_at": now, "archive_attempt.lease_expires_at": now})
     await db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].update_one(_owned(version_id, attempt_id), [{"$set": fields}])
+
+
+async def expire_abandoned_attempts(db: AsyncIOMotorDatabase) -> int:
+    """Close expired durable leases after hard termination, preserving ready data."""
+    now = datetime.now(timezone.utc)
+    message = "来源归档执行租约已过期，保留证据等待按需恢复"
+    result = await db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].update_many(
+        {"archive_attempt.status": "processing", "archive_attempt.lease_expires_at": {"$lte": now}},
+        [{"$set": {
+            "status": {"$cond": [{"$eq": ["$status", "ready"]}, "ready", "error"]},
+            "error": {"$cond": [{"$eq": ["$status", "ready"]}, {"$ifNull": ["$error", ""]}, message]},
+            "archive_attempt.status": "interrupted", "archive_attempt.error": message,
+            "archive_attempt.finished_at": now, "updated_at": now,
+        }}],
+    )
+    return int(result.modified_count)

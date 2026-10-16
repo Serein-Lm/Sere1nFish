@@ -76,6 +76,7 @@
 - `SourceDocument` 是按规范 URL 全局去重的来源文档，持久化在 `source_documents`；同一文章在不同项目或 Target 中只保存一份来源身份。
 - `SourceDocumentVersion` 是按稳定正文哈希生成的内容版本，持久化在 `source_document_versions`。版本的内容身份不可变，但允许幂等补齐同一版本中曾下载失败的图片等证据。原始响应 HTML、渲染 DOM、原图、图片识别、浏览器截图和结构化来源 JSON 通过私有 OSS 对象引用永久保存；历史记录必须按自身 `version_id` 读取，不能静默切换到最新版本。
 - 来源证据补齐的尝试状态单独保存为版本内 `archive_attempt`，由 `api.dao.source_document_versions` 与 `source_documents.version_lifecycle` 管理租约、续期和原子拥有者校验。已有 ready 版本在补齐期间保持可读；取消不得降级已有证据，新版本中断保留可恢复错误。已提交来源后发生场景关联失败时不得回滚来源版本。
+- 后端生命周期内的 `api.services.collection_lease_recovery` 每 30 秒收口到期来源/官网租约，保护 ready 证据、按拥有者恢复页面，并保留跨集合恢复检查点；不自动继续用户暂停任务。没有租约字段的历史状态只能走有备份和证据校验的独立对账。
 - 官网文档采集通过可恢复队列遍历普通分页、查询参数分页和脚本/嵌入资源链接；PDF、Office、文本与压缩附件先归档原件，再通过统一资源解析器提取正文，扫描版 PDF 使用有页数和时限边界的本地 OCR。来源站点明确返回 404/410 的历史图片或附件保留为可追溯警告，不得作为无限重试的临时故障；同一来源版本重跑时必须能够补齐后来成功解析的附件和视觉证据。
 - `SourceDocumentLink` 是 Project、Target、任务、关键词发现某个文档的关系，持久化在 `source_document_links`。任务字段、主体对应度和相关性评分属于该场景关联，不得写成全局来源事实；相同场景可按分析指纹复用，不同 Target 必须独立分析。
 - 官网门户深研通过既有 `target_research` 任务的可选 `portal_options` 接入 `api.services.portal_research`，浏览策略由专用 Agent factory/adapter 执行，阅读摘要与链接地图存入 `tasks.checkpoint.portal_research`，不复制原始 HTML。默认研究 60 分钟、50 页、120 次工具调用、24K 上下文，直属下级默认开启，直接上级可选；友情链接、合作伙伴与普通外部推荐不得作为单位扩展路径。六类栏目报告与 SourceDocument 版本引用共存于 `target_research` 历史；扩展后仅继承官网深采，不自动开启手机、招投标或话术渠道。边界及恢复语义见 `docs/PORTAL_RESEARCH.md`。
