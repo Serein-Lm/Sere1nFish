@@ -21,6 +21,10 @@ import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional, Protocol
+from datetime import date, datetime, timedelta, timezone
+
+from core.log_safety import process_identity, redact_log_data, redact_log_text
+from core.observability.file_tail import load_recent_jsonl
 
 # 旧日志集合名，仅保留给历史数据清理逻辑复用；运行时不再读写 DB。
 TASK_LOGS_COLLECTION = "task_logs"
@@ -61,6 +65,14 @@ class LocalJsonlLogStore:
             self.root = (Path.cwd() / "logs" / "observability").resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._pruned_day = ""
+
+    @staticmethod
+    def _nonnegative_env(name: str, default: int) -> int:
+        try:
+            return max(0, int(os.getenv(name, str(default))))
+        except ValueError:
+            return default
 
     def _file_for_ts(self, ts: float) -> Path:
         day = time.strftime("%Y-%m-%d", time.localtime(ts))
@@ -74,27 +86,27 @@ class LocalJsonlLogStore:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(payload)
                 fh.write("\n")
+            self._prune_expired()
+
+    def _prune_expired(self) -> None:
+        days = self._nonnegative_env("OBS_LOG_RETENTION_DAYS", 0)
+        today = datetime.now(timezone.utc).date()
+        if not days or self._pruned_day == today.isoformat():
+            return
+        cutoff = today - timedelta(days=days)
+        for path in self.root.glob("????-??-??.jsonl"):
+            try:
+                if date.fromisoformat(path.stem) < cutoff:
+                    path.unlink(missing_ok=True)
+            except (ValueError, OSError):
+                continue
+        self._pruned_day = today.isoformat()
 
     def load_recent(self, limit: int) -> list[dict[str, Any]]:
-        if limit <= 0:
-            return []
-        rows: deque[dict[str, Any]] = deque(maxlen=limit)
-        for path in sorted(self.root.glob("*.jsonl")):
-            try:
-                with path.open("r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            value = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(value, dict):
-                            rows.append(value)
-            except FileNotFoundError:
-                continue
-        return list(rows)
+        return load_recent_jsonl(
+            list(self.root.glob("*.jsonl")), limit=limit,
+            max_bytes=self._nonnegative_env("OBS_LOG_RESTORE_MAX_BYTES", 16 * 1024 * 1024),
+        )
 
 
 class ObservabilityLogger:
@@ -174,12 +186,13 @@ class ObservabilityLogger:
             "level": lvl,
             "source": source,
             "event": event,
-            "message": str(message),
-            "data": data or {},
+            "message": redact_log_text(message),
+            "data": redact_log_data(data or {}),
             "project_id": project_id,
             "task_id": task_id,
             "phase": phase,
             "agent": agent,
+            **process_identity(),
         }
         with self._lock:
             self._records.append(doc)

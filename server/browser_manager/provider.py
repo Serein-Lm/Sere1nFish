@@ -1069,6 +1069,7 @@ class DockerProvider(BrowserProvider):
             "shm_size": self.config.shm_size,
             "environment": env,
             "labels": {"sere1nfish.browser.managed": "true"},
+            "log_config": {"type": "json-file", "config": {"max-size": "10m", "max-file": "3"}},
         }
         if port_bindings:
             run_kwargs["ports"] = port_bindings

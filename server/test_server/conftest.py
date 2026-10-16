@@ -2,6 +2,8 @@
 import os
 import uuid
 
+os.environ.setdefault("SEREINFISH_RUN_KIND", "test")
+
 import pytest
 import pytest_asyncio
 from motor.motor_asyncio import AsyncIOMotorClient

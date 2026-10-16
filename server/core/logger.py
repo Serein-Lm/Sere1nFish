@@ -25,10 +25,11 @@ import logging
 import logging.handlers
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from functools import lru_cache
 from typing import Optional
+from core.log_rotation import DailySizeRotatingFileHandler
+from core.log_safety import RuntimeLogFormatter
 
 # ── 默认配置 ──────────────────────────────────────────────
 _DEFAULTS = {
@@ -92,7 +93,8 @@ def _notice(self, message, *args, **kwargs):
 logging.Logger.notice = _notice
 
 
-_LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+_LOG_FORMAT = ("%(asctime)s | %(levelname)-7s | %(name)s | "
+               "run_kind=%(run_kind)s process_id=%(process_id)s runtime_id=%(runtime_id)s | %(message)s")
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _initialized = False
 
@@ -116,7 +118,7 @@ def _ensure_init():
     root = logging.getLogger()
     root.setLevel(getattr(logging, cfg["level"].upper(), logging.DEBUG))
 
-    formatter = logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
+    formatter = RuntimeLogFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
 
     # ── Console Handler（受配置控制）──
     if cfg.get("console_enabled", False):
@@ -137,13 +139,12 @@ def _ensure_init():
         log_dir = _PROJECT_ROOT / cfg.get("log_dir", "logs")
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        log_file = log_dir / f"{today}.log"
+        log_file = log_dir / "application.log"
 
         max_bytes = cfg.get("max_file_size_mb", 10) * 1024 * 1024
         backup = cfg.get("backup_count", 5)
 
-        fh = logging.handlers.RotatingFileHandler(
+        fh = DailySizeRotatingFileHandler(
             log_file,
             maxBytes=max_bytes,
             backupCount=backup,
@@ -162,6 +163,7 @@ def _ensure_init():
         "openai", "openai.api_requestor",
         "watchfiles", "watchfiles.main",
         "docker.utils.config", "docker.auth",
+        "PIL", "websockets", "watchdog", "httpcore2",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -190,5 +192,6 @@ def reconfigure():
     root = logging.getLogger()
     for h in root.handlers[:]:
         root.removeHandler(h)
+        h.close()
     _initialized = False
     _ensure_init()

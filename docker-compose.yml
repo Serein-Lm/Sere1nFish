@@ -5,6 +5,8 @@ x-backend-env: &backend-env
   PORT: 8000
   SERVER_RELOAD: ${SERVER_RELOAD:-false}
   SEREINFISH_RUN_KIND: service
+  OBS_LOG_RETENTION_DAYS: ${OBS_LOG_RETENTION_DAYS:-90}
+  OBS_LOG_RESTORE_MAX_BYTES: ${OBS_LOG_RESTORE_MAX_BYTES:-16777216}
   MONGODB_URI: mongodb://mongo:27017
   MONGODB_DATABASE: Sere1nG0Fish
   MONGODB_DIRECT: "true"
@@ -50,8 +52,15 @@ x-high-ulimits: &high-ulimits
     soft: 1048576
     hard: 1048576
 
+x-container-logging: &container-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   mongo:
+    logging: *container-logging
     image: mongo:7
     restart: unless-stopped
     command: ["mongod", "--bind_ip", "0.0.0.0"]
@@ -67,6 +76,7 @@ services:
       retries: 12
 
   redis:
+    logging: *container-logging
     image: redis:7-alpine
     restart: unless-stopped
     command: ["redis-server", "--bind", "0.0.0.0", "--protected-mode", "no"]
@@ -82,6 +92,7 @@ services:
       retries: 12
 
   chrome-image:
+    logging: *container-logging
     image: chrome-browser:latest
     build:
       context: ./server/chrome-browser
@@ -95,6 +106,7 @@ services:
     ulimits: *high-ulimits
 
   db-import:
+    logging: *container-logging
     build:
       context: ./server
       dockerfile: Dockerfile.dev
@@ -129,6 +141,7 @@ services:
       - --drop-before-import
 
   backend:
+    logging: *container-logging
     build:
       context: ./server
       dockerfile: Dockerfile.dev
@@ -177,6 +190,7 @@ services:
     command: ["python", "run.py"]
 
   frontend:
+    logging: *container-logging
     image: node:22-bookworm-slim
     restart: unless-stopped
     working_dir: /app
@@ -202,6 +216,7 @@ services:
     command: sh -c "npm install --registry=https://registry.npmmirror.com && npm run dev -- --host 0.0.0.0"
 
   easytier-server:
+    logging: *container-logging
     image: ghcr.io/easytier/easytier:v2.6.4
     restart: unless-stopped
     command:
@@ -239,6 +254,7 @@ services:
     ulimits: *high-ulimits
 
   easytier-backend-peer:
+    logging: *container-logging
     image: ghcr.io/easytier/easytier:v2.6.4
     restart: unless-stopped
     network_mode: "service:backend"
@@ -270,6 +286,7 @@ services:
     ulimits: *high-ulimits
 
   nginx:
+    logging: *container-logging
     image: nginx:1.27-alpine
     restart: unless-stopped
     depends_on:
