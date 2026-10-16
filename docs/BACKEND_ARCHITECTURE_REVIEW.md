@@ -18,6 +18,8 @@
 
 浏览器排队统一：`browser_manager.scheduling` 对真实容量与批量配额使用同一可取消等待队列，释放、创建、健康复检和配置变化主动唤醒；不再每秒轮询空闲容器。按交互/批量 3:1 轮转，并在各类别内按 Project 轮转，保留非批量软保留、借用和不抢占已有租约。人设、机构、学者与小红书批量工作通过 registry 分类；来源抓取复用统一观测上下文，网页扫描与规范化显式传 Project/Task，未提供上下文的兼容调用归 unscoped，不能假称已识别其项目。等待/获取/释放均有日志，状态 API 增加 waiting/类别/项目数。234 项浏览器及相关调用链回归通过；未完成多项目真实站点负载测量。
 
+Chrome 预热策略：`browser_manager.warm_policy` 在 `chrome_docker.adaptive_warm_pool` 开启后，以 `warm_pool_min_size`（默认 4）为底座，以既有 `warm_pool_size` 为预热上限，按近期活跃/排队租约需求提高目标，并在 `warm_demand_window_seconds`（默认 180 秒）后回落。仅影响空闲预热与空闲回收，保留总容量、创建并发和有效 busy 租约；兼容开关默认关闭。30 项池契约回归通过；冷启动、实时内存与灰度配置变更另行记录，尚未宣称生产节省量。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。

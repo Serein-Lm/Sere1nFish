@@ -66,6 +66,9 @@ async def pool_config():
             "screen_width": config.screen_width,
             "screen_height": config.screen_height,
             "warm_pool_size": config.warm_pool_size,
+            "adaptive_warm_pool": config.adaptive_warm_pool,
+            "warm_pool_min_size": config.warm_pool_min_size,
+            "warm_demand_window_seconds": config.warm_demand_window_seconds,
             "container_create_concurrency": (
                 config.container_create_concurrency
             ),

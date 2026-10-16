@@ -26,6 +26,7 @@ from core.async_limiter import ResizableLimiter
 from core.logger import get_logger
 from .leases import BrowserLeaseRegistry, BrowserLeaseRequest
 from .scheduling import FairBrowserWaitQueue, request_class, workload_class
+from .warm_policy import AdaptiveWarmPool
 
 logger = get_logger("browser_manager")
 
@@ -140,6 +141,9 @@ class ChromeDockerConfig:
     generic_busy_lease_timeout: int = 1800  # 其他浏览器租约异常告警/恢复上限
     # 预热池
     warm_pool_size: int = 1  # 预热池大小（启动时预创建的空闲容器数）
+    adaptive_warm_pool: bool = False
+    warm_pool_min_size: int = 4
+    warm_demand_window_seconds: int = 180
     # 软保留：无非批量需求时可由批量扫描借用，有需求时自动归还。
     reserved_non_bulk_containers: int = 2
     container_create_concurrency: int = 4  # Docker API 创建并发，避免启动风暴
@@ -184,6 +188,8 @@ class ChromeDockerConfig:
         config.warm_pool_size = max(
             0, min(int(config.warm_pool_size), config.max_containers)
         )
+        config.warm_pool_min_size = max(0, min(int(config.warm_pool_min_size), config.warm_pool_size))
+        config.warm_demand_window_seconds = max(30, min(int(config.warm_demand_window_seconds), 1800))
         config.reserved_non_bulk_containers = max(
             0,
             min(
@@ -325,6 +331,7 @@ class DockerProvider(BrowserProvider):
         self.containers: dict[str, ContainerInfo] = {}  # container_id → info
         self.task_map: dict[str, str] = {}  # task_id → container_id
         self._leases = BrowserLeaseRegistry()
+        self._warm_policy = AdaptiveWarmPool()
         self._scheduler = FairBrowserWaitQueue(self._can_admit_browser_request)
         self._lock = asyncio.Lock()
         self._reaper_task: Optional[asyncio.Task] = None
@@ -587,10 +594,15 @@ class DockerProvider(BrowserProvider):
         }
         return effective
 
+    def _warm_target(self) -> int:
+        return self._warm_policy.target(self.config, demand=len(self._leases.leases))
+
     def capacity_status(self) -> dict[str, Any]:
         effective = self._effective_container_limit()
         return {
             "configured_max_containers": self.config.max_containers,
+            "warm_pool_target": self._warm_target(),
+            "adaptive_warm_pool": self.config.adaptive_warm_pool,
             "effective_max_containers": effective,
             "bulk_limit": self._bulk_slot_limit,
             "bulk_base_limit": self._bulk_base_limit,
@@ -710,6 +722,7 @@ class DockerProvider(BrowserProvider):
         if self._closing:
             raise RuntimeError("浏览器池正在关闭")
         lease, reused = self._leases.reserve(request)
+        self._warm_target()
         if reused:
             info = self.containers.get(self.task_map.get(task_id, ""))
             if not info or info.task_id != task_id or info.status != "busy" or not info.cdp_healthy:
@@ -1323,7 +1336,7 @@ class DockerProvider(BrowserProvider):
                             idle_seconds = (now - info.last_used_at).total_seconds()
                             if idle_seconds > self.config.idle_timeout:
                                 # 保留预热池数量的空闲容器不销毁
-                                if len(idle_healthy) > self.config.warm_pool_size:
+                                if len(idle_healthy) > self._warm_target():
                                     info.status = "stopping"
                                     to_destroy.append(cid)
                                     idle_healthy = [c for c in idle_healthy if c != cid]
@@ -1747,7 +1760,8 @@ class DockerProvider(BrowserProvider):
                         and info.unhealthy_reason == ""
                         and info.cdp_healthy
                     )
-                    need = self.config.warm_pool_size - idle_healthy_count
+                    warm_target = self._warm_target()
+                    need = warm_target - idle_healthy_count
                     can_create = (
                         effective_limit
                         - total_active
@@ -1767,7 +1781,7 @@ class DockerProvider(BrowserProvider):
 
                 if to_create > 0:
                     logger.info(
-                        f"[WarmPool] 空闲容器不足 ({idle_healthy_count}/{self.config.warm_pool_size})，"
+                        f"[WarmPool] 空闲容器不足 ({idle_healthy_count}/{warm_target})，"
                         f"预创建 {to_create} 个"
                     )
                     await asyncio.gather(
