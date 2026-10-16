@@ -30,6 +30,8 @@ Chrome 预热策略：`browser_manager.warm_policy` 在 `chrome_docker.adaptive_
 
 进程强制退出补充：`CollectionLeaseRecovery` 在后端生命周期中每 30 秒收口已到期的新来源/官网租约；来源保留已有 ready 快照，官网按 runtime_id 恢复未完成页面，心跳更新或后继拥有者不会被旧扫描结果覆盖。跨集合清理保留 recovery_pending，进程再次中断后可继续；不自动恢复任何 Project 任务。12 项相关真实 MongoDB/生命周期回归通过。旧数据没有租约字段，必须通过独立维护对账，不能被此 worker 直接猜测为可读。
 
+历史状态维护入口：`scripts.reconcile_collection_state` 默认只读生成计划，显式 --apply 前先落盘 BSON 无损 before-image，再按原状态/更新时间 CAS 修正手机部分完成、无租约旧官网状态与来源版本。官网必须能核对父任务终态，保留父任务暂停；页面只处理同一旧拥有者且早于截止时间的未完成项。来源恢复 ready 必须读取全部对象并逐一校验大小/SHA-256，结构化对象中的 document_id/version_id/content_hash/正文必须匹配该版本；已存在的 archive_status=partial 与警告保留。没有已提交快照时只结束遗留 processing 状态并保存可重试错误，禁止借用最新版本内容。相关 25 项回归通过，线上只读证据核验已确认 3 个旧快照的 16 个对象可读；历史写入仍需受控执行并单独验收。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。
