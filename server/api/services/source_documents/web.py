@@ -28,7 +28,6 @@ from .contracts import (
 from .resources import (
     ATTACHMENT_EXTENSIONS,
     FetchedResource,
-    create_public_fetch_ssl_context,
     extract_html_links,
     extract_attachment_text,
     fetch_resource_with_retry,
@@ -36,6 +35,7 @@ from .resources import (
     should_try_rendered_fallback,
 )
 from .urls import canonicalize_source_url
+from .http_runtime import public_source_session
 from .resource_types import (
     is_html_resource, normalize_resource, looks_like_attachment_url as _looks_like_attachment_url,
     looks_like_attachment_response as _looks_like_attachment_response,
@@ -249,24 +249,7 @@ class OfficialWebDocumentProvider:
             if _looks_like_attachment_url(canonical_url)
             else _MAX_HTML_BYTES
         )
-        timeout = aiohttp.ClientTimeout(total=120, connect=20, sock_read=90)
-        connector = aiohttp.TCPConnector(
-            limit=16,
-            ttl_dns_cache=180,
-            ssl=create_public_fetch_ssl_context(),
-        )
-        async with aiohttp.ClientSession(
-            timeout=timeout,
-            connector=connector,
-            trust_env=True,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/138.0 Safari/537.36"
-                ),
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
-            },
-        ) as session:
+        async with public_source_session() as session:
             static_capture_error = ""
             rendered_fallback = False
             try:

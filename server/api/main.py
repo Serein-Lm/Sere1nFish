@@ -73,6 +73,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    from api.services.source_documents.http_runtime import start_source_http_runtime, shutdown_source_http_runtime
+
+    start_source_http_runtime()
+
     # 启动时：初始化默认用户和配置
     from api.db.mongodb import get_db
     from api.dao import users as users_dao
@@ -610,6 +614,8 @@ async def lifespan(app: FastAPI):
         logger.info(f"业务后台任务已停止: {cancelled}")
     except Exception as e:
         logger.warning(f"业务后台任务停止失败: {e}")
+
+    await shutdown_source_http_runtime()
 
     # 关闭时：先 drain 观测组件，把内存待写记录全部落库（须先于 close_mongo）
     try:

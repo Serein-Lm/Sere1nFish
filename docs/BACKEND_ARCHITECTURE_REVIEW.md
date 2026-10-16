@@ -10,6 +10,8 @@
 
 官网动态附件读取：`source_documents.resource_types` 统一按响应与 PDF/Office/ZIP 内容签名区分正文和附件，发现阶段经 Provider 协议把已下载的 `FetchedResource` 交给来源归档，字节不写入检查点。HTML 仍限 8 MiB，附件按响应在同次下载中允许至 64 MiB；所有重定向仍校验公共 URL。404/410 保留不可重试原因，同一队列续跑不重试；临时 5xx 保留有界重试。相关 149 项回归通过，新增本地 HTTP 重定向/误标 MIME/分类型大小限制与真实 MongoDB 永久失败续跑契约；不代表历史网站已重新归档。
 
+来源 HTTP 生命周期：`source_documents.http_runtime` 在应用生命周期内复用匿名公共资源连接池（总连接 64、单站点 8，无 Cookie 状态），临时工具未启用应用 runtime 时使用自行关闭的会话。同会话、URL、请求预算、鉴权/Cookie/代理环境一致时只合并尚未结束的网络读取，结束后立即失效；单个等待者取消不影响其他等待者，最后一个等待者取消及应用关闭会回收读取任务。153 项来源/官网回归通过，本地 HTTP 验证两次顺序请求共用一个 TCP 连接；未以隔离实验推断生产吞吐提升。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。

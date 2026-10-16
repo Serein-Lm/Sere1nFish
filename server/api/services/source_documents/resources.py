@@ -26,6 +26,7 @@ from lxml import html as lxml_html
 
 from api.services.url_security import assert_public_http_url
 from .contracts import FetchedResource
+from .http_runtime import coalesce_read
 from .resource_types import is_attachment_resource, is_permanently_missing, normalize_resource
 
 
@@ -322,6 +323,18 @@ async def fetch_resource_with_retry(
     max_bytes: int,
     attempts: int = 3,
     max_attachment_bytes: int | None = None,
+) -> FetchedResource:
+    """Share only concurrent identical reads; retain per-session transport policy."""
+    return await coalesce_read(
+        session, url, policy=(max_bytes, attempts, max_attachment_bytes),
+        fetch=lambda: _fetch_resource_retry(session, url, max_bytes=max_bytes,
+                                            attempts=attempts, max_attachment_bytes=max_attachment_bytes),
+    )
+
+
+async def _fetch_resource_retry(
+    session: aiohttp.ClientSession, url: str, *, max_bytes: int,
+    attempts: int, max_attachment_bytes: int | None,
 ) -> FetchedResource:
     """Retry transient transport errors while returning deterministic 4xx."""
     last_error: Exception | None = None
