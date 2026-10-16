@@ -24,6 +24,7 @@ import httpx
 
 from core.async_limiter import ResizableLimiter
 from core.logger import get_logger
+from .leases import BrowserLeaseRegistry, BrowserLeaseRequest
 
 logger = get_logger("browser_manager")
 
@@ -245,7 +246,8 @@ class BrowserProvider(ABC):
         return None
 
     @abstractmethod
-    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general",
+                               *, request: BrowserLeaseRequest | None = None) -> Optional[str]:
         """
         获取一个可用的 CDP WebSocket 地址。
         返回 None 表示走本地模式。
@@ -253,7 +255,7 @@ class BrowserProvider(ABC):
         ...
 
     @abstractmethod
-    async def release_cdp_endpoint(self, task_id: Optional[str] = None):
+    async def release_cdp_endpoint(self, task_id: Optional[str] = None, *, owner_token: str | None = None):
         """释放 CDP 连接"""
         ...
 
@@ -295,10 +297,11 @@ class BrowserProvider(ABC):
 class LocalProvider(BrowserProvider):
     """本地模式：返回 None，让 CDPBrowserManager 走原有逻辑"""
 
-    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general",
+                               *, request: BrowserLeaseRequest | None = None) -> Optional[str]:
         return None
 
-    async def release_cdp_endpoint(self, task_id: Optional[str] = None):
+    async def release_cdp_endpoint(self, task_id: Optional[str] = None, *, owner_token: str | None = None):
         pass
 
     async def shutdown(self):
@@ -321,6 +324,7 @@ class DockerProvider(BrowserProvider):
         self.config = config
         self.containers: dict[str, ContainerInfo] = {}  # container_id → info
         self.task_map: dict[str, str] = {}  # task_id → container_id
+        self._leases = BrowserLeaseRegistry()
         self._lock = asyncio.Lock()
         self._reaper_task: Optional[asyncio.Task] = None
         self._health_checker_task: Optional[asyncio.Task] = None
@@ -658,7 +662,8 @@ class DockerProvider(BrowserProvider):
 
         raise RuntimeError(f"无法分配可用端口（尝试 {max_attempts} 次）")
 
-    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general") -> Optional[str]:
+    async def get_cdp_endpoint(self, task_id: Optional[str] = None, purpose: str = "general",
+                               *, request: BrowserLeaseRequest | None = None) -> Optional[str]:
         """
         获取一个 CDP 地址，必要时动态创建容器。
         
@@ -670,18 +675,35 @@ class DockerProvider(BrowserProvider):
                 - "xhs_screenshot": 小红书截屏
                 - "general": 通用
         """
-        task_id = task_id or str(uuid.uuid4())
-        logger.info(f"[DockerProvider] 请求 CDP 端点 | task_id={task_id} purpose={purpose}")
-
-        await self._acquire_workload_slot(task_id, purpose)
+        request = request or BrowserLeaseRequest(lease_id=task_id or str(uuid.uuid4()), purpose=purpose)
+        if task_id and task_id != request.lease_id:
+            raise ValueError("浏览器租约身份与 task_id 不一致")
+        task_id, purpose = request.lease_id, request.purpose
+        if self._closing:
+            raise RuntimeError("浏览器池正在关闭")
+        lease, reused = self._leases.reserve(request)
+        if reused:
+            info = self.containers.get(self.task_map.get(task_id, ""))
+            if not info or info.task_id != task_id or info.status != "busy" or not info.cdp_healthy:
+                raise RuntimeError("已有浏览器租约的 CDP 不可用，需要显式恢复")
+            return lease.endpoint
         try:
-            endpoint = await self._allocate_cdp_endpoint(task_id, purpose)
+            wait_seconds = request.wait_timeout_seconds
+            if request.execution_deadline is not None:
+                wait_seconds = min(wait_seconds, max(0, request.execution_deadline-time.monotonic()))
+            async with asyncio.timeout(wait_seconds):
+                await self._acquire_workload_slot(task_id, purpose)
+                endpoint = await self._allocate_cdp_endpoint(task_id, purpose)
+            if endpoint:
+                budget = (self.config.wechat_article_lease_timeout if purpose == "wechat_article"
+                          else self.config.generic_busy_lease_timeout)
+                self._leases.assigned(lease, endpoint, budget)
+            else:
+                await self.release_cdp_endpoint(task_id, owner_token=request.owner_token)
+            return endpoint
         except BaseException:
-            self._release_workload_slot(task_id)
+            await self.release_cdp_endpoint(task_id, owner_token=request.owner_token)
             raise
-        if endpoint is None:
-            self._release_workload_slot(task_id)
-        return endpoint
 
     async def _allocate_cdp_endpoint(
         self,
@@ -792,14 +814,19 @@ class DockerProvider(BrowserProvider):
             await self.release_cdp_endpoint(task_id)
             raise
 
-    async def release_cdp_endpoint(self, task_id: Optional[str] = None):
+    async def release_cdp_endpoint(self, task_id: Optional[str] = None, *, owner_token: str | None = None):
         """释放任务占用的容器"""
+        if task_id and not self._leases.matches(task_id, owner_token):
+            return
         if not task_id or task_id not in self.task_map:
             logger.debug(f"[DockerProvider] 释放请求忽略 | task_id={task_id} (未找到)")
             self._release_workload_slot(task_id)
+            self._leases.release(task_id, owner_token)
             return
 
         async with self._lock:
+            if not self._leases.matches(task_id, owner_token):
+                return
             cid = self.task_map.pop(task_id, None)
             if cid and cid in self.containers:
                 info = self.containers[cid]
@@ -812,6 +839,7 @@ class DockerProvider(BrowserProvider):
                     f"状态→idle | 当前容器池: {len(self.containers)} 个"
                 )
         self._release_workload_slot(task_id)
+        self._leases.release(task_id, owner_token)
 
     async def shutdown(self):
         """销毁所有容器和后台任务"""
@@ -890,6 +918,7 @@ class DockerProvider(BrowserProvider):
                 "status": info.status,
                 "task_id": info.task_id,
                 "purpose": info.purpose,
+                "lease": self._leases.describe(info.task_id),
                 "cdp_url": info.cdp_url,
                 "novnc_url": info.novnc_url,
                 "memory_mb": round(info.memory_usage_mb, 1),
@@ -1248,6 +1277,7 @@ class DockerProvider(BrowserProvider):
             for task_id in stale_tasks:
                 self.task_map.pop(task_id, None)
                 self._release_workload_slot(task_id)
+                self._leases.release(task_id)
         if not info:
             return
 
@@ -1420,7 +1450,10 @@ class DockerProvider(BrowserProvider):
                 if info.purpose == "wechat_article"
                 else self.config.generic_busy_lease_timeout
             )
-            stale_lease = info.status == "busy" and busy_seconds > max(60, lease_limit)
+            if await self._enforce_lease_owner(info):
+                return
+            stale_lease = (info.status == "busy" and self._leases.get(info.task_id) is None
+                           and busy_seconds > max(60, lease_limit))
             if stale_lease:
                 await self._restart_chrome_for_recovery(
                     info,
@@ -1455,6 +1488,28 @@ class DockerProvider(BrowserProvider):
                 info.container_name,
                 exc,
             )
+
+    async def _enforce_lease_owner(self, info: ContainerInfo) -> bool:
+        if info.status != "busy":
+            return False
+        lease = self._leases.get(info.task_id)
+        if not lease:
+            return False
+        reason = self._leases.termination_reason(info.task_id)
+        if reason == "owner_exited":
+            await self.release_cdp_endpoint(info.task_id, owner_token=lease.request.owner_token)
+            return True
+        if reason == "execution_budget_exhausted":
+            lease.expiry_reported = True
+            self._leases.event("budget_exhausted", lease)
+            owner = lease.request.owner_task
+            if owner is not None:
+                if not owner.done() and not owner.cancelling():
+                    owner.cancel()
+            else:
+                await self._restart_chrome_for_recovery(info, reason="浏览器租约持续超过声明的执行预算")
+            return True
+        return False
 
     async def _query_cdp_health(self, info: ContainerInfo) -> tuple[bool, str]:
         try:
@@ -1788,6 +1843,8 @@ class DockerProvider(BrowserProvider):
         if not task_id:
             return None
 
+        previous_lease = self._leases.get(task_id)
+        request = previous_lease.request if previous_lease else None
         old_cid = self.task_map.get(task_id)
         old_name = ""
         if old_cid and old_cid in self.containers:
@@ -1807,6 +1864,9 @@ class DockerProvider(BrowserProvider):
                 old_info.task_id = None
                 old_info.unhealthy_reason = old_info.unhealthy_reason or "热切换淘汰"
 
+        self._release_workload_slot(task_id)
+        self._leases.release(task_id)
+
         # 2. 异步销毁旧容器（不阻塞）
         if old_cid:
             from core.background import spawn_background
@@ -1818,7 +1878,7 @@ class DockerProvider(BrowserProvider):
 
         # 3. 获取新容器（走正常流程，会优先从预热池拿空闲容器）
         try:
-            new_ws_url = await self.get_cdp_endpoint(task_id=task_id, purpose=purpose)
+            new_ws_url = await self.get_cdp_endpoint(task_id=task_id, purpose=purpose, request=request)
             if new_ws_url:
                 # 重置新容器的错误计数
                 new_cid = self.task_map.get(task_id)

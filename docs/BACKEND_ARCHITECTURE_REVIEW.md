@@ -14,6 +14,8 @@
 
 联系方式场景复用：`source_documents.contextual_analysis` 以 Project/Target/版本身份、可靠别名、搜索意图、正文和图片证据、联系方式上下文、Prompt 与策略版本生成审核指纹，完整审核（含明确拒绝的空结果）保存于 SourceDocumentLink 的场景分析并可复用；部分批次失败不缓存。来源全局版本不保存 Target 归属判断，Finding 对账继续按当前接受结果执行。派生联系方式投影的版本写入增加 ready 快照时间与无活动尝试的 CAS，旧快照不能覆盖补齐中的新证据。相关回归 169 项通过，包含真实 MongoDB 场景持久化复用、跨 Target 关联隔离及投影竞态；未以历史总调用量推算节省比例。
 
+浏览器租约契约：`browser_manager.leases` 持有显式 lease_id/owner_token、Project/Task、等待预算、执行截止时间和可选真实生命周期 owner。相同显式请求复用有效租约，旧式重复身份或并发重入明确报冲突，避免覆盖 task_map；带旧 token 的释放不能释放后继租约。机构门户研究传入原有总预算及 owner，热切换保留截止时间；健康的 60 分钟研究不再受通用 30 分钟阈值提前恢复。声明预算到期取消 owner，owner 退出后回收；没有明确 owner 的兼容调用保留配置预算和故障恢复，不根据获取端点的临时协程退出猜测任务完成。新增 queued/assigned/released 的等待和持有日志，70 项浏览器/机构/门户回归通过（隔离传输）；旧重入调用会收到明确 RuntimeError，应改用显式请求或独立租约身份。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。

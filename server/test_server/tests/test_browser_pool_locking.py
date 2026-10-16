@@ -173,8 +173,8 @@ async def test_cancelled_url_scan_waiter_does_not_leak_capacity(
 ) -> None:
     provider = DockerProvider(
         ChromeDockerConfig(
-            max_containers=2,
-            reserved_non_bulk_containers=1,
+            max_containers=1,
+            reserved_non_bulk_containers=0,
         )
     )
     provider.containers = {

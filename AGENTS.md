@@ -145,7 +145,7 @@
 - 人物方案链路统一为“身份消歧 -> 按新鲜度复用或刷新 OSINT -> 当前时间与热点信号 -> 主动采集/匹配虚构人设 -> 沟通场景 -> 话术 -> 可选产物”。不是每次请求都重新检索：身份一致、信息完整且 30 天内的新鲜记录可直接复用；缺少匹配人设时由 Agent 主动研究公开的行业/岗位通用背景，并按严格 Schema 生成、校验、入库完全虚构且自洽的人设，代码不得硬编码人物样本。事实来源链和生成决策链分别保存，由 service 自动生成稳定 node/edge，前端只消费统一 lineage，不自行推断关联。
 - 手机相关能力通过 `core/mobile/*`、设备池、预约 DAO、mobile router/service 统一接入；不要在业务流程里直接写 ADB、EasyTier 或设备协议细节。简单动作由 `MobileCommandDispatcher` 按注册处理器直接下发，同一指令批次只解析一次设备上下文；规划层按子任务先尝试确定性工具，只对无法编译的复杂操作延迟初始化并复用视觉 Agent。新增工具通过 dispatcher/registry 扩展，不按业务话术继续堆叠 `if/else` 特例。
 - 手机附件、图片和音频传递统一通过 `api.services.mobile_transfer` 接入：先写私有对象存储留档，再按媒体类型推送到 Android 公共媒体目录并触发媒体扫描；上传临时文件必须在成功、失败和取消分支释放，页面不得直接执行 ADB。
-- 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。
+- 浏览器相关能力通过 `browser_manager` 和后端统一 provider 接入；不要在业务代码中临时启动独立 Chrome 或暴露调试端口。 长任务通过 `BrowserLeaseRequest` 传入原有执行截止时间、Project/Task 和真实生命周期 owner；重试/热切换不得延长总预算，同一租约只有相同 owner_token 可显式复用，释放应携带 token。
 - 截图、Word 产物、语音上传和受保护下载文件统一通过 `api.storage.ObjectStorageService` 写入；业务集合只保存 `storage_object_id`，不得直接调用 OSS SDK 或拼接 Object Key。读取按对象元数据选择 Provider，允许迁移期本地与 OSS 对象并存。
 - 百炼全双工语音统一通过 `api.services.voice_realtime` 的 Provider/Factory/Service 接入：浏览器只连接鉴权代理并传输 16kHz PCM，后端返回 24kHz PCM 和白名单事件；API Key 不得下发前端。TTS 与全双工复刻音色按目标模型隔离，禁止跨模型混用。
 - 视频通话中的纯变声统一通过 Deepfake 会话的语音转换接口接入。默认浏览器采集路径通过共享 AudioWorklet 把麦克风重采样为 16kHz PCM，经鉴权 WebSocket、GPU Gateway 和 `meanvc` adapter 转换后写回统一 `media_output`，与换脸画面共同提供给 OBS 浏览器源；OBS WHIP 路径仍可直接解码其麦克风音轨。两条路径都只做原话音色转换，不调用对话模型、不维护对话上下文；参考声音和原始 PCM 只属于短时会话，不落盘。后续替换模型必须扩展 Provider/Factory，不得在媒体 pipeline 或页面增加模型特例。

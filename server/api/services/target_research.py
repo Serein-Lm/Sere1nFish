@@ -1,6 +1,7 @@
 """Target 机构公开情报深研与扩展扫描编排。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -1575,6 +1576,13 @@ async def run_target_research(
     scan_params = session.scan_params(scan_params)
     provider = get_browser_provider()
     browser_task_id = f"target_research_{task_id}"
+    from browser_manager.leases import BrowserLeaseRequest
+
+    browser_lease = BrowserLeaseRequest(
+        lease_id=browser_task_id, purpose="target_research", project_id=project_id, task_id=task_id,
+        execution_deadline=session.deadline if session.options else None,
+        owner_task=asyncio.current_task(),
+    )
     query = (
         "请对以下公司/机构执行公开互联网深度研究，并严格输出 Prompt 规定的 JSON。\n"
         f"project_id: {project_id}\n"
@@ -1607,6 +1615,7 @@ async def run_target_research(
                     cdp_url = await provider.get_cdp_endpoint(
                         task_id=browser_task_id,
                         purpose="target_research",
+                        request=browser_lease,
                     )
                 else:
                     cdp_url = await provider.hot_swap_container(
@@ -1614,10 +1623,11 @@ async def run_target_research(
                         purpose="target_research",
                     )
                     if not cdp_url:
-                        await provider.release_cdp_endpoint(browser_task_id)
+                        await provider.release_cdp_endpoint(browser_task_id, owner_token=browser_lease.owner_token)
                         cdp_url = await provider.get_cdp_endpoint(
                             task_id=browser_task_id,
                             purpose="target_research",
+                            request=browser_lease,
                         )
                 if not cdp_url:
                     raise RuntimeError("无法获取 Chrome 容器执行机构深研")
@@ -1780,7 +1790,7 @@ async def run_target_research(
         try:
             await session.flush()
         finally:
-            await provider.release_cdp_endpoint(browser_task_id)
+            await provider.release_cdp_endpoint(browser_task_id, owner_token=browser_lease.owner_token)
     if not parsed:
         raise ValueError("机构深研 Agent 未返回可解析的结构化结果")
 
