@@ -20,12 +20,16 @@ from api.dao.website_crawl_runs import WebsiteCrawlOwnershipLost
 from api.services.site_relevance import classify_candidate_surface
 from api.services.source_documents.resources import (
     create_public_fetch_ssl_context,
+    FetchedResource,
     fetch_resource_with_retry,
     html_text_and_links,
     is_attachment_link,
     should_try_rendered_fallback,
 )
 from api.services.source_documents.service import ingest_source_url
+from api.services.source_documents.resource_types import (
+    is_attachment_resource, is_html_resource, is_permanently_missing, http_error_status,
+)
 from api.services.source_documents.urls import canonicalize_source_url
 from api.services.task_progress import update_source_progress
 from api.storage.errors import (
@@ -39,6 +43,7 @@ from core.mobile.collect.contacts import build_contact_findings
 logger = get_logger("website_documents")
 
 _MAX_HTML_BYTES = 8 * 1024 * 1024
+_MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024
 _DISCOVERY_POLICY_VERSION = 6
 _DETAIL_DOCUMENT_PATH_RE = re.compile(
     r"(?:^|[/_.-])detail(?:[/_.-]|$)",
@@ -862,7 +867,7 @@ class WebsiteDocumentCollectionService:
                 ),
             )
 
-        async def _archive(item: dict[str, Any]) -> None:
+        async def _archive(item: dict[str, Any], prefetched: FetchedResource | None = None) -> None:
             page_id = str(item["page_id"])
             if not dry_run:
                 await crawl_dao.mark_page_started(
@@ -889,6 +894,7 @@ class WebsiteDocumentCollectionService:
                     persist=not dry_run,
                     min_subject_match=80,
                     analysis_mode="trusted_official",
+                    prefetched_resource=prefetched,
                 )
             status = archive_page_status(source_result)
             attribution_error = str(
@@ -958,7 +964,8 @@ class WebsiteDocumentCollectionService:
         async def _discover(
             session: aiohttp.ClientSession,
             item: dict[str, Any],
-        ) -> None:
+        ) -> FetchedResource | None:
+            fetched = None
             page_id = str(item["page_id"])
             if not dry_run:
                 await crawl_dao.mark_page_started(
@@ -1056,20 +1063,13 @@ class WebsiteDocumentCollectionService:
 
             try:
                 fetched = await fetch_resource_with_retry(
-                    session,
-                    item["canonical_url"],
-                    max_bytes=_MAX_HTML_BYTES,
+                    session, item["canonical_url"], max_bytes=_MAX_HTML_BYTES,
+                    max_attachment_bytes=_MAX_ATTACHMENT_BYTES,
                 )
-                content_type = fetched.content_type.casefold()
-                if (
-                    "html" not in content_type
-                    and not fetched.data.lstrip().startswith(
-                        (b"<!DOCTYPE", b"<html", b"<HTML")
-                    )
-                ):
-                    raise RuntimeError(
-                        f"目录入口不是 HTML: {fetched.content_type}"
-                    )
+                if is_attachment_resource(fetched):
+                    return fetched
+                if not is_html_resource(fetched):
+                    raise RuntimeError(f"目录入口是不支持的媒体类型: {fetched.content_type}")
                 text, links = html_text_and_links(
                     fetched.data,
                     fetched.url,
@@ -1122,6 +1122,8 @@ class WebsiteDocumentCollectionService:
                     },
                 )
 
+            return fetched
+
         async with aiohttp.ClientSession(
             timeout=timeout,
             connector=connector,
@@ -1143,17 +1145,20 @@ class WebsiteDocumentCollectionService:
                     try:
                         if archive_blocked.is_set():
                             continue
-                        if item.get("kind") == "index_document":
-                            await _discover(session, item)
-                            await _archive(item)
-                        elif item.get("kind") == "document" or _is_document_url(
-                            str(item.get("canonical_url") or ""),
-                            str(item.get("anchor_text") or ""),
+                        if item.get("kind") == "document" or (
+                            item.get("kind") != "index_document" and _is_document_url(
+                                str(item.get("canonical_url") or ""), str(item.get("anchor_text") or ""),
+                            )
                         ):
                             item["kind"] = "document"
                             await _archive(item)
                         else:
-                            await _discover(session, item)
+                            fetched = await _discover(session, item)
+                            if item.get("kind") == "index_document" or (fetched and is_attachment_resource(fetched)):
+                                if item.get("kind") != "index_document":
+                                    counters["documents_scheduled"] += 1
+                                item["kind"] = "document"
+                                await _archive(item, prefetched=fetched)
                     except WebsiteCrawlOwnershipLost:
                         execution.cancel()
                         raise
@@ -1191,7 +1196,8 @@ class WebsiteDocumentCollectionService:
                             item.get("canonical_url"),
                             exc,
                         )
-                        if attempt < self.policy.max_page_attempts:
+                        permanent = is_permanently_missing(exc)
+                        if not permanent and attempt < self.policy.max_page_attempts:
                             if not dry_run:
                                 await crawl_dao.mark_page_retry(
                                     self.db,
@@ -1215,7 +1221,9 @@ class WebsiteDocumentCollectionService:
                                     runtime_id=execution.runtime_id,
                                     page_id=str(item["page_id"]),
                                     status="error",
-                                    fields={"error": str(exc)[:2_000]},
+                                    fields={"error": str(exc)[:2_000], "retryable": not permanent,
+                                            "error_code": "source_missing" if permanent else "fetch_failed",
+                                            "http_status": http_error_status(exc)},
                                 )
                             counters["processed_pages"] += 1
                     else:

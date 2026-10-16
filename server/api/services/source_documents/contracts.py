@@ -6,6 +6,16 @@ from typing import Protocol
 
 
 @dataclass(slots=True)
+class FetchedResource:
+    url: str
+    data: bytes
+    content_type: str
+    filename: str
+    requested_url: str = ""
+    reported_content_type: str = ""
+
+
+@dataclass(slots=True)
 class CapturedImage:
     index: int
     source_url: str
@@ -62,7 +72,8 @@ class SourceDocumentProvider(Protocol):
 
     def supports(self, url: str) -> bool: ...
 
-    async def capture(self, url: str, *, task_id: str = "") -> CapturedDocument: ...
+    async def capture(self, url: str, *, task_id: str = "",
+                      prefetched: FetchedResource | None = None) -> CapturedDocument: ...
 
 
 class SourceDocumentError(RuntimeError):

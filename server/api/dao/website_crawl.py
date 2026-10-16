@@ -132,6 +132,7 @@ async def begin_task(
             "crawl_task_id": crawl_task_id,
             "runtime_id": runtime_id,
             "status": {"$in": statuses},
+            "retryable": {"$ne": False},
         },
         {
             "$set": {

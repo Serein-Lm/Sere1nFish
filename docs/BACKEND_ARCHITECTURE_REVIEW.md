@@ -8,6 +8,8 @@
 
 官网采集取消与恢复：`website_crawl_runtime.WebsiteCrawlExecution` 统一持有执行租约、心跳、队列排空和异常收口；DAO 的 `runtime_id/lease_expires_at` 与逐页拥有者校验阻止过期执行覆盖当前执行。取消后只将本执行尚在抓取/归档的页面恢复为 pending，任务记为 interrupted，保留队列、累计尝试和原父任务暂停状态。worker 的致命持久化异常会传播并回收其他 worker，不再无限等待队列排空。当前来源/官网回归 141 项通过，包括真实 MongoDB 的抓取取消、归档取消、租约独占和旧拥有者写入拒绝；历史遗留状态仍需独立对账。
 
+官网动态附件读取：`source_documents.resource_types` 统一按响应与 PDF/Office/ZIP 内容签名区分正文和附件，发现阶段经 Provider 协议把已下载的 `FetchedResource` 交给来源归档，字节不写入检查点。HTML 仍限 8 MiB，附件按响应在同次下载中允许至 64 MiB；所有重定向仍校验公共 URL。404/410 保留不可重试原因，同一队列续跑不重试；临时 5xx 保留有界重试。相关 149 项回归通过，新增本地 HTTP 重定向/误标 MIME/分类型大小限制与真实 MongoDB 永久失败续跑契约；不代表历史网站已重新归档。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。

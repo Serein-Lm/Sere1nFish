@@ -36,6 +36,10 @@ from .resources import (
     should_try_rendered_fallback,
 )
 from .urls import canonicalize_source_url
+from .resource_types import (
+    is_html_resource, normalize_resource, looks_like_attachment_url as _looks_like_attachment_url,
+    looks_like_attachment_response as _looks_like_attachment_response,
+)
 
 
 logger = get_logger("source_document.web")
@@ -73,60 +77,12 @@ _NOISE_XPATH = (
     ".//*[contains(concat(' ', normalize-space(@class), ' '), ' share ')]"
 )
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
-_ATTACHMENT_ENDPOINT_RE = re.compile(
-    r"(?:^|[/_?&=-])(?:attachment|download|file)(?:$|[/_?&=-])|"
-    r"(?:file|attach)(?:id|name|path)=",
-    re.I,
-)
-_ATTACHMENT_CONTENT_TYPES = {
-    "application/msword",
-    "application/octet-stream",
-    "application/pdf",
-    "application/rtf",
-    "application/vnd.ms-excel",
-    "application/vnd.ms-powerpoint",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/zip",
-    "text/csv",
-    "text/plain",
-}
-
-
 def _is_public_http_url(value: str) -> bool:
     try:
         parsed = urlsplit(value)
     except ValueError:
         return False
     return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
-
-
-def _looks_like_attachment_url(value: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return False
-    return bool(
-        PurePosixPath(parsed.path).suffix.lower() in ATTACHMENT_EXTENSIONS
-        or _ATTACHMENT_ENDPOINT_RE.search(f"{parsed.path}?{parsed.query}")
-    )
-
-
-def _looks_like_attachment_response(
-    *,
-    requested_url: str,
-    final_url: str,
-    filename: str,
-    content_type: str,
-) -> bool:
-    media_type = str(content_type or "").split(";", 1)[0].strip().lower()
-    return bool(
-        _looks_like_attachment_url(requested_url)
-        or _looks_like_attachment_url(final_url)
-        or is_attachment_link({"url": final_url, "label": filename})
-        or media_type in _ATTACHMENT_CONTENT_TYPES
-    )
 
 
 def _decode_html(data: bytes, content_type: str = "") -> str:
@@ -285,7 +241,8 @@ class OfficialWebDocumentProvider:
         except ValueError:
             return False
 
-    async def capture(self, url: str, *, task_id: str = "") -> CapturedDocument:
+    async def capture(self, url: str, *, task_id: str = "",
+                      prefetched: FetchedResource | None = None) -> CapturedDocument:
         canonical_url = canonicalize_source_url(url)
         fetch_limit = (
             _MAX_ATTACHMENT_BYTES
@@ -313,11 +270,11 @@ class OfficialWebDocumentProvider:
             static_capture_error = ""
             rendered_fallback = False
             try:
-                page = await fetch_resource_with_retry(
-                    session,
-                    canonical_url,
-                    max_bytes=fetch_limit,
+                page = prefetched or await fetch_resource_with_retry(
+                    session, canonical_url, max_bytes=fetch_limit,
+                    max_attachment_bytes=_MAX_ATTACHMENT_BYTES,
                 )
+                page = normalize_resource(page)
             except Exception as exc:  # noqa: BLE001
                 if not should_try_rendered_fallback(exc):
                     raise SourceDocumentError(f"官网正文读取失败: {exc}") from exc
@@ -353,9 +310,7 @@ class OfficialWebDocumentProvider:
                         "官网静态正文读取失败，浏览器回退也失败: "
                         f"{exc}; {rendered_exc}"
                     ) from rendered_exc
-            is_html = "html" in page.content_type.lower() or page.data.lstrip().startswith(
-                (b"<!DOCTYPE", b"<html", b"<HTML")
-            )
+            is_html = is_html_resource(page)
             if not is_html and _looks_like_attachment_response(
                 requested_url=canonical_url,
                 final_url=page.url,
@@ -393,6 +348,7 @@ class OfficialWebDocumentProvider:
                     attachments=[attachment],
                     metadata={
                         "http_status": 200,
+                        "reported_content_type": page.reported_content_type or page.content_type,
                         "final_url": page.url,
                         "article_text": extracted_text,
                         "direct_attachment": True,

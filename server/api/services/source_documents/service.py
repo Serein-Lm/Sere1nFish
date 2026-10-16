@@ -33,6 +33,7 @@ from .analysis import (
 from .contracts import (
     CapturedAttachment,
     CapturedDocument,
+    FetchedResource,
     CapturedImage,
     CapturedScreenshot,
     SourceDocumentAnalysisError,
@@ -1165,6 +1166,7 @@ async def ingest_source_url(
     persist: bool = True,
     min_subject_match: int = 0,
     analysis_mode: str = "full",
+    prefetched_resource: FetchedResource | None = None,
 ) -> dict[str, Any]:
     """读取、结构化并永久保存一个来源 URL；同内容版本不会重复上传。"""
     requested_url = canonicalize_source_url(url)
@@ -1188,6 +1190,7 @@ async def ingest_source_url(
     capture = await provider.capture(
         requested_url,
         task_id=run_task_id or task_def_id or requested_document_id,
+        **({"prefetched": prefetched_resource} if prefetched_resource is not None else {}),
     )
     canonical_url = canonicalize_source_url(
         capture.canonical_url or requested_url

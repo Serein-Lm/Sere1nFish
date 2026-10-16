@@ -17,7 +17,6 @@ import subprocess
 import tempfile
 import time
 import zipfile
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
@@ -26,6 +25,8 @@ import aiohttp
 from lxml import html as lxml_html
 
 from api.services.url_security import assert_public_http_url
+from .contracts import FetchedResource
+from .resource_types import is_attachment_resource, is_permanently_missing, normalize_resource
 
 
 DEFAULT_MAX_ATTACHMENT_TEXT_CHARS = 200_000
@@ -77,14 +78,6 @@ _DOCX_RASTER_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".w
 _OPENSSL_LEGACY_SERVER_CONNECT = int(
     getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00000004)
 )
-
-
-@dataclass(slots=True)
-class FetchedResource:
-    url: str
-    data: bytes
-    content_type: str
-    filename: str
 
 
 @lru_cache(maxsize=1)
@@ -283,6 +276,7 @@ async def fetch_resource(
     *,
     max_bytes: int,
     redirects: int = 5,
+    max_attachment_bytes: int | None = None,
 ) -> FetchedResource:
     current = str(url or "").strip()
     for _ in range(max(0, redirects) + 1):
@@ -295,35 +289,29 @@ async def fetch_resource(
                 current = urljoin(current, location)
                 continue
             response.raise_for_status()
+            content_type = str(response.headers.get("Content-Type") or "application/octet-stream")
+            final_url = str(response.url)
+            filename = filename_from_response(final_url, response.headers, content_type)
             declared_size = int(response.headers.get("Content-Length") or 0)
-            if declared_size > max_bytes:
-                raise ValueError(
-                    f"远程文件超过 {max_bytes // 1024 // 1024} MiB 限制"
-                )
+            absolute_limit = max(max_bytes, max_attachment_bytes or 0)
+            if declared_size > absolute_limit:
+                raise ValueError(f"远程文件超过 {absolute_limit // 1024 // 1024} MiB 限制")
             chunks: list[bytes] = []
             size = 0
+            limit = max_bytes
             async for chunk in response.content.iter_chunked(128 * 1024):
+                if not chunks and max_attachment_bytes:
+                    probe = FetchedResource(final_url, chunk, content_type, filename)
+                    if is_attachment_resource(probe):
+                        limit = max_attachment_bytes
                 size += len(chunk)
-                if size > max_bytes:
-                    raise ValueError(
-                        f"远程文件超过 {max_bytes // 1024 // 1024} MiB 限制"
-                    )
+                if size > limit:
+                    raise ValueError(f"远程文件超过 {limit // 1024 // 1024} MiB 限制")
                 chunks.append(chunk)
-            content_type = str(
-                response.headers.get("Content-Type")
-                or "application/octet-stream"
-            )
-            final_url = str(response.url)
-            return FetchedResource(
-                url=final_url,
-                data=b"".join(chunks),
-                content_type=content_type,
-                filename=filename_from_response(
-                    final_url,
-                    response.headers,
-                    content_type,
-                ),
-            )
+            return normalize_resource(FetchedResource(
+                url=final_url, data=b"".join(chunks), content_type=content_type,
+                filename=filename, requested_url=url, reported_content_type=content_type,
+            ))
     raise RuntimeError("远程地址跳转次数过多")
 
 
@@ -333,12 +321,14 @@ async def fetch_resource_with_retry(
     *,
     max_bytes: int,
     attempts: int = 3,
+    max_attachment_bytes: int | None = None,
 ) -> FetchedResource:
     """Retry transient transport errors while returning deterministic 4xx."""
     last_error: Exception | None = None
     for attempt in range(max(1, attempts)):
         try:
-            return await fetch_resource(session, url, max_bytes=max_bytes)
+            return await fetch_resource(session, url, max_bytes=max_bytes,
+                                        **({"max_attachment_bytes": max_attachment_bytes} if max_attachment_bytes else {}))
         except aiohttp.ClientResponseError as exc:
             last_error = exc
             if exc.status not in {408, 425, 429} and exc.status < 500:
@@ -354,10 +344,7 @@ async def fetch_resource_with_retry(
 
 def should_try_rendered_fallback(exc: BaseException) -> bool:
     """Use Chrome for access/transport failures, but not confirmed missing pages."""
-    return not (
-        isinstance(exc, aiohttp.ClientResponseError)
-        and int(exc.status or 0) in {404, 410}
-    )
+    return not is_permanently_missing(exc)
 
 
 def _ocr_pdf_pages(

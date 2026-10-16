@@ -27,6 +27,7 @@ from core.logger import get_logger
 
 from .contracts import (
     CapturedDocument,
+    FetchedResource,
     CapturedImage,
     CapturedScreenshot,
     SourceDocumentBlocked,
@@ -88,7 +89,8 @@ class WechatArticleProvider:
         except Exception:
             return False
 
-    async def capture(self, url: str, *, task_id: str = "") -> CapturedDocument:
+    async def capture(self, url: str, *, task_id: str = "",
+                      prefetched: FetchedResource | None = None) -> CapturedDocument:
         canonical_url = canonicalize_source_url(url)
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
