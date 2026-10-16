@@ -8,6 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 
 MOBILE_COLLECT_PLAN_VERSION = 2
+MOBILE_COLLECT_RESULT_VERSION = 1
 
 
 @dataclass(slots=True)

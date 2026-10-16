@@ -9,7 +9,11 @@ from core.logger import get_logger
 from core.mobile.collect.contracts import MobileCollectExecution, MobileCollectPlan
 from core.mobile.collect.planning import resolve_collection_target, resolve_keyword_plan
 from core.mobile.collect.stage_registry import MobileStageRegistry
-from core.mobile.collect.state import build_stream_state, project_terminal_result
+from core.mobile.collect.state import (
+    build_stream_state,
+    project_terminal_result,
+    terminal_collection_status,
+)
 from core.stream import Item
 
 
@@ -168,12 +172,13 @@ class MobileCollectRuntime:
         persist_failed = int(getattr(persist, "failed", 0) or 0)
         state["counters"]["failed"] = collect_failed
         state["counters"]["persist_failed"] = persist_failed
+        state["all_failed"] = bool(collect_received and collect_succeeded == 0)
         if self.plan.dry_run:
             state["keywords_completed"] = int(state.get("keywords_processed") or 0)
         return {
             "collect_failed": collect_failed,
             "persist_failed": persist_failed,
-            "all_failed": bool(collect_received and collect_succeeded == 0),
+            "all_failed": state["all_failed"],
         }
 
     @staticmethod
@@ -258,15 +263,19 @@ async def _update_parent_terminal_progress(
     completed = int(state.get("keywords_completed") or 0)
     total = int(state.get("keyword_total") or 0)
     stopped = bool(state["stop_event"].is_set())
-    partial = timed_out or stopped or completed < total
-    status = "error" if all_failed else ("partial" if partial else "completed")
+    status = terminal_collection_status(
+        state, timed_out=timed_out, all_failed=all_failed,
+        failed_keywords=failed_keywords,
+    )
     label = str(state.get("progress_label") or "公众号")
-    if all_failed:
+    if status == "error":
         message = f"{label}采集失败，已完成 {completed}/{total} 个关键词"
     elif timed_out:
         message = f"{label}达到运行时限，已完成 {completed}/{total} 个关键词"
     elif stopped:
         message = f"{label}已停止，保留 {completed}/{total} 个关键词结果"
+    elif status == "partial":
+        message = f"{label}采集部分完成，保留 {completed}/{total} 个关键词结果"
     else:
         message = f"{label}关键词已完成 {completed}/{total}"
     await update_source_progress(

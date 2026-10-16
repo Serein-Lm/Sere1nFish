@@ -6,6 +6,7 @@ from typing import Any
 
 from api.models.mobile_collect import ExtractField
 from core.mobile.collect.contracts import (
+    MOBILE_COLLECT_RESULT_VERSION,
     MobileCollectExecution,
     MobileCollectPlan,
     MobileSeedPlan,
@@ -207,9 +208,41 @@ def _runtime_state(
     }
 
 
+def terminal_collection_status(
+    state: dict[str, Any],
+    *,
+    timed_out: bool,
+    all_failed: bool = False,
+    failed_keywords: int = 0,
+) -> str:
+    """Project completeness once for both source progress and task results.
+
+    Cooperative stopping preserves partial output. The task control owner keeps
+    paused/cancelled execution state through its existing compare-and-set write.
+    """
+    counters = state.get("counters") or {}
+    persist_failed = int(counters.get("persist_failed") or 0)
+    if all_failed or state.get("all_failed") or (
+        persist_failed and state.get("require_persist_success")
+    ):
+        return "error"
+    incomplete = (
+        timed_out
+        or state["stop_event"].is_set()
+        or int(state.get("keywords_completed") or 0) < int(state.get("keyword_total") or 0)
+        or failed_keywords
+        or int(counters.get("failed") or 0)
+        or persist_failed
+    )
+    return "partial" if incomplete else "completed"
+
+
 def project_terminal_result(execution: MobileCollectExecution) -> dict[str, Any]:
     state = execution.state
     return {
+        **dict(state.get("counters") or {}),
+        "result_version": MOBILE_COLLECT_RESULT_VERSION,
+        "status": terminal_collection_status(state, timed_out=execution.timed_out),
         "stopped": bool(state["stop_event"].is_set()),
         "timed_out": execution.timed_out,
         "preview": list(state.get("preview") or []),
@@ -221,5 +254,4 @@ def project_terminal_result(execution: MobileCollectExecution) -> dict[str, Any]
         "keyword_resolution": execution.seeds.keyword_resolution,
         "incremental_window": state.get("incremental_window"),
         "incremental_cursor_advanced": bool(state.get("incremental_cursor_advanced")),
-        **dict(state.get("counters") or {}),
     }
