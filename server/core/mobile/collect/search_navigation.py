@@ -12,6 +12,8 @@ from typing import Callable, Protocol
 from core.mobile.app_launcher import AdbAppLauncher, AppLaunchResult
 from core.mobile.coordinates import resolve_tap
 from core.mobile.manager import MobileDeviceManager
+from core.mobile.collect.dependencies import require_authenticated_activity
+from core.task_dependencies import TaskDependencyBlocked
 
 
 CommandRunner = Callable[[list[str], int], subprocess.CompletedProcess[str]]
@@ -38,6 +40,7 @@ class SearchNavigationResult:
     error: str | None = None
     elapsed_ms: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
+    blocked_reason: str = ""
 
 
 class SearchNavigator(Protocol):
@@ -228,7 +231,8 @@ class WechatArticleSearchNavigator:
             return ""
         activity = match.group(1)
         if activity.startswith("."):
-            return f"{self._PACKAGE}{activity}"
+            activity = f"{self._PACKAGE}{activity}"
+        require_authenticated_activity(activity)
         return activity
 
     def _wait_for_activity(
@@ -246,6 +250,8 @@ class WechatArticleSearchNavigator:
                 current = self._current_activity(adb_device_id)
                 if current == expected:
                     return current
+            except TaskDependencyBlocked:
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
             if attempt + 1 < attempts:
@@ -422,6 +428,12 @@ class WechatArticleSearchNavigator:
                 ok=True,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 metadata=metadata,
+            )
+        except TaskDependencyBlocked as exc:
+            return SearchNavigationResult(
+                strategy=self.strategy, ok=False, error=str(exc),
+                blocked_reason=exc.reason, metadata=exc.context,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
             )
         except Exception as exc:  # noqa: BLE001
             return SearchNavigationResult(

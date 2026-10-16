@@ -20,6 +20,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from api.db.collections import PROFILE_COPYWRITINGS_COLLECTION
 from core.logger import get_logger
+from core.task_dependencies import TaskDependencyBlocked
 from api.services.info_collection.tuning import (
     DEFAULT_ASSET_PROBE_CONCURRENCY,
     DEFAULT_COPYWRITING_CONCURRENCY,
@@ -676,6 +677,8 @@ class CompanyScanPipeline:
         failed_jobs: set[str] = set()
         xhs_succeeded = False
         for (kind, _operation), outcome in zip(jobs, outcomes):
+            if isinstance(outcome, TaskDependencyBlocked):
+                result.setdefault("blocked_dependencies", []).append(outcome.as_dict())
             if isinstance(outcome, BaseException):
                 failed_jobs.add(kind)
                 logger.error("[company_scan] %s 子流水线失败: %s", kind, outcome)

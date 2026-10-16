@@ -6,6 +6,7 @@ import time
 from typing import Any, Protocol
 
 from core.logger import get_logger
+from core.task_dependencies import TaskDependencyBlocked
 from core.observability import obs_log
 from api.services.company_scan.checkpoints import CompanyScanCheckpointRepository
 from api.services.company_scan.contracts import CompanyScanContext, CompanyScanPlan
@@ -174,10 +175,18 @@ class CompanyScanRuntime:
         try:
             await self._prepare_core_lease(ctx)
             await self.workflow.run(ctx)
+            if dependencies := ctx.result.get("blocked_dependencies"):
+                dependency = dependencies[0]
+                raise TaskDependencyBlocked(
+                    dependency["reason"], dependency["message"],
+                    context=dependency, result=ctx.result,
+                )
             return ctx.result
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if isinstance(error, TaskDependencyBlocked):
+                raise
             await self.failure_handler.handle(ctx, error)
             raise AssertionError("failure handler must raise")
         finally:

@@ -15,6 +15,7 @@ from core.mobile.collect.state import (
     terminal_collection_status,
 )
 from core.stream import Item
+from core.task_dependencies import TaskDependencyBlocked
 
 
 logger = get_logger("mobile_collect.runtime")
@@ -186,6 +187,12 @@ class MobileCollectRuntime:
         execution: MobileCollectExecution,
         failure_state: dict[str, int | bool],
     ) -> None:
+        dependency = execution.state.get("blocked_dependency")
+        if dependency:
+            raise TaskDependencyBlocked(
+                dependency["reason"], dependency["message"], context=dependency,
+                result=project_terminal_result(execution),
+            )
         if failure_state["all_failed"]:
             failed = int(failure_state["collect_failed"])
             received = int(

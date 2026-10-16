@@ -245,6 +245,7 @@ def project_terminal_result(execution: MobileCollectExecution) -> dict[str, Any]
         "status": terminal_collection_status(state, timed_out=execution.timed_out),
         "stopped": bool(state["stop_event"].is_set()),
         "timed_out": execution.timed_out,
+        "blocked_dependency": state.get("blocked_dependency"),
         "preview": list(state.get("preview") or []),
         "candidate_reviews": list(state.get("candidate_reviews") or []),
         "detail_entry_reviews": list(state.get("detail_entry_reviews") or []),

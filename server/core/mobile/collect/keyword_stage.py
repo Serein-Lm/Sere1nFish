@@ -73,6 +73,11 @@ class MobileKeywordStageRunner:
             run.persist_failures_before = int(metrics.get("failed") or 0)
         await self._mark_checkpoint(run, "running")
         if not await self._navigate(run):
+            if run.shared.get("blocked_dependency"):
+                await self._mark_checkpoint(
+                    run, "blocked", error=run.shared["blocked_dependency"]["message"],
+                )
+                return
             await self._fail_navigation(run)
         await self._scan_screens(run)
         await self._finalize(run)

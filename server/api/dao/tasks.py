@@ -581,6 +581,7 @@ async def resume_task(
                 "heartbeat_at": "",
                 "pause_requested_at": "",
                 "paused_at": "",
+                "blocked_dependency": "",
                 "completed_at": "",
                 "error": "",
             },

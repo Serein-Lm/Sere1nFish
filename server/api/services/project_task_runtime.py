@@ -8,9 +8,11 @@ from collections.abc import Awaitable, Mapping
 from typing import Any, Callable
 
 from api.dao import tasks as tasks_dao
+from api.dao.task_dependencies import pause_for_dependency
 from api.db.mongodb import get_db
 from core.logger import get_logger
 from core.observability import obs_log
+from core.task_dependencies import TaskDependencyBlocked
 
 
 TaskDispatcher = Callable[[str, str, dict[str, Any]], Awaitable[Any]]
@@ -396,6 +398,18 @@ async def _execute_project_task(
             )
             logger.info("任务异常清理期间完成暂停 | task=%s", task_id)
             return None
+        if isinstance(exc, TaskDependencyBlocked):
+            paused = await pause_for_dependency(
+                db, task_id=task_id, runtime_id=_RUNTIME_ID,
+                dependency=exc.as_dict(), result=exc.result,
+            )
+            if paused:
+                obs_log(
+                    str(exc), task_id=task_id, project_id=project_id,
+                    source="task_runner", level="warning", event="task_dependency_blocked",
+                    data=exc.as_dict(),
+                )
+            return exc.result
         elapsed_ms = round((time.monotonic() - started) * 1000)
         await tasks_dao.fail_task(
             db,

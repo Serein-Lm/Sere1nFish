@@ -20,6 +20,8 @@
 
 Chrome 预热策略：`browser_manager.warm_policy` 在 `chrome_docker.adaptive_warm_pool` 开启后，以 `warm_pool_min_size`（默认 4）为底座，以既有 `warm_pool_size` 为预热上限，按近期活跃/排队租约需求提高目标，并在 `warm_demand_window_seconds`（默认 180 秒）后回落。仅影响空闲预热与空闲回收，保留总容量、创建并发和有效 busy 租约；兼容开关默认关闭。30 项池契约回归通过；冷启动、实时内存与灰度配置变更另行记录，尚未宣称生产节省量。
 
+手机登录依赖：确定性导航只按已知登录 Activity 产生 `needs_auth`，未知页面仍走既有导航回退；不会依据业务文本或尝试次数猜测登录状态。关键词保存 blocked 检查点并停止新手机动作，已归档结果与成功关键词保留。统一任务运行时以拥有者 CAS 转为可手动继续的 paused，并保存 `blocked_dependency`；公司其他已启动渠道先完成收口，再保留同一依赖身份。手动继续清除阻塞标识而不清除检查点，设备与定义租约沿原 finally 释放。手机相关 69 项和公司关联 72 项定向测试通过（两组有重叠），包含真实 MongoDB 暂停/续跑与旧拥有者拒绝；尚未代替登录失效实机验收。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。

@@ -45,6 +45,14 @@ class MobileSearchNavigationRunner:
         stop: asyncio.Event = state["stop_event"]
         direct_launch = bool(state.get("direct_launch_app"))
         deterministic = await self._try_deterministic(state, keyword, direct_launch)
+        if deterministic is not None and deterministic.blocked_reason:
+            state["blocked_dependency"] = {
+                "reason": deterministic.blocked_reason,
+                "message": deterministic.error or "手机依赖需要人工恢复",
+                "device_id": state["device_id"], **deterministic.metadata,
+            }
+            stop.set()
+            return False
         if stop.is_set():
             return False
         if deterministic is not None and deterministic.ok:
@@ -99,6 +107,7 @@ class MobileSearchNavigationRunner:
             event=(
                 "collect_nav_deterministic"
                 if result.ok
+                else "collect_dependency_blocked" if result.blocked_reason
                 else "collect_nav_deterministic_fallback"
             ),
             data={
