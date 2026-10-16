@@ -154,7 +154,7 @@
 - 看板历史 Token 统计统一使用 `Sere1nGraph.graph.observability.stats_reader` 的有界共享快照，全局与场景共用一次历史聚合，缓存窗口 10 秒；不得重新按场景串行全量聚合，也不得用内存环形缓冲替代完整历史。前端刷新复用按登录隔离的 `dashboardService`，保留已显示内容并独立更新到期的数据源。
 - 观测能力通过 `core/observability`、`Sere1nGraph` token tracker 或统一日志入口接入；新增长流程应记录开始、结束、失败和关键资源标识。
 - LLM token 归因必须通过 `core.observability.observation_context` 包裹 AI 调用(浏览器 agent、结构化解析、修复重试),携带 `project_id/task_id/phase/agent/task_type`;不要直接操作 `TokenTracker`。凡是新接入的 AI 链路(人设采集、公司规范化、采集分析、手机规划等)都要确认 token 与日志观测已连通,可在 Observability/Dashboard 看到归因。
-- 已知缺口:`AutoGLM-GUI-main` 手机执行器使用原生 OpenAI 客户端,绕过 LangChain 回调,其 token 暂未纳入统一 tracker;修改该 vendored 代码风险高,接入前先评估影响并在交接说明。
+- 手机执行器的原生 OpenAI 客户端已由 `core.mobile.llm_usage` 适配器接入统一 usage 记录，`core.mobile.executor` 负责注入，保留 vendored AutoGLM 原代码。归因通过 Project/Task/phase/agent 传递；模型未返回 usage 时不能把估算值当作实际账单。
 - 后台 fire-and-forget 任务统一用 `core.background.spawn_background` 启动,避免任务被 GC 回收并统一记录异常;不要在业务代码里散落裸 `asyncio.create_task` 且不持引用。
 - 采集/分析等长流程应提供「试跑预览(dry_run)」能力:仍执行导航、截屏、结构化,但不入库、不发通知,而是把结构化结果收集到返回值的 `preview` 列表,供前端评估效果。dry_run 分支收敛在 runtime/stage 内(如 `run_collect_task(dry_run=True)`),调用侧只切换标志,不复制流程。
 - 新增 API 表面优先使用明确的请求/响应模型。响应结构要稳定，字段命名与既有 API 保持一致。

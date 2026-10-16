@@ -42,7 +42,7 @@ Chrome 预热策略：`browser_manager.warm_policy` 在 `chrome_docker.adaptive_
 
 2026-09-14 增量通报补充：手机持久化 Stage 与浏览器补录共用 `mobile_incremental_notifications` 领域入口。独立的 `mobile_incremental_events` 保存来源版本、发现时间、文章时间及原始扫描窗口，不受采集记录后续 upsert 影响；唯一事件索引与短期投递认领避免同版本重扫重复通报。项目读取权限保护的 API 提供最近 7 天按项目筛选的通报与计数，界面显著展示未读与新增/变化。通道失败仍保留站内通报和失败状态，当前只在事件重放时重试，尚不承诺独立投递重试 worker。
 
-同日按“没有信息不通报”收紧入口：无正文摘要、业务背景或实际联系内容的手机结果不形成增量事件，只有标题、日期和计数不能通过；时间增量必须保有 ready 来源与版本 ID。单 Target 与批次结束事件没有有效结果时不投递，失败仍留在原任务与观测日志。空项目的前端通报卡片隐藏，通知与前端均省略零值类别，不新增空结果通知或额外弹窗。
+同日按“没有信息不通报”收紧入口：无正文摘要、业务背景或实际联系内容的手机结果不形成增量事件，只有标题、日期和计数不能通过；时间增量必须保有 ready 来源与版本 ID。单 Target 与批次结束事件没有有效结果时不投递，失败仍留在原任务与观测日志。增量主动通报仅走钉钉；前端增量卡片、历史抽屉与未读角标已移除。通知省略零值类别，不新增空结果通知。
 
 当前系统的核心采集、手机、AI、对象存储和恢复机制已经具备清晰的领域入口，能够继续在线运行。主要风险不是“缺少架构”，而是若干早期大型模块同时承担编排、策略、适配和数据转换，后续继续直接追加功能会放大回归范围。
 
@@ -95,15 +95,17 @@ Target 卡片的公众号数量与手机记录列表统一统计有效项目关�
 
 ### 规模热点
 
+行数于 2026-10-16 重新核对；本轮按已证实的行为边界抽取租约、队列、证据尝试、HTTP runtime 和上下文审核，仍保留原兼容入口，未宣称所有大型遗留模块拆分完成。
+
 | 模块 | 行数 | 主要职责混合 | 优先级 |
 | --- | ---: | --- | --- |
-| `api/services/company_scan_pipeline.py` | 922 | 兼容 facade 与本机 adapter 薄入口；编排和大型渠道实现已迁入 `company_scan/*` | P2 |
-| `core/mobile/collect/pipeline.py` | 426 | 兼容入口、设备原语注入与 Stage adapter | P2 |
-| `api/services/targets.py` | 2240 | Target 命令、查询、聚合、迁移兼容 | P1 |
+| `api/services/company_scan_pipeline.py` | 939 | 兼容 facade 与本机 adapter 薄入口；编排和大型渠道实现已迁入 `company_scan/*` | P2 |
+| `core/mobile/collect/pipeline.py` | 427 | 兼容入口、设备原语注入与 Stage adapter | P2 |
+| `api/services/targets.py` | 2295 | Target 命令、查询、聚合、迁移兼容 | P1 |
 | `api/routers/mobile.py` | 2197 | HTTP、ADB/流控制、设备行为 | P1 |
-| `browser_manager/provider.py` | 1934 | 池、容器、会话、健康和协议 | P2 |
-| `api/services/source_documents/service.py` | 1864 | 来源编排、版本、媒体和恢复 | P2 |
-| `api/services/target_research.py` | 1794 | 检索、核验、关系、扫描触发 | P2 |
+| `browser_manager/provider.py` | 2028 | 池、容器、会话、健康和协议 | P2 |
+| `api/services/source_documents/service.py` | 1778 | 来源编排、版本、媒体和恢复 | P2 |
+| `api/services/target_research.py` | 2229 | 检索、核验、关系、扫描触发 | P2 |
 | `api/services/url_scan_pipeline.py` | 1659 | 探活、浏览器、分析、Finding | P2 |
 
 行数不是单独的缺陷。真正需要拆分的是多个变更原因共享可变状态、无法独立测试，或 Router 直接承担领域规则。
