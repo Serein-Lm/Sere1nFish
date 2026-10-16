@@ -786,12 +786,16 @@ class UrlWebScanTool:
     ) -> ScanResult:
         from api.services.info_collection.contracts import ScanInfrastructureError
         from browser_manager.provider import is_browser_infrastructure_error
+        from browser_manager.leases import BrowserLeaseRequest
 
         cdp_url = ""
+        browser_lease = BrowserLeaseRequest(lease_id=url_task_id, purpose="url_scan",
+            project_id=request.project_id, task_id=request.task_id, owner_task=asyncio.current_task())
         try:
             cdp_url = await provider.get_cdp_endpoint(
                 task_id=url_task_id,
                 purpose="url_scan",
+                request=browser_lease,
             )
             if not cdp_url:
                 raise RuntimeError(f"无法获取 Chrome 容器 (url={url})")
@@ -991,6 +995,6 @@ class UrlWebScanTool:
         finally:
             if cdp_url:
                 try:
-                    await provider.release_cdp_endpoint(task_id=url_task_id)
+                    await provider.release_cdp_endpoint(task_id=url_task_id, owner_token=browser_lease.owner_token)
                 except Exception:
                     pass

@@ -28,6 +28,15 @@ class ResizableLimiter:
     def locked(self) -> bool:
         return self._in_use >= self._limit
 
+    def try_acquire(self) -> bool:
+        """Reserve synchronously after an external fair scheduler grants a turn."""
+        while self._waiters and self._waiters[0].done():
+            self._waiters.popleft()
+        if self._in_use >= self._limit or self._waiters:
+            return False
+        self._in_use += 1
+        return True
+
     async def acquire(self) -> None:
         if self._in_use < self._limit and not self._waiters:
             self._in_use += 1

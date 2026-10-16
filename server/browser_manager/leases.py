@@ -24,9 +24,19 @@ class BrowserLeaseRequest:
     execution_deadline: float | None = None
     priority_class: str = ""
 
+    @classmethod
+    def for_task(cls, lease_id: str, purpose: str = "general") -> "BrowserLeaseRequest":
+        from core.observability.context import current_observation_context
+
+        context = current_observation_context()
+        return cls(lease_id=lease_id, purpose=purpose, project_id=context["project_id"],
+                   task_id=context["task_id"] or lease_id)
+
     def __post_init__(self):
         if not self.lease_id or not self.owner_token or self.wait_timeout_seconds <= 0:
             raise ValueError("浏览器租约必须有身份、拥有者和正数等待预算")
+        if self.priority_class not in {"", "batch", "interactive"}:
+            raise ValueError("未知浏览器租约优先级")
         if self.max_hold_seconds is not None and self.max_hold_seconds <= 0:
             raise ValueError("浏览器租约执行预算必须为正数")
 

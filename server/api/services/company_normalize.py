@@ -283,6 +283,10 @@ async def normalize_company(
 
     provider = get_browser_provider()
     cdp_task_id = f"company_normalize_{task_id or project_id}_{abs(hash(input_name)) % 100000}"
+    from browser_manager.leases import BrowserLeaseRequest
+
+    browser_lease = BrowserLeaseRequest(lease_id=cdp_task_id, purpose="company_normalize",
+                                       project_id=project_id, task_id=task_id)
     cdp_url = ""
     parsed: dict[str, Any] = {}
     browser_error = ""
@@ -291,6 +295,7 @@ async def normalize_company(
         cdp_url = await provider.get_cdp_endpoint(
             task_id=cdp_task_id,
             purpose="company_normalize",
+            request=browser_lease,
         )
         if not cdp_url:
             raise RuntimeError("无法获取 Chrome 容器用于公司名规范化")
@@ -317,7 +322,7 @@ async def normalize_company(
     finally:
         if cdp_url:
             try:
-                await provider.release_cdp_endpoint(cdp_task_id)
+                await provider.release_cdp_endpoint(cdp_task_id, owner_token=browser_lease.owner_token)
             except Exception:
                 pass
 

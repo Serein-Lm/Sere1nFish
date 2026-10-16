@@ -10,6 +10,15 @@ from contextlib import contextmanager
 from typing import Iterator
 
 
+def current_observation_context() -> dict[str, str]:
+    """Read stable attribution without constructing the tracker or doing I/O."""
+    from Sere1nGraph.graph.observability.tracker import _current_context
+
+    context = _current_context()
+    return {name: str(getattr(context, name, "") or "")
+            for name in ("project_id", "task_id", "turn_id", "phase", "agent", "task_type")}
+
+
 @contextmanager
 def observation_context(
     *,

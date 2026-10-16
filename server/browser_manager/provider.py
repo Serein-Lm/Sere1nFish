@@ -25,10 +25,10 @@ import httpx
 from core.async_limiter import ResizableLimiter
 from core.logger import get_logger
 from .leases import BrowserLeaseRegistry, BrowserLeaseRequest
+from .scheduling import FairBrowserWaitQueue, request_class, workload_class
 
 logger = get_logger("browser_manager")
 
-_BULK_BROWSER_PURPOSES = frozenset({"url_scan"})
 MAX_CHROME_CONTAINERS = 96
 
 
@@ -325,6 +325,7 @@ class DockerProvider(BrowserProvider):
         self.containers: dict[str, ContainerInfo] = {}  # container_id → info
         self.task_map: dict[str, str] = {}  # task_id → container_id
         self._leases = BrowserLeaseRegistry()
+        self._scheduler = FairBrowserWaitQueue(self._can_admit_browser_request)
         self._lock = asyncio.Lock()
         self._reaper_task: Optional[asyncio.Task] = None
         self._health_checker_task: Optional[asyncio.Task] = None
@@ -400,7 +401,7 @@ class DockerProvider(BrowserProvider):
 
     async def _acquire_workload_slot(self, task_id: str, purpose: str) -> None:
         """Let bulk work borrow idle reserved slots and yield them on priority demand."""
-        if purpose not in _BULK_BROWSER_PURPOSES:
+        if workload_class(purpose) != "batch":
             if task_id not in self._non_bulk_slot_owners:
                 self._non_bulk_slot_owners.add(task_id)
                 self._refresh_bulk_slot_limit()
@@ -429,6 +430,30 @@ class DockerProvider(BrowserProvider):
         if task_id in self._non_bulk_slot_owners:
             self._non_bulk_slot_owners.remove(task_id)
             self._refresh_bulk_slot_limit()
+        self._scheduler.wake()
+
+    def _can_admit_browser_request(self, request: BrowserLeaseRequest) -> bool:
+        if self._closing:
+            return False
+        if request_class(request) == "batch":
+            already_owned = request.lease_id in self._bulk_slot_owners
+            if self._bulk_slots.in_use >= self._bulk_slots.limit + int(already_owned):
+                return False
+        if any(self._is_assignable(info) for info in self.containers.values()):
+            return True
+        active = sum(info.status in {"busy", "idle", "starting"} and not info.unhealthy_reason
+                     and info.cdp_healthy for info in self.containers.values()) + self._pending_creates
+        return active < self._effective_container_limit()
+
+    async def _await_browser_admission(self, request: BrowserLeaseRequest) -> None:
+        while True:
+            await self._scheduler.wait_turn(request)
+            if request_class(request) != "batch" or request.lease_id in self._bulk_slot_owners:
+                return
+            if self._bulk_slots.try_acquire():
+                self._bulk_slot_owners.add(request.lease_id)
+                return
+            self._scheduler.reserved(request.lease_id)
 
     def _get_docker_client(self):
         """延迟初始化 docker client"""
@@ -463,6 +488,7 @@ class DockerProvider(BrowserProvider):
     async def start(self) -> None:
         """服务启动时立即启动健康检查、回收器和预热池。"""
         self._closing = False
+        self._scheduler.reopen()
         if not self._orphan_cleanup_done:
             try:
                 await asyncio.to_thread(self._cleanup_orphan_containers)
@@ -494,6 +520,7 @@ class DockerProvider(BrowserProvider):
             config.container_create_concurrency,
             config.container_health_concurrency,
         )
+        self._scheduler.wake()
         return self.capacity_status()
 
     def _prune_recent_cdp_failures(self) -> None:
@@ -571,7 +598,8 @@ class DockerProvider(BrowserProvider):
                 0, self._bulk_slot_limit - self._bulk_base_limit
             ),
             "bulk_in_use": self._bulk_slots.in_use,
-            "bulk_waiting": self._bulk_slots.waiting,
+            "bulk_waiting": self._scheduler.status()["waiting_by_class"]["batch"],
+            **self._scheduler.status(),
             "non_bulk_demand": len(self._non_bulk_slot_owners),
             "reserved_non_bulk_containers": (
                 self.config.normalized_reserved_non_bulk_containers
@@ -675,7 +703,7 @@ class DockerProvider(BrowserProvider):
                 - "xhs_screenshot": 小红书截屏
                 - "general": 通用
         """
-        request = request or BrowserLeaseRequest(lease_id=task_id or str(uuid.uuid4()), purpose=purpose)
+        request = request or BrowserLeaseRequest.for_task(task_id or str(uuid.uuid4()), purpose)
         if task_id and task_id != request.lease_id:
             raise ValueError("浏览器租约身份与 task_id 不一致")
         task_id, purpose = request.lease_id, request.purpose
@@ -687,12 +715,15 @@ class DockerProvider(BrowserProvider):
             if not info or info.task_id != task_id or info.status != "busy" or not info.cdp_healthy:
                 raise RuntimeError("已有浏览器租约的 CDP 不可用，需要显式恢复")
             return lease.endpoint
+        if request_class(request) != "batch":
+            self._non_bulk_slot_owners.add(task_id)
+            self._refresh_bulk_slot_limit()
         try:
             wait_seconds = request.wait_timeout_seconds
             if request.execution_deadline is not None:
                 wait_seconds = min(wait_seconds, max(0, request.execution_deadline-time.monotonic()))
             async with asyncio.timeout(wait_seconds):
-                await self._acquire_workload_slot(task_id, purpose)
+                await self._await_browser_admission(request)
                 endpoint = await self._allocate_cdp_endpoint(task_id, purpose)
             if endpoint:
                 budget = (self.config.wechat_article_lease_timeout if purpose == "wechat_article"
@@ -704,6 +735,8 @@ class DockerProvider(BrowserProvider):
         except BaseException:
             await self.release_cdp_endpoint(task_id, owner_token=request.owner_token)
             raise
+        finally:
+            self._scheduler.reserved(task_id)
 
     async def _allocate_cdp_endpoint(
         self,
@@ -766,6 +799,7 @@ class DockerProvider(BrowserProvider):
                     self._pending_creates += 1
                     create_required = True
 
+        self._scheduler.reserved(task_id)
         if wait_for_idle:
             return await self._wait_for_idle(task_id, purpose=purpose, timeout=60)
         if create_required:
@@ -796,6 +830,7 @@ class DockerProvider(BrowserProvider):
             finally:
                 async with self._lock:
                     self._pending_creates = max(0, self._pending_creates - 1)
+                self._scheduler.wake()
         if claimed is None:
             return None
         try:
@@ -844,6 +879,7 @@ class DockerProvider(BrowserProvider):
     async def shutdown(self):
         """销毁所有容器和后台任务"""
         self._closing = True
+        self._scheduler.close()
         logger.info(
             "[DockerProvider] 开始关闭 | tracked=%s pending_creates=%s",
             len(self.containers),
@@ -1242,30 +1278,11 @@ class DockerProvider(BrowserProvider):
         purpose: str = "general",
         timeout: int = 60,
     ) -> Optional[str]:
-        """等待一个空闲容器"""
-        start = time.time()
-        while time.time() - start < timeout:
-            claimed: ContainerInfo | None = None
-            async with self._lock:
-                for cid, info in self.containers.items():
-                    if self._is_assignable(info):
-                        info.status = "busy"
-                        info.task_id = task_id
-                        info.purpose = purpose
-                        info.last_used_at = datetime.now()
-                        self.task_map[task_id] = cid
-                        claimed = info
-                        break
-            if claimed is not None:
-                try:
-                    return await self._get_ws_url(claimed)
-                except BaseException:
-                    await self.release_cdp_endpoint(task_id)
-                    raise
-            await asyncio.sleep(1)
-
-        logger.error(f"[DockerProvider] 等待空闲容器超时 ({timeout}s)")
-        return None
+        """Rejoin admission if concurrent resource guards changed after a grant."""
+        lease = self._leases.get(task_id)
+        request = lease.request if lease else BrowserLeaseRequest(lease_id=task_id, purpose=purpose)
+        await self._await_browser_admission(request)
+        return await self._allocate_cdp_endpoint(task_id, purpose)
 
     async def _destroy_container(self, container_id: str):
         """销毁容器"""
@@ -1392,6 +1409,7 @@ class DockerProvider(BrowserProvider):
             await self._inspect_container_health(container_id, info)
         finally:
             self._health_slots.release()
+            self._scheduler.wake()
 
     async def _inspect_container_health(
         self,
@@ -1704,6 +1722,7 @@ class DockerProvider(BrowserProvider):
         finally:
             async with self._lock:
                 self._pending_creates = max(0, self._pending_creates - 1)
+            self._scheduler.wake()
 
     async def _warm_pool_filler(self):
         """

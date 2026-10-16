@@ -21,6 +21,7 @@ from api.dao import targets as targets_dao
 from api.models.mobile_collect import ExtractField
 from api.storage import get_object_storage
 from core.mobile.collect.contacts import extract_contacts, normalize_contact_candidate
+from core.observability import observation_context
 
 from .analysis import (
     analyze_and_review_article,
@@ -1127,11 +1128,12 @@ async def ingest_source_url(
     if normalized_analysis_mode not in {"full", "trusted_official"}:
         raise ValueError(f"不支持的来源分析模式: {analysis_mode}")
 
-    capture = await provider.capture(
-        requested_url,
-        task_id=run_task_id or task_def_id or requested_document_id,
-        **({"prefetched": prefetched_resource} if prefetched_resource is not None else {}),
-    )
+    with observation_context(project_id=project_id, task_id=run_task_id or task_def_id, phase="source_capture"):
+        capture = await provider.capture(
+            requested_url,
+            task_id=run_task_id or task_def_id or requested_document_id,
+            **({"prefetched": prefetched_resource} if prefetched_resource is not None else {}),
+        )
     canonical_url = canonicalize_source_url(
         capture.canonical_url or requested_url
     )
