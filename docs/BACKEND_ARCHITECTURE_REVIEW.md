@@ -32,6 +32,8 @@ Chrome 预热策略：`browser_manager.warm_policy` 在 `chrome_docker.adaptive_
 
 历史状态维护入口：`scripts.reconcile_collection_state` 默认只读生成计划，显式 --apply 前先落盘 BSON 无损 before-image，再按原状态/更新时间 CAS 修正手机部分完成、无租约旧官网状态与来源版本。官网必须能核对父任务终态，保留父任务暂停；页面只处理同一旧拥有者且早于截止时间的未完成项。来源恢复 ready 必须读取全部对象并逐一校验大小/SHA-256，结构化对象中的 document_id/version_id/content_hash/正文必须匹配该版本；已存在的 archive_status=partial 与警告保留。没有已提交快照时只结束遗留 processing 状态并保存可重试错误，禁止借用最新版本内容。相关 25 项回归通过，线上只读证据核验已确认 3 个旧快照的 16 个对象可读；历史写入仍需受控执行并单独验收。
 
+本轮合并验证（部署前）：35 个相关测试文件共 534 项通过，均在隔离快照与临时 MongoDB 中执行，5 条既有兼容性警告单独保留。另用严格限制容器标签的 Docker adapter 验证 3 个真实 Chrome 并发 CDP、同主租约复用、重复拥有者拒绝、过期 token 释放拒绝、排队超时清理和释放唤醒，最终租约/槽位/测试容器均为零。单容器控制 API 冷启动 3 次为 2.250–2.268 秒，三容器并发就绪 5.071 秒；这属于本机隔离验收，不等同于生产多项目扫描吞吐。
+
 持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
 
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。
