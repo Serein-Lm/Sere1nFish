@@ -39,6 +39,7 @@ from .contracts import (
 )
 from .factory import get_source_document_provider
 from .urls import canonicalize_source_url
+from .version_lifecycle import SourceVersionAttempt
 
 
 _document_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -1148,29 +1149,6 @@ def _result_from_version(
     }
 
 
-async def _record_version_failure(
-    db: AsyncIOMotorDatabase,
-    *,
-    version_id: str,
-    error: Exception,
-    previous_ready_version: dict[str, Any] | None,
-) -> None:
-    """Keep the last readable evidence snapshot when an in-place upgrade fails."""
-    if previous_ready_version:
-        restore_payload = {
-            key: value
-            for key, value in previous_ready_version.items()
-            if key not in {"_id", "status", "error", "updated_at"}
-        }
-        await source_dao.mark_version_ready(
-            db,
-            version_id=version_id,
-            payload=restore_payload,
-        )
-        return
-    await source_dao.mark_version_error(db, version_id, str(error))
-
-
 async def ingest_source_url(
     db: AsyncIOMotorDatabase,
     *,
@@ -1227,11 +1205,8 @@ async def ingest_source_url(
             fields=task_fields,
             analysis_mode=normalized_analysis_mode,
         )
-        previous_ready_version: dict[str, Any] | None = None
         if persist:
             existing = await source_dao.get_version(db, version_id)
-            if existing and existing.get("status") == "ready":
-                previous_ready_version = dict(existing)
             if (
                 existing
                 and existing.get("status") == "ready"
@@ -1401,7 +1376,10 @@ async def ingest_source_url(
                     analysis_override=contextual_analysis,
                 )
 
-        version_started = False
+        attempt = SourceVersionAttempt(
+            db, version_id=version_id, document_id=document_id, content_hash=content_hash,
+            source_type=capture.source_type, project_id=project_id, task_id=run_task_id,
+        )
         try:
             required_subject_match = max(0, min(100, int(min_subject_match or 0)))
             image_analysis: list[dict[str, Any]] = []
@@ -1488,14 +1466,7 @@ async def ingest_source_url(
                     fallback_subject_match=discovery_subject_match,
                 )
             if persist:
-                await source_dao.begin_version(
-                    db,
-                    version_id=version_id,
-                    document_id=document_id,
-                    content_hash=content_hash,
-                    source_type=capture.source_type,
-                )
-                version_started = True
+                await attempt.start()
             if not images_analyzed:
                 image_analysis, raw_image_analysis_error = (
                     await analyze_article_images(
@@ -1692,9 +1663,7 @@ async def ingest_source_url(
                 "archive_status": archive_status,
                 "archive_warnings": archive_warnings,
             }
-            version = await source_dao.mark_version_ready(
-                db, version_id=version_id, payload=version_payload
-            )
+            version = await attempt.commit(version_payload)
             document = await source_dao.upsert_document(
                 db,
                 document_id=document_id,
@@ -1729,15 +1698,12 @@ async def ingest_source_url(
                 target=target,
                 analysis_override=analysis,
             )
-        except Exception as exc:
-            if persist and version_started:
-                await _record_version_failure(
-                    db,
-                    version_id=version_id,
-                    error=exc,
-                    previous_ready_version=previous_ready_version,
-                )
+        except (Exception, asyncio.CancelledError) as exc:
+            if persist:
+                await attempt.fail(exc)
             raise
+        finally:
+            await attempt.close()
 
 
 async def _link_discovery(

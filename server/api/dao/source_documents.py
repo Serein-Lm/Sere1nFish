@@ -8,6 +8,8 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
 
+from api.dao.source_document_versions import begin_version, mark_version_error, mark_version_ready
+
 from api.db.collections import (
     SOURCE_DOCUMENT_LINKS_COLLECTION,
     SOURCE_DOCUMENT_VERSIONS_COLLECTION,
@@ -94,6 +96,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     )
     await versions.create_index([("document_id", 1), ("captured_at", -1)])
     await versions.create_index("storage_object_ids")
+    await versions.create_index([("archive_attempt.status", 1), ("archive_attempt.lease_expires_at", 1)])
 
     links = db[SOURCE_DOCUMENT_LINKS_COLLECTION]
     await links.create_index("link_id", unique=True)
@@ -140,68 +143,6 @@ async def get_latest_version(
         {"document_id": document_id, "status": "ready"},
         {"_id": 0},
         sort=[("captured_at", -1)],
-    )
-
-
-async def begin_version(
-    db: AsyncIOMotorDatabase,
-    *,
-    version_id: str,
-    document_id: str,
-    content_hash: str,
-    source_type: str,
-) -> None:
-    now = _now()
-    await db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].update_one(
-        {"version_id": version_id},
-        {
-            "$set": {
-                "document_id": document_id,
-                "content_hash": content_hash,
-                "source_type": source_type,
-                "status": "processing",
-                "updated_at": now,
-            },
-            "$setOnInsert": {"created_at": now, "captured_at": now},
-        },
-        upsert=True,
-    )
-
-
-async def mark_version_ready(
-    db: AsyncIOMotorDatabase,
-    *,
-    version_id: str,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    now = _now()
-    await db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].update_one(
-        {"version_id": version_id},
-        {
-            "$set": {
-                **payload,
-                "status": "ready",
-                "error": "",
-                "updated_at": now,
-            }
-        },
-        upsert=True,
-    )
-    return await get_version(db, version_id) or payload
-
-
-async def mark_version_error(
-    db: AsyncIOMotorDatabase, version_id: str, error: str
-) -> None:
-    await db[SOURCE_DOCUMENT_VERSIONS_COLLECTION].update_one(
-        {"version_id": version_id},
-        {
-            "$set": {
-                "status": "error",
-                "error": str(error)[:2000],
-                "updated_at": _now(),
-            }
-        },
     )
 
 

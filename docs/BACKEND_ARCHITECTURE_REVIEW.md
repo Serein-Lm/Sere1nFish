@@ -4,6 +4,10 @@
 
 2026-10-16 运行审查修复：手机采集终态通过 `core.mobile.collect.state.terminal_collection_status` 统一投影到来源进度和返回结果，结果增加向后兼容的 `result_version/status`。超时、停止、关键词或持久化未完成保留 `partial`，全部失败及要求完整持久化的失败保留 `error`；用户暂停/取消仍由任务控制的原子拥有者校验保护。定向回归 80 项在无网络、无生产卷的独立容器通过；尚不代表手机实机业务验收。
 
+同日来源版本收口：`api.dao.source_document_versions` 管理 `archive_attempt` 的原子认领、120 秒租约与拥有者校验，`source_documents.version_lifecycle` 持有 30 秒续租协程并在完成、失败、取消时回收。补齐证据期间已有 `ready` 快照保持可读；中断只终止本次尝试，新版本没有可读快照时保留错误和可重试身份。旧拥有者不能覆盖新的尝试，来源已提交后的场景关联失败也不再回滚版本。增加尝试状态/过期时间索引，不新增集合或进程；历史 `processing` 需单独基于证据对账，不能直接批量标为 ready。来源/官网相关 137 项回归通过，其中 5 项使用独立临时 MongoDB 验证实际原子语义与取消路径。
+
+持久化契约测试需显式设置 `SEREINFISH_TEST_MONGODB_URI` 指向可丢弃测试实例；fixture 只创建随机 `sereinfish_test_*` 数据库并在结束时删除。默认未配置时跳过，不回退业务 MongoDB，也不使用业务 `.env`。
+
 2026-09-14 看板刷新补充：历史 Token 聚合拆到 `Sere1nGraph.graph.observability.stats_reader.TokenStatsReader`，同一个 Project/Task 的全局及场景维度共用单次分组扫描与 10 秒有界缓存，并发请求合并；仍从完整历史计算，未用进程内最近 5000 条替代历史。数据库切换和删除清理会失效缓存，普通新写入至多等待当前缓存窗口；不新增集合或后台进程。前端 `dashboardService` 按登录隔离短期缓存，总览/场景 10 秒、轮次/告警 5 秒、项目 30 秒，各数据源独立返回，刷新保留现有内容，失败保留最后成功值。
 
 2026-09-14 Target 列表性能补充：首屏瓶颈确认在 `target_library.archive_metrics` 的逐文档嵌套 lookup（约 5.3 秒），已改为当前页 Target 范围的四次批量读取，只取文档 ID、时间和版本计数，保留跨身份去重及 ready 版本变化口径。身份索引仍为全局轻量投影，未将原始来源或历史扫描全量下发前端。
